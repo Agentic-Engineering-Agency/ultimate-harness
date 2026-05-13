@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
+import { createMission } from "./harness/mission.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
@@ -122,7 +123,35 @@ adapterCmd
 // uh mission
 const missionCmd = program
   .command("mission")
-  .description("Execute missions against configured runtimes");
+  .description("Create and execute missions against configured runtimes");
+
+missionCmd
+  .command("create")
+  .description("Create a scaffold mission packet")
+  .argument("<id>", "Mission id")
+  .requiredOption("--title <title>", "Mission title")
+  .requiredOption("--workflow <profile>", "Workflow profile")
+  .requiredOption("--objective <text>", "Mission objective")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--force", "Overwrite existing mission.yaml")
+  .action(async (id: string, opts: { title: string; workflow: string; objective: string; root?: string; force?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await createMission(root, {
+        id,
+        title: opts.title,
+        workflow: opts.workflow,
+        objective: opts.objective,
+        force: opts.force ?? false,
+      });
+      console.log(`${result.created ? "Created" : "Updated"} mission: ${id}`);
+      console.log(`Path: ${result.path}`);
+    } catch (err) {
+      console.error(`[FAIL] mission create error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
 
 missionCmd
   .command("dry-run")
