@@ -1,0 +1,24 @@
+schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+description: Runtime adapter for Hermes Agent (Nous Research). Executes missions via hermes CLI.
+runtime: hermes
+capabilities:
+  - cli-execution
+  - worktree-isolation
+  - skill-loading
+  - toolset-config
+  - session-resume
+status: experimental
+config:
+  cli_command: hermes
+  default_toolsets:
+    - terminal
+    - file
+    - web
+    - skills
+    - session_search
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true

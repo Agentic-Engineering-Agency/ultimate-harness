@@ -25,7 +25,7 @@ describe("uh status", () => {
     const s = await getStatus(TEST_ROOT);
     expect(s.name).toBeTruthy();
     expect(s.schema_version).toBe("uh.project.v0");
-    expect(s.adapters_count).toBe(0);
+    expect(s.adapters.length).toBe(0);
     expect(s.active_missions_count).toBe(0);
   });
 
@@ -45,7 +45,8 @@ describe("uh status", () => {
       "utf-8"
     );
     const s = await getStatus(TEST_ROOT);
-    expect(s.adapters_count).toBe(1);
+    expect(s.adapters.length).toBe(1);
+    expect(s.adapters[0].id).toBe("hermes");
   });
 
   test("counts active missions", async () => {

@@ -1,5 +1,16 @@
 import { z } from "zod";
 
+export const AdapterConfigSchema = z.object({
+  cli_command: z.string().min(1).optional(),
+  default_toolsets: z.array(z.string()).optional().default([]),
+  default_provider: z.string().optional().default(""),
+  default_model: z.string().optional().default(""),
+  worktree_mode: z.boolean().optional().default(false),
+  pass_session_id: z.boolean().optional().default(true),
+});
+
+export type AdapterConfig = z.infer<typeof AdapterConfigSchema>;
+
 export const AdapterSchema = z.object({
   schema_version: z.literal("uh.adapter.v0"),
   id: z.string().min(1),
@@ -8,6 +19,7 @@ export const AdapterSchema = z.object({
   runtime: z.string().min(1),
   capabilities: z.array(z.string()).optional().default([]),
   status: z.enum(["active", "experimental", "deprecated"]).default("active"),
+  config: AdapterConfigSchema.optional(),
 });
 
 export type AdapterDocument = z.infer<typeof AdapterSchema>;
