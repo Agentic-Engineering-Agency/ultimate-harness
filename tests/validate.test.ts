@@ -4,9 +4,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { validateAllMissions, validateFile } from "../src/harness/validate.js";
+import { validateAllMissions, validateAllWorkflows, validateFile } from "../src/harness/validate.js";
 import { initializeHarness } from "../src/harness/init.js";
 import { validateMission } from "../src/schema/mission.js";
+import { validateWorkflow } from "../src/schema/workflow.js";
 
 let TEST_ROOT: string;
 const execFileP = promisify(execFile);
@@ -22,6 +23,86 @@ test.beforeEach(async () => {
 test.afterEach(cleanup);
 
 describe("uh validate", () => {
+  test("old minimal workflow validates without BMAD metadata", () => {
+    const workflow = validateWorkflow({
+      schema_version: "uh.workflow.v0",
+      id: "legacy-workflow",
+      name: "Legacy Workflow",
+      phases: [
+        {
+          name: "do-work",
+          agent_role: "developer",
+          description: "Do the work",
+        },
+      ],
+    });
+
+    expect(workflow.bmad).toBeUndefined();
+    expect(workflow.phases[0]?.bmad_role).toBeUndefined();
+    expect(workflow.phases[0]?.outputs).toBeUndefined();
+  });
+
+  test("workflow validates with BMAD metadata and phase role traceability", () => {
+    const workflow = validateWorkflow({
+      schema_version: "uh.workflow.v0",
+      id: "bmad-workflow",
+      name: "BMAD Workflow",
+      bmad: {
+        inspiration: "BMAD-METHOD",
+        dependency: false,
+        roles: ["Analyst", "Developer", "QA / Test Architect"],
+        guardrails: [
+          "Roles are hats; a single agent may play multiple roles.",
+          "Do not import BMAD as a dependency.",
+        ],
+      },
+      phases: [
+        {
+          name: "research",
+          agent_role: "researcher",
+          bmad_role: "Analyst",
+          description: "Research source systems",
+          outputs: ["risk notes", "pattern comparison"],
+        },
+      ],
+    });
+
+    expect(workflow.bmad).toEqual({
+      inspiration: "BMAD-METHOD",
+      dependency: false,
+      roles: ["Analyst", "Developer", "QA / Test Architect"],
+      guardrails: [
+        "Roles are hats; a single agent may play multiple roles.",
+        "Do not import BMAD as a dependency.",
+      ],
+    });
+    expect(workflow.phases[0]?.bmad_role).toBe("Analyst");
+    expect(workflow.phases[0]?.outputs).toEqual(["risk notes", "pattern comparison"]);
+  });
+
+  test("initializeHarness writes default workflows with BMAD metadata and all workflows validate", async () => {
+    await mkdir(TEST_ROOT, { recursive: true });
+    await initializeHarness(TEST_ROOT);
+
+    const workflowPath = join(TEST_ROOT, ".harness", "workflows", "research-docs.yaml");
+    const result = await validateFile(workflowPath);
+    expect(result.valid, result.errors.join("\n")).toBe(true);
+
+    const { parse } = await import("yaml");
+    const { readFile } = await import("node:fs/promises");
+    const workflow = validateWorkflow(parse(await readFile(workflowPath, "utf-8")));
+    expect(workflow.bmad).toMatchObject({
+      inspiration: "BMAD-METHOD",
+      dependency: false,
+    });
+    expect(workflow.bmad?.roles).toContain("Analyst");
+    expect(workflow.phases.every((phase) => phase.bmad_role && phase.outputs && phase.outputs.length > 0)).toBe(true);
+
+    const results = await validateAllWorkflows(TEST_ROOT);
+    expect(results).toHaveLength(5);
+    expect(results.every((workflowResult) => workflowResult.valid)).toBe(true);
+  });
+
   test("valid project YAML passes", async () => {
     await mkdir(TEST_ROOT, { recursive: true });
     await initializeHarness(TEST_ROOT);

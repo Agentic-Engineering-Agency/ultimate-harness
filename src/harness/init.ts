@@ -118,16 +118,37 @@ export async function initializeHarness(
 }
 
 function getDefaultWorkflows(): Record<string, unknown> {
+  const bmad = {
+    inspiration: "BMAD-METHOD",
+    dependency: false,
+    roles: [
+      "Analyst",
+      "Product Manager",
+      "Architect",
+      "Scrum Master / Workflow Designer",
+      "Developer",
+      "QA / Test Architect",
+      "Technical Writer",
+    ],
+    guardrails: [
+      "BMAD is inspiration only, not a runtime dependency.",
+      "Roles are hats; a single agent may play multiple roles.",
+      "Outputs should be traceable and reviewable.",
+      "Do not import BMAD-METHOD as a dependency.",
+    ],
+  };
+
   return {
     "research-docs": {
       schema_version: "uh.workflow.v0",
       id: "research-docs",
       name: "Research & Documentation",
       description: "Research a topic and produce documented findings.",
+      bmad,
       phases: [
-        { name: "research", agent_role: "researcher", description: "Research and gather information" },
-        { name: "draft", agent_role: "writer", description: "Draft documentation" },
-        { name: "review", agent_role: "reviewer", description: "Review for accuracy and completeness" },
+        { name: "research", agent_role: "researcher", bmad_role: "Analyst", description: "Research and gather information", outputs: ["source notes", "pattern comparison", "risk list"] },
+        { name: "draft", agent_role: "writer", bmad_role: "Technical Writer", description: "Draft documentation", outputs: ["draft documentation"] },
+        { name: "review", agent_role: "reviewer", bmad_role: "QA / Test Architect", description: "Review for accuracy and completeness", outputs: ["review notes", "verification status"] },
       ],
     },
     "spec-first-feature": {
@@ -135,10 +156,11 @@ function getDefaultWorkflows(): Record<string, unknown> {
       id: "spec-first-feature",
       name: "Spec-First Feature Development",
       description: "Define spec before implementation.",
+      bmad,
       phases: [
-        { name: "spec", agent_role: "architect", description: "Write technical specification" },
-        { name: "implement", agent_role: "developer", description: "Implement according to spec" },
-        { name: "verify", agent_role: "reviewer", description: "Verify implementation against spec" },
+        { name: "spec", agent_role: "architect", bmad_role: "Architect", description: "Write technical specification", outputs: ["technical specification", "adapter and schema notes"] },
+        { name: "implement", agent_role: "developer", bmad_role: "Developer", description: "Implement according to spec", outputs: ["code changes", "implementation notes"] },
+        { name: "verify", agent_role: "reviewer", bmad_role: "QA / Test Architect", description: "Verify implementation against spec", outputs: ["test results", "review gate decision"] },
       ],
     },
     "bugfix-contained": {
@@ -146,10 +168,11 @@ function getDefaultWorkflows(): Record<string, unknown> {
       id: "bugfix-contained",
       name: "Contained Bug Fix",
       description: "Investigate, fix, and verify a bug.",
+      bmad,
       phases: [
-        { name: "reproduce", agent_role: "researcher", description: "Reproduce and understand the bug" },
-        { name: "fix", agent_role: "developer", description: "Implement the fix" },
-        { name: "verify", agent_role: "reviewer", description: "Verify fix and regression testing" },
+        { name: "reproduce", agent_role: "researcher", bmad_role: "Analyst", description: "Reproduce and understand the bug", outputs: ["reproduction steps", "impact notes"] },
+        { name: "fix", agent_role: "developer", bmad_role: "Developer", description: "Implement the fix", outputs: ["code changes", "fix notes"] },
+        { name: "verify", agent_role: "reviewer", bmad_role: "QA / Test Architect", description: "Verify fix and regression testing", outputs: ["regression test results", "review gate decision"] },
       ],
     },
     "adapter-design": {
@@ -157,11 +180,12 @@ function getDefaultWorkflows(): Record<string, unknown> {
       id: "adapter-design",
       name: "Runtime Adapter Design",
       description: "Design and implement a runtime adapter.",
+      bmad,
       phases: [
-        { name: "research", agent_role: "researcher", description: "Study runtime capabilities" },
-        { name: "design", agent_role: "architect", description: "Design adapter contract" },
-        { name: "implement", agent_role: "developer", description: "Implement adapter" },
-        { name: "test", agent_role: "reviewer", description: "Test with sample missions" },
+        { name: "research", agent_role: "researcher", bmad_role: "Analyst", description: "Study runtime capabilities", outputs: ["runtime capability notes", "risk list"] },
+        { name: "design", agent_role: "architect", bmad_role: "Architect", description: "Design adapter contract", outputs: ["adapter contract", "schema and sandboxing notes"] },
+        { name: "implement", agent_role: "developer", bmad_role: "Developer", description: "Implement adapter", outputs: ["adapter implementation", "usage notes"] },
+        { name: "test", agent_role: "reviewer", bmad_role: "QA / Test Architect", description: "Test with sample missions", outputs: ["sample mission test results", "review gate decision"] },
       ],
     },
     "skill-authoring": {
@@ -169,10 +193,11 @@ function getDefaultWorkflows(): Record<string, unknown> {
       id: "skill-authoring",
       name: "Skill Authoring",
       description: "Create or update a skill with SKILL.md and supporting files.",
+      bmad,
       phases: [
-        { name: "draft", agent_role: "writer", description: "Draft SKILL.md content" },
-        { name: "structure", agent_role: "architect", description: "Create references/templates/scripts" },
-        { name: "review", agent_role: "reviewer", description: "Review for clarity and completeness" },
+        { name: "draft", agent_role: "writer", bmad_role: "Technical Writer", description: "Draft SKILL.md content", outputs: ["draft SKILL.md"] },
+        { name: "structure", agent_role: "architect", bmad_role: "Architect", description: "Create references/templates/scripts", outputs: ["supporting files", "structure notes"] },
+        { name: "review", agent_role: "reviewer", bmad_role: "QA / Test Architect", description: "Review for clarity and completeness", outputs: ["review notes", "verification status"] },
       ],
     },
   };

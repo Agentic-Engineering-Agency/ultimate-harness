@@ -2,13 +2,41 @@ schema_version: uh.workflow.v0
 id: spec-first-feature
 name: Spec-First Feature Development
 description: Define spec before implementation.
+bmad:
+  inspiration: BMAD-METHOD
+  dependency: false
+  roles:
+    - Analyst
+    - Product Manager
+    - Architect
+    - Scrum Master / Workflow Designer
+    - Developer
+    - QA / Test Architect
+    - Technical Writer
+  guardrails:
+    - BMAD is inspiration only, not a runtime dependency.
+    - Roles are hats; a single agent may play multiple roles.
+    - Outputs should be traceable and reviewable.
+    - Do not import BMAD-METHOD as a dependency.
 phases:
   - name: spec
     agent_role: architect
+    bmad_role: Architect
     description: Write technical specification
+    outputs:
+      - technical specification
+      - adapter and schema notes
   - name: implement
     agent_role: developer
+    bmad_role: Developer
     description: Implement according to spec
+    outputs:
+      - code changes
+      - implementation notes
   - name: verify
     agent_role: reviewer
+    bmad_role: QA / Test Architect
     description: Verify implementation against spec
+    outputs:
+      - test results
+      - review gate decision

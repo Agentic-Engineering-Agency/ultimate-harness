@@ -2,13 +2,41 @@ schema_version: uh.workflow.v0
 id: bugfix-contained
 name: Contained Bug Fix
 description: Investigate, fix, and verify a bug.
+bmad:
+  inspiration: BMAD-METHOD
+  dependency: false
+  roles:
+    - Analyst
+    - Product Manager
+    - Architect
+    - Scrum Master / Workflow Designer
+    - Developer
+    - QA / Test Architect
+    - Technical Writer
+  guardrails:
+    - BMAD is inspiration only, not a runtime dependency.
+    - Roles are hats; a single agent may play multiple roles.
+    - Outputs should be traceable and reviewable.
+    - Do not import BMAD-METHOD as a dependency.
 phases:
   - name: reproduce
     agent_role: researcher
+    bmad_role: Analyst
     description: Reproduce and understand the bug
+    outputs:
+      - reproduction steps
+      - impact notes
   - name: fix
     agent_role: developer
+    bmad_role: Developer
     description: Implement the fix
+    outputs:
+      - code changes
+      - fix notes
   - name: verify
     agent_role: reviewer
+    bmad_role: QA / Test Architect
     description: Verify fix and regression testing
+    outputs:
+      - regression test results
+      - review gate decision
