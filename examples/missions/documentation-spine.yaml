@@ -1,0 +1,35 @@
+schema_version: uh.mission.v0
+id: documentation-spine
+name: Documentation Spine Creation
+workflow_profile: research-docs
+description: Create the initial documentation spine for Ultimate Harness, covering research, PRD, architecture, workflows, and verification.
+issues:
+  - source: github
+    reference: "#1"
+    url: https://github.com/Agentic-Engineering-Agency/ultimate-harness/issues/21
+  - source: linear
+    reference: UH-1
+    url: https://linear.app/agentic-eng/issue/UH-1
+read_first:
+  - README.md
+  - docs/handoffs/2026-05-13-documentation-bmad-handoff.md
+expected_artifacts:
+  - path: docs/research/inspiration-systems.md
+    type: markdown
+  - path: docs/product/prd.md
+    type: markdown
+  - path: docs/architecture/overview.md
+    type: markdown
+  - path: docs/workflows/overview.md
+    type: markdown
+  - path: docs/architecture/mission-packet-schema.md
+    type: markdown
+sandbox:
+  backend: git-worktree
+  config:
+    branch: docs/documentation-spine
+verification:
+  checks:
+    - All docs files referenced in docs/README.md exist
+    - Internal markdown links are valid
+    - No trailing whitespace in markdown files
