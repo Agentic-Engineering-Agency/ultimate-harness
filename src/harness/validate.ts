@@ -102,3 +102,29 @@ export async function validateAllWorkflows(root: string): Promise<ValidationResu
   }
   return results;
 }
+
+export async function validateAllMissions(root: string): Promise<ValidationResult[]> {
+  const { readdir, access } = await import("node:fs/promises");
+  const path = await import("node:path");
+  const { missionsDir } = await import("./paths.js");
+  const results: ValidationResult[] = [];
+  let entries: Array<{ name: string; isDirectory(): boolean }>;
+  try {
+    entries = await readdir(missionsDir(root), { withFileTypes: true });
+  } catch {
+    return results;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const missionPath = path.join(missionsDir(root), entry.name, "mission.yaml");
+    try {
+      await access(missionPath);
+    } catch {
+      continue;
+    }
+    results.push(await validateFile(missionPath));
+  }
+  return results;
+}

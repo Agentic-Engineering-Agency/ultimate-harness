@@ -1,17 +1,24 @@
 import { test, expect, describe } from "vitest";
-import { writeFile, mkdir, rm } from "node:fs/promises";
+import { writeFile, mkdir, rm, mkdtemp } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { join } from "node:path";
-import { validateFile } from "../src/harness/validate.js";
+import { tmpdir } from "node:os";
+import { validateAllMissions, validateFile } from "../src/harness/validate.js";
 import { initializeHarness } from "../src/harness/init.js";
 import { validateMission } from "../src/schema/mission.js";
 
-const TEST_ROOT = "/tmp/uh-test-validate";
+let TEST_ROOT: string;
+const execFileP = promisify(execFile);
 
 async function cleanup() {
+  if (!TEST_ROOT) return;
   try { await rm(TEST_ROOT, { recursive: true, force: true }); } catch {}
 }
 
-test.beforeEach(cleanup);
+test.beforeEach(async () => {
+  TEST_ROOT = await mkdtemp(join(tmpdir(), "uh-test-validate-"));
+});
 test.afterEach(cleanup);
 
 describe("uh validate", () => {
@@ -48,6 +55,89 @@ workflow_profile: research-docs
     );
     const result = await validateFile(join(TEST_ROOT, "mission.yaml"));
     expect(result.valid).toBe(true);
+  });
+
+  test("all missions validates .harness/missions/*/mission.yaml", async () => {
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "test"), { recursive: true });
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "test", "mission.yaml"),
+      `schema_version: uh.mission.v0
+id: test-mission
+name: Test Mission
+workflow_profile: research-docs
+`,
+      "utf-8"
+    );
+
+    const results = await validateAllMissions(TEST_ROOT);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.path).toBe(join(TEST_ROOT, ".harness", "missions", "test", "mission.yaml"));
+    expect(results[0]?.valid).toBe(true);
+  });
+
+  test("all missions ignores example missions outside .harness", async () => {
+    await mkdir(join(TEST_ROOT, "examples", "missions"), { recursive: true });
+    await writeFile(
+      join(TEST_ROOT, "examples", "missions", "mission.yaml"),
+      `schema_version: uh.mission.v0
+id: example-mission
+name: Example Mission
+workflow_profile: research-docs
+`,
+      "utf-8"
+    );
+
+    const results = await validateAllMissions(TEST_ROOT);
+
+    expect(results).toEqual([]);
+  });
+
+  test("CLI validate --all-missions prints passing validation results and exits 0 for valid missions", async () => {
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "good"), { recursive: true });
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "good", "mission.yaml"),
+      `schema_version: uh.mission.v0
+id: good-mission
+name: Good Mission
+workflow_profile: research-docs
+`,
+      "utf-8"
+    );
+
+    const { stdout, stderr } = await execFileP(
+      join(process.cwd(), "node_modules", ".bin", "tsx"),
+      ["src/cli.ts", "validate", "--all-missions", "--root", TEST_ROOT],
+      { cwd: process.cwd() }
+    );
+
+    expect(stdout).toContain(`[PASS] ${join(TEST_ROOT, ".harness", "missions", "good", "mission.yaml")}`);
+    expect(stderr).toBe("");
+  });
+
+  test("CLI validate --all-missions prints validation results and fails for invalid missions", async () => {
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "bad"), { recursive: true });
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "bad", "mission.yaml"),
+      `schema_version: uh.mission.v0
+id: bad-mission
+`,
+      "utf-8"
+    );
+
+    try {
+      await execFileP(
+        join(process.cwd(), "node_modules", ".bin", "tsx"),
+        ["src/cli.ts", "validate", "--all-missions", "--root", TEST_ROOT],
+        { cwd: process.cwd() }
+      );
+      throw new Error("expected CLI to fail");
+    } catch (err) {
+      const output = `${(err as { stdout?: string }).stdout ?? ""}${(err as { stderr?: string }).stderr ?? ""}`;
+      expect(output).toContain(`[FAIL] ${join(TEST_ROOT, ".harness", "missions", "bad", "mission.yaml")}`);
+      expect(output).toContain("schema: uh.mission.v0");
+      expect(output).toContain("error:");
+    }
   });
 
   test("documented mission packet shape validates", async () => {

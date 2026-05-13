@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
-import { validateFile, validateRootProject, validateAllWorkflows } from "./harness/validate.js";
+import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
 const VERSION = "0.0.0";
@@ -39,10 +39,19 @@ program
   .argument("[file]", "Path to YAML file (default: .harness/project.yaml)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--all-workflows", "Validate all workflow profiles")
-  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean }) => {
+  .option("--all-missions", "Validate all mission files")
+  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean }) => {
     const root = resolveRoot(opts.root);
     if (opts.allWorkflows) {
       const results = await validateAllWorkflows(root);
+      for (const r of results) {
+        printValidationResult(r);
+      }
+      process.exit(results.some((r) => !r.valid) ? 1 : 0);
+      return;
+    }
+    if (opts.allMissions) {
+      const results = await validateAllMissions(root);
       for (const r of results) {
         printValidationResult(r);
       }
