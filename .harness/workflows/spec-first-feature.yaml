@@ -1,0 +1,14 @@
+schema_version: uh.workflow.v0
+id: spec-first-feature
+name: Spec-First Feature Development
+description: Define spec before implementation.
+phases:
+  - name: spec
+    agent_role: architect
+    description: Write technical specification
+  - name: implement
+    agent_role: developer
+    description: Implement according to spec
+  - name: verify
+    agent_role: reviewer
+    description: Verify implementation against spec

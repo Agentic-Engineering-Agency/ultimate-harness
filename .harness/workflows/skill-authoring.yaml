@@ -1,0 +1,14 @@
+schema_version: uh.workflow.v0
+id: skill-authoring
+name: Skill Authoring
+description: Create or update a skill with SKILL.md and supporting files.
+phases:
+  - name: draft
+    agent_role: writer
+    description: Draft SKILL.md content
+  - name: structure
+    agent_role: architect
+    description: Create references/templates/scripts
+  - name: review
+    agent_role: reviewer
+    description: Review for clarity and completeness

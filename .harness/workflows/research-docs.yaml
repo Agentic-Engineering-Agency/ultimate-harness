@@ -1,0 +1,14 @@
+schema_version: uh.workflow.v0
+id: research-docs
+name: Research & Documentation
+description: Research a topic and produce documented findings.
+phases:
+  - name: research
+    agent_role: researcher
+    description: Research and gather information
+  - name: draft
+    agent_role: writer
+    description: Draft documentation
+  - name: review
+    agent_role: reviewer
+    description: Review for accuracy and completeness

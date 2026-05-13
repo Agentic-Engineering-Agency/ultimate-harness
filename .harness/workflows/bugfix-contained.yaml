@@ -1,0 +1,14 @@
+schema_version: uh.workflow.v0
+id: bugfix-contained
+name: Contained Bug Fix
+description: Investigate, fix, and verify a bug.
+phases:
+  - name: reproduce
+    agent_role: researcher
+    description: Reproduce and understand the bug
+  - name: fix
+    agent_role: developer
+    description: Implement the fix
+  - name: verify
+    agent_role: reviewer
+    description: Verify fix and regression testing

@@ -1,0 +1,17 @@
+schema_version: uh.workflow.v0
+id: adapter-design
+name: Runtime Adapter Design
+description: Design and implement a runtime adapter.
+phases:
+  - name: research
+    agent_role: researcher
+    description: Study runtime capabilities
+  - name: design
+    agent_role: architect
+    description: Design adapter contract
+  - name: implement
+    agent_role: developer
+    description: Implement adapter
+  - name: test
+    agent_role: reviewer
+    description: Test with sample missions
