@@ -1,14 +1,38 @@
 import { test, expect, describe, beforeAll } from "vitest";
-import { chmod, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile, readFile, symlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
+import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { checkHermes, dryRunHermes, runHermes } from "../src/adapters/hermes.js";
 import { validateAdapter } from "../src/schema/adapter.js";
+import { validateFile } from "../src/harness/validate.js";
 
 const TEST_ROOT = "/tmp/uh-test-adapter";
 const execFileP = promisify(execFile);
+
+async function writeHarnessMission(id = "mission-one") {
+  const missionDir = join(TEST_ROOT, ".harness", "missions", id);
+  await mkdir(missionDir, { recursive: true });
+  const missionPath = join(missionDir, "mission.yaml");
+  await writeFile(
+    missionPath,
+    `schema_version: uh.mission.v0
+id: ${id}
+name: Artifact Mission
+description: Persist Hermes runtime artifacts.
+workflow_profile: research-docs
+issues: []
+read_first: []
+expected_artifacts: []
+verification:
+  checks: []
+`,
+    "utf-8"
+  );
+  return { missionDir, missionPath };
+}
 
 async function cleanup() {
   try { await rm(TEST_ROOT, { recursive: true, force: true }); } catch {}
@@ -102,6 +126,142 @@ describe("uh mission dry-run --runtime hermes", () => {
     expect(result.errors.length).toBeGreaterThan(0);
     expect(result.errors[0]).toContain("Mission load error");
   });
+
+  test("persists prompt and planned runtime session for harness mission", async () => {
+    const fakeHermes = join(TEST_ROOT, "fake-hermes.mjs");
+    await writeFile(fakeHermes, "#!/usr/bin/env node\n", "utf-8");
+    await chmod(fakeHermes, 0o755);
+    await writeFile(
+      join(TEST_ROOT, ".harness", "adapters", "hermes.yaml"),
+      `schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+runtime: hermes
+config:
+  cli_command: ${fakeHermes}
+  default_toolsets:
+    - terminal
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true
+`,
+      "utf-8"
+    );
+    const { missionDir, missionPath } = await writeHarnessMission("dry-run-artifacts");
+
+    const result = await dryRunHermes(TEST_ROOT, missionPath);
+
+    expect(result.errors).toEqual([]);
+    expect(await readFile(join(missionDir, "prompt.md"), "utf-8")).toBe(result.prompt);
+    const sessionPath = join(missionDir, "runtime-session.yaml");
+    const sessionValidation = await validateFile(sessionPath);
+    expect(sessionValidation).toMatchObject({ valid: true, schema_version: "uh.runtime-session.v0" });
+    const session = parse(await readFile(sessionPath, "utf-8"));
+    expect(session).toMatchObject({
+      schema_version: "uh.runtime-session.v0",
+      mission_id: "dry-run-artifacts",
+      runtime: "hermes",
+      status: "planned",
+      command: fakeHermes,
+    });
+    expect(session.args).toEqual(result.args);
+  });
+
+  test("does not persist artifacts for non-harness mission path", async () => {
+    const result = await dryRunHermes(TEST_ROOT, "examples/missions/documentation-spine.yaml");
+
+    expect(result.errors).toEqual([]);
+    await expect(readFile(join(TEST_ROOT, ".harness", "missions", "documentation-spine", "runtime-session.yaml"), "utf-8"))
+      .rejects.toThrow();
+  });
+
+  test("rejects artifact persistence when mission directory is a symlink", async () => {
+    const target = join(TEST_ROOT, "outside-mission-dir");
+    await mkdir(target, { recursive: true });
+    await writeFile(
+      join(target, "mission.yaml"),
+      `schema_version: uh.mission.v0
+id: symlink-dir
+name: Symlink Dir
+workflow_profile: research-docs
+`,
+      "utf-8"
+    );
+    const missionsRoot = join(TEST_ROOT, ".harness", "missions");
+    await rm(join(missionsRoot, "symlink-dir"), { recursive: true, force: true });
+    await symlink(target, join(missionsRoot, "symlink-dir"));
+
+    const result = await dryRunHermes(TEST_ROOT, join(missionsRoot, "symlink-dir", "mission.yaml"));
+
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0]).toContain("Refusing to persist artifacts");
+    await expect(readFile(join(target, "prompt.md"), "utf-8")).rejects.toThrow();
+  });
+
+  test("rejects artifact persistence when .harness is a symlink", async () => {
+    const outsideHarness = join(TEST_ROOT, "outside-harness");
+    await mkdir(join(outsideHarness, "missions", "symlink-harness"), { recursive: true });
+    await writeFile(
+      join(outsideHarness, "missions", "symlink-harness", "mission.yaml"),
+      `schema_version: uh.mission.v0
+id: symlink-harness
+name: Symlink Harness
+workflow_profile: research-docs
+`,
+      "utf-8"
+    );
+    await mkdir(join(outsideHarness, "adapters"), { recursive: true });
+    await writeFile(
+      join(outsideHarness, "adapters", "hermes.yaml"),
+      `schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+runtime: hermes
+config:
+  cli_command: hermes
+  default_toolsets:
+    - terminal
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true
+`,
+      "utf-8"
+    );
+    await rm(join(TEST_ROOT, ".harness"), { recursive: true, force: true });
+    await symlink(outsideHarness, join(TEST_ROOT, ".harness"));
+
+    const result = await dryRunHermes(TEST_ROOT, join(TEST_ROOT, ".harness", "missions", "symlink-harness", "mission.yaml"));
+
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0]).toContain("Refusing to persist artifacts");
+    await expect(readFile(join(outsideHarness, "missions", "symlink-harness", "prompt.md"), "utf-8"))
+      .rejects.toThrow();
+  });
+
+  test("rejects artifact persistence when .harness/missions is a symlink", async () => {
+    const outsideMissions = join(TEST_ROOT, "outside-missions");
+    await mkdir(join(outsideMissions, "symlink-missions"), { recursive: true });
+    await writeFile(
+      join(outsideMissions, "symlink-missions", "mission.yaml"),
+      `schema_version: uh.mission.v0
+id: symlink-missions
+name: Symlink Missions
+workflow_profile: research-docs
+`,
+      "utf-8"
+    );
+    await rm(join(TEST_ROOT, ".harness", "missions"), { recursive: true, force: true });
+    await symlink(outsideMissions, join(TEST_ROOT, ".harness", "missions"));
+
+    const result = await dryRunHermes(TEST_ROOT, join(TEST_ROOT, ".harness", "missions", "symlink-missions", "mission.yaml"));
+
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0]).toContain("Refusing to persist artifacts");
+    await expect(readFile(join(outsideMissions, "symlink-missions", "prompt.md"), "utf-8"))
+      .rejects.toThrow();
+  });
 });
 
 describe("uh mission run --runtime hermes", () => {
@@ -182,5 +342,153 @@ config:
         process.env.FAKE_HERMES_ARGV_PATH = previousArgvPath;
       }
     }
+  });
+
+  test("persists running/final runtime session and runtime events for harness mission", async () => {
+    const fakeHermes = join(TEST_ROOT, "fake-hermes.mjs");
+    await writeFile(
+      fakeHermes,
+      `#!/usr/bin/env node
+console.log("fake stdout");
+console.error("fake stderr");
+`,
+      "utf-8"
+    );
+    await chmod(fakeHermes, 0o755);
+    await writeFile(
+      join(TEST_ROOT, ".harness", "adapters", "hermes.yaml"),
+      `schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+runtime: hermes
+config:
+  cli_command: ${fakeHermes}
+  default_toolsets:
+    - terminal
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true
+`,
+      "utf-8"
+    );
+    const { missionDir, missionPath } = await writeHarnessMission("run-artifacts");
+
+    const result = await runHermes(TEST_ROOT, missionPath);
+
+    expect(result).toMatchObject({ exitCode: 0, stdout: "fake stdout\n", stderr: "fake stderr\n" });
+    const sessionPath = join(missionDir, "runtime-session.yaml");
+    expect(await validateFile(sessionPath)).toMatchObject({ valid: true, schema_version: "uh.runtime-session.v0" });
+    const session = parse(await readFile(sessionPath, "utf-8"));
+    expect(session).toMatchObject({
+      mission_id: "run-artifacts",
+      runtime: "hermes",
+      status: "succeeded",
+      command: fakeHermes,
+      exit_code: 0,
+    });
+    expect(session.started_at).toBeTypeOf("string");
+    expect(session.finished_at).toBeTypeOf("string");
+    const events = (await readFile(join(missionDir, "events.ndjson"), "utf-8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.map((event) => event.event)).toEqual(["runtime.started", "runtime.finished"]);
+    expect(events[0]).toMatchObject({ mission_id: "run-artifacts", runtime: "hermes" });
+    expect(events[1]).toMatchObject({ mission_id: "run-artifacts", runtime: "hermes", exit_code: 0, status: "succeeded" });
+  });
+
+  test("nonexistent cli_command returns spawn error and finalizes failed runtime session", async () => {
+    const missingHermes = join(TEST_ROOT, "does-not-exist-hermes");
+    await writeFile(
+      join(TEST_ROOT, ".harness", "adapters", "hermes.yaml"),
+      `schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+runtime: hermes
+config:
+  cli_command: ${missingHermes}
+  default_toolsets:
+    - terminal
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true
+`,
+      "utf-8"
+    );
+    const { missionDir, missionPath } = await writeHarnessMission("spawn-error-artifacts");
+
+    const result = await runHermes(TEST_ROOT, missionPath);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Spawn error:");
+    const sessionPath = join(missionDir, "runtime-session.yaml");
+    expect(await validateFile(sessionPath)).toMatchObject({ valid: true, schema_version: "uh.runtime-session.v0" });
+    const session = parse(await readFile(sessionPath, "utf-8"));
+    expect(session).toMatchObject({
+      mission_id: "spawn-error-artifacts",
+      runtime: "hermes",
+      status: "failed",
+      command: missingHermes,
+      exit_code: 1,
+    });
+    expect(session.finished_at).toBeTypeOf("string");
+  });
+
+  test("artifact finalization failure resolves with friendly stderr", async () => {
+    const fakeHermes = join(TEST_ROOT, "fake-hermes-break-artifact.mjs");
+    const { missionDir, missionPath } = await writeHarnessMission("finalization-failure");
+    const sessionPath = join(missionDir, "runtime-session.yaml");
+    const outside = join(TEST_ROOT, "outside-final-runtime-session.yaml");
+    await writeFile(
+      fakeHermes,
+      `#!/usr/bin/env node
+import { symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(outside)}, "outside", "utf-8");
+unlinkSync(${JSON.stringify(sessionPath)});
+symlinkSync(${JSON.stringify(outside)}, ${JSON.stringify(sessionPath)});
+console.log("fake stdout");
+`,
+      "utf-8"
+    );
+    await chmod(fakeHermes, 0o755);
+    await writeFile(
+      join(TEST_ROOT, ".harness", "adapters", "hermes.yaml"),
+      `schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+runtime: hermes
+config:
+  cli_command: ${fakeHermes}
+  default_toolsets:
+    - terminal
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true
+`,
+      "utf-8"
+    );
+
+    const result = await runHermes(TEST_ROOT, missionPath);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("fake stdout\n");
+    expect(result.stderr).toContain("Artifact persistence failure:");
+    expect(await readFile(outside, "utf-8")).toBe("outside");
+  });
+
+  test("refuses to overwrite symlinked runtime session artifact", async () => {
+    const { missionDir, missionPath } = await writeHarnessMission("symlink-session");
+    const outside = join(TEST_ROOT, "outside-runtime-session.yaml");
+    await writeFile(outside, "outside", "utf-8");
+    await symlink(outside, join(missionDir, "runtime-session.yaml"));
+
+    const result = await dryRunHermes(TEST_ROOT, missionPath);
+
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0]).toContain("Refusing to overwrite symlinked artifact");
+    expect(await readFile(outside, "utf-8")).toBe("outside");
   });
 });

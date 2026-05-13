@@ -125,6 +125,27 @@ audit_event_id: audit-1
     expect(result.valid, result.errors.join("\n")).toBe(true);
   });
 
+  test("runtime-session YAML rejects unknown fields", async () => {
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "mission-1"), { recursive: true });
+    const filePath = join(TEST_ROOT, ".harness", "missions", "mission-1", "runtime-session.yaml");
+    await writeFile(
+      filePath,
+      `schema_version: uh.runtime-session.v0
+mission_id: mission-1
+runtime: hermes
+status: failed
+exit_code: 1
+unexpected_field: should-fail
+`,
+      "utf-8"
+    );
+
+    const result = await validateFile(filePath);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors.join("\n")).toContain("Unrecognized key");
+  });
+
   test("initializeHarness writes schema-versioned skills and sandboxes indexes that validate", async () => {
     await mkdir(TEST_ROOT, { recursive: true });
     await initializeHarness(TEST_ROOT);

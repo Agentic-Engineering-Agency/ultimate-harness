@@ -79,11 +79,29 @@ export const PromotionSchema = z.object({
   audit_event_id: z.string().optional(),
 });
 
+export const RuntimeSessionStatusSchema = z.enum(["planned", "running", "succeeded", "failed"]);
+
+export const RuntimeSessionSchema = z.object({
+  schema_version: z.literal("uh.runtime-session.v0"),
+  mission_id: z.string().min(1),
+  runtime: z.string().min(1),
+  status: RuntimeSessionStatusSchema,
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  exit_code: z.number().int().optional(),
+  started_at: z.string().optional(),
+  finished_at: z.string().optional(),
+  stdout_path: z.string().optional(),
+  stderr_path: z.string().optional(),
+}).strict();
+
 export type SkillsIndexDocument = z.infer<typeof SkillsIndexSchema>;
 export type SandboxesIndexDocument = z.infer<typeof SandboxesIndexSchema>;
 export type SandboxStatus = z.infer<typeof SandboxStatusSchema>;
 export type VerificationResultDocument = z.infer<typeof VerificationResultSchema>;
 export type PromotionDocument = z.infer<typeof PromotionSchema>;
+export type RuntimeSessionDocument = z.infer<typeof RuntimeSessionSchema>;
+export type RuntimeSessionStatus = z.infer<typeof RuntimeSessionStatusSchema>;
 
 export function validateSkillsIndex(data: unknown): SkillsIndexDocument {
   return SkillsIndexSchema.parse(data);
@@ -99,4 +117,8 @@ export function validateVerificationResult(data: unknown): VerificationResultDoc
 
 export function validatePromotion(data: unknown): PromotionDocument {
   return PromotionSchema.parse(data);
+}
+
+export function validateRuntimeSession(data: unknown): RuntimeSessionDocument {
+  return RuntimeSessionSchema.parse(data);
 }

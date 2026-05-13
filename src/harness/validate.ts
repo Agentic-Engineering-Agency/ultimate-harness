@@ -8,6 +8,7 @@ import { validateWorkflow } from "../schema/workflow.js";
 import { validateMission } from "../schema/mission.js";
 import {
   validatePromotion,
+  validateRuntimeSession,
   validateSandboxesIndex,
   validateSkillsIndex,
   validateVerificationResult,
@@ -22,6 +23,7 @@ const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.sandboxes-index.v0": validateSandboxesIndex,
   "uh.verification-result.v0": validateVerificationResult,
   "uh.promotion.v0": validatePromotion,
+  "uh.runtime-session.v0": validateRuntimeSession,
 };
 
 export type ValidationResult = {
