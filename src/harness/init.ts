@@ -75,7 +75,7 @@ export async function initializeHarness(
 
   // Create skills index
   const skillsIndexPath = path.join(root, ".harness", "skills", "index.yaml");
-  await writeFile(skillsIndexPath, stringify({ skills: [] }), "utf-8");
+  await writeFile(skillsIndexPath, stringify({ schema_version: "uh.skills-index.v0", skills: [] }), "utf-8");
   created.push(skillsIndexPath);
 
   // Create sandboxes index
@@ -87,7 +87,7 @@ export async function initializeHarness(
   );
   await writeFile(
     sandboxesIndexPath,
-    stringify({ sandboxes: [] }),
+    stringify({ schema_version: "uh.sandboxes-index.v0", sandboxes: [] }),
     "utf-8",
   );
   created.push(sandboxesIndexPath);

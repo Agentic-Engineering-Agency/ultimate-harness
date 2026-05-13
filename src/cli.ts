@@ -82,6 +82,13 @@ program
       }
       console.log(`Workflow profiles: ${s.workflow_profiles_count}`);
       console.log(`Active missions: ${s.active_missions_count}`);
+      console.log(`Skills indexed: ${s.skills_indexed_count}`);
+      console.log(`Sandboxes: ${s.sandboxes.total}`);
+      for (const [status, count] of Object.entries(s.sandboxes.by_status)) {
+        console.log(`  - ${status}: ${count}`);
+      }
+      console.log(`Verified missions: ${s.verified_missions_count}`);
+      console.log(`Promoted missions: ${s.promoted_missions_count}`);
       console.log(`Recent audit events: ${s.recent_audit_events}`);
     } catch (err) {
       console.error((err as Error).message);

@@ -6,12 +6,22 @@ import { validateProject } from "../schema/project.js";
 import { validateAdapter } from "../schema/adapter.js";
 import { validateWorkflow } from "../schema/workflow.js";
 import { validateMission } from "../schema/mission.js";
+import {
+  validatePromotion,
+  validateSandboxesIndex,
+  validateSkillsIndex,
+  validateVerificationResult,
+} from "../schema/artifacts.js";
 
 const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.project.v0": validateProject,
   "uh.adapter.v0": validateAdapter,
   "uh.workflow.v0": validateWorkflow,
   "uh.mission.v0": validateMission,
+  "uh.skills-index.v0": validateSkillsIndex,
+  "uh.sandboxes-index.v0": validateSandboxesIndex,
+  "uh.verification-result.v0": validateVerificationResult,
+  "uh.promotion.v0": validatePromotion,
 };
 
 export type ValidationResult = {

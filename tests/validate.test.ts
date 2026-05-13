@@ -23,6 +23,121 @@ test.beforeEach(async () => {
 test.afterEach(cleanup);
 
 describe("uh validate", () => {
+  test("valid skills index YAML passes", async () => {
+    await mkdir(join(TEST_ROOT, ".harness", "skills"), { recursive: true });
+    const filePath = join(TEST_ROOT, ".harness", "skills", "index.yaml");
+    await writeFile(
+      filePath,
+      `schema_version: uh.skills-index.v0
+skills:
+  - name: code-review
+    description: Review code changes
+    source: local
+    path: skills/code-review
+    required: true
+    tags:
+      - quality
+`,
+      "utf-8"
+    );
+
+    const result = await validateFile(filePath);
+
+    expect(result.valid, result.errors.join("\n")).toBe(true);
+  });
+
+  test("valid sandboxes index YAML passes", async () => {
+    await mkdir(join(TEST_ROOT, ".harness", "sandboxes"), { recursive: true });
+    const filePath = join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+    await writeFile(
+      filePath,
+      `schema_version: uh.sandboxes-index.v0
+sandboxes:
+  - id: sandbox-1
+    mission_id: mission-1
+    backend: git-worktree
+    path: .harness/sandboxes/sandbox-1
+    status: verified
+    created_at: "2026-05-13T00:00:00.000Z"
+    updated_at: "2026-05-13T00:05:00.000Z"
+`,
+      "utf-8"
+    );
+
+    const result = await validateFile(filePath);
+
+    expect(result.valid, result.errors.join("\n")).toBe(true);
+  });
+
+  test("valid verification result YAML passes", async () => {
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "mission-1"), { recursive: true });
+    const filePath = join(TEST_ROOT, ".harness", "missions", "mission-1", "verification.yaml");
+    await writeFile(
+      filePath,
+      `schema_version: uh.verification-result.v0
+mission_id: mission-1
+status: passed
+checks:
+  - name: typecheck
+    type: command
+    status: passed
+    command: npx tsc -p tsconfig.tests.json --noEmit
+  - name: qa-review
+    type: review
+    status: waived
+    reviewer: reviewer@example.com
+    notes: Low-risk docs change
+findings:
+  - severity: info
+    message: No issues found
+approvals:
+  - gate: promotion
+    status: approved
+`,
+      "utf-8"
+    );
+
+    const result = await validateFile(filePath);
+
+    expect(result.valid, result.errors.join("\n")).toBe(true);
+  });
+
+  test("valid promotion YAML passes", async () => {
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "mission-1"), { recursive: true });
+    const filePath = join(TEST_ROOT, ".harness", "missions", "mission-1", "promotion.yaml");
+    await writeFile(
+      filePath,
+      `schema_version: uh.promotion.v0
+mission_id: mission-1
+sandbox_id: sandbox-1
+decision: promoted
+approved_by: reviewer@example.com
+promoted_at: "2026-05-13T00:10:00.000Z"
+changes:
+  - src/schema/artifacts.ts
+audit_event_id: audit-1
+`,
+      "utf-8"
+    );
+
+    const result = await validateFile(filePath);
+
+    expect(result.valid, result.errors.join("\n")).toBe(true);
+  });
+
+  test("initializeHarness writes schema-versioned skills and sandboxes indexes that validate", async () => {
+    await mkdir(TEST_ROOT, { recursive: true });
+    await initializeHarness(TEST_ROOT);
+
+    const skillsResult = await validateFile(join(TEST_ROOT, ".harness", "skills", "index.yaml"));
+    const sandboxesResult = await validateFile(join(TEST_ROOT, ".harness", "sandboxes", "index.yaml"));
+
+    expect(skillsResult.schema_version).toBe("uh.skills-index.v0");
+    expect(skillsResult.valid, skillsResult.errors.join("\n")).toBe(true);
+    expect(sandboxesResult.schema_version).toBe("uh.sandboxes-index.v0");
+    expect(sandboxesResult.valid, sandboxesResult.errors.join("\n")).toBe(true);
+  });
+
   test("old minimal workflow validates without BMAD metadata", () => {
     const workflow = validateWorkflow({
       schema_version: "uh.workflow.v0",
