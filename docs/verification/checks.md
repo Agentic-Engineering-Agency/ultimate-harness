@@ -1,0 +1,37 @@
+# Checks
+
+## Documentation checks
+
+```bash
+find docs -type f | sort
+```
+
+Expected: required docs from the handoff are present.
+
+```bash
+git diff -- README.md docs
+```
+
+Expected: changes are intentional and navigable.
+
+Optional later:
+
+```bash
+markdown-link-check docs/**/*.md README.md
+```
+
+## Future schema checks
+
+```bash
+uh validate .harness/project.yaml
+uh validate .harness/missions/<id>/mission.yaml
+uh validate .harness/adapters/<adapter>.yaml
+```
+
+## Future runtime checks
+
+```bash
+uh adapter check hermes
+uh mission dry-run .harness/missions/<id>/mission.yaml
+uh sandbox inspect <sandbox-id>
+```

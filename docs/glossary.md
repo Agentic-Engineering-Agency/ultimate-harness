@@ -1,0 +1,40 @@
+# Glossary
+
+## Ultimate Harness
+A runtime-agnostic orchestration layer that standardizes how agentic software work is specified, delegated, sandboxed, verified, reviewed, and promoted.
+
+## Runtime
+A coding-agent environment capable of performing work: Codex, Claude Code, Pi, oh-my-pi, Hermes, or a future agent runtime.
+
+## Runtime adapter
+A thin integration layer that translates Ultimate Harness mission packets into runtime-specific prompts, commands, tool invocations, and state collection.
+
+## Mission
+A bounded unit of agentic work with a goal, inputs, constraints, expected artifacts, verification requirements, and promotion policy.
+
+## Mission packet
+The portable data structure passed from Ultimate Harness to a runtime adapter. It describes the work without assuming a specific agent implementation.
+
+## Workflow profile
+A named end-to-end procedure for a class of work, such as `research-docs`, `spec-first-feature`, `bugfix-contained`, `adapter-design`, or `skill-authoring`.
+
+## Skill
+A reusable procedural capability that can be selected for a mission. Skills may be human-readable Markdown first and machine-indexable second.
+
+## Sandbox
+An isolated execution environment where an agent can read project context and produce changes without directly mutating canonical project state.
+
+## Promotion
+The controlled process of moving approved sandbox outputs into the canonical working tree, docs, issue tracker, or release state.
+
+## Verification result
+Structured evidence that a mission satisfied required checks: static analysis, tests, diff review, spec compliance, security review, and human approval.
+
+## Audit trail
+A durable record linking issue → spec → plan → mission → runtime session → sandbox changes → verification → promotion.
+
+## Canonical artifact
+A project artifact that has been reviewed/promoted and is accepted as source of truth.
+
+## Generated artifact
+An artifact produced by an agent or runtime. It is not canonical until verified and promoted.

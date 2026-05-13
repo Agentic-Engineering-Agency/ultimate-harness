@@ -1,0 +1,21 @@
+# Workflow: Plan to Mission
+
+## Use when
+
+A plan needs to become a bounded runtime-executable unit.
+
+## Steps
+
+1. Select a task or small task batch from the plan.
+2. Assign issue refs and workflow profile.
+3. Add ordered context files.
+4. Add constraints and non-goals.
+5. Add required/suggested skills.
+6. Define expected outputs.
+7. Choose sandbox backend.
+8. Define verification commands and review gates.
+9. Serialize as `uh.mission.v0`.
+
+## Exit criteria
+
+The mission packet is complete enough to pass adapter `prepare()` validation.

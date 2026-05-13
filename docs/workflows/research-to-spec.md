@@ -1,0 +1,30 @@
+# Workflow: Research to Spec
+
+## Use when
+
+- Product semantics are unclear.
+- External systems must be compared before design.
+- Implementation would require inventing concepts in code.
+
+## Steps
+
+1. Read project handoff and README.
+2. Identify source systems and URLs.
+3. Extract or summarize authoritative docs.
+4. Create comparison matrix.
+5. Create adopt/reject/defer decisions.
+6. Draft glossary terms.
+7. Convert stable decisions into product/spec docs.
+8. Record assumptions and open questions.
+
+## Outputs
+
+- `docs/research/inspiration-systems.md`
+- `docs/research/comparison-matrix.md`
+- `docs/research/adopt-reject-defer.md`
+- `docs/glossary.md`
+- Product or architecture docs as needed.
+
+## Exit criteria
+
+A later implementer can distinguish copied ideas, rejected ideas, deferred ideas, and unresolved assumptions.

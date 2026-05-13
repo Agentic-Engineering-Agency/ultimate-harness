@@ -1,0 +1,34 @@
+# Adopt / Reject / Defer Decision Log
+
+## Adopt now
+
+| Decision | Rationale | Source influence |
+|---|---|---|
+| Artifact-first docs/specs/plans | Prevents semantics from living only in chat context. | OpenSpec, BMAD, GSD |
+| Runtime-agnostic adapter contract | Allows Codex, Claude Code, Pi, oh-my-pi, Hermes, and future runtimes. | Pi, oh-my-pi, OpenSpec, superpowers |
+| Mission packet as portable work unit | Gives every runtime the same goal, constraints, context, checks, and expected outputs. | GSD phase plans, OpenSpec changes, BMAD workflows |
+| Sandbox abstraction | Safe agent work requires isolated changes and promotion control. | AgentFS, superpowers worktrees, oh-my-pi isolation |
+| Verification and promotion lifecycle | Agent output is not done until checked and approved. | superpowers reviews, OpenSpec verify/archive, AgentFS inspect/promote model |
+| BMAD-style roles as workflow roles | Analyst/PM/Architect/QA/Writer roles are useful for docs and planning. | BMAD Method |
+| Human-readable first, machine-readable second | Early schemas should be understandable before they are frozen. | OpenSpec, matt-pocock/skills |
+
+## Reject for MVP
+
+| Rejected idea | Why |
+|---|---|
+| A single blessed runtime | Violates runtime-agnostic direction. |
+| A full autonomous mega-orchestrator | Too early; artifact model and adapters must be proven first. |
+| Treating BMAD as the whole product | BMAD is one inspiration system, not the harness ontology. |
+| Direct mutation of canonical working tree by agents | Undermines sandboxing, review, auditability, and promotion. |
+| Tool-specific slash commands as core API | Slash commands can be adapters, but core contracts should be data/API driven. |
+| Opaque agent transcripts as the only audit log | Audit records must include structured evidence and promoted artifacts. |
+
+## Defer
+
+| Deferred idea | Why defer | Revisit when |
+|---|---|---|
+| Choosing TypeScript/Rust/Python package architecture | Docs should justify runtime choices first. | Adapter contract and CLI MVP are ready. |
+| Full AgentFS integration | Need a sandbox interface and git worktree baseline first. | Worktree sandbox is modeled and verification lifecycle is stable. |
+| Web dashboard | CLI/docs/artifact discipline are more important now. | Audit trail and mission status format are stable. |
+| Two-way Linear/GitHub sync automation | Useful but not core product semantics. | Product docs and issue metadata conventions are stable. |
+| Runtime marketplace | Requires stable adapter manifest and conformance tests. | At least two adapters exist. |

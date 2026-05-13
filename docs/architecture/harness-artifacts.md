@@ -1,0 +1,70 @@
+# `.harness/` Artifact Structure
+
+## Purpose
+
+`.harness/` stores Ultimate Harness project state. It should make agentic work inspectable even if the original chat session disappears.
+
+## Draft layout
+
+```text
+.harness/
+  project.yaml
+  adapters/
+    hermes.yaml
+    codex.yaml
+    claude-code.yaml
+    pi.yaml
+  workflows/
+    research-docs.yaml
+    spec-first-feature.yaml
+    bugfix-contained.yaml
+    adapter-design.yaml
+    skill-authoring.yaml
+  skills/
+    index.yaml
+  specs/
+    active/
+    archive/
+  missions/
+    mission-2026-05-13-docs-spine/
+      mission.yaml
+      prompt.md
+      runtime-session.yaml
+      events.ndjson
+      artifacts/
+      diff.patch
+      verification.yaml
+      review.md
+      promotion.yaml
+  sandboxes/
+    index.yaml
+  audit/
+    events.ndjson
+```
+
+## File responsibilities
+
+- `project.yaml` — project identity, issue sources, schema versions, defaults.
+- `adapters/*.yaml` — adapter manifests and capabilities.
+- `workflows/*.yaml` — workflow profile definitions.
+- `skills/index.yaml` — discoverable skill metadata and locations.
+- `specs/active/` — current canonical specs.
+- `specs/archive/` — superseded or completed specs.
+- `missions/<id>/mission.yaml` — canonical mission packet.
+- `missions/<id>/prompt.md` — runtime-specific prompt generated from mission.
+- `missions/<id>/runtime-session.yaml` — runtime IDs/status/capabilities.
+- `missions/<id>/events.ndjson` — structured lifecycle events.
+- `missions/<id>/artifacts/` — generated outputs not yet promoted.
+- `missions/<id>/diff.patch` — captured patch for review.
+- `missions/<id>/verification.yaml` — checks and results.
+- `missions/<id>/review.md` — human or review-agent notes.
+- `missions/<id>/promotion.yaml` — promotion decision and applied refs.
+- `sandboxes/index.yaml` — active/discarded/promoted sandboxes.
+- `audit/events.ndjson` — append-only project-level timeline.
+
+## Design notes
+
+- `.harness/` should be checked into git except large logs or secrets.
+- Secrets must never be stored in `.harness/`.
+- Generated artifacts remain non-canonical until promoted.
+- Runtime-specific details belong under mission/session records, not in core specs.

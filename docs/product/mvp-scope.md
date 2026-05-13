@@ -1,0 +1,41 @@
+# MVP Scope
+
+## MVP objective
+
+Prove that Ultimate Harness can describe, launch, observe, verify, and promote bounded agentic work in a runtime-agnostic way.
+
+## In scope
+
+1. Documentation spine for product semantics.
+2. `.harness/` artifact layout specification.
+3. Mission packet schema with examples.
+4. Runtime adapter contract with lifecycle methods and result shapes.
+5. Git worktree sandbox backend design.
+6. AgentFS sandbox backend design at interface level.
+7. Verification and promotion lifecycle.
+8. Initial workflow profiles:
+   - `research-docs`
+   - `spec-first-feature`
+   - `bugfix-contained`
+   - `adapter-design`
+   - `skill-authoring`
+9. First implementation target after docs: minimal CLI skeleton with `uh init`, `uh propose`, `uh status`.
+10. First adapter MVP: Hermes, because Hermes already has skills, tool calls, session context, and subagent concepts available in this environment.
+
+## Out of scope for MVP
+
+- Hosted service/dashboard.
+- Full marketplace for adapters or skills.
+- Full two-way Linear/GitHub sync.
+- Fully automated merge/promotion without human approval.
+- Complex multi-agent scheduling engine.
+- Choosing Pi/oh-my-pi as the mandatory core engine.
+- Production-grade AgentFS integration before sandbox interface stabilizes.
+
+## MVP acceptance criteria
+
+- Docs define all core entities consistently.
+- A sample mission can be represented as YAML and mapped to at least one runtime adapter plan.
+- The adapter contract describes status, artifacts, logs, diffs, checks, blockers, and final result.
+- The sandbox lifecycle distinguishes create, execute, inspect, verify, promote, and discard.
+- Workflow profiles define entry criteria, steps, outputs, and exit criteria.

@@ -1,0 +1,63 @@
+# Architecture Overview
+
+## Architectural stance
+
+Ultimate Harness is a **control plane for agentic software work**. It should own durable artifacts and lifecycle semantics while delegating execution to runtime adapters.
+
+```text
+Issue / Spec / Request
+        |
+        v
+Workflow Profile  ---> Skills
+        |
+        v
+Mission Packet
+        |
+        v
+Runtime Adapter  ---> Runtime Session (Codex, Claude Code, Pi, Hermes, ...)
+        |
+        v
+Sandbox Backend  ---> Git worktree / AgentFS / future backend
+        |
+        v
+Verification Result
+        |
+        v
+Human Review + Promotion
+        |
+        v
+Canonical Project State + Audit Trail
+```
+
+## Major components
+
+### 1. Artifact store
+The `.harness/` directory stores project metadata, specs, workflow profiles, mission packets, adapter manifests, sandbox records, verification results, and audit records.
+
+### 2. Workflow engine
+Initially this can be a documented procedure or small CLI commands. It maps work types to required artifacts, skills, checks, and approval gates.
+
+### 3. Mission compiler
+Transforms a request/spec/plan into a mission packet suitable for runtime execution.
+
+### 4. Runtime registry
+Knows which adapters are available, what capabilities they support, and how to invoke them.
+
+### 5. Runtime adapter
+Translates a mission packet into runtime-specific execution while reporting structured status and outputs back to the harness.
+
+### 6. Sandbox manager
+Creates, identifies, inspects, and disposes of isolated workspaces.
+
+### 7. Verification manager
+Runs checks, captures results, and prepares review gates.
+
+### 8. Promotion manager
+Moves approved outputs into canonical project state and writes audit records.
+
+## Design constraints
+
+- Runtime adapters must not define product semantics; they implement the contract.
+- Sandboxes are not optional for agent-generated changes in MVP workflows.
+- Human-readable artifacts should remain useful without the CLI.
+- Machine-readable schemas should be versioned and introduced incrementally.
