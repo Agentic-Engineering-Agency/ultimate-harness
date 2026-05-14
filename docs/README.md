@@ -60,7 +60,7 @@ The core design goal is **portable discipline**: a project should be able to use
 
 ## Current status
 
-This repo is documentation-first. Implementation issues exist, but they should not start until the artifact model, adapter contract, mission packet, sandbox model, and verification lifecycle are clear enough that an implementation agent does not need to invent product semantics.
+Ultimate Harness now has an early working CLI and schema-backed artifact lifecycle. The docs remain the product and architecture spine for the implementation: use them to understand the artifact model, adapter contract, mission packet, sandbox policy model, verification lifecycle, and promotion gates as the CLI continues to grow.
 
 
 ## Sources used in this documentation sprint
