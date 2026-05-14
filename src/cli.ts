@@ -4,6 +4,7 @@ import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
 import { createMission } from "./harness/mission.js";
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
+import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
@@ -114,6 +115,38 @@ program
       console.log(`checks: ${result.checks_passed} passed, ${result.checks_failed} failed, ${result.checks_blocked} blocked`);
       console.log(`artifact: ${result.path}`);
       process.exit(result.status === "passed" ? 0 : 1);
+    } catch (err) {
+      console.error(`[BLOCKED] ${missionId}`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+function collectRepeatedOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+// uh promote
+program
+  .command("promote")
+  .description("Write a safe promotion record for a mission")
+  .argument("<mission-id>", "Mission id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .requiredOption("--approved-by <name>", "Approver name")
+  .option("--decision <decision>", "Promotion decision: promoted, rejected, or deferred", "promoted")
+  .option("--change <path>", "Changed path to include in the promotion record", collectRepeatedOption, [])
+  .option("--sandbox-id <id>", "Sandbox id associated with this promotion")
+  .action(async (missionId: string, opts: { root?: string; approvedBy: string; decision: PromoteDecision; change: string[]; sandboxId?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await promoteMission(root, missionId, {
+        approvedBy: opts.approvedBy,
+        decision: opts.decision,
+        changes: opts.change,
+        sandboxId: opts.sandboxId,
+      });
+      console.log(`[${result.decision.toUpperCase()}] ${result.mission_id}`);
+      console.log(`artifact: ${result.path}`);
     } catch (err) {
       console.error(`[BLOCKED] ${missionId}`);
       console.error(`  error: ${(err as Error).message}`);

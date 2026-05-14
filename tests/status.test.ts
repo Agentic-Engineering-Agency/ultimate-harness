@@ -229,4 +229,80 @@ sandboxes:
     const s = await getStatus(TEST_ROOT);
     expect(s.promoted_missions_count).toBe(1);
   });
+
+  test("does not count promoted promotion result from a different mission id", async () => {
+    await mkdir(TEST_ROOT, { recursive: true });
+    await initializeHarness(TEST_ROOT);
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "a"), { recursive: true });
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "a", "mission.yaml"),
+      "schema_version: uh.mission.v0\nid: a\nname: Mission A\nworkflow_profile: research-docs\n",
+      "utf-8"
+    );
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "a", "promotion.yaml"),
+      "schema_version: uh.promotion.v0\nmission_id: b\ndecision: promoted\n",
+      "utf-8"
+    );
+
+    const s = await getStatus(TEST_ROOT);
+    expect(s.promoted_missions_count).toBe(0);
+  });
+
+  test("does not count passed verification result from a different mission id", async () => {
+    await mkdir(TEST_ROOT, { recursive: true });
+    await initializeHarness(TEST_ROOT);
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "a"), { recursive: true });
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "a", "mission.yaml"),
+      "schema_version: uh.mission.v0\nid: a\nname: Mission A\nworkflow_profile: research-docs\n",
+      "utf-8"
+    );
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "a", "verification.yaml"),
+      "schema_version: uh.verification-result.v0\nmission_id: b\nstatus: passed\nchecks: []\n",
+      "utf-8"
+    );
+
+    const s = await getStatus(TEST_ROOT);
+    expect(s.verified_missions_count).toBe(0);
+  });
+
+  test("does not count passed verification result when mission id does not match directory", async () => {
+    await mkdir(TEST_ROOT, { recursive: true });
+    await initializeHarness(TEST_ROOT);
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "b"), { recursive: true });
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "b", "mission.yaml"),
+      "schema_version: uh.mission.v0\nid: a\nname: Mission A\nworkflow_profile: research-docs\n",
+      "utf-8"
+    );
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "b", "verification.yaml"),
+      "schema_version: uh.verification-result.v0\nmission_id: b\nstatus: passed\nchecks: []\n",
+      "utf-8"
+    );
+
+    const s = await getStatus(TEST_ROOT);
+    expect(s.verified_missions_count).toBe(0);
+  });
+
+  test("does not count promoted promotion result when mission id does not match directory", async () => {
+    await mkdir(TEST_ROOT, { recursive: true });
+    await initializeHarness(TEST_ROOT);
+    await mkdir(join(TEST_ROOT, ".harness", "missions", "b"), { recursive: true });
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "b", "mission.yaml"),
+      "schema_version: uh.mission.v0\nid: a\nname: Mission A\nworkflow_profile: research-docs\n",
+      "utf-8"
+    );
+    await writeFile(
+      join(TEST_ROOT, ".harness", "missions", "b", "promotion.yaml"),
+      "schema_version: uh.promotion.v0\nmission_id: b\ndecision: promoted\n",
+      "utf-8"
+    );
+
+    const s = await getStatus(TEST_ROOT);
+    expect(s.promoted_missions_count).toBe(0);
+  });
 });

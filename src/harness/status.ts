@@ -16,6 +16,7 @@ import {
   VerificationResultSchema,
   type SandboxStatus,
 } from "../schema/artifacts.js";
+import { MissionSchema } from "../schema/mission.js";
 
 export type AdapterInfo = {
   id: string;
@@ -192,10 +193,12 @@ async function countPassedVerificationMissionDirs(dir: string): Promise<number> 
       }
       const missionDir = path.join(dir, entry.name);
       try {
-        await access(path.join(missionDir, "mission.yaml"));
+        if (!(await isSameMissionDir(missionDir, entry.name))) {
+          continue;
+        }
         const parsed = parse(await readFile(path.join(missionDir, "verification.yaml"), "utf-8"));
         const result = VerificationResultSchema.safeParse(parsed);
-        if (result.success && result.data.status === "passed") {
+        if (result.success && result.data.status === "passed" && result.data.mission_id === entry.name) {
           count++;
         }
       } catch {
@@ -218,10 +221,12 @@ async function countPromotedMissionDirs(dir: string): Promise<number> {
       }
       const missionDir = path.join(dir, entry.name);
       try {
-        await access(path.join(missionDir, "mission.yaml"));
+        if (!(await isSameMissionDir(missionDir, entry.name))) {
+          continue;
+        }
         const parsed = parse(await readFile(path.join(missionDir, "promotion.yaml"), "utf-8"));
         const result = PromotionSchema.safeParse(parsed);
-        if (result.success && result.data.decision === "promoted") {
+        if (result.success && result.data.decision === "promoted" && result.data.mission_id === entry.name) {
           count++;
         }
       } catch {
@@ -231,5 +236,15 @@ async function countPromotedMissionDirs(dir: string): Promise<number> {
     return count;
   } catch {
     return 0;
+  }
+}
+
+async function isSameMissionDir(missionDir: string, dirName: string): Promise<boolean> {
+  try {
+    const parsed = parse(await readFile(path.join(missionDir, "mission.yaml"), "utf-8"));
+    const result = MissionSchema.safeParse(parsed);
+    return result.success && result.data.id === dirName;
+  } catch {
+    return false;
   }
 }
