@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
 import { createMission } from "./harness/mission.js";
+import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
@@ -95,6 +96,38 @@ program
       process.exit(1);
     }
   });
+
+// uh verify
+program
+  .command("verify")
+  .description("Run a mission's required verification checks and write verification.yaml")
+  .argument("<mission-id>", "Mission id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--timeout-ms <ms>", `Verification command timeout in milliseconds (default: ${DEFAULT_VERIFY_COMMAND_TIMEOUT_MS})`)
+  .action(async (missionId: string, opts: { root?: string; timeoutMs?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const commandTimeoutMs = opts.timeoutMs === undefined ? undefined : parsePositiveIntegerOption("--timeout-ms", opts.timeoutMs);
+      const result = await verifyMission(root, missionId, { commandTimeoutMs });
+      const label = result.status === "passed" ? "PASS" : result.status === "failed" ? "FAIL" : "BLOCKED";
+      console.log(`[${label}] ${result.mission_id}`);
+      console.log(`checks: ${result.checks_passed} passed, ${result.checks_failed} failed, ${result.checks_blocked} blocked`);
+      console.log(`artifact: ${result.path}`);
+      process.exit(result.status === "passed" ? 0 : 1);
+    } catch (err) {
+      console.error(`[BLOCKED] ${missionId}`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+function parsePositiveIntegerOption(name: string, value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer, got ${value}`);
+  }
+  return parsed;
+}
 
 // uh adapter
 const adapterCmd = program
