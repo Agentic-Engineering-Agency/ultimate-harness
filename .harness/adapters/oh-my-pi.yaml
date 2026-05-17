@@ -1,26 +1,20 @@
 schema_version: uh.adapter.v0
 id: oh-my-pi
-name: oh-my-pi runtime
+name: oh-my-pi
 description: >-
-  Design-only adapter stub for oh-my-pi (`omp`), the batteries-included
-  extension of the Pi lineage with LSP, subagents, browser, Python, MCP,
-  sessions, branches, skills, hooks, and isolation backends. The harness will
-  drive oh-my-pi via `omp -p` (print mode) once wiring lands. See
-  docs/architecture/adapter-pi-omp.md for the full design.
+  Runtime adapter for oh-my-pi (omp), a multi-provider CLI coding agent.
+  Executes missions via `omp --print --mode json` with sessions ephemeral and
+  extensions/skills disabled by default for deterministic runs. Provider /
+  account auth flows through OMP's own credential store and env vars.
 runtime: oh-my-pi
 capabilities:
   - cli-execution
-  - non-interactive-run
-  - json-output
-  - session-resume
-  - file-tools
-  - terminal
-  - subagents
-  - skills
-  - browser
-  - mcp
-  - hooks
+  - non-interactive
+  - one-shot
+  - background
   - worktree-isolation
+  - json-output
+  - diff-output
 status: experimental
 config:
   cli_command: omp
@@ -28,4 +22,9 @@ config:
   default_provider: ""
   default_model: ""
   worktree_mode: false
-  pass_session_id: true
+  pass_session_id: false
+  runtime_config:
+    mode: json
+    thinking: ""
+    allow_extensions: false
+    allow_skills: false

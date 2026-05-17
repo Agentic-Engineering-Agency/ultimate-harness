@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, appendFile, lstat, writeFile, copyFile } from "node:fs/promises";
+import { readFile, appendFile, lstat, writeFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
 import path from "node:path";
 import { AdapterDocument } from "../schema/adapter.js";
@@ -49,7 +49,7 @@ export type DryRunResult = {
   errors: string[];
 };
 
-export type CodexRunPlan = {
+export type OhMyPiRunPlan = {
   command: string;
   args: string[];
   prompt: string;
@@ -60,14 +60,14 @@ export type CodexRunPlan = {
 };
 
 /**
- * Input the adapter hands to a Codex runner.
+ * Input the adapter hands to a OhMyPi runner.
  *
  * Runners are responsible for invoking the configured CLI with the given
  * arguments inside `cwd`. They MUST honor `timeoutMs` when set; on expiry,
  * return `timedOut: true` and a non-zero exit code. The default runner uses
  * `child_process.spawn`; tests inject deterministic stubs.
  */
-export interface CodexRunnerInput {
+export interface OhMyPiRunnerInput {
   command: string;
   args: string[];
   cwd: string;
@@ -75,13 +75,13 @@ export interface CodexRunnerInput {
 }
 
 /**
- * Output a Codex runner returns to the adapter.
+ * Output a OhMyPi runner returns to the adapter.
  *
  * Errors are surfaced explicitly rather than swallowed: a spawn failure sets
  * `spawnError`; a timeout sets `timedOut`. The adapter translates these into
  * `failed` runtime-result entries with explicit `errors[]` items.
  */
-export interface CodexRunnerOutput {
+export interface OhMyPiRunnerOutput {
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -89,7 +89,7 @@ export interface CodexRunnerOutput {
   spawnError?: string;
 }
 
-export type CodexRunner = (input: CodexRunnerInput) => Promise<CodexRunnerOutput>;
+export type OhMyPiRunner = (input: OhMyPiRunnerInput) => Promise<OhMyPiRunnerOutput>;
 
 export interface DiffCaptureResult {
   patch: string;
@@ -98,30 +98,30 @@ export interface DiffCaptureResult {
 
 export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
 
-export interface RunCodexOptions {
-  runner?: CodexRunner;
+export interface RunOhMyPiOptions {
+  runner?: OhMyPiRunner;
   timeoutMs?: number;
   collectDiff?: DiffCollector;
 }
 
-export interface RunCodexResult {
+export interface RunOhMyPiResult {
   exitCode: number;
   stdout: string;
   stderr: string;
   result?: RuntimeResultDocument;
 }
 
-export interface CodexCollectInput {
+export interface OhMyPiCollectInput {
   root: string;
   artifacts: MissionArtifactContext | null;
-  plan: CodexRunPlan;
+  plan: OhMyPiRunPlan;
   startedAt: string;
   finishedAt: string;
-  runnerResult: CodexRunnerOutput;
+  runnerResult: OhMyPiRunnerOutput;
   diff: DiffCaptureResult;
 }
 
-export interface CodexCollectOutput {
+export interface OhMyPiCollectOutput {
   exitCode: number;
   stderr: string;
   result?: RuntimeResultDocument;
@@ -134,9 +134,9 @@ export async function loadAdapterConfig(root: string, runtimeId: string): Promis
   return entry.document;
 }
 
-async function runCodexCliCheck(command: string): Promise<AdapterCheckResult> {
+async function runOhMyPiCliCheck(command: string): Promise<AdapterCheckResult> {
   const result: AdapterCheckResult = {
-    runtime: "codex",
+    runtime: "oh-my-pi",
     found: false,
     version: "",
     errors: [],
@@ -148,44 +148,44 @@ async function runCodexCliCheck(command: string): Promise<AdapterCheckResult> {
     result.version = stdout.trim();
   } catch {
     result.errors.push(
-      "codex CLI not found in PATH. Install: brew install --cask codex or https://github.com/openai/codex",
+      "omp CLI not found in PATH. Install: https://github.com/can1357/oh-my-pi",
     );
   }
 
   return result;
 }
 
-const codexRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
-  const command = manifest.config?.cli_command ? manifest.config.cli_command : "codex";
-  return runCodexCliCheck(command);
+const ohMyPiRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
+  const command = manifest.config?.cli_command ? manifest.config.cli_command : "omp";
+  return runOhMyPiCliCheck(command);
 };
 
-runtimeRegistry.register("codex", codexRuntimeChecker);
+runtimeRegistry.register("oh-my-pi", ohMyPiRuntimeChecker);
 
 /**
- * Convenience wrapper that mirrors the CLI's codex check.
+ * Convenience wrapper that mirrors the CLI's oh-my-pi check.
  *
  * - With `root`: dispatches through the registry so manifest errors and CLI
  *   errors share the same structured shape.
- * - Without `root`: probes the codex CLI directly (used in environments
+ * - Without `root`: probes the oh-my-pi CLI directly (used in environments
  *   without an initialized `.harness/`).
  */
-export async function checkCodex(root?: string): Promise<CheckResult> {
+export async function checkOhMyPi(root?: string): Promise<CheckResult> {
   if (root) {
-    return runtimeRegistry.check(root, "codex");
+    return runtimeRegistry.check(root, "oh-my-pi");
   }
-  return runCodexCliCheck("codex");
+  return runOhMyPiCliCheck("omp");
 }
 
-export async function dryRunCodex(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunOhMyPi(root: string, missionPath: string): Promise<DryRunResult> {
   try {
-    const plan = await planCodexRun(root, missionPath);
+    const plan = await planOhMyPiRun(root, missionPath);
     const artifacts = await getMissionArtifactContext(root, missionPath);
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
         schema_version: "uh.runtime-session.v0",
         mission_id: plan.mission.id,
-        runtime: "codex",
+        runtime: "oh-my-pi",
         status: "planned",
         command: plan.command,
         args: plan.args,
@@ -212,14 +212,14 @@ export async function dryRunCodex(root: string, missionPath: string): Promise<Dr
 }
 
 /**
- * Compile a mission into the command, args, and prompt the Codex runner
+ * Compile a mission into the command, args, and prompt the OhMyPi runner
  * needs. Throws when the mission or adapter manifest cannot be loaded;
  * recoverable issues (missing workflow profile) are returned in `errors[]`
  * so the caller decides whether to proceed.
  */
-export async function planCodexRun(root: string, missionPath: string): Promise<CodexRunPlan> {
+export async function planOhMyPiRun(root: string, missionPath: string): Promise<OhMyPiRunPlan> {
   const errors: string[] = [];
-  const adapter = await loadAdapterConfig(root, "codex");
+  const adapter = await loadAdapterConfig(root, "oh-my-pi");
   const runtimeConfig: Record<string, unknown> = adapter.config?.runtime_config ?? {};
 
   let mission: MissionDocument;
@@ -242,32 +242,39 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
   }
 
   const config = adapter.config;
-  const cliCommand = config?.cli_command ? config.cli_command : "codex";
+  const cliCommand = config?.cli_command ? config.cli_command : "omp";
   const worktreeMode = config?.worktree_mode === true;
   if (config?.pass_session_id === true) {
-    errors.push("Codex assigns its own thread id; set pass_session_id: false");
+    errors.push("OhMyPi assigns its own thread id; set pass_session_id: false");
   }
 
-  const sandboxMode = readOptionalStringConfig(runtimeConfig, "sandbox_mode", "workspace-write");
-  const approvalPolicy = readOptionalStringConfig(runtimeConfig, "approval_policy", "never");
-  validateOptionalBooleanConfig(runtimeConfig, "full_auto_compat");
-  const finalMessagePath = await resolveFinalMessagePath(root, missionPath);
+  const mode = readOhMyPiModeConfig(runtimeConfig);
+  if (mode === "rpc-ui") {
+    errors.push("oh-my-pi mode rpc-ui expects a TUI parent; use mode: json, text, or rpc for headless runs");
+  }
+  const model = readOptionalNonEmptyStringConfig(runtimeConfig, "model");
+  const thinking = readOptionalThinkingConfig(runtimeConfig);
+  const allowExtensions = readOptionalBooleanConfig(runtimeConfig, "allow_extensions", false);
+  const allowSkills = readOptionalBooleanConfig(runtimeConfig, "allow_skills", false);
 
   const prompt = buildMissionPrompt(mission, workflow);
   const args = [
-    "exec",
-    "--cd",
-    path.resolve(root),
-    "--sandbox",
-    sandboxMode,
-    "--ask-for-approval",
-    approvalPolicy,
-    "--json",
-    "--output-last-message",
-    finalMessagePath,
-    "--skip-git-repo-check",
-    prompt,
+    "--print",
   ];
+  if (model) {
+    args.push("--model", model);
+  }
+  if (thinking) {
+    args.push("--thinking", thinking);
+  }
+  args.push("--mode", mode, "--no-session");
+  if (!allowExtensions) {
+    args.push("--no-extensions");
+  }
+  if (!allowSkills) {
+    args.push("--no-skills");
+  }
+  args.push("--no-title", prompt);
 
   return {
     command: cliCommand,
@@ -286,7 +293,7 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
  * `timedOut` on the returned record so the adapter can translate them into a
  * `failed` runtime-result with explicit errors.
  */
-export const defaultCodexRunner: CodexRunner = (input) => {
+export const defaultOhMyPiRunner: OhMyPiRunner = (input) => {
   return new Promise((resolve) => {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
@@ -343,20 +350,20 @@ export const defaultDiffCollector: DiffCollector = async (cwd) => {
 };
 
 /**
- * Execute a mission against the Codex runtime end-to-end.
+ * Execute a mission against the OhMyPi runtime end-to-end.
  *
- * Orchestrates: `planCodexRun` -> writeable artifact context ->
+ * Orchestrates: `planOhMyPiRun` -> writeable artifact context ->
  * `runtime.started` audit -> runner invocation -> diff capture ->
- * `collectCodexSession`. The runner and diff collector are injectable so
+ * `collectOhMyPiSession`. The runner and diff collector are injectable so
  * tests can drive deterministic outcomes (success, non-zero exit, timeout,
- * malformed result block) without invoking a real `codex` binary.
+ * malformed result block) without invoking a real `oh-my-pi` binary.
  */
-export async function runCodex(
+export async function runOhMyPi(
   root: string,
   missionPath: string,
-  options: RunCodexOptions = {},
-): Promise<RunCodexResult> {
-  const plan = await planCodexRun(root, missionPath);
+  options: RunOhMyPiOptions = {},
+): Promise<RunOhMyPiResult> {
+  const plan = await planOhMyPiRun(root, missionPath);
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
@@ -368,7 +375,7 @@ export async function runCodex(
     await persistPromptAndSession(artifacts, plan.prompt, {
       schema_version: "uh.runtime-session.v0",
       mission_id: plan.mission.id,
-      runtime: "codex",
+      runtime: "oh-my-pi",
       status: "running",
       command: plan.command,
       args: plan.args,
@@ -377,7 +384,7 @@ export async function runCodex(
     await appendMissionEvent(artifacts, {
       event: "runtime.started",
       timestamp: startedAt,
-      runtime: "codex",
+      runtime: "oh-my-pi",
       mission_id: plan.mission.id,
       command: plan.command,
       args: plan.args,
@@ -390,7 +397,7 @@ export async function runCodex(
     const auditEntry = JSON.stringify({
       event: "mission.run",
       timestamp: new Date().toISOString(),
-      runtime: "codex",
+      runtime: "oh-my-pi",
       mission_id: plan.mission.id,
       mission_name: plan.mission.name,
       workflow: plan.mission.workflow_profile,
@@ -400,7 +407,7 @@ export async function runCodex(
     // audit failure shouldn't block run
   }
 
-  const runner = options.runner ?? defaultCodexRunner;
+  const runner = options.runner ?? defaultOhMyPiRunner;
   const runnerResult = await runner({
     command: plan.command,
     args: plan.args,
@@ -412,7 +419,7 @@ export async function runCodex(
   const diff = await collectDiff(root);
   const finishedAt = new Date().toISOString();
 
-  const collection = await collectCodexSession({
+  const collection = await collectOhMyPiSession({
     root,
     artifacts,
     plan,
@@ -431,10 +438,10 @@ export async function runCodex(
 }
 
 /**
- * Persist a completed Codex session: stdout.log, stderr.log, diff.patch,
+ * Persist a completed OhMyPi session: stdout.log, stderr.log, diff.patch,
  * runtime-result.yaml, and the back-compat runtime-session.yaml. Determines
  * the runtime-result `status` from the runner outcome and any final
- * `uh.runtime-result.v0` block emitted by Codex on stdout.
+ * `uh.runtime-result.v0` block emitted by OhMyPi on stdout.
  *
  * Status rules:
  *  - `spawnError` -> failed (with explicit "Spawn error: ..." stderr)
@@ -442,14 +449,14 @@ export async function runCodex(
  *  - `exitCode != 0` -> failed
  *  - `exitCode == 0` + valid final block with status passed/completed -> passed
  *  - `exitCode == 0` + any other final block status -> that block's status
- *  - `exitCode == 0` + missing/malformed block -> blocked
+ *  - `exitCode == 0` + missing final assistant message -> blocked
  *
  * Artifact-write failures are caught and surfaced via stderr so callers see
  * the cause instead of getting a silent partial commit.
  */
-export async function collectCodexSession(
-  input: CodexCollectInput,
-): Promise<CodexCollectOutput> {
+export async function collectOhMyPiSession(
+  input: OhMyPiCollectInput,
+): Promise<OhMyPiCollectOutput> {
   const { artifacts, plan, runnerResult, diff, startedAt, finishedAt, root } = input;
 
   const errors: string[] = [];
@@ -470,25 +477,18 @@ export async function collectCodexSession(
     errors.push(...diff.errors);
   }
 
-  const quotaError = detectCodexQuotaError(runnerResult.stdout, stderr);
+  const quotaError = detectOhMyPiQuotaError(runnerResult.stdout, stderr);
   if (quotaError) {
     errors.push(quotaError);
   }
 
-  const parsedStream = parseCodexJsonlStream(runnerResult.stdout);
+  const parsedStream = parseOhMyPiOutput(runnerResult.stdout);
   errors.push(...parsedStream.parseErrors);
 
-  let finalMessage = "";
-  let finalMessageMissing = false;
-  try {
-    finalMessage = await readFile(getFinalMessagePath(plan.args), "utf-8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      finalMessageMissing = true;
-      errors.push("Codex did not write --output-last-message");
-    } else {
-      throw err;
-    }
+  const finalMessage = parsedStream.finalMessage;
+  const finalMessageMissing = finalMessage.length === 0;
+  if (finalMessageMissing) {
+    errors.push("oh-my-pi did not emit a final assistant message");
   }
 
   let status: RuntimeResultStatus;
@@ -515,12 +515,12 @@ export async function collectCodexSession(
     await writeArtifactFile(artifacts.missionDir, artifacts.stdoutPath, runnerResult.stdout);
     await writeArtifactFile(artifacts.missionDir, artifacts.stderrPath, stderr);
     await writeArtifactFile(artifacts.missionDir, artifacts.diffPath, diff.patch);
-    await persistFinalMessage(artifacts, getFinalMessagePath(plan.args), finalMessage, finalMessageMissing);
+    await persistFinalMessage(artifacts, finalMessage);
     for (const event of parsedStream.events) {
       if (typeof event.type === "string") {
         await appendMissionEvent(artifacts, {
           ...event,
-          event: `codex.${event.type}`,
+          event: `oh-my-pi.${event.type}`,
         });
       }
     }
@@ -528,7 +528,7 @@ export async function collectCodexSession(
     const draft: RuntimeResultDocument = {
       schema_version: "uh.runtime-result.v0",
       mission_id: plan.mission.id,
-      runtime: "codex",
+      runtime: "oh-my-pi",
       status,
       started_at: startedAt,
       finished_at: finishedAt,
@@ -560,7 +560,7 @@ export async function collectCodexSession(
   return { exitCode, stderr, result };
 }
 
-export function parseCodexJsonlStream(stdout: string): { events: Array<Record<string, unknown>>; parseErrors: string[] } {
+export function parseOhMyPiOutput(stdout: string): { events: Array<Record<string, unknown>>; parseErrors: string[]; finalMessage: string } {
   const events: Array<Record<string, unknown>> = [];
   const parseErrors: string[] = [];
   const lines = stdout.split("\n");
@@ -572,78 +572,153 @@ export function parseCodexJsonlStream(stdout: string): { events: Array<Record<st
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         events.push(parsed as Record<string, unknown>);
       } else {
-        parseErrors.push(`Codex JSONL line ${index + 1} is not an object`);
+        parseErrors.push(`OhMyPi JSON line ${index + 1} is not an object`);
       }
     } catch (err) {
-      parseErrors.push(`Codex JSONL line ${index + 1} parse error: ${(err as Error).message}`);
+      parseErrors.push(`OhMyPi JSON line ${index + 1} parse error: ${(err as Error).message}`);
     }
   }
-  return { events, parseErrors };
+
+  if (events.length === 0 && stdout.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(stdout) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        events.push(parsed as Record<string, unknown>);
+        parseErrors.length = 0;
+      } else {
+        parseErrors.push("OhMyPi JSON output is not an object");
+      }
+    } catch {
+      // Keep line-by-line parse errors; they are more actionable.
+    }
+  }
+
+  return {
+    events,
+    parseErrors,
+    finalMessage: extractFinalMessage(events),
+  };
 }
 
-export function detectCodexQuotaError(stdout: string, stderr: string): string | null {
+export function detectOhMyPiQuotaError(stdout: string, stderr: string): string | null {
   const combined = `${stdout}\n${stderr}`;
-  if (!/usage limit|purchase more credits|usage exceeded|not authenticated|auth(orization)? required/i.test(combined)) {
+  const pattern = /usage limit|rate limit|not authenticated|auth(orization)? required|please log in|quota|credit|401|403|api[- ]?key/i;
+  if (!pattern.test(combined)) {
     return null;
   }
   const firstMatch = combined
     .split("\n")
     .map((line) => line.trim())
-    .find((line) => /usage limit|purchase more credits|usage exceeded|not authenticated|auth(orization)? required/i.test(line));
+    .find((line) => pattern.test(line));
   const detail = firstMatch && firstMatch.length > 0 ? `: ${firstMatch}` : "";
-  return `Codex usage quota exhausted${detail}`;
+  return `oh-my-pi auth or quota error${detail}`;
 }
 
-function readOptionalStringConfig(config: Record<string, unknown>, key: string, defaultValue: string): string {
+function readOhMyPiModeConfig(config: Record<string, unknown>): "json" | "text" | "rpc" | "rpc-ui" {
+  const value = config.mode;
+  if (value === undefined) return "json";
+  if (value === "json" || value === "text" || value === "rpc" || value === "rpc-ui") {
+    return value;
+  }
+  throw new Error("OhMyPi adapter config mode must be one of: json, text, rpc, rpc-ui");
+}
+
+function readOptionalNonEmptyStringConfig(config: Record<string, unknown>, key: string): string | undefined {
   const value = config[key];
-  if (value === undefined) return defaultValue;
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`Codex adapter config ${key} must be a non-empty string`);
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string") {
+    throw new Error(`OhMyPi adapter config ${key} must be a string`);
   }
   return value;
 }
 
-function validateOptionalBooleanConfig(config: Record<string, unknown>, key: string): void {
+function readOptionalThinkingConfig(config: Record<string, unknown>): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+  const value = config.thinking;
+  if (value === undefined || value === "") return undefined;
+  if (value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh") {
+    return value;
+  }
+  throw new Error("OhMyPi adapter config thinking must be one of: minimal, low, medium, high, xhigh");
+}
+
+function readOptionalBooleanConfig(config: Record<string, unknown>, key: string, defaultValue: boolean): boolean {
   const value = config[key];
-  if (value === undefined) return;
+  if (value === undefined) return defaultValue;
   if (typeof value !== "boolean") {
-    throw new Error(`Codex adapter config ${key} must be a boolean`);
+    throw new Error(`OhMyPi adapter config ${key} must be a boolean`);
   }
+  return value;
 }
 
-async function resolveFinalMessagePath(root: string, missionPath: string): Promise<string> {
-  const artifacts = await getMissionArtifactContext(root, missionPath);
-  if (artifacts) return artifacts.finalMessagePath;
-  return path.join(path.resolve(root), ".harness", "runtime-final.txt");
+function extractFinalMessage(events: Array<Record<string, unknown>>): string {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const extracted = extractAssistantText(events[index]);
+    if (extracted.length > 0) {
+      return extracted;
+    }
+  }
+  return "";
 }
 
-function getFinalMessagePath(args: string[]): string {
-  const flagIndex = args.indexOf("--output-last-message");
-  if (flagIndex < 0 || flagIndex + 1 >= args.length) {
-    throw new Error("Codex run args missing --output-last-message path");
+function extractAssistantText(event: Record<string, unknown>): string {
+  const role = event.role;
+  const type = event.type;
+  const isAssistantLike = role === "assistant" || type === "assistant" || type === "message" || type === "result";
+  if (isAssistantLike) {
+    const direct = extractStringBody(event);
+    if (direct.length > 0) return direct;
   }
-  return args[flagIndex + 1];
+
+  const messages = event.messages;
+  if (Array.isArray(messages)) {
+    const extracted = extractLastAssistantFromArray(messages);
+    if (extracted.length > 0) return extracted;
+  }
+
+  const transcript = event.transcript;
+  if (Array.isArray(transcript)) {
+    const extracted = extractLastAssistantFromArray(transcript);
+    if (extracted.length > 0) return extracted;
+  }
+
+  const final = event.final;
+  if (typeof final === "string") return final;
+  if (final && typeof final === "object" && !Array.isArray(final)) {
+    const extracted = extractAssistantText(final as Record<string, unknown>);
+    if (extracted.length > 0) return extracted;
+  }
+
+  const result = event.result;
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    return extractStringBody(result as Record<string, unknown>);
+  }
+
+  return "";
+}
+
+function extractLastAssistantFromArray(items: unknown[]): string {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const extracted = extractAssistantText(item as Record<string, unknown>);
+    if (extracted.length > 0) return extracted;
+  }
+  return "";
+}
+
+function extractStringBody(event: Record<string, unknown>): string {
+  for (const key of ["content", "text", "message", "body", "output"]) {
+    const value = event[key];
+    if (typeof value === "string") return value;
+  }
+  return "";
 }
 
 async function persistFinalMessage(
   artifacts: MissionArtifactContext,
-  sourcePath: string,
   finalMessage: string,
-  missing: boolean,
 ): Promise<void> {
-  if (missing) {
-    await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, "");
-    return;
-  }
-  if (path.resolve(sourcePath) === path.resolve(artifacts.finalMessagePath)) {
-    await assertWritableArtifact(artifacts.missionDir, artifacts.finalMessagePath);
-    return;
-  }
-  await assertWritableArtifact(artifacts.missionDir, artifacts.finalMessagePath);
-  await copyFile(sourcePath, artifacts.finalMessagePath);
-  if (finalMessage.length === 0) {
-    await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, "");
-  }
+  await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, finalMessage);
 }
 
 async function getMissionArtifactContext(root: string, missionPath: string): Promise<MissionArtifactContext | null> {
@@ -754,7 +829,7 @@ async function appendMissionEvent(artifacts: MissionArtifactContext, event: Reco
 
 async function persistFinalRuntimeSession(
   artifacts: MissionArtifactContext,
-  plan: CodexRunPlan,
+  plan: OhMyPiRunPlan,
   startedAt: string,
   finishedAt: string,
   exitCode: number,
@@ -763,7 +838,7 @@ async function persistFinalRuntimeSession(
   await persistPromptAndSession(artifacts, plan.prompt, {
     schema_version: "uh.runtime-session.v0",
     mission_id: plan.mission.id,
-    runtime: "codex",
+    runtime: "oh-my-pi",
     status: sessionStatus,
     command: plan.command,
     args: plan.args,
@@ -774,7 +849,7 @@ async function persistFinalRuntimeSession(
   await appendMissionEvent(artifacts, {
     event: "runtime.finished",
     timestamp: finishedAt,
-    runtime: "codex",
+    runtime: "oh-my-pi",
     mission_id: plan.mission.id,
     exit_code: exitCode,
     status: sessionStatus,
@@ -832,7 +907,7 @@ function buildMissionPrompt(
   }
 
   prompt += "Execute this mission and produce the expected artifacts.\n\n";
-  prompt += "## Final output\nWhen you finish, write a one-paragraph status summary as the last assistant message. The harness captures it via --output-last-message.";
+  prompt += "## Final output\nWhen you finish, write a one-paragraph status summary as your last response. The harness captures it from the JSON output.";
 
   return prompt;
 }

@@ -64,9 +64,10 @@ config:
   default_model: ""
   worktree_mode: true
   pass_session_id: false
-  sandbox_mode: workspace-write
-  approval_policy: never
-  full_auto_compat: false
+  runtime_config:
+    sandbox_mode: workspace-write
+    approval_policy: never
+    full_auto_compat: false
 `,
   "claude-code": `schema_version: uh.adapter.v0
 id: claude-code
@@ -112,12 +113,19 @@ config:
 id: oh-my-pi
 name: oh-my-pi
 description: >-
-  Runtime adapter design for oh-my-pi, a Pi-derived agent harness.
-  Design-only; no runtime wiring yet.
+  Runtime adapter for oh-my-pi (omp), a multi-provider CLI coding agent.
+  Executes missions via \`omp --print --mode json\` with sessions ephemeral and
+  extensions/skills disabled by default for deterministic runs. Provider /
+  account auth flows through OMP's own credential store and env vars.
 runtime: oh-my-pi
 capabilities:
   - cli-execution
+  - non-interactive
+  - one-shot
+  - background
   - worktree-isolation
+  - json-output
+  - diff-output
 status: experimental
 config:
   cli_command: omp
@@ -126,6 +134,11 @@ config:
   default_model: ""
   worktree_mode: false
   pass_session_id: false
+  runtime_config:
+    mode: json
+    thinking: ""
+    allow_extensions: false
+    allow_skills: false
 `,
 };
 

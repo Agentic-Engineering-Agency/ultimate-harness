@@ -39,9 +39,10 @@ config:
   default_model: ""
   worktree_mode: true
   pass_session_id: false
-  sandbox_mode: workspace-write
-  approval_policy: never
-  full_auto_compat: false
+  runtime_config:
+    sandbox_mode: workspace-write
+    approval_policy: never
+    full_auto_compat: false
 ${overrides}`,
     "utf-8",
   );
@@ -143,8 +144,9 @@ config:
   cli_command: codex
   worktree_mode: true
   pass_session_id: true
-  sandbox_mode: workspace-write
-  approval_policy: never
+  runtime_config:
+    sandbox_mode: workspace-write
+    approval_policy: never
 `,
       "utf-8",
     );
