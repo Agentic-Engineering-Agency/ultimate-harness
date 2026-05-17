@@ -40,6 +40,8 @@ The core design goal is **portable discipline**: a project should be able to use
 - [.harness artifacts](./architecture/harness-artifacts.md)
 - [Sandboxing](./architecture/sandboxing.md)
 - [Verification and promotion](./architecture/verification-and-promotion.md)
+- `architecture/adapter-codex.md` — Codex CLI adapter design + 2026-05-17 implementation status. Experimental; gated on subscription quota for live end-to-end runs.
+- `architecture/adapter-pi-and-oh-my-pi.md` — near-term planning doc for Pi and oh-my-pi runtime inclusion (Options A/B/C; recommends starting with the `omp` CLI direct-invocation pattern).
 
 ### Workflows
 
