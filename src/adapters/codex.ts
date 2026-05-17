@@ -322,7 +322,7 @@ export const defaultCodexRunner: CodexRunner = (input) => {
   return new Promise((resolve) => {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
     let stdout = "";

@@ -5,5 +5,5 @@ branch: sandbox/codex-smoke-sb
 path: .harness/sandboxes/codex-smoke-sb/worktree
 base_ref: HEAD
 status: created
-created_at: 2026-05-17T22:21:39.086Z
-updated_at: 2026-05-17T22:21:39.086Z
+created_at: 2026-05-17T22:27:47.975Z
+updated_at: 2026-05-17T22:27:47.975Z
