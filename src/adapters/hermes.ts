@@ -21,6 +21,10 @@ import {
   type AdapterCheckResult,
   type AdapterRuntimeChecker,
 } from "../harness/registry.js";
+import {
+  extractRuntimeFinalMessageSentinel,
+  runtimeFinalMessageInstruction,
+} from "../harness/runtime-final-message.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -31,6 +35,7 @@ type MissionArtifactContext = {
   stderrPath: string;
   diffPath: string;
   runtimeResultPath: string;
+  finalMessagePath: string;
 };
 
 export type CheckResult = {
@@ -528,6 +533,17 @@ export async function collectHermesSession(
     await writeArtifactFile(artifacts.missionDir, artifacts.stdoutPath, runnerResult.stdout);
     await writeArtifactFile(artifacts.missionDir, artifacts.stderrPath, stderr);
     await writeArtifactFile(artifacts.missionDir, artifacts.diffPath, diff.patch);
+    // UH-28: extract the runtime-final-message sentinel from Hermes stdout.
+    // Hermes does not produce its own runtime-final.txt; this is the only path
+    // by which the sentinel block becomes a first-class artifact. When the
+    // model omits the sentinel, runtime-final.txt is written as an empty file
+    // for parity with codex/oh-my-pi.
+    const hermesSentinel = extractRuntimeFinalMessageSentinel(runnerResult.stdout);
+    await writeArtifactFile(
+      artifacts.missionDir,
+      artifacts.finalMessagePath,
+      hermesSentinel ?? "",
+    );
 
     const draft: RuntimeResultDocument = {
       schema_version: "uh.runtime-result.v0",
@@ -693,6 +709,7 @@ async function getMissionArtifactContext(root: string, missionPath: string): Pro
     stderrPath: path.join(missionDir, "runtime.stderr.log"),
     diffPath: path.join(missionDir, "diff.patch"),
     runtimeResultPath: path.join(missionDir, "runtime-result.yaml"),
+    finalMessagePath: path.join(missionDir, "runtime-final.txt"),
   };
 
   for (const artifactPath of [
@@ -703,6 +720,7 @@ async function getMissionArtifactContext(root: string, missionPath: string): Pro
     context.stderrPath,
     context.diffPath,
     context.runtimeResultPath,
+    context.finalMessagePath,
   ]) {
     assertPathInsideMissionDir(missionDir, artifactPath);
   }
@@ -828,7 +846,8 @@ function buildMissionPrompt(
     prompt += "\n";
   }
 
-  prompt += "Execute this mission and produce the expected artifacts.";
+  prompt += "Execute this mission and produce the expected artifacts.\n";
+  prompt += runtimeFinalMessageInstruction();
 
   return prompt;
 }

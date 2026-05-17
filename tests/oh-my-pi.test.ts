@@ -195,6 +195,28 @@ runtime_config_overrides:
 
     await expect(planOhMyPiRun(TEST_ROOT, missionPath)).rejects.toThrow(/runtime_config_overrides validation failed.*modell/s);
   });
+
+  test("prefers UH-28 sentinel block over heuristic finalMessage", async () => {
+    const { missionDir, missionPath } = await writeHarnessMission("sentinel-omp");
+    const stdout = [
+      '{"type":"message","role":"assistant","content":"first reasoning chunk"}',
+      '{"type":"message","role":"assistant","content":"```uh-runtime-final-message\\nBounded oh-my-pi summary.\\n```"}',
+      '',
+    ].join("\n");
+    const runner: OhMyPiRunner = async () => ({
+      stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+    });
+    const collectDiff: DiffCollector = async () => ({ patch: "" });
+
+    const result = await runOhMyPi(TEST_ROOT, missionPath, { runner, collectDiff });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.result?.status).toBe("passed");
+    expect(await readFile(join(missionDir, "runtime-final.txt"), "utf-8")).toBe("Bounded oh-my-pi summary.");
+  });
 });
 
 describe("oh-my-pi output parsing", () => {

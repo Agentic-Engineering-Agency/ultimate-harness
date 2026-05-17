@@ -21,6 +21,10 @@ import {
   type AdapterCheckResult,
   type AdapterRuntimeChecker,
 } from "../harness/registry.js";
+import {
+  extractRuntimeFinalMessageSentinel,
+  runtimeFinalMessageInstruction,
+} from "../harness/runtime-final-message.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -510,7 +514,14 @@ export async function collectCodexSession(
   let finalMessage = "";
   let finalMessageMissing = false;
   try {
-    finalMessage = await readFile(getFinalMessagePath(plan.args), "utf-8");
+    const rawFinalMessage = await readFile(getFinalMessagePath(plan.args), "utf-8");
+    // Prefer the UH-28 runtime-final-message sentinel when present; this lets
+    // missions explicitly bound the summary independent of Codex's raw
+    // last-message capture. Fall back to the raw content for backward compat
+    // with missions written before UH-28 (and with models that ignore the
+    // sentinel instruction).
+    const sentinel = extractRuntimeFinalMessageSentinel(rawFinalMessage);
+    finalMessage = sentinel ?? rawFinalMessage;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       finalMessageMissing = true;
@@ -544,7 +555,7 @@ export async function collectCodexSession(
     await writeArtifactFile(artifacts.missionDir, artifacts.stdoutPath, runnerResult.stdout);
     await writeArtifactFile(artifacts.missionDir, artifacts.stderrPath, stderr);
     await writeArtifactFile(artifacts.missionDir, artifacts.diffPath, diff.patch);
-    await persistFinalMessage(artifacts, getFinalMessagePath(plan.args), finalMessage, finalMessageMissing);
+    await persistFinalMessage(artifacts, finalMessage, finalMessageMissing);
     for (const event of parsedStream.events) {
       if (typeof event.type === "string") {
         await appendMissionEvent(artifacts, {
@@ -639,23 +650,19 @@ function getFinalMessagePath(args: string[]): string {
 
 async function persistFinalMessage(
   artifacts: MissionArtifactContext,
-  sourcePath: string,
   finalMessage: string,
   missing: boolean,
 ): Promise<void> {
-  if (missing) {
-    await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, "");
-    return;
-  }
-  if (path.resolve(sourcePath) === path.resolve(artifacts.finalMessagePath)) {
-    await assertWritableArtifact(artifacts.missionDir, artifacts.finalMessagePath);
-    return;
-  }
+  // UH-28: write the in-memory finalMessage (sentinel-extracted or raw,
+  // resolved at the call site) into runtime-final.txt. We deliberately
+  // overwrite whatever Codex put there via --output-last-message — the
+  // sentinel substitution would otherwise be lost when source === dest.
   await assertWritableArtifact(artifacts.missionDir, artifacts.finalMessagePath);
-  await copyFile(sourcePath, artifacts.finalMessagePath);
-  if (finalMessage.length === 0) {
-    await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, "");
-  }
+  await writeArtifactFile(
+    artifacts.missionDir,
+    artifacts.finalMessagePath,
+    missing ? "" : finalMessage,
+  );
 }
 
 async function getMissionArtifactContext(root: string, missionPath: string): Promise<MissionArtifactContext | null> {
@@ -843,8 +850,8 @@ function buildMissionPrompt(
     prompt += "\n";
   }
 
-  prompt += "Execute this mission and produce the expected artifacts.\n\n";
-  prompt += "## Final output\nWhen you finish, write a one-paragraph status summary as the last assistant message. The harness captures it via --output-last-message.";
+  prompt += "Execute this mission and produce the expected artifacts.\n";
+  prompt += runtimeFinalMessageInstruction();
 
   return prompt;
 }
