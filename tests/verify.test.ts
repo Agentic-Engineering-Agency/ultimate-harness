@@ -46,8 +46,8 @@ async function writeMission(id: string, requiredChecks: Array<{ name: string; co
   return missionDir;
 }
 
-async function readVerification(id: string) {
-  const filePath = join(TEST_ROOT, ".harness", "missions", id, "verification.yaml");
+async function readVerification(id: string, root?: string) {
+  const filePath = join(root ?? TEST_ROOT, ".harness", "missions", id, "verification.yaml");
   const parsed = parse(await readFile(filePath, "utf-8"));
   const validation = await validateFile(filePath);
   expect(validation.valid, validation.errors.join("\n")).toBe(true);
@@ -208,5 +208,67 @@ describe("uh verify", () => {
 
     const status = await getStatus(TEST_ROOT);
     expect(status.verified_missions_count).toBe(1);
+  });
+
+  test("auto-routes into bound sandbox worktree", async () => {
+    await writeMission("sandboxed", [{ name: "cat marker", command: "cat marker.txt" }]);
+
+    // Create a fake sandbox worktree and register it
+    const sandboxPath = join(TEST_ROOT, ".harness", "sandboxes", "sb-1", "worktree");
+    await mkdir(sandboxPath, { recursive: true });
+    await mkdir(join(sandboxPath, ".harness"), { recursive: true });
+    await writeFile(join(sandboxPath, ".harness", "project.yaml"), await readFile(join(TEST_ROOT, ".harness", "project.yaml"), "utf-8"), "utf-8");
+    await mkdir(join(sandboxPath, ".harness", "missions", "sandboxed"), { recursive: true });
+    await writeFile(join(sandboxPath, ".harness", "missions", "sandboxed", "mission.yaml"), await readFile(join(TEST_ROOT, ".harness", "missions", "sandboxed", "mission.yaml"), "utf-8"), "utf-8");
+    await writeFile(join(sandboxPath, "marker.txt"), "found-in-sandbox", "utf-8");
+
+    const indexPath = join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+    await writeFile(indexPath, stringify({
+      schema_version: "uh.sandboxes-index.v0",
+      sandboxes: [{
+        id: "sb-1",
+        mission_id: "sandboxed",
+        backend: "git-worktree",
+        status: "created",
+        path: ".harness/sandboxes/sb-1/worktree",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }],
+    }), "utf-8");
+
+    const result = await verifyMission(TEST_ROOT, "sandboxed");
+    expect(result.status).toBe("passed");
+    expect(result.sandbox).toMatchObject({ id: "sb-1" });
+    const verification = await readVerification("sandboxed", sandboxPath);
+    expect(verification.checks[0].notes).toContain("found-in-sandbox");
+  });
+  test("useSandbox: false forces parent-root execution", async () => {
+    await writeMission("no-sandbox", [{ name: "cat marker", command: "cat marker.txt" }]);
+
+    const sandboxPath = join(TEST_ROOT, ".harness", "sandboxes", "sb-2", "worktree");
+    await mkdir(sandboxPath, { recursive: true });
+    await mkdir(join(sandboxPath, ".harness"), { recursive: true });
+    await writeFile(join(sandboxPath, ".harness", "project.yaml"), await readFile(join(TEST_ROOT, ".harness", "project.yaml"), "utf-8"), "utf-8");
+    await mkdir(join(sandboxPath, ".harness", "missions", "no-sandbox"), { recursive: true });
+    await writeFile(join(sandboxPath, ".harness", "missions", "no-sandbox", "mission.yaml"), await readFile(join(TEST_ROOT, ".harness", "missions", "no-sandbox", "mission.yaml"), "utf-8"), "utf-8");
+    await writeFile(join(sandboxPath, "marker.txt"), "found-in-sandbox", "utf-8");
+
+    const indexPath = join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+    await writeFile(indexPath, stringify({
+      schema_version: "uh.sandboxes-index.v0",
+      sandboxes: [{
+        id: "sb-2",
+        mission_id: "no-sandbox",
+        backend: "git-worktree",
+        status: "created",
+        path: ".harness/sandboxes/sb-2/worktree",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }],
+    }), "utf-8");
+
+    const result = await verifyMission(TEST_ROOT, "no-sandbox", { useSandbox: false });
+    expect(result.status).toBe("failed");
+    expect(result.sandbox).toBeUndefined();
   });
 });

@@ -492,3 +492,28 @@ config:
     expect(await readFile(outside, "utf-8")).toBe("outside");
   });
 });
+
+describe("uh adapter add", () => {
+  test("writes a built-in manifest and refuses duplicates", async () => {
+    const { addAdapter } = await import("../src/harness/adapter-add.js");
+
+    const result = await addAdapter(TEST_ROOT, "codex");
+    expect(result.runtime).toBe("codex");
+    expect(result.created).toBe(true);
+
+    const content = await readFile(result.path, "utf-8");
+    expect(content).toContain("status: experimental");
+
+    // duplicate without force should throw
+    await expect(addAdapter(TEST_ROOT, "codex")).rejects.toThrow("already exists");
+
+    // duplicate with force should succeed
+    const overwrite = await addAdapter(TEST_ROOT, "codex", { force: true });
+    expect(overwrite.created).toBe(true);
+  });
+
+  test("unknown runtime throws with available list", async () => {
+    const { addAdapter } = await import("../src/harness/adapter-add.js");
+    await expect(addAdapter(TEST_ROOT, "nonexistent")).rejects.toThrow("Unknown adapter template");
+  });
+});

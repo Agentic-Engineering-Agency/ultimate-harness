@@ -52,6 +52,8 @@ export type SandboxStatusInfo = SandboxRecord & {
 
 export type DiscardSandboxOptions = {
   force?: boolean;
+  /** When true, leave the git branch in place when removing the worktree. */
+  keepBranch?: boolean;
 };
 
 export type DiscardSandboxResult = {
@@ -200,7 +202,7 @@ export async function discardSandbox(
   }
 
   let branchRemoved = false;
-  if (record.branch) {
+  if (record.branch && !opts.keepBranch) {
     try {
       await runGit(root, ["branch", "-D", record.branch]);
       branchRemoved = true;

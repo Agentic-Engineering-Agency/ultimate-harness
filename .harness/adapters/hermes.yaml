@@ -9,7 +9,7 @@ capabilities:
   - skill-loading
   - toolset-config
   - session-resume
-status: experimental
+status: active
 config:
   cli_command: hermes
   default_toolsets:
