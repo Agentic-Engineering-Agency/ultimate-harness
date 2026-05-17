@@ -140,6 +140,50 @@ export async function loadAdapterConfig(root: string, runtimeId: string): Promis
 }
 
 /**
+ * Minimum Hermes Agent version required by Ultimate Harness.
+ *
+ * Hermes Agent v0.14.0 introduced the `hermes proxy` OAI-compatible local
+ * endpoint (UH-32), the per-turn file-mutation verifier footer, and the
+ * codex app-server runtime with OAuth refresh classification. Older Hermes
+ * builds are missing those capabilities and produce subtly different
+ * runtime artifacts; gate explicitly rather than silently accept.
+ */
+export const MINIMUM_HERMES_VERSION = { major: 0, minor: 14, patch: 0 } as const;
+
+export type HermesSemver = { major: number; minor: number; patch: number };
+
+/**
+ * Pull the first M.N.P (or M.N.P-pre / M.N.P+build) number out of a `hermes
+ * --version` output. Returns null when no semver-like sequence is found.
+ *
+ * Tolerates the variants we have observed in the wild:
+ * - "hermes 0.14.0"
+ * - "Hermes Agent 0.14.0"
+ * - "hermes-agent 0.14.0-beta.1"
+ * - "hermes 0.14.0 (build abc)"
+ */
+export function parseHermesVersion(output: string): HermesSemver | null {
+  const match = output.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return {
+    major: Number.parseInt(match[1], 10),
+    minor: Number.parseInt(match[2], 10),
+    patch: Number.parseInt(match[3], 10),
+  };
+}
+
+/**
+ * Returns true when `version` is at least `MINIMUM_HERMES_VERSION` in semver
+ * order. Pre-release / build suffixes are ignored; we compare the base triple.
+ */
+export function meetsMinimumHermesVersion(version: HermesSemver): boolean {
+  const min = MINIMUM_HERMES_VERSION;
+  if (version.major !== min.major) return version.major > min.major;
+  if (version.minor !== min.minor) return version.minor > min.minor;
+  return version.patch >= min.patch;
+}
+
+/**
  * Hermes runtime availability check.
  *
  * Runs `<cli_command> --version` and `<cli_command> status`; the manifest is
@@ -168,6 +212,18 @@ async function runHermesCliCheck(command: string): Promise<AdapterCheckResult> {
 
   result.found = true;
   result.version = versionOutput;
+
+  const parsed = parseHermesVersion(versionOutput);
+  if (!parsed) {
+    result.errors.push(
+      `hermes --version output not recognized; expected M.N.P somewhere in: ${versionOutput}`,
+    );
+  } else if (!meetsMinimumHermesVersion(parsed)) {
+    const min = MINIMUM_HERMES_VERSION;
+    result.errors.push(
+      `hermes ${min.major}.${min.minor}.${min.patch}+ required (you have ${parsed.major}.${parsed.minor}.${parsed.patch}); upgrade with: pip install --upgrade hermes-agent`,
+    );
+  }
 
   try {
     await execFileP(command, ["status"]);
