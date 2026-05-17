@@ -134,6 +134,14 @@ describe("RuntimeRegistry.load", () => {
     );
   });
 
+  test("rejects unsafe adapter ids before constructing a manifest path", async () => {
+    const registry = new RuntimeRegistry();
+
+    await expect(registry.load(TEST_ROOT, "../project")).rejects.toThrow(
+      /Unsafe adapter id/,
+    );
+  });
+
   test("throws on malformed YAML", async () => {
     await writeManifest("broken", ":: not yaml :::\n  - [\n");
     const registry = new RuntimeRegistry();

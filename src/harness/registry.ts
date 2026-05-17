@@ -53,6 +53,14 @@ function isManifestFile(name: string): boolean {
 function manifestIdFromFilename(name: string): string {
   return name.replace(/\.ya?ml$/, "");
 }
+const SAFE_ADAPTER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function assertSafeAdapterId(id: string): void {
+  if (!SAFE_ADAPTER_ID.test(id)) {
+    throw new Error(`Unsafe adapter id: ${id}`);
+  }
+}
+
 
 async function readManifestFile(
   adapterPath: string,
@@ -154,6 +162,7 @@ export class RuntimeRegistry {
    * fails schema validation, or declares an id different from the filename.
    */
   async load(root: string, id: string): Promise<AdapterManifestEntry> {
+    assertSafeAdapterId(id);
     const adapterPath = path.join(adaptersDir(root), `${id}.yaml`);
     try {
       await access(adapterPath);
