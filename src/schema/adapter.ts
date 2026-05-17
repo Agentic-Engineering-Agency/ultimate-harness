@@ -18,7 +18,7 @@ export const AdapterSchema = z.object({
   description: z.string().optional().default(""),
   runtime: z.string().min(1),
   capabilities: z.array(z.string()).optional().default([]),
-  status: z.enum(["active", "experimental", "deprecated"]).default("active"),
+  status: z.enum(["planned", "active", "experimental", "deprecated"]).default("active"),
   config: AdapterConfigSchema.optional(),
 });
 
