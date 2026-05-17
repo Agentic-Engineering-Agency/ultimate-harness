@@ -16,6 +16,7 @@ import {
   getSandboxStatus,
   listSandboxes,
 } from "./harness/sandbox.js";
+import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 const VERSION = "0.0.0";
 
@@ -114,14 +115,18 @@ program
   .argument("<mission-id>", "Mission id")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--timeout-ms <ms>", `Verification command timeout in milliseconds (default: ${DEFAULT_VERIFY_COMMAND_TIMEOUT_MS})`)
-  .action(async (missionId: string, opts: { root?: string; timeoutMs?: string }) => {
+  .option("--no-sandbox", "Force checks to run in the harness root instead of auto-routing into the bound sandbox worktree")
+  .action(async (missionId: string, opts: { root?: string; timeoutMs?: string; sandbox: boolean }) => {
     const root = resolveRoot(opts.root);
     try {
       const commandTimeoutMs = opts.timeoutMs === undefined ? undefined : parsePositiveIntegerOption("--timeout-ms", opts.timeoutMs);
-      const result = await verifyMission(root, missionId, { commandTimeoutMs });
+      const result = await verifyMission(root, missionId, { commandTimeoutMs, useSandbox: opts.sandbox });
       const label = result.status === "passed" ? "PASS" : result.status === "failed" ? "FAIL" : "BLOCKED";
       console.log(`[${label}] ${result.mission_id}`);
       console.log(`checks: ${result.checks_passed} passed, ${result.checks_failed} failed, ${result.checks_blocked} blocked`);
+      if (result.sandbox) {
+        console.log(`sandbox: ${result.sandbox.id} (${result.sandbox.path})`);
+      }
       console.log(`artifact: ${result.path}`);
       process.exit(result.status === "passed" ? 0 : 1);
     } catch (err) {
@@ -189,7 +194,7 @@ program
   .option("--suggested-skill <name>", "Suggested skill; repeatable", collectRepeatedOption, [])
   .option("--expected-output <path>", "Expected output file path; repeatable", collectRepeatedOption, [])
   .option("--completion <text>", "Completion criterion; repeatable", collectRepeatedOption, [])
-  .option("--required-check <name[=command]>", "Required verification check; repeatable", collectRequiredCheckOption, [] as ProposeRequiredCheck[])
+  .option("--required-check <name[=command]>", 'Required verification check; repeatable. Quote the entire value when the command contains short flags or spaces, e.g. --required-check "lint=pnpm -r lint"', collectRequiredCheckOption, [] as ProposeRequiredCheck[])
   .option("--review-gate <name>", "Review gate; repeatable", collectRepeatedOption, [])
   .option("--sandbox-backend <name>", "Sandbox backend (default: git-worktree)")
   .option("--promotion-policy <name>", "Promotion policy (default: human-approved)")
@@ -330,6 +335,25 @@ adapterCmd
       }
     }
     if (failures > 0) {
+      process.exit(1);
+    }
+  });
+
+adapterCmd
+  .command("add")
+  .description("Write a built-in adapter manifest template into .harness/adapters/")
+  .argument("<runtime>", `Runtime template id (one of: ${listAdapterTemplates().join(", ")})`)
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--force", "Overwrite an existing manifest at the same path")
+  .action(async (runtime: string, opts: { root?: string; force?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await addAdapter(root, runtime, { force: opts.force ?? false });
+      console.log(`[ADDED] ${result.runtime}`);
+      console.log(`  manifest: ${result.path}`);
+    } catch (err) {
+      console.error(`[FAIL] adapter add error:`);
+      console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }
   });
@@ -528,11 +552,12 @@ sandboxCmd
   .description("Remove a sandbox worktree and registry entry")
   .argument("<id>", "Sandbox id")
   .option("--force", "Discard even if the worktree has uncommitted changes")
+  .option("--keep-branch", "Preserve the git branch after removing the worktree")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (id: string, opts: { force?: boolean; root?: string }) => {
+  .action(async (id: string, opts: { force?: boolean; keepBranch?: boolean; root?: string }) => {
     const root = resolveRoot(opts.root);
     try {
-      const result = await discardSandbox(root, id, { force: opts.force ?? false });
+      const result = await discardSandbox(root, id, { force: opts.force ?? false, keepBranch: opts.keepBranch ?? false });
       console.log(`[DISCARDED] ${result.id}`);
       console.log(`  removed: ${result.worktree_path}`);
       if (result.branch) {
