@@ -4,7 +4,8 @@ import { promisify } from "node:util";
 import { readFile, appendFile, lstat, writeFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
 import path from "node:path";
-import { AdapterDocument } from "../schema/adapter.js";
+import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.js";
+import { z } from "zod";
 import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
@@ -163,6 +164,38 @@ const ohMyPiRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
 runtimeRegistry.register("oh-my-pi", ohMyPiRuntimeChecker);
 
 /**
+ * Strict Zod schema for `config.runtime_config` of the oh-my-pi adapter.
+ *
+ * Registered with the adapter-schema registry so manifests are validated at
+ * load time; unknown keys raise a Zod error.
+ */
+export const OhMyPiRuntimeConfigSchema = z.object({
+  mode: z
+    .enum(["json", "text", "rpc", "rpc-ui"])
+    .optional()
+    .default("json"),
+  thinking: z
+    .union([
+      z.literal(""),
+      z.enum(["minimal", "low", "medium", "high", "xhigh"]),
+    ])
+    .optional()
+    .default(""),
+  allow_extensions: z.boolean().optional().default(false),
+  allow_skills: z.boolean().optional().default(false),
+  model: z.string().optional(),
+}).strict();
+
+export type OhMyPiRuntimeConfig = z.infer<typeof OhMyPiRuntimeConfigSchema>;
+
+registerRuntimeConfigSchema("oh-my-pi", OhMyPiRuntimeConfigSchema);
+
+/** Extract the strongly-typed oh-my-pi `runtime_config` from an adapter manifest. */
+export function getOhMyPiRuntimeConfig(adapter: AdapterDocument): OhMyPiRuntimeConfig {
+  return OhMyPiRuntimeConfigSchema.parse(adapter.config?.runtime_config ?? {});
+}
+
+/**
  * Convenience wrapper that mirrors the CLI's oh-my-pi check.
  *
  * - With `root`: dispatches through the registry so manifest errors and CLI
@@ -220,7 +253,7 @@ export async function dryRunOhMyPi(root: string, missionPath: string): Promise<D
 export async function planOhMyPiRun(root: string, missionPath: string): Promise<OhMyPiRunPlan> {
   const errors: string[] = [];
   const adapter = await loadAdapterConfig(root, "oh-my-pi");
-  const runtimeConfig: Record<string, unknown> = adapter.config?.runtime_config ?? {};
+  const runtimeConfig = getOhMyPiRuntimeConfig(adapter);
 
   let mission: MissionDocument;
   try {
@@ -248,14 +281,14 @@ export async function planOhMyPiRun(root: string, missionPath: string): Promise<
     errors.push("OhMyPi assigns its own thread id; set pass_session_id: false");
   }
 
-  const mode = readOhMyPiModeConfig(runtimeConfig);
+  const mode = runtimeConfig.mode;
   if (mode === "rpc-ui") {
     errors.push("oh-my-pi mode rpc-ui expects a TUI parent; use mode: json, text, or rpc for headless runs");
   }
-  const model = readOptionalNonEmptyStringConfig(runtimeConfig, "model");
-  const thinking = readOptionalThinkingConfig(runtimeConfig);
-  const allowExtensions = readOptionalBooleanConfig(runtimeConfig, "allow_extensions", false);
-  const allowSkills = readOptionalBooleanConfig(runtimeConfig, "allow_skills", false);
+  const model = runtimeConfig.model && runtimeConfig.model.length > 0 ? runtimeConfig.model : undefined;
+  const thinking = runtimeConfig.thinking === "" ? undefined : runtimeConfig.thinking;
+  const allowExtensions = runtimeConfig.allow_extensions;
+  const allowSkills = runtimeConfig.allow_skills;
 
   const prompt = buildMissionPrompt(mission, workflow);
   const args = [
@@ -612,42 +645,6 @@ export function detectOhMyPiQuotaError(stdout: string, stderr: string): string |
     .find((line) => pattern.test(line));
   const detail = firstMatch && firstMatch.length > 0 ? `: ${firstMatch}` : "";
   return `oh-my-pi auth or quota error${detail}`;
-}
-
-function readOhMyPiModeConfig(config: Record<string, unknown>): "json" | "text" | "rpc" | "rpc-ui" {
-  const value = config.mode;
-  if (value === undefined) return "json";
-  if (value === "json" || value === "text" || value === "rpc" || value === "rpc-ui") {
-    return value;
-  }
-  throw new Error("OhMyPi adapter config mode must be one of: json, text, rpc, rpc-ui");
-}
-
-function readOptionalNonEmptyStringConfig(config: Record<string, unknown>, key: string): string | undefined {
-  const value = config[key];
-  if (value === undefined || value === "") return undefined;
-  if (typeof value !== "string") {
-    throw new Error(`OhMyPi adapter config ${key} must be a string`);
-  }
-  return value;
-}
-
-function readOptionalThinkingConfig(config: Record<string, unknown>): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
-  const value = config.thinking;
-  if (value === undefined || value === "") return undefined;
-  if (value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh") {
-    return value;
-  }
-  throw new Error("OhMyPi adapter config thinking must be one of: minimal, low, medium, high, xhigh");
-}
-
-function readOptionalBooleanConfig(config: Record<string, unknown>, key: string, defaultValue: boolean): boolean {
-  const value = config[key];
-  if (value === undefined) return defaultValue;
-  if (typeof value !== "boolean") {
-    throw new Error(`OhMyPi adapter config ${key} must be a boolean`);
-  }
-  return value;
 }
 
 function extractFinalMessage(events: Array<Record<string, unknown>>): string {

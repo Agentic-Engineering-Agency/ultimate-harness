@@ -4,7 +4,8 @@ import { promisify } from "node:util";
 import { readFile, appendFile, lstat, writeFile, copyFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
 import path from "node:path";
-import { AdapterDocument } from "../schema/adapter.js";
+import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.js";
+import { z } from "zod";
 import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
@@ -163,6 +164,34 @@ const codexRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
 runtimeRegistry.register("codex", codexRuntimeChecker);
 
 /**
+ * Strict Zod schema for `config.runtime_config` of the Codex adapter.
+ *
+ * Registered with the adapter-schema registry so manifests are validated
+ * at load time; unknown keys (typos like `sandbox_modd`) raise a Zod error
+ * instead of being silently dropped.
+ */
+export const CodexRuntimeConfigSchema = z.object({
+  sandbox_mode: z
+    .enum(["read-only", "workspace-write", "danger-full-access"])
+    .optional()
+    .default("workspace-write"),
+  approval_policy: z
+    .enum(["never", "on-request", "on-failure", "untrusted"])
+    .optional()
+    .default("never"),
+  full_auto_compat: z.boolean().optional().default(false),
+}).strict();
+
+export type CodexRuntimeConfig = z.infer<typeof CodexRuntimeConfigSchema>;
+
+registerRuntimeConfigSchema("codex", CodexRuntimeConfigSchema);
+
+/** Extract the strongly-typed Codex `runtime_config` from an adapter manifest. */
+export function getCodexRuntimeConfig(adapter: AdapterDocument): CodexRuntimeConfig {
+  return CodexRuntimeConfigSchema.parse(adapter.config?.runtime_config ?? {});
+}
+
+/**
  * Convenience wrapper that mirrors the CLI's codex check.
  *
  * - With `root`: dispatches through the registry so manifest errors and CLI
@@ -220,7 +249,7 @@ export async function dryRunCodex(root: string, missionPath: string): Promise<Dr
 export async function planCodexRun(root: string, missionPath: string): Promise<CodexRunPlan> {
   const errors: string[] = [];
   const adapter = await loadAdapterConfig(root, "codex");
-  const runtimeConfig: Record<string, unknown> = adapter.config?.runtime_config ?? {};
+  const runtimeConfig = getCodexRuntimeConfig(adapter);
 
   let mission: MissionDocument;
   try {
@@ -248,9 +277,9 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
     errors.push("Codex assigns its own thread id; set pass_session_id: false");
   }
 
-  const sandboxMode = readOptionalStringConfig(runtimeConfig, "sandbox_mode", "workspace-write");
-  const approvalPolicy = readOptionalStringConfig(runtimeConfig, "approval_policy", "never");
-  validateOptionalBooleanConfig(runtimeConfig, "full_auto_compat");
+  const sandboxMode = runtimeConfig.sandbox_mode;
+  const approvalPolicy = runtimeConfig.approval_policy;
+  // runtimeConfig.full_auto_compat is validated by schema; not yet consumed (reserved for legacy Codex builds).
   const finalMessagePath = await resolveFinalMessagePath(root, missionPath);
 
   const prompt = buildMissionPrompt(mission, workflow);
@@ -592,23 +621,6 @@ export function detectCodexQuotaError(stdout: string, stderr: string): string | 
     .find((line) => /usage limit|purchase more credits|usage exceeded|not authenticated|auth(orization)? required/i.test(line));
   const detail = firstMatch && firstMatch.length > 0 ? `: ${firstMatch}` : "";
   return `Codex usage quota exhausted${detail}`;
-}
-
-function readOptionalStringConfig(config: Record<string, unknown>, key: string, defaultValue: string): string {
-  const value = config[key];
-  if (value === undefined) return defaultValue;
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`Codex adapter config ${key} must be a non-empty string`);
-  }
-  return value;
-}
-
-function validateOptionalBooleanConfig(config: Record<string, unknown>, key: string): void {
-  const value = config[key];
-  if (value === undefined) return;
-  if (typeof value !== "boolean") {
-    throw new Error(`Codex adapter config ${key} must be a boolean`);
-  }
 }
 
 async function resolveFinalMessagePath(root: string, missionPath: string): Promise<string> {

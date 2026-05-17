@@ -80,6 +80,69 @@ describe("adapter schema", () => {
     expect(adapter.config).toBeDefined();
     expect(adapter.config).not.toHaveProperty("cli_command");
   });
+
+  test("codex runtime_config rejects unknown keys (typo safety)", async () => {
+    await import("../src/adapters/codex.js");
+    expect(() =>
+      validateAdapter({
+        schema_version: "uh.adapter.v0",
+        id: "codex",
+        name: "OpenAI Codex",
+        runtime: "codex",
+        config: {
+          runtime_config: {
+            sandbox_mode: "workspace-write",
+            sandbox_modd: "workspace-write",
+          },
+        },
+      }),
+    ).toThrow(/sandbox_modd/);
+  });
+
+  test("oh-my-pi runtime_config rejects unknown enum value for mode", async () => {
+    await import("../src/adapters/oh-my-pi.js");
+    expect(() =>
+      validateAdapter({
+        schema_version: "uh.adapter.v0",
+        id: "oh-my-pi",
+        name: "oh-my-pi",
+        runtime: "oh-my-pi",
+        config: {
+          runtime_config: {
+            mode: "json-with-tools",
+          },
+        },
+      }),
+    ).toThrow(/mode/);
+  });
+
+  test("hermes runtime_config rejects any unknown key (strict empty schema)", async () => {
+    await import("../src/adapters/hermes.js");
+    expect(() =>
+      validateAdapter({
+        schema_version: "uh.adapter.v0",
+        id: "hermes",
+        name: "Hermes Agent",
+        runtime: "hermes",
+        config: {
+          runtime_config: { reasoning_effort: "high" },
+        },
+      }),
+    ).toThrow(/reasoning_effort/);
+  });
+
+  test("unknown runtime keeps loose runtime_config (no registered schema)", async () => {
+    const adapter = validateAdapter({
+      schema_version: "uh.adapter.v0",
+      id: "future-runtime",
+      name: "Future Runtime",
+      runtime: "future-runtime",
+      config: {
+        runtime_config: { whatever_we_want: "passes" },
+      },
+    });
+    expect(adapter.config?.runtime_config).toEqual({ whatever_we_want: "passes" });
+  });
 });
 
 describe("uh adapter check hermes", () => {
