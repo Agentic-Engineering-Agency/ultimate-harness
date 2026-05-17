@@ -21,7 +21,7 @@ capabilities:
   - mcp
   - hooks
   - worktree-isolation
-status: planned
+status: experimental
 config:
   cli_command: omp
   default_toolsets: []

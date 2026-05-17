@@ -14,7 +14,7 @@ capabilities:
   - session-resume
   - file-tools
   - terminal
-status: planned
+status: experimental
 config:
   cli_command: pi
   default_toolsets: []
