@@ -110,6 +110,39 @@ export const RuntimeSessionSchema = z.object({
   stderr_path: z.string().optional(),
 }).strict();
 
+/**
+ * Final structured outcome of a runtime adapter invocation.
+ *
+ * Boring on purpose: just enough to point a reviewer at the captured
+ * stdout/stderr/diff and tell them whether the run passed, failed, was
+ * blocked (e.g. missing/malformed result block from the model), or was
+ * cancelled. Adapters compile this from runner output and persist it as
+ * `runtime-result.yaml` next to the other mission artifacts.
+ *
+ * Status mapping:
+ *  - `passed`    : runtime exited 0 AND emitted a valid runtime-result block.
+ *  - `failed`    : runtime spawn error, timeout, or non-zero exit.
+ *  - `blocked`   : runtime exited 0 but did not emit a parseable result block.
+ *  - `cancelled` : explicitly cancelled by the harness (reserved).
+ */
+export const RuntimeResultStatusSchema = z.enum(["passed", "failed", "blocked", "cancelled"]);
+
+export const RuntimeResultSchema = z.object({
+  schema_version: z.literal("uh.runtime-result.v0"),
+  mission_id: z.string().min(1),
+  runtime: z.string().min(1),
+  status: RuntimeResultStatusSchema,
+  started_at: z.string().min(1),
+  finished_at: z.string().min(1),
+  exit_code: z.number().int().optional(),
+  prompt_path: z.string().min(1),
+  stdout_path: z.string().min(1),
+  stderr_path: z.string().min(1),
+  diff_path: z.string().min(1).optional(),
+  errors: z.array(z.string()).default([]),
+  notes: z.string().optional(),
+}).strict();
+
 export type SkillsIndexDocument = z.infer<typeof SkillsIndexSchema>;
 export type SkillFrontmatter = z.infer<typeof SkillFrontmatterSchema>;
 export type SandboxesIndexDocument = z.infer<typeof SandboxesIndexSchema>;
@@ -118,6 +151,8 @@ export type VerificationResultDocument = z.infer<typeof VerificationResultSchema
 export type PromotionDocument = z.infer<typeof PromotionSchema>;
 export type RuntimeSessionDocument = z.infer<typeof RuntimeSessionSchema>;
 export type RuntimeSessionStatus = z.infer<typeof RuntimeSessionStatusSchema>;
+export type RuntimeResultStatus = z.infer<typeof RuntimeResultStatusSchema>;
+export type RuntimeResultDocument = z.infer<typeof RuntimeResultSchema>;
 
 export function validateSkillsIndex(data: unknown): SkillsIndexDocument {
   return SkillsIndexSchema.parse(data);
@@ -141,4 +176,8 @@ export function validatePromotion(data: unknown): PromotionDocument {
 
 export function validateRuntimeSession(data: unknown): RuntimeSessionDocument {
   return RuntimeSessionSchema.parse(data);
+}
+
+export function validateRuntimeResult(data: unknown): RuntimeResultDocument {
+  return RuntimeResultSchema.parse(data);
 }
