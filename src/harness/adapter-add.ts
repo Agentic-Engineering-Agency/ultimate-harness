@@ -5,18 +5,23 @@ import { fileExists } from "./mission.js";
 
 /**
  * Built-in adapter manifest templates. These mirror the canonical manifests
- * that live in this repo's own `.harness/adapters/` and are what `uh init`
- * conspicuously refuses to seed. `uh adapter add <runtime>` writes the named
- * template into the target project's `.harness/adapters/<runtime>.yaml`.
+ * that live in this repo's own `.harness/adapters/` directory. `uh adapter
+ * add <runtime>` writes the named template into the target project's
+ * `.harness/adapters/<runtime>.yaml`.
  *
- * Hermes is the only `status: active` template; the rest are `experimental`
- * design stubs matching the v0.1.0 ship state.
+ * Wired adapters (post v0.1.0):
+ * - `hermes`     — active   (reference adapter)
+ * - `codex`      — active   (verified end-to-end against codex-cli 0.130.0)
+ * - `oh-my-pi`   — experimental
+ *
+ * Adapters tracked on the roadmap (not yet templated):
+ * - `hermes-proxy` — see UH-32 / docs/ROADMAP.md
  */
 const ADAPTER_TEMPLATES: Record<string, string> = {
   hermes: `schema_version: uh.adapter.v0
 id: hermes
 name: Hermes Agent
-description: Runtime adapter for Hermes Agent (Nous Research). Executes missions via hermes CLI.
+description: Runtime adapter for Hermes Agent (Nous Research). Executes missions via hermes CLI. Requires hermes >= 0.14.0.
 runtime: hermes
 capabilities:
   - cli-execution
@@ -42,9 +47,10 @@ config:
 id: codex
 name: OpenAI Codex
 description: >-
-  Runtime adapter design for the OpenAI Codex CLI. Executes missions via
+  Runtime adapter for the OpenAI Codex CLI. Executes missions via
   \`codex exec\` inside a git-worktree sandbox with --sandbox workspace-write.
-  See docs/architecture/adapter-codex.md. Design-only; no runtime wiring yet.
+  Verified against codex-cli 0.130.0.
+  See docs/architecture/adapter-codex.md and docs/runbooks/codex-e2e-smoke.md.
 runtime: codex
 capabilities:
   - cli-execution
@@ -69,46 +75,6 @@ config:
     approval_policy: never
     full_auto_compat: false
 `,
-  "claude-code": `schema_version: uh.adapter.v0
-id: claude-code
-name: Claude Code
-description: >-
-  Runtime adapter design for the Anthropic Claude Code CLI. Design-only;
-  no runtime wiring yet.
-runtime: claude-code
-capabilities:
-  - cli-execution
-  - worktree-isolation
-  - skill-loading
-  - mcp-tools
-status: experimental
-config:
-  cli_command: claude
-  default_toolsets: []
-  default_provider: ""
-  default_model: ""
-  worktree_mode: true
-  pass_session_id: false
-`,
-  pi: `schema_version: uh.adapter.v0
-id: pi
-name: Pi
-description: >-
-  Runtime adapter design for Pi (Inflection's terminal coding agent).
-  Design-only; no runtime wiring yet.
-runtime: pi
-capabilities:
-  - cli-execution
-  - worktree-isolation
-status: experimental
-config:
-  cli_command: pi
-  default_toolsets: []
-  default_provider: ""
-  default_model: ""
-  worktree_mode: false
-  pass_session_id: false
-`,
   "oh-my-pi": `schema_version: uh.adapter.v0
 id: oh-my-pi
 name: oh-my-pi
@@ -117,6 +83,8 @@ description: >-
   Executes missions via \`omp --print --mode json\` with sessions ephemeral and
   extensions/skills disabled by default for deterministic runs. Provider /
   account auth flows through OMP's own credential store and env vars.
+  See docs/runbooks/anthropic-via-omp.md for the Anthropic-via-OMP routing
+  path and its ToS posture.
 runtime: oh-my-pi
 capabilities:
   - cli-execution
@@ -167,19 +135,14 @@ export async function addAdapter(
       `Unknown adapter template: ${runtime}. Available: ${listAdapterTemplates().join(", ")}`,
     );
   }
-  const projectRoot = path.resolve(root);
-  const adaptersRoot = adaptersDir(projectRoot);
-  await mkdir(adaptersRoot, { recursive: true });
-  const manifestPath = path.join(adaptersRoot, `${runtime}.yaml`);
-  if (!options.force && (await fileExists(manifestPath))) {
+  const dir = adaptersDir(root);
+  await mkdir(dir, { recursive: true });
+  const target = path.join(dir, `${runtime}.yaml`);
+  if (!options.force && (await fileExists(target))) {
     throw new Error(
-      `Adapter manifest already exists: ${manifestPath}. Re-run with --force to overwrite.`,
+      `Adapter manifest already exists at ${target}. Pass --force to overwrite.`,
     );
   }
-  await writeFile(manifestPath, template, "utf-8");
-  return {
-    runtime,
-    path: manifestPath,
-    created: true,
-  };
+  await writeFile(target, template, "utf-8");
+  return { runtime, path: target, created: true };
 }

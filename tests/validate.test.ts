@@ -378,7 +378,7 @@ context:
   repo_root: /Users/eduardojaviergarcialopez/AgenticEngineering/ultimate-harness
   read_first:
     - README.md
-    - docs/handoffs/2026-05-13-documentation-bmad-handoff.md
+    - docs/architecture/overview.md
   source_links:
     - https://github.com/bmad-code-org/BMAD-METHOD
 constraints:

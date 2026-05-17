@@ -11,9 +11,9 @@ import { z } from "zod";
  *     manifest's `config.runtime_config` against it. Strict means typos like
  *     `sandbox_modd` raise a Zod error instead of being silently dropped.
  *
- * Runtimes without a registered schema (design-only stubs such as
- * `claude-code` and `pi`) keep the loose record shape so their manifests
- * still validate while no adapter module exists.
+ * Runtimes without a registered schema keep the loose record shape so their
+ * manifests still validate. New adapters are expected to register a strict
+ * schema via `registerRuntimeConfigSchema()` at module import time.
  */
 
 export const BaseAdapterConfigSchema = z.object({
