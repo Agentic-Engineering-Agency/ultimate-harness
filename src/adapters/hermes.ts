@@ -21,6 +21,7 @@ import {
   type AdapterCheckResult,
   type AdapterRuntimeChecker,
 } from "../harness/registry.js";
+import { captureDiffWithUntracked } from "../harness/diff-capture.js";
 import {
   extractRuntimeFinalMessageSentinel,
   runtimeFinalMessageInstruction,
@@ -415,21 +416,12 @@ export const defaultHermesRunner: HermesRunner = (input) => {
 };
 
 /**
- * Default diff collector. Runs `git diff --no-color` against the working
- * tree from `cwd`. When git is unavailable or `cwd` is not a git checkout,
- * returns an empty patch and records the failure in `errors[]` so the
- * runtime-result still has a diff_path but the cause is visible.
+ * Default diff collector. Delegates to `captureDiffWithUntracked`
+ * (UH-34) which captures both modified-tracked files AND new untracked
+ * files in a single `git diff` output.
  */
 export const defaultDiffCollector: DiffCollector = async (cwd) => {
-  try {
-    const { stdout } = await execFileP("git", ["diff", "--no-color"], {
-      cwd,
-      maxBuffer: 50 * 1024 * 1024,
-    });
-    return { patch: stdout };
-  } catch (err) {
-    return { patch: "", errors: [`Diff capture failed: ${(err as Error).message}`] };
-  }
+  return captureDiffWithUntracked(cwd);
 };
 
 /**
