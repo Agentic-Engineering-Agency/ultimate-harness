@@ -112,8 +112,6 @@ describe("uh mission dry-run --runtime codex", () => {
       TEST_ROOT,
       "--sandbox",
       "workspace-write",
-      "--ask-for-approval",
-      "never",
       "--json",
       "--output-last-message",
       join(missionDir, "runtime-final.txt"),

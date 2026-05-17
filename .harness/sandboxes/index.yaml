@@ -1,2 +1,9 @@
 schema_version: uh.sandboxes-index.v0
-sandboxes: []
+sandboxes:
+  - id: codex-smoke-sb
+    mission_id: codex-e2e-smoke
+    backend: git-worktree
+    path: .harness/sandboxes/codex-smoke-sb/worktree
+    status: created
+    created_at: 2026-05-17T22:21:39.086Z
+    updated_at: 2026-05-17T22:21:39.086Z
