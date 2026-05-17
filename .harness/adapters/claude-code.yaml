@@ -18,7 +18,7 @@ capabilities:
   - worktree-isolation
   - diff-output
   - json-output
-status: planned
+status: experimental
 config:
   cli_command: claude
   default_toolsets:
