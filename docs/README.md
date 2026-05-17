@@ -4,6 +4,8 @@ Ultimate Harness is a runtime-agnostic development harness for planning, launchi
 
 The core design goal is **portable discipline**: a project should be able to use Codex, Claude Code, Pi/oh-my-pi, Hermes, or a future runtime without losing its specifications, skills, workflow state, audit trail, sandbox boundaries, or human approval checkpoints.
 
+
+For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP.md](./ROADMAP.md).
 ## Start here
 
 1. [Glossary](./glossary.md) — shared terms used across the project.
