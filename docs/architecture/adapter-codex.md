@@ -266,3 +266,15 @@ The mission prompt is the trailing positional argument.
 - **No subagent fan-out.** Codex runs as a single thread. Missions that
   expect parallel subagent execution must route to an adapter that
   advertises `subagents`.
+
+## Implementation status (2026-05-17)
+
+- The adapter is now wired as `experimental` in `src/adapters/codex.ts` (CLI transport via `codex exec`, JSONL parsing, final-message capture, diff capture, runtime-result emission). End-to-end against the real Codex backend is gated on subscription quota and is NOT yet verified.
+- Local CLI probed: `codex-cli 0.130.0`. Supports `--cd`, `--sandbox`, `--ask-for-approval`, `--json`, `--output-last-message`, `--skip-git-repo-check`.
+- Quota / auth failures are classified as `runtime-result.status: blocked` with an explicit remediation message; they are NOT failures of the mission.
+
+## Why no direct ChatGPT backend OAuth client
+
+- Both `NousResearch/hermes-agent` and `can1357/oh-my-pi` treat the Codex backend (`https://chatgpt.com/backend-api`) as a specialized OAuth-backed surface (`OpenAI-Beta: responses=experimental`, `chatgpt-account-id` from a JWT claim, `originator` header). Implementing that wire protocol inside Ultimate Harness would duplicate fragile semi-private behavior and require credential/refresh storage decisions.
+- The official `codex exec` CLI already owns OAuth, account state, session ids, and rate-limit handling, and exposes the exact non-interactive primitives we need. Using it as the transport is the smallest correct slice.
+- Reuse of broker/gateway patterns (oh-my-pi `auth-broker`/`auth-gateway`) is parked as a future option — see `architecture/adapter-pi-and-oh-my-pi.md`.

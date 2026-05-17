@@ -23,6 +23,8 @@ Ultimate Harness `v0.1.0` ships an end-to-end working CLI and schema-backed arti
 
 The design remains runtime-agnostic. Hermes is the first runtime adapter implemented; additional coding-agent runtimes can target the same mission, runtime-session, verification, and promotion contracts.
 
+Codex is wired as an experimental adapter that drives the `codex exec` CLI inside a `workspace-write` sandbox with `--ask-for-approval never` and consumes the JSONL event stream. End-to-end runs against the real Codex backend require an unexhausted ChatGPT subscription quota; in the meantime the adapter classifies quota/auth failures as a `blocked` runtime-result with a clear remediation message. See `docs/architecture/adapter-codex.md`.
+
 Start with the documentation spine for product and architecture context:
 
 - [Documentation home](./docs/README.md)
