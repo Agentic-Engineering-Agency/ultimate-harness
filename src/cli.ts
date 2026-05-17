@@ -9,6 +9,7 @@ import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
+import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import {
   createSandbox,
@@ -418,6 +419,22 @@ missionCmd
       console.log("=== Rendered mission prompt ===");
       console.log(result.prompt);
       console.log("=== End mission prompt ===");
+    } else if (runtime === "codex") {
+      const result = await dryRunCodex(root, filePath);
+      if (result.errors.length > 0) {
+        console.log("[FAIL] dry-run errors:");
+        for (const e of result.errors) {
+          console.log(`  error: ${e}`);
+        }
+        process.exit(1);
+      }
+      console.log(`Command: ${result.command} ${result.args.join(" ")}`);
+      console.log(`Worktree mode: ${result.worktree}`);
+      console.log(`Session ID passthrough: ${result.session_id_passthrough}`);
+      console.log("");
+      console.log("=== Rendered mission prompt ===");
+      console.log(result.prompt);
+      console.log("=== End mission prompt ===");
     } else {
       console.error(`Unknown runtime: ${runtime}`);
       process.exit(1);
@@ -452,6 +469,35 @@ missionCmd
       }
       if (result.stderr) {
         console.error(result.stderr);
+      }
+      if (result.exitCode !== 0) {
+        console.log(`[FAIL] mission exited with code ${result.exitCode}`);
+        process.exit(result.exitCode);
+      }
+    } else if (runtime === "codex") {
+      console.log(`Running mission: ${filePath}`);
+      console.log(`Runtime: ${runtime}`);
+      console.log("");
+      let result: Awaited<ReturnType<typeof runCodex>>;
+      try {
+        result = await runCodex(root, filePath);
+      } catch (err) {
+        console.log("[FAIL] mission run error:");
+        console.log(`  error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+      if (result.stdout) {
+        console.log(result.stdout);
+      }
+      if (result.stderr) {
+        console.error(result.stderr);
+      }
+      if (result.result?.status === "blocked") {
+        console.log(`[BLOCKED] mission classified as blocked`);
+        for (const e of result.result.errors) {
+          console.log(`  error: ${e}`);
+        }
+        process.exit(1);
       }
       if (result.exitCode !== 0) {
         console.log(`[FAIL] mission exited with code ${result.exitCode}`);

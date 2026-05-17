@@ -64,6 +64,9 @@ config:
   default_model: ""
   worktree_mode: true
   pass_session_id: false
+  sandbox_mode: workspace-write
+  approval_policy: never
+  full_auto_compat: false
 `,
   "claude-code": `schema_version: uh.adapter.v0
 id: claude-code
