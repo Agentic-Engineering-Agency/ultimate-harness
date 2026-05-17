@@ -1,14 +1,19 @@
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { readFile, appendFile, access, lstat, writeFile } from "node:fs/promises";
+import { readFile, appendFile, lstat, writeFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
 import path from "node:path";
-import { validateAdapter, AdapterDocument, AdapterConfigSchema } from "../schema/adapter.js";
+import { AdapterDocument, AdapterConfigSchema } from "../schema/adapter.js";
 import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
-import { adaptersDir, auditLog, workflowsDir } from "../harness/paths.js";
+import { auditLog, workflowsDir } from "../harness/paths.js";
 import { RuntimeSessionDocument } from "../schema/artifacts.js";
+import {
+  runtimeRegistry,
+  type AdapterCheckResult,
+  type AdapterRuntimeChecker,
+} from "../harness/registry.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -44,20 +49,20 @@ type HermesRunPlan = {
 };
 
 export async function loadAdapterConfig(root: string, runtimeId: string): Promise<AdapterDocument> {
-  const path = await import("node:path");
-  const adapterPath = path.join(adaptersDir(root), `${runtimeId}.yaml`);
-  try {
-    await access(adapterPath);
-  } catch {
-    throw new Error(`Adapter manifest not found: ${adapterPath}`);
-  }
-  const content = await readFile(adapterPath, "utf-8");
-  const parsed = parse(content);
-  return validateAdapter(parsed);
+  const entry = await runtimeRegistry.load(root, runtimeId);
+  return entry.document;
 }
 
-export async function checkHermes(root?: string): Promise<CheckResult> {
-  const result: CheckResult = {
+/**
+ * Hermes runtime availability check.
+ *
+ * Runs `<cli_command> --version` and `<cli_command> status`; the manifest is
+ * trusted because it has already been loaded and validated by the registry.
+ * Hard failures from missing manifests never reach here — they are surfaced
+ * by `RuntimeRegistry.load`/`check` upstream.
+ */
+async function runHermesCliCheck(command: string): Promise<AdapterCheckResult> {
+  const result: AdapterCheckResult = {
     runtime: "hermes",
     found: false,
     version: "",
@@ -68,24 +73,13 @@ export async function checkHermes(root?: string): Promise<CheckResult> {
   const { execFile } = await import("node:child_process");
   const execFileP = promisify(execFile);
 
-  let command = "hermes";
-  if (root) {
-    try {
-      const adapter = await loadAdapterConfig(root, "hermes");
-      command = adapter.config?.cli_command || command;
-    } catch (e) {
-      result.errors.push((e as Error).message);
-      return result;
-    }
-  }
-
   let versionOutput: string;
   try {
     const { stdout } = await execFileP(command, ["--version"]);
     versionOutput = stdout.trim();
   } catch {
     result.errors.push(
-      "hermes CLI not found in PATH. Install: curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
+      "hermes CLI not found in PATH. Install: curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
     );
     return result;
   }
@@ -100,6 +94,28 @@ export async function checkHermes(root?: string): Promise<CheckResult> {
   }
 
   return result;
+}
+
+const hermesRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
+  const command = manifest.config?.cli_command || "hermes";
+  return runHermesCliCheck(command);
+};
+
+runtimeRegistry.register("hermes", hermesRuntimeChecker);
+
+/**
+ * Convenience wrapper that mirrors the CLI's hermes check.
+ *
+ * - With `root`: dispatches through the registry so manifest errors and CLI
+ *   errors share the same structured shape.
+ * - Without `root`: probes the hermes CLI directly (used in environments
+ *   without an initialized `.harness/`).
+ */
+export async function checkHermes(root?: string): Promise<CheckResult> {
+  if (root) {
+    return runtimeRegistry.check(root, "hermes");
+  }
+  return runHermesCliCheck("hermes");
 }
 
 export async function dryRunHermes(root: string, missionPath: string): Promise<DryRunResult> {

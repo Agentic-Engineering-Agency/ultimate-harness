@@ -9,6 +9,7 @@ import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
+import { runtimeRegistry } from "./harness/registry.js";
 const VERSION = "0.0.0";
 
 const program = new Command();
@@ -257,27 +258,71 @@ const adapterCmd = program
   .description("Manage runtime adapters");
 
 adapterCmd
+  .command("list")
+  .description("List configured adapter manifests")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const entries = await runtimeRegistry.list(root);
+      if (entries.length === 0) {
+        console.log("No adapter manifests configured.");
+        return;
+      }
+      for (const entry of entries) {
+        const doc = entry.document;
+        const checker = runtimeRegistry.hasChecker(doc.runtime) ? "yes" : "no";
+        console.log(`- ${doc.id} (runtime=${doc.runtime}, status=${doc.status}, checker=${checker})`);
+        console.log(`    manifest: ${entry.path}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] adapter list error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+adapterCmd
   .command("check")
   .description("Check if a runtime adapter is available and configured")
-  .argument("[runtime]", "Runtime to check (e.g. hermes)")
+  .argument("[runtime]", "Runtime id to check; defaults to every configured adapter")
   .option("--root <path>", "Root directory (default: cwd)")
   .action(async (runtime: string | undefined, opts: { root?: string }) => {
     const root = resolveRoot(opts.root);
-    if (!runtime || runtime === "hermes") {
-      const result = await checkHermes(root);
-      if (result.errors.length === 0 && result.found) {
-        console.log(`[PASS] hermes adapter`);
+    let ids: string[];
+    if (runtime) {
+      ids = [runtime];
+    } else {
+      try {
+        ids = (await runtimeRegistry.list(root)).map((entry) => entry.id);
+      } catch (err) {
+        console.error(`[FAIL] adapter check error:`);
+        console.error(`  error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    }
+    if (ids.length === 0) {
+      console.log("No adapter manifests to check.");
+      return;
+    }
+    let failures = 0;
+    for (const id of ids) {
+      const result = await runtimeRegistry.check(root, id);
+      if (result.found && result.errors.length === 0) {
+        console.log(`[PASS] ${id} adapter`);
         console.log(`  runtime: ${result.runtime}`);
-        console.log(`  version: ${result.version}`);
+        if (result.version) {
+          console.log(`  version: ${result.version}`);
+        }
       } else {
-        console.log(`[FAIL] hermes adapter`);
+        failures++;
+        console.log(`[FAIL] ${id} adapter`);
         for (const e of result.errors) {
           console.log(`  error: ${e}`);
         }
-        process.exit(1);
       }
-    } else {
-      console.error(`Unknown runtime: ${runtime}`);
+    }
+    if (failures > 0) {
       process.exit(1);
     }
   });
