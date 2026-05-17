@@ -10,6 +10,12 @@ import { validateFile, validateRootProject, validateAllWorkflows, validateAllMis
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
 import { runtimeRegistry } from "./harness/registry.js";
+import {
+  createSandbox,
+  discardSandbox,
+  getSandboxStatus,
+  listSandboxes,
+} from "./harness/sandbox.js";
 const VERSION = "0.0.0";
 
 const program = new Command();
@@ -428,6 +434,112 @@ missionCmd
       }
     } else {
       console.error(`Unknown runtime: ${runtime}`);
+      process.exit(1);
+    }
+  });
+
+// uh sandbox
+const sandboxCmd = program
+  .command("sandbox")
+  .description("Manage git worktree sandboxes");
+
+sandboxCmd
+  .command("create")
+  .description("Create a new git worktree sandbox bound to a mission")
+  .argument("<id>", "Sandbox id")
+  .requiredOption("--mission <id>", "Mission id this sandbox belongs to")
+  .option("--base <ref>", "Base git ref to branch from (default: HEAD)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { mission: string; base?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const record = await createSandbox(root, {
+        id,
+        missionId: opts.mission,
+        baseRef: opts.base,
+      });
+      console.log(`[CREATED] ${record.id}`);
+      console.log(`  mission: ${record.mission_id}`);
+      console.log(`  branch: ${record.branch}`);
+      console.log(`  base: ${record.base_ref}`);
+      console.log(`  path: ${record.path}`);
+    } catch (err) {
+      console.error(`[FAIL] sandbox create error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("list")
+  .description("List registered sandboxes")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const entries = await listSandboxes(root);
+      if (entries.length === 0) {
+        console.log("No sandboxes registered.");
+        return;
+      }
+      for (const entry of entries) {
+        console.log(`- ${entry.id} (mission=${entry.mission_id}, status=${entry.status}, backend=${entry.backend})`);
+        if (entry.path) {
+          console.log(`    path: ${entry.path}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox list error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("status")
+  .description("Show a sandbox's metadata and working tree status")
+  .argument("<id>", "Sandbox id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const info = await getSandboxStatus(root, id);
+      console.log(`- ${info.id}`);
+      console.log(`  mission: ${info.mission_id}`);
+      console.log(`  status: ${info.status}`);
+      console.log(`  branch: ${info.branch}`);
+      console.log(`  base: ${info.base_ref}`);
+      console.log(`  path: ${info.path}`);
+      console.log(`  dirty: ${info.dirty ? "yes" : "no"}`);
+      console.log(`  changes: ${info.changes.length}`);
+      for (const change of info.changes) {
+        console.log(`    ${change}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox status error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("discard")
+  .description("Remove a sandbox worktree and registry entry")
+  .argument("<id>", "Sandbox id")
+  .option("--force", "Discard even if the worktree has uncommitted changes")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { force?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await discardSandbox(root, id, { force: opts.force ?? false });
+      console.log(`[DISCARDED] ${result.id}`);
+      console.log(`  removed: ${result.worktree_path}`);
+      if (result.branch) {
+        console.log(`  branch: ${result.branch} (${result.branch_removed ? "deleted" : "kept"})`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox discard error:`);
+      console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }
   });
