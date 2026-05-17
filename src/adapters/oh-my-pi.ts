@@ -253,7 +253,6 @@ export async function dryRunOhMyPi(root: string, missionPath: string): Promise<D
 export async function planOhMyPiRun(root: string, missionPath: string): Promise<OhMyPiRunPlan> {
   const errors: string[] = [];
   const adapter = await loadAdapterConfig(root, "oh-my-pi");
-  const runtimeConfig = getOhMyPiRuntimeConfig(adapter);
 
   let mission: MissionDocument;
   try {
@@ -262,6 +261,19 @@ export async function planOhMyPiRun(root: string, missionPath: string): Promise<
     mission = validateMission(parsed);
   } catch (e) {
     throw new Error(`Mission load error: ${(e as Error).message}`);
+  }
+
+  // Merge mission-level overrides on top of adapter defaults, then strict-parse.
+  // The strict schema catches typos in either source (adapter manifest or mission override).
+  const mergedRuntimeConfig = {
+    ...(adapter.config?.runtime_config ?? {}),
+    ...mission.runtime_config_overrides,
+  };
+  let runtimeConfig;
+  try {
+    runtimeConfig = OhMyPiRuntimeConfigSchema.parse(mergedRuntimeConfig);
+  } catch (e) {
+    throw new Error(`Mission runtime_config_overrides validation failed: ${(e as Error).message}`);
   }
 
   let workflow: WorkflowDocument | undefined;
