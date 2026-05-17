@@ -153,7 +153,7 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   };
 }
 
-async function findBoundSandbox(
+export async function findBoundSandbox(
   projectRoot: string,
   missionId: string,
 ): Promise<{ id: string; path: string } | null> {
