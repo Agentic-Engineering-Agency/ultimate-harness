@@ -1,8 +1,8 @@
 # Ultimate Harness
 
-Ultimate Harness is an early-stage **runtime-agnostic software-development harness** for agentic engineering work.
+Ultimate Harness is a **runtime-agnostic software-development harness** for agentic engineering work.
 
-It sits above coding agents and agent runtimes. Instead of becoming “one more coding agent,” it standardizes the durable artifacts and lifecycle around agentic work:
+It sits above coding agents and agent runtimes. Instead of becoming "one more coding agent", it standardizes the durable artifacts and lifecycle around agentic work:
 
 ```text
 request / issue / spec
@@ -19,198 +19,145 @@ The goal is to combine proven patterns from specification-driven development, ag
 
 ## Current status
 
-Ultimate Harness `v0.1.0` ships an end-to-end working CLI and schema-backed artifact lifecycle. It can initialize a harness project, propose and create mission packets, validate configured artifacts, list/check adapter manifests through the runtime registry, manage git-worktree sandboxes, register and check skills, render/run missions through the Hermes adapter, write runtime and verification artifacts, and record promotion decisions. See the [v0.1.0 release notes](https://github.com/Agentic-Engineering-Agency/ultimate-harness/releases/tag/v0.1.0).
+UH ships an end-to-end CLI with a schema-backed artifact lifecycle and three wired adapters. See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for in-flight epics and the [v0.1.0 release notes](https://github.com/Agentic-Engineering-Agency/ultimate-harness/releases/tag/v0.1.0) for the initial cut.
 
-The design remains runtime-agnostic. Hermes is the first runtime adapter implemented; additional coding-agent runtimes can target the same mission, runtime-session, verification, and promotion contracts.
+| Adapter | Status | Notes |
+|---|---|---|
+| `hermes` | active | Reference adapter. Pinned to Hermes Agent ≥ 0.14.0. |
+| `codex` | active | Drives `codex exec --sandbox workspace-write --json --output-last-message` against `codex-cli ≥ 0.130.0`. Verified end-to-end against the live ChatGPT backend. |
+| `oh-my-pi` | experimental | Drives `omp --print --mode json`. Missions can route to any OMP-supported model (including Anthropic-tier via OMP's stealth surface) by setting `runtime_config_overrides.model:`. **Read [`docs/runbooks/anthropic-via-omp.md`](./docs/runbooks/anthropic-via-omp.md) before routing Claude through OMP** — the ToS posture is documented there. |
 
-Codex is wired as an experimental adapter that drives the `codex exec` CLI inside a `workspace-write` sandbox with `--ask-for-approval never` and consumes the JSONL event stream. End-to-end runs against the real Codex backend require an unexhausted ChatGPT subscription quota; in the meantime the adapter classifies quota/auth failures as a `blocked` runtime-result with a clear remediation message. See `docs/architecture/adapter-codex.md`.
+Cross-cutting protocols every adapter participates in:
 
-Oh-my-pi is wired as an experimental adapter that drives `omp --print --mode json`. Missions can select an Anthropic-tier (or any other OMP-supported) model with `runtime_config_overrides.model:` — no per-route adapter manifest needed. **Be aware of the ToS posture** before using Anthropic via OMP: see `docs/runbooks/anthropic-via-omp.md` for the stealth surface and risks.
+- **UH-28 runtime-final-message capture** — every adapter prompts the model to emit a fenced `uh-runtime-final-message` block; the harness extracts it into `runtime-final.txt` for cross-runtime parity. See the protocol section of [`docs/architecture/runtime-adapter-contract.md`](./docs/architecture/runtime-adapter-contract.md).
+- **UH-26 per-runtime strict `runtime_config` validation** — typos in adapter manifests fail at load time.
+- **UH-27 / UH-33 mission `runtime_config_overrides`** — missions override adapter defaults per-run with the same typo safety.
+- **UH-34 untracked-file diff capture** — `diff.patch` includes brand-new files, not just modified-tracked ones.
 
-Start with the documentation spine for product and architecture context:
+## Documentation
 
-- [Documentation home](./docs/README.md)
+Start with the [documentation home](./docs/README.md) and the [roadmap](./docs/ROADMAP.md). Direct links:
+
 - [Glossary](./docs/glossary.md)
 - [Product requirements](./docs/product/prd.md)
 - [MVP scope](./docs/product/mvp-scope.md)
 - [Architecture overview](./docs/architecture/overview.md)
-- [Runtime adapter contract](./docs/architecture/runtime-adapter-contract.md)
+- [Runtime adapter contract](./docs/architecture/runtime-adapter-contract.md) — includes the UH-28 sentinel protocol
 - [Mission packet schema](./docs/architecture/mission-packet-schema.md)
 - [Verification and promotion lifecycle](./docs/architecture/verification-and-promotion.md)
-- [BMAD-style agent map](./docs/workflows/bmad-agent-map.md)
+
+Runbooks:
+
+- [Codex E2E smoke](./docs/runbooks/codex-e2e-smoke.md)
+- [Anthropic via oh-my-pi](./docs/runbooks/anthropic-via-omp.md)
 
 ## Quick start
-
-Install dependencies and build the CLI:
 
 ```sh
 bun install
 bun run build
 ```
 
-Run the CLI during development:
-
 ```sh
-bun run dev -- --help
-# or
-npx tsx src/cli.ts --help
-```
-
-Run the built CLI directly:
-
-```sh
-node dist/cli.js --help
-node dist/cli.js init
-node dist/cli.js status
-```
-
-Use the package bin locally after building:
-
-```sh
-npm link
-uh --help
-uh init
-uh status
-```
-
-`package.json` exposes the `uh` binary as `./dist/cli.js`, so build before using the linked command. This package is currently private and intended for local development rather than publishing.
-
-## CLI usage
-
-Common commands:
-
-```sh
-uh init [--root <path>]
-uh status [--root <path>]
-uh validate <file>
-uh validate --all-workflows [--root <path>]
-uh validate --all-missions [--root <path>]
-uh adapter list [--root <path>]
-uh adapter check [runtime] [--root <path>]
-uh mission create <id> --title <title> --workflow <profile> --objective <text> [--root <path>] [--force]
-uh propose <id> --title <title> --workflow <profile> --objective <text> [--priority <p>] [--issue <provider:id[:url]>...] [--read-first <path>...] [--expected-output <path>...] [--required-check <name[=command]>...] [--review-gate <name>...] [--constraint <text>...] [--source-link <url>...] [--required-skill <name>...] [--suggested-skill <name>...] [--completion <text>...] [--repo-root <path>] [--sandbox-backend <name>] [--promotion-policy <name>] [--output <path>] [--root <path>] [--force]
-uh mission dry-run [file] --runtime hermes [--root <path>]
-uh mission run [file] --runtime hermes [--root <path>]
-uh verify <mission-id> [--root <path>] [--timeout-ms <ms>]
-uh promote <mission-id> --approved-by <name> [--decision promoted|rejected|deferred] [--change <path>...] [--sandbox-id <id>] [--root <path>]
-uh sandbox create <id> --mission <mission-id> [--base <ref>] [--root <path>]
-uh sandbox list [--root <path>]
-uh sandbox status <id> [--root <path>]
-uh sandbox discard <id> [--force] [--root <path>]
-uh skill add <skill-dir> [--root <path>]
-uh skill list [--root <path>]
-uh skill check <skill-id> [--root <path>]
-```
-
-## Example lifecycle
-
-Run the lifecycle from the project root:
-
-```sh
-# 1. Initialize .harness/ project state.
+# Initialize .harness/ project state.
 uh init
 
-# 2. Ensure the Hermes adapter manifest exists, then confirm the runtime is available.
-#    In this repository, .harness/adapters/hermes.yaml is already present.
-#    In a new project, uh init creates .harness/adapters/; copy or write a manifest after init.
-#    For example: cp path/to/hermes.yaml .harness/adapters/hermes.yaml
+# Confirm a runtime is available (one of: hermes, codex, oh-my-pi).
 uh adapter check hermes
 
-# 3. Create a mission packet using an existing workflow profile.
-uh mission create m9-readme-polish \
-  --title "README usage docs and installability polish" \
+# Create and validate a mission packet.
+uh mission create m1-example \
+  --title "Example mission" \
   --workflow spec-first-feature \
-  --objective "Update README usage docs and verify the CLI is installable."
-
-# 4. Edit the generated mission packet and add at least one executable required check
-#    before verifying. For example, update this block in
-#    .harness/missions/m9-readme-polish/mission.yaml:
-#
-#    verification:
-#      required_checks:
-#        - name: cli-help
-#          command: node dist/cli.js --help
-#      review_gates:
-#        - spec-compliance
-#        - implementation-quality
-
-# 5. Validate mission packets.
+  --objective "Demonstrate the mission lifecycle"
 uh validate --all-missions
 
-# 6. Render the runtime prompt and command without executing Hermes.
-uh mission dry-run .harness/missions/m9-readme-polish/mission.yaml --runtime hermes
+# Render the runtime invocation without launching.
+uh mission dry-run .harness/missions/m1-example/mission.yaml --runtime hermes
 
-# 7. Execute the mission through the Hermes runtime adapter.
-uh mission run .harness/missions/m9-readme-polish/mission.yaml --runtime hermes
+# Execute the mission. --runtime accepts: hermes | codex | oh-my-pi.
+uh mission run .harness/missions/m1-example/mission.yaml --runtime hermes
 
-# 8. Run the mission's declared verification checks and write verification.yaml.
-#    Continue to promotion only if this command reports passed checks.
-uh verify m9-readme-polish
+# Run the mission's declared verification checks.
+uh verify m1-example
 
-# 9. Record a human promotion decision after verification passes.
-#    The default decision is promoted, which is blocked unless verification.yaml is passed.
-uh promote m9-readme-polish \
-  --approved-by "Reviewer Name" \
-  --change README.md
+# Record a human promotion decision.
+uh promote m1-example --approved-by "Reviewer Name" --change README.md
 
-# 10. Inspect current harness state.
+# Inspect harness state.
 uh status
 ```
 
-Notes:
+For the package bin and dev loop:
 
-- `uh mission create` writes `.harness/missions/<id>/mission.yaml` and requires the named workflow profile to exist in `.harness/workflows/<profile>.yaml`.
-- `uh mission dry-run` renders the prompt and command but does not invoke the runtime. For mission files under `.harness/missions/<id>/mission.yaml`, it also persists planning artifacts such as `prompt.md` and `runtime-session.yaml` with planned status.
-- `uh mission run` currently supports `--runtime hermes`.
-- `uh verify` only runs checks declared in the mission packet. A freshly scaffolded mission has no required checks until you add them.
-- `uh promote` with `--decision promoted` requires a passed `verification.yaml`; rejected and deferred decisions can still be recorded as explicit review outcomes.
+```sh
+bun run dev -- --help       # tsx-driven dev runner
+node dist/cli.js --help     # built CLI
+npm link && uh --help       # local bin install after build
+```
+
+This package is currently private and intended for local development rather than publishing.
+
+## Mission-level runtime overrides
+
+Missions select which model / runtime config to use per-run without editing the shared adapter manifest:
+
+```yaml
+# .harness/missions/<id>/mission.yaml
+runtime_config_overrides:
+  model: anthropic/claude-opus-4-7
+  thinking: medium
+```
+
+Mission overrides merge over the adapter manifest's `config.runtime_config` and are strict-validated by the per-runtime Zod schema, so typos fail fast.
 
 ## Durable artifacts
 
-Ultimate Harness records durable files under `.harness/` so agentic work can be inspected, resumed, audited, and promoted safely.
+Mission-scoped:
 
-Mission-scoped artifacts:
+- `mission.yaml` — schema-backed mission packet.
+- `prompt.md` — rendered runtime prompt for the run.
+- `runtime-session.yaml` — runtime command, args, status, timestamps, exit code.
+- `events.ndjson` — runtime lifecycle + adapter-specific event stream.
+- `runtime-final.txt` — model's one-paragraph summary (UH-28 sentinel-extracted when present).
+- `runtime-result.yaml` — terminal status + artifact refs.
+- `diff.patch` — `git diff` including untracked new files (UH-34).
+- `verification.yaml` — `uh verify` output.
+- `promotion.yaml` — human approval / rejection / deferral.
 
-- `.harness/missions/<id>/mission.yaml` — schema-backed mission packet containing objective, workflow profile, constraints, expected outputs, sandbox policy, and verification gates.
-- `.harness/missions/<id>/prompt.md` — rendered runtime prompt produced by the Hermes adapter for a mission run.
-- `.harness/missions/<id>/runtime-session.yaml` — runtime session record with runtime name, command, args, status, timestamps, and exit code.
-- `.harness/missions/<id>/events.ndjson` — mission event stream for runtime lifecycle and related audit events.
-- `.harness/missions/<id>/verification.yaml` — verification result produced by `uh verify`.
-- `.harness/missions/<id>/promotion.yaml` — human promotion, rejection, or deferral record produced by `uh promote`.
-
-Project-scoped artifacts include `.harness/project.yaml`, workflow profiles in `.harness/workflows/`, adapter configuration in `.harness/adapters/`, indexes for skills and sandboxes, and `.harness/audit/events.ndjson`.
+Project-scoped: `.harness/project.yaml`, `.harness/workflows/`, `.harness/adapters/`, `.harness/sandboxes/`, `.harness/skills/`, `.harness/audit/events.ndjson`.
 
 ## Safety model
 
-Ultimate Harness is designed around explicit gates instead of direct, unchecked mutation of canonical project state:
+Ultimate Harness is designed around explicit gates rather than direct mutation of canonical state:
 
-- Schemas validate project, workflow, mission, runtime-session, verification, and promotion artifacts.
+- Schemas validate every persisted artifact (`uh.project.v0`, `uh.workflow.v0`, `uh.mission.v0`, `uh.runtime-session.v0`, `uh.runtime-result.v0`, `uh.verification.v0`, `uh.promotion.v0`).
 - Mission IDs, workflow profile names, and artifact paths are constrained to avoid path traversal.
-- Runtime artifact persistence refuses symlinked `.harness`, missions, mission directories, or artifact files where that would make writes unsafe.
-- Missions model their expected sandbox policy in mission/runtime configuration, with `git-worktree` modeled as the current mission packet default backend.
-- The current Hermes adapter launches Hermes from the project root (`cwd` is the harness root). It records and passes through runtime planning details, but the adapter itself does not enforce an OS/filesystem sandbox automatically.
-- Promotion is a separate human approval step. A `promoted` decision is blocked unless the mission has a passed `verification.yaml`.
-- Event streams and YAML records provide an audit trail for runtime execution, verification, and promotion decisions.
+- Runtime artifact persistence refuses symlinked `.harness`, mission directories, or artifact targets.
+- Sandboxes are git-worktree-backed; missions run with `cwd` set to the sandbox path. Bound mission packets are seeded into the worktree at create time (UH-29).
+- Codex runs with `--sandbox workspace-write`; oh-my-pi runs with `--no-extensions --no-skills` by default.
+- Promotion is a separate human approval step. A `promoted` decision is blocked unless `verification.yaml` is passed.
+- Event streams and YAML records provide an audit trail for execution, verification, and promotion.
 
 ## Inspiration
 
 Ultimate Harness studies and selectively integrates ideas from:
 
-- [Specsafe](https://github.com/Agentic-Engineering-Agency/specsafe/issues) — specification safety and issue-driven development practices.
-- [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) — structured agent roles, planning, and delivery workflows.
-- [superpowers](https://github.com/obra/superpowers) — composable agent capabilities and disciplined software-development skills.
-- [GSD](https://github.com/gsd-build/get-shit-done) — context engineering, fresh-context execution, and durable project context.
+- [Specsafe](https://github.com/Agentic-Engineering-Agency/specsafe/issues) — specification safety and issue-driven development.
+- [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) — structured agent roles and delivery workflows.
+- [superpowers](https://github.com/obra/superpowers) — composable agent capabilities.
+- [GSD](https://github.com/gsd-build/get-shit-done) — fresh-context execution and durable project context.
 - [matt-pocock/skills](https://github.com/mattpocock/skills) — focused reusable engineering skills.
-- [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) — open multi-agent harness patterns.
+- [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) — multi-agent harness patterns.
 - [OpenSpec](https://github.com/Fission-AI/OpenSpec) — artifact-guided specification workflows.
-- [Pi](https://pi.dev/) and [oh-my-pi](https://github.com/can1357/oh-my-pi) — customizable terminal agent harnesses and possible runtime targets.
-- [AgentFS](https://github.com/tursodatabase/agentfs/blob/main/MANUAL.md) — copy-on-write agent filesystem and sandboxing patterns.
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) — wired as the reference adapter.
+- [Codex CLI](https://github.com/openai/codex) — wired adapter for OpenAI's coding agent.
+- [oh-my-pi](https://github.com/can1357/oh-my-pi) and [Pi](https://pi.dev/) — wired oh-my-pi adapter; Pi tracked as a future addition.
+- [AgentFS](https://github.com/tursodatabase/agentfs/blob/main/MANUAL.md) — copy-on-write sandboxing patterns (design at [`docs/architecture/sandbox-agentfs.md`](./docs/architecture/sandbox-agentfs.md)).
 
 See the [comparison matrix](./docs/research/comparison-matrix.md) and [adopt/reject/defer log](./docs/research/adopt-reject-defer.md) for the current design position.
 
 ## Project vision
-
-Ultimate Harness aims to provide:
 
 - Specification-first planning and execution.
 - Portable mission packets for bounded agentic work.

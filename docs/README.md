@@ -1,11 +1,11 @@
 # Ultimate Harness Documentation
 
-Ultimate Harness is a runtime-agnostic development harness for planning, launching, observing, verifying, and promoting agentic software-development work across multiple coding agents and runtimes.
+Ultimate Harness is a runtime-agnostic development harness for planning, launching, observing, verifying, and promoting agentic software-development work across multiple coding agents.
 
-The core design goal is **portable discipline**: a project should be able to use Codex, Claude Code, Pi/oh-my-pi, Hermes, or a future runtime without losing its specifications, skills, workflow state, audit trail, sandbox boundaries, or human approval checkpoints.
-
+The core design goal is **portable discipline**: a project should be able to use multiple coding-agent runtimes without losing its specifications, skills, workflow state, audit trail, sandbox boundaries, or human approval checkpoints.
 
 For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP.md](./ROADMAP.md).
+
 ## Start here
 
 1. [Glossary](./glossary.md) — shared terms used across the project.
@@ -13,10 +13,23 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 3. [MVP scope](./product/mvp-scope.md) — what must exist before implementation grows.
 4. [Architecture overview](./architecture/overview.md) — major components and boundaries.
 5. [Core entities](./architecture/entities.md) — canonical vocabulary for data and artifacts.
-6. [Runtime adapter contract](./architecture/runtime-adapter-contract.md) — what all agent runtimes must implement.
-7. [Mission packet schema](./architecture/mission-packet-schema.md) — the first portable work-request format.
+6. [Runtime adapter contract](./architecture/runtime-adapter-contract.md) — what every adapter implements (includes the UH-28 runtime-final-message protocol).
+7. [Mission packet schema](./architecture/mission-packet-schema.md) — the portable work-request format.
 8. [Verification and promotion](./architecture/verification-and-promotion.md) — how sandbox work becomes canonical work.
 9. [BMAD agent map](./workflows/bmad-agent-map.md) — how BMAD-style roles map into Ultimate Harness.
+
+## Adapters
+
+| Adapter | Status | Doc / Runbook |
+|---|---|---|
+| `hermes` | active | [Runtime adapter contract](./architecture/runtime-adapter-contract.md) defines the shape; `src/adapters/hermes.ts` is the reference implementation. |
+| `codex` | active | [`architecture/adapter-codex.md`](./architecture/adapter-codex.md), [`runbooks/codex-e2e-smoke.md`](./runbooks/codex-e2e-smoke.md) |
+| `oh-my-pi` | experimental | [`runbooks/anthropic-via-omp.md`](./runbooks/anthropic-via-omp.md) — covers the Anthropic-via-OMP routing path and its ToS posture. |
+
+In flight (see [ROADMAP.md](./ROADMAP.md)):
+
+- `hermes-proxy` — clean ToS-positioned path to subscription routing via Hermes v0.14.0's `hermes proxy` local OAI-compat endpoint (epic [UH-32](https://linear.app/agentic-eng/issue/UH-32)).
+- `uh tui` — interactive terminal UI built on OpenTUI (epic [UH-41](https://linear.app/agentic-eng/issue/UH-41)).
 
 ## Documentation map
 
@@ -38,12 +51,18 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 - [Overview](./architecture/overview.md)
 - [Entities](./architecture/entities.md)
 - [Runtime adapter contract](./architecture/runtime-adapter-contract.md)
+- [Codex adapter design](./architecture/adapter-codex.md)
 - [Mission packet schema](./architecture/mission-packet-schema.md)
 - [.harness artifacts](./architecture/harness-artifacts.md)
+- [Skill format](./architecture/skill-format.md)
 - [Sandboxing](./architecture/sandboxing.md)
+- [AgentFS sandbox backend (design)](./architecture/sandbox-agentfs.md)
 - [Verification and promotion](./architecture/verification-and-promotion.md)
-- `architecture/adapter-codex.md` — Codex CLI adapter design + 2026-05-17 implementation status. Experimental; gated on subscription quota for live end-to-end runs.
-- `architecture/adapter-pi-and-oh-my-pi.md` — near-term planning doc for Pi and oh-my-pi runtime inclusion (Options A/B/C; recommends starting with the `omp` CLI direct-invocation pattern).
+
+### Runbooks
+
+- [Codex E2E smoke](./runbooks/codex-e2e-smoke.md)
+- [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md)
 
 ### Workflows
 
@@ -61,21 +80,3 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 - [Checks](./verification/checks.md)
 - [Review gates](./verification/review-gates.md)
 - [Audit trail](./verification/audit-trail.md)
-
-## Current status
-
-Ultimate Harness now has an early working CLI and schema-backed artifact lifecycle. The docs remain the product and architecture spine for the implementation: use them to understand the artifact model, adapter contract, mission packet, sandbox policy model, verification lifecycle, and promotion gates as the CLI continues to grow.
-
-
-## Sources used in this documentation sprint
-
-- Specsafe issue tracker: <https://github.com/Agentic-Engineering-Agency/specsafe/issues>
-- BMAD Method: <https://github.com/bmad-code-org/BMAD-METHOD>
-- superpowers: <https://github.com/obra/superpowers>
-- GSD: <https://github.com/gsd-build/get-shit-done>
-- matt-pocock/skills: <https://github.com/mattpocock/skills>
-- oh-my-openagent: <https://github.com/code-yeongyu/oh-my-openagent>
-- OpenSpec: <https://github.com/Fission-AI/OpenSpec>
-- oh-my-pi: <https://github.com/can1357/oh-my-pi>
-- Pi: <https://pi.dev/>
-- AgentFS manual: <https://github.com/tursodatabase/agentfs/blob/main/MANUAL.md>

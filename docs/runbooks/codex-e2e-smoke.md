@@ -39,7 +39,6 @@ After the smoke succeeds, edit:
 - `.harness/adapters/codex.yaml`: `status: experimental` → `status: active`.
 - `src/harness/adapter-add.ts`: same change in the Codex template.
 - `docs/architecture/adapter-codex.md`: append a dated `Promoted to active` paragraph under the implementation status section.
-- `docs/status-dashboard.html`: move Codex from the experimental row to the active row.
 - Tests: extend `tests/codex.test.ts` with a manifest-loader assertion `expect(adapter.status).toBe('active')`.
 
 Open a PR titled `chore(codex): promote adapter to active after E2E smoke` and link the runtime-result.yaml + final.txt + diff.patch as evidence.
