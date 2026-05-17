@@ -1,9 +1,0 @@
-id: codex-smoke-sb
-mission_id: codex-e2e-smoke
-backend: git-worktree
-branch: sandbox/codex-smoke-sb
-path: .harness/sandboxes/codex-smoke-sb/worktree
-base_ref: HEAD
-status: created
-created_at: 2026-05-17T22:27:47.975Z
-updated_at: 2026-05-17T22:27:47.975Z
