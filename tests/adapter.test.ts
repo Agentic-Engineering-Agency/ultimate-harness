@@ -80,6 +80,18 @@ describe("adapter schema", () => {
     expect(adapter.config).toBeDefined();
     expect(adapter.config).not.toHaveProperty("cli_command");
   });
+
+  test("accepts planned status for design-only adapter stubs", () => {
+    const adapter = validateAdapter({
+      schema_version: "uh.adapter.v0",
+      id: "pi",
+      name: "Pi runtime",
+      runtime: "pi",
+      status: "planned",
+    });
+
+    expect(adapter.status).toBe("planned");
+  });
 });
 
 describe("uh adapter check hermes", () => {
