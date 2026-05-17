@@ -84,13 +84,13 @@ export async function createMission(root: string, opts: CreateMissionOptions): P
   };
 }
 
-function assertSafeMissionId(id: string): void {
+export function assertSafeMissionId(id: string): void {
   if (id === "." || id === ".." || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id)) {
     throw new Error(`Invalid mission id: ${id}. Use letters, numbers, dots, underscores, and hyphens; do not use path separators.`);
   }
 }
 
-async function requireInitializedProject(root: string): Promise<void> {
+export async function requireInitializedProject(root: string): Promise<void> {
   const projectPath = projectYaml(root);
   if (!(await fileExists(projectPath))) {
     throw new Error(`Harness project is not initialized: missing ${projectPath}. Run 'uh init' first.`);
@@ -104,7 +104,7 @@ async function requireInitializedProject(root: string): Promise<void> {
   }
 }
 
-async function requireWorkflowProfile(root: string, workflow: string): Promise<void> {
+export async function requireWorkflowProfile(root: string, workflow: string): Promise<void> {
   if (workflow === "." || workflow === ".." || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(workflow)) {
     throw new Error(`Invalid workflow profile: ${workflow}`);
   }
@@ -126,7 +126,7 @@ async function requireWorkflowProfile(root: string, workflow: string): Promise<v
   }
 }
 
-async function rejectSymlinkIfExists(filePath: string, label: string): Promise<void> {
+export async function rejectSymlinkIfExists(filePath: string, label: string): Promise<void> {
   try {
     const stats = await lstat(filePath);
     if (stats.isSymbolicLink()) {
@@ -140,12 +140,12 @@ async function rejectSymlinkIfExists(filePath: string, label: string): Promise<v
   }
 }
 
-function isPathWithin(candidate: string, parent: string): boolean {
+export function isPathWithin(candidate: string, parent: string): boolean {
   const relative = path.relative(parent, candidate);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
+export async function fileExists(filePath: string): Promise<boolean> {
   try {
     await access(filePath);
     return true;

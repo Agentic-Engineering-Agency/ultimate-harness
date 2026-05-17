@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
 import { createMission } from "./harness/mission.js";
+import { parseIssueRef, parseRequiredCheck, proposeMission, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
@@ -160,6 +161,94 @@ function parsePositiveIntegerOption(name: string, value: string): number {
     throw new Error(`${name} must be a positive integer, got ${value}`);
   }
   return parsed;
+}
+
+// uh propose
+program
+  .command("propose")
+  .description("Generate a mission packet from request/issue metadata")
+  .argument("<id>", "Mission id")
+  .requiredOption("--title <title>", "Mission title")
+  .requiredOption("--workflow <profile>", "Workflow profile")
+  .requiredOption("--objective <text>", "Mission objective")
+  .option("--priority <priority>", "Mission priority (default: medium)")
+  .option("--issue <provider:id[:url]>", "Issue ref; repeatable", collectIssueRefOption, [] as ProposeIssueRef[])
+  .option("--read-first <path>", "Read-first context path; repeatable", collectRepeatedOption, [])
+  .option("--source-link <url>", "Source link; repeatable", collectRepeatedOption, [])
+  .option("--repo-root <path>", "Repository root recorded in mission context")
+  .option("--constraint <text>", "Mission constraint; repeatable", collectRepeatedOption, [])
+  .option("--required-skill <name>", "Required skill; repeatable", collectRepeatedOption, [])
+  .option("--suggested-skill <name>", "Suggested skill; repeatable", collectRepeatedOption, [])
+  .option("--expected-output <path>", "Expected output file path; repeatable", collectRepeatedOption, [])
+  .option("--completion <text>", "Completion criterion; repeatable", collectRepeatedOption, [])
+  .option("--required-check <name[=command]>", "Required verification check; repeatable", collectRequiredCheckOption, [] as ProposeRequiredCheck[])
+  .option("--review-gate <name>", "Review gate; repeatable", collectRepeatedOption, [])
+  .option("--sandbox-backend <name>", "Sandbox backend (default: git-worktree)")
+  .option("--promotion-policy <name>", "Promotion policy (default: human-approved)")
+  .option("--output <path>", "Explicit output path (default: .harness/missions/<id>/mission.yaml)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--force", "Overwrite existing mission file")
+  .action(async (id: string, opts: {
+    title: string;
+    workflow: string;
+    objective: string;
+    priority?: string;
+    issue: ProposeIssueRef[];
+    readFirst: string[];
+    sourceLink: string[];
+    repoRoot?: string;
+    constraint: string[];
+    requiredSkill: string[];
+    suggestedSkill: string[];
+    expectedOutput: string[];
+    completion: string[];
+    requiredCheck: ProposeRequiredCheck[];
+    reviewGate: string[];
+    sandboxBackend?: string;
+    promotionPolicy?: string;
+    output?: string;
+    root?: string;
+    force?: boolean;
+  }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await proposeMission(root, {
+        id,
+        title: opts.title,
+        workflow: opts.workflow,
+        objective: opts.objective,
+        priority: opts.priority,
+        issueRefs: opts.issue,
+        readFirst: opts.readFirst,
+        sourceLinks: opts.sourceLink,
+        repoRoot: opts.repoRoot,
+        constraints: opts.constraint,
+        requiredSkills: opts.requiredSkill,
+        suggestedSkills: opts.suggestedSkill,
+        expectedOutputs: opts.expectedOutput,
+        completionCriteria: opts.completion,
+        requiredChecks: opts.requiredCheck,
+        reviewGates: opts.reviewGate,
+        sandboxBackend: opts.sandboxBackend,
+        promotionPolicy: opts.promotionPolicy,
+        outputPath: opts.output,
+        force: opts.force ?? false,
+      });
+      console.log(`${result.created ? "Created" : "Updated"} mission: ${id}`);
+      console.log(`Path: ${result.path}`);
+    } catch (err) {
+      console.error(`[FAIL] propose error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+function collectIssueRefOption(value: string, previous: ProposeIssueRef[]): ProposeIssueRef[] {
+  return [...previous, parseIssueRef(value)];
+}
+
+function collectRequiredCheckOption(value: string, previous: ProposeRequiredCheck[]): ProposeRequiredCheck[] {
+  return [...previous, parseRequiredCheck(value)];
 }
 
 // uh adapter
