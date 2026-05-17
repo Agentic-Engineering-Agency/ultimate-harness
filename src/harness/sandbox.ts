@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
@@ -99,6 +99,24 @@ export async function createSandbox(
   } catch (err) {
     await rm(sandboxDir, { recursive: true, force: true });
     throw err;
+  }
+
+  // UH-29: seed the bound mission directory into the new worktree.
+  // The worktree forks from `baseRef` (HEAD by default), which usually
+  // does not include freshly-created-but-uncommitted mission packets.
+  // Without this seed, `mission run` auto-routes lookup into the sandbox
+  // and fails with ENOENT on the mission directory. We copy only when
+  // the host already has the mission directory; missing-on-host is left
+  // to the caller (create-mission-inside-sandbox is a valid pattern too).
+  const hostMissionDir = path.resolve(root, ".harness", "missions", opts.missionId);
+  if (await fileExists(hostMissionDir)) {
+    const sandboxMissionsRoot = path.resolve(worktreePath, ".harness", "missions");
+    await mkdir(sandboxMissionsRoot, { recursive: true });
+    const sandboxMissionDir = path.resolve(sandboxMissionsRoot, opts.missionId);
+    if (!isPathWithin(sandboxMissionDir, worktreePath)) {
+      throw new Error(`Unsafe mission seed target: ${sandboxMissionDir}`);
+    }
+    await cp(hostMissionDir, sandboxMissionDir, { recursive: true });
   }
 
   const now = new Date().toISOString();
