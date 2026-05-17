@@ -278,7 +278,12 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
   }
 
   const sandboxMode = runtimeConfig.sandbox_mode;
-  const approvalPolicy = runtimeConfig.approval_policy;
+  // approval_policy is retained in the runtime_config schema for backward
+  // compatibility with manifests written against UH-23 / codex-cli <0.130,
+  // but codex-cli 0.130+ no longer accepts the `--ask-for-approval` flag.
+  // Under `--sandbox workspace-write`, in-sandbox actions are auto-approved
+  // without an explicit flag (verified against codex-cli 0.130.0, UH-30).
+  void runtimeConfig.approval_policy;
   // runtimeConfig.full_auto_compat is validated by schema; not yet consumed (reserved for legacy Codex builds).
   const finalMessagePath = await resolveFinalMessagePath(root, missionPath);
 
@@ -289,8 +294,6 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
     path.resolve(root),
     "--sandbox",
     sandboxMode,
-    "--ask-for-approval",
-    approvalPolicy,
     "--json",
     "--output-last-message",
     finalMessagePath,
@@ -319,7 +322,7 @@ export const defaultCodexRunner: CodexRunner = (input) => {
   return new Promise((resolve) => {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
     let stdout = "";

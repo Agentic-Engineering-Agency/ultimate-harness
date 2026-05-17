@@ -56,7 +56,7 @@ capabilities:
   - diff-output
   - mcp-tools
   - structured-events
-status: experimental
+status: active
 config:
   cli_command: codex
   default_toolsets: []

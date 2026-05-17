@@ -2,9 +2,10 @@ schema_version: uh.adapter.v0
 id: codex
 name: OpenAI Codex
 description: >-
-  Runtime adapter design for the OpenAI Codex CLI. Executes missions via
+  Runtime adapter for the OpenAI Codex CLI. Executes missions via
   `codex exec` inside a git-worktree sandbox with --sandbox workspace-write.
-  See docs/architecture/adapter-codex.md. Design-only; no runtime wiring yet.
+  Verified against codex-cli 0.130.0 (UH-30 smoke).
+  See docs/architecture/adapter-codex.md and docs/runbooks/codex-e2e-smoke.md.
 runtime: codex
 capabilities:
   - cli-execution
@@ -16,7 +17,7 @@ capabilities:
   - diff-output
   - mcp-tools
   - structured-events
-status: experimental
+status: active
 config:
   cli_command: codex
   default_toolsets: []
