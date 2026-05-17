@@ -1,0 +1,25 @@
+schema_version: uh.mission.v0
+id: codex-e2e-smoke
+name: Codex E2E Smoke
+workflow_profile: research-docs
+description: >-
+  Minimum-cost end-to-end smoke for the experimental Codex adapter.
+  Writes a single timestamp marker file to verify codex exec --json,
+  --output-last-message, JSONL parsing, diff capture, and the
+  runtime-result pipeline against the real Codex backend.
+issues:
+  - source: linear
+    reference: UH-23
+    url: https://linear.app/agentic-eng/issue/UH-23
+read_first:
+  - docs/architecture/adapter-codex.md
+expected_artifacts:
+  - path: docs/codex-smoke.txt
+    type: text
+sandbox:
+  backend: git-worktree
+  config:
+    branch: codex/e2e-smoke
+verification:
+  checks:
+    - docs/codex-smoke.txt exists and contains a single ISO 8601 timestamp line
