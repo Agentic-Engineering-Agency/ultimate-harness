@@ -19,7 +19,7 @@ The goal is to combine proven patterns from specification-driven development, ag
 
 ## Current status
 
-Ultimate Harness now has an early working CLI and schema-backed artifact lifecycle. It is still pre-release and intentionally small, but it can initialize a harness project, create mission packets, validate configured artifacts, render/run missions through the Hermes adapter, write runtime and verification artifacts, and record promotion decisions.
+Ultimate Harness `v0.1.0` ships an end-to-end working CLI and schema-backed artifact lifecycle. It can initialize a harness project, propose and create mission packets, validate configured artifacts, list/check adapter manifests through the runtime registry, manage git-worktree sandboxes, register and check skills, render/run missions through the Hermes adapter, write runtime and verification artifacts, and record promotion decisions. See the [v0.1.0 release notes](https://github.com/Agentic-Engineering-Agency/ultimate-harness/releases/tag/v0.1.0).
 
 The design remains runtime-agnostic. Hermes is the first runtime adapter implemented; additional coding-agent runtimes can target the same mission, runtime-session, verification, and promotion contracts.
 
@@ -81,13 +81,21 @@ uh status [--root <path>]
 uh validate <file>
 uh validate --all-workflows [--root <path>]
 uh validate --all-missions [--root <path>]
-uh adapter check [hermes] [--root <path>]
+uh adapter list [--root <path>]
+uh adapter check [runtime] [--root <path>]
 uh mission create <id> --title <title> --workflow <profile> --objective <text> [--root <path>] [--force]
 uh propose <id> --title <title> --workflow <profile> --objective <text> [--priority <p>] [--issue <provider:id[:url]>...] [--read-first <path>...] [--expected-output <path>...] [--required-check <name[=command]>...] [--review-gate <name>...] [--constraint <text>...] [--source-link <url>...] [--required-skill <name>...] [--suggested-skill <name>...] [--completion <text>...] [--repo-root <path>] [--sandbox-backend <name>] [--promotion-policy <name>] [--output <path>] [--root <path>] [--force]
 uh mission dry-run [file] --runtime hermes [--root <path>]
 uh mission run [file] --runtime hermes [--root <path>]
 uh verify <mission-id> [--root <path>] [--timeout-ms <ms>]
 uh promote <mission-id> --approved-by <name> [--decision promoted|rejected|deferred] [--change <path>...] [--sandbox-id <id>] [--root <path>]
+uh sandbox create <id> --mission <mission-id> [--base <ref>] [--root <path>]
+uh sandbox list [--root <path>]
+uh sandbox status <id> [--root <path>]
+uh sandbox discard <id> [--force] [--root <path>]
+uh skill add <skill-dir> [--root <path>]
+uh skill list [--root <path>]
+uh skill check <skill-id> [--root <path>]
 ```
 
 ## Example lifecycle
