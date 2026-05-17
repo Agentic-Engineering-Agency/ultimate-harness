@@ -265,6 +265,7 @@ export async function planHermesRun(root: string, missionPath: string): Promise<
     default_model: "",
     worktree_mode: false,
     pass_session_id: true,
+    runtime_config: {},
   };
   const config = adapter.config ?? defaultConfig;
   const toolsets = config.default_toolsets.length > 0

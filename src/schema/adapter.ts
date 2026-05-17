@@ -7,6 +7,7 @@ export const AdapterConfigSchema = z.object({
   default_model: z.string().optional().default(""),
   worktree_mode: z.boolean().optional().default(false),
   pass_session_id: z.boolean().optional().default(true),
+  runtime_config: z.record(z.string(), z.unknown()).optional().default({}),
 });
 
 export type AdapterConfig = z.infer<typeof AdapterConfigSchema>;
