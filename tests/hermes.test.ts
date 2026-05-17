@@ -143,6 +143,43 @@ workflow_profile: not-a-real-workflow
     expect(plan.errors).toEqual(["Workflow profile not found: not-a-real-workflow"]);
     expect(plan.command).toBe("hermes");
   });
+
+  test("rejects mission runtime_config_overrides against hermes empty-strict schema (UH-33)", async () => {
+    const { missionPath } = await writeHarnessMission("override-bad-key");
+    await writeFile(missionPath, `schema_version: uh.mission.v0
+id: override-bad-key
+name: Override Bad Key
+description: Hermes runtime_config schema is empty-strict; any key is rejected.
+workflow_profile: research-docs
+issues: []
+read_first: []
+expected_artifacts: []
+verification:
+  checks: []
+runtime_config_overrides:
+  bogus_key: anything
+`, "utf-8");
+
+    await expect(planHermesRun(TEST_ROOT, missionPath)).rejects.toThrow(/runtime_config_overrides validation failed.*bogus_key/s);
+  });
+
+  test("accepts an empty runtime_config_overrides for hermes (UH-33)", async () => {
+    const { missionPath } = await writeHarnessMission("override-empty");
+    await writeFile(missionPath, `schema_version: uh.mission.v0
+id: override-empty
+name: Override Empty
+description: Hermes accepts an empty override block.
+workflow_profile: research-docs
+issues: []
+read_first: []
+expected_artifacts: []
+verification:
+  checks: []
+`, "utf-8");
+
+    const plan = await planHermesRun(TEST_ROOT, missionPath);
+    expect(plan.command).toBe("hermes");
+  });
 });
 
 describe("runHermes with injected runner", () => {
