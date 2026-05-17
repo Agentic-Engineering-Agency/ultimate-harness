@@ -1,0 +1,184 @@
+# AgentFS Sandbox Backend
+
+> Status: **design** — no runtime wiring yet. Tracked by [UH-8](https://linear.app/agentic-eng/issue/UH-8/design-agentfs-sandbox-backend) / [GH #14](https://github.com/Agentic-Engineering-Agency/ultimate-harness/issues/14). The git-worktree backend in `src/harness/sandbox.ts` is the reference implementation this design must reach parity with.
+
+This document specifies how an [AgentFS](https://github.com/tursodatabase/agentfs)-backed sandbox plugs into the existing sandbox manager without disturbing the contract that `git-worktree` already satisfies. It is intentionally interface-level: no Zod schemas, no TypeScript modules, no `.harness/` layout changes.
+
+The companion read is [`sandboxing.md`](./sandboxing.md) (lifecycle + safety rules) and the current git-worktree implementation under `src/harness/sandbox.ts`. The AgentFS backend MUST satisfy the same `SandboxStatus` enum (`created | running | dirty | verified | promoted | discarded`) and the same backend interface so the rest of the harness (CLI, verifier, promoter, audit) does not learn about AgentFS specifics.
+
+## 1. Goals
+
+1. **Isolate filesystem effects beyond the git repo.** Git worktrees leak runtime caches, dotfile mutations, package-manager state, and any write that lives outside the project root. AgentFS isolates the full process-visible filesystem so a misbehaving runtime cannot mutate the operator's `$HOME`, project sibling repos, or shared toolchain caches.
+2. **Capture deltas as data, not as diffs.** AgentFS records the upper-layer overlay as structured filesystem state. Promotion should be able to pick changes by path *and* by file content hash without re-running `git diff` on a mutable worktree.
+3. **Provide lifecycle parity with the git-worktree backend.** A mission MUST be runnable, inspectable, verifiable, promotable, and discardable through identical CLI verbs regardless of backend. The backend choice is a `mission.sandbox.backend` flag, not a workflow rewrite.
+4. **Stay safe by default.** The AgentFS sandbox MUST refuse to write outside its mount, MUST reject symlinks that escape the mount, and MUST reuse the same path-safety helpers (`assertSafeSandboxId`, `assertSafeMissionId`, `isPathWithin`, `rejectSymlinkIfExists`) the git-worktree backend uses.
+5. **Keep promotion deterministic.** The harness, not AgentFS, decides what becomes canonical. AgentFS exposes a deltas API; the promoter still writes a `promotion.yaml` and an explicit changeset.
+
+Non-goals:
+
+- Replacing the git-worktree backend. Both backends coexist and are selected per mission.
+- Shipping a Turso/AgentFS dependency in the harness binary. Wiring is gated behind `agentfs` being present on `$PATH`.
+- Implementing AgentFS sync, encryption, or multi-host replication. Out of scope for the harness; treat them as host-level concerns.
+
+## 2. Expected CLI shape
+
+All shapes here are forward-looking. `uh sandbox create`, `uh sandbox status`, `uh sandbox list`, `uh sandbox discard`, and `uh promote` already exist for the git-worktree backend; `uh diff` is new and lands with the AgentFS backend because git-only diffing is no longer sufficient when changes can live outside the repo. The verbs MUST behave identically across backends; only `--backend` selects the implementation.
+
+### Create
+
+```bash
+uh sandbox create <sandbox-id> \
+  --mission <mission-id> \
+  --backend agentfs \
+  [--base <ref>] \
+  [--mount <path>] \
+  [--seed <ref|spec>] \
+  [--allow-host-read <path>]... \
+  [--root <project-root>]
+```
+
+- `--backend agentfs` selects the new backend; default remains `git-worktree`.
+- `--base <ref>` is the git ref used to seed the AgentFS overlay's lower layer. Defaults to `HEAD`. The harness materializes the ref as a snapshot; AgentFS supplies a fresh overlay on top.
+- `--mount <path>` is the resolved mount point. Defaults to `.harness/sandboxes/<sandbox-id>/mount/` so the path stays inside `sandboxesDir(root)` and the existing `isPathWithin` guard rejects escapes.
+- `--seed` is reserved for non-git seeds (an existing AgentFS snapshot id, a tarball ref, etc.). Out of scope for v0; the flag is documented so missions can declare future intent without breaking the CLI.
+- `--allow-host-read <path>` opt-in passthroughs (toolchain caches, language servers). Repeatable. Anything not listed is invisible to processes inside the sandbox.
+- The created record MUST follow the same `metadata.yaml` shape the git-worktree backend writes today (`id`, `mission_id`, `backend: agentfs`, `path`, `status: created`, timestamps) so `listSandboxes` and `getSandboxStatus` keep working without branching on backend.
+
+### Inspect
+
+```bash
+uh sandbox status <sandbox-id>
+uh sandbox list
+uh diff <sandbox-id> [--name-only] [--patch] [--against <ref>]
+```
+
+- `uh sandbox status` returns the registry entry plus a backend-derived `dirty` flag and a `changes[]` list. For AgentFS the list is sourced from the overlay's recorded mutations rather than `git status --porcelain`.
+- `uh diff` is the new universal verb. For `git-worktree` it shells out to `git diff`; for `agentfs` it asks AgentFS to enumerate overlay deltas and renders them as a unified patch when `--patch` is requested. The flags are backend-agnostic: callers do not learn which backend they are hitting.
+- `--against <ref>` is meaningful for both backends. For AgentFS, the ref identifies the lower-layer snapshot the overlay was seeded from.
+
+### Promote
+
+```bash
+uh promote <mission-id> \
+  --approved-by <name> \
+  --decision promoted \
+  --sandbox-id <sandbox-id> \
+  --change <path>...
+```
+
+- The verb does NOT change. The promoter consumes `--change` paths and the sandbox's diff/deltas to produce a `promotion.yaml`.
+- For AgentFS, the promoter resolves each `--change` path against the overlay, materializes the file content out of AgentFS, and applies it to the canonical project tree. No git-only assumptions live in the promoter.
+- The promotion record's `changes[]` is the source of truth either way; the backend only supplies the bytes.
+
+### Discard
+
+```bash
+uh sandbox discard <sandbox-id> [--force]
+```
+
+- Same safety rule as today: refuse if dirty unless `--force`.
+- For AgentFS, "dirty" means the overlay has unrecorded mutations (i.e. files outside the promotion record). The backend MUST unmount cleanly, drop the overlay database, and remove `.harness/sandboxes/<sandbox-id>/` only after the unmount succeeds.
+
+## 3. Lifecycle parity with the git-worktree backend
+
+The backend interface stays the one declared in [`sandboxing.md`](./sandboxing.md) §"Backend interface". AgentFS implementations of each method:
+
+| Method | git-worktree behavior | AgentFS behavior |
+|---|---|---|
+| `create(mission_id, base_ref, options)` | `git worktree add -b sandbox/<id> <path> <base_ref>` and register `metadata.yaml`. | `agentfs init` a new overlay seeded from `base_ref` (materialized as a snapshot of the working tree), then `agentfs mount <path>`. Register the same `metadata.yaml` shape. |
+| `path(sandbox_id)` | Returns the worktree path on disk. | Returns the mount point on disk. Both are absolute paths inside `sandboxesDir(root)`. |
+| `status(sandbox_id)` | Reads `metadata.yaml` + `git status --porcelain`. | Reads `metadata.yaml` + AgentFS overlay enumeration. The returned `SandboxStatus` enum value MUST be one of `created | running | dirty | verified | promoted | discarded`. |
+| `collect_diff(sandbox_id)` | `git diff` against the base ref, written to `diff.patch`. | AgentFS overlay → unified patch, written to the same `diff.patch` location so verification and review consume one shape. |
+| `list_changes(sandbox_id)` | Filenames from `git status --porcelain`. | Filenames from the overlay enumeration. Path strings are forward-slashed (see `toForwardSlash`). |
+| `run_check(sandbox_id, command)` | Spawned with `cwd = worktreePath`. | Spawned with `cwd = mountPath` (via `agentfs exec` so the process sees the overlay namespace). |
+| `promote(sandbox_id, selected_changes)` | Reads files from the worktree, writes to canonical state. | Reads files from the overlay, writes to canonical state. |
+| `discard(sandbox_id)` | `git worktree remove` + branch delete + `rm -rf <sandbox dir>`. | `agentfs unmount` + drop overlay db + `rm -rf <sandbox dir>`. |
+
+The registry (`.harness/sandboxes/index.yaml`) and per-sandbox `metadata.yaml` MUST stay schema-compatible. The only difference visible to callers is the `backend` string (`git-worktree` vs `agentfs`). The `SandboxStatus` enum stays as defined in `src/schema/artifacts.ts`; the AgentFS backend does NOT add new states.
+
+## 4. Comparison vs the git-worktree backend
+
+| Dimension | git-worktree (today) | agentfs (designed) |
+|---|---|---|
+| Isolation scope | Repo subtree only. Writes outside the worktree (e.g. `$HOME`, `/tmp`, sibling repos) are unisolated. | Full filesystem view inside the mount. Host paths are invisible unless explicitly passed via `--allow-host-read`. |
+| Cross-repo leakage | Possible. The runtime shares the operator's tool caches, npm/pip configs, and credentials directories. | Prevented by default. The mount has its own `$HOME` unless explicitly bound. |
+| Change capture | `git status --porcelain` + `git diff`. Misses unstaged untracked files in ignored paths. | Overlay enumeration. Captures every mutation the overlay observed, including files outside the historical repo tree. |
+| Promotion model | Files copied from worktree; relies on git tracking. Untracked-but-needed files require explicit `git add`. | Files copied from overlay by path. No staging step required; the promoter selects from the deltas list. |
+| Performance: create | Fast (`git worktree add` is one fork + checkout). Scales with repo size. | Slower (mount setup + snapshot seed). One-time cost; bounded by base-ref materialization. |
+| Performance: per-write | Native FS speed. | Overhead from FUSE / FSKit redirection per syscall. Acceptable for code/docs work; expensive for large binary or DB workloads. |
+| Performance: discard | Fast (`git worktree remove`). | Fast once unmounted; unmount itself can stall if a process still holds the mount. |
+| Operational complexity | Low. Git is already a dependency. | Higher. Requires AgentFS binary, kernel-level FS support (FUSE/FSKit), and platform-specific permission grants. |
+| Failure recovery | Stuck worktrees recoverable with `git worktree prune`. | Stuck mounts may require `umount -f` and orphaned-db cleanup; backend MUST expose an idempotent recovery path. |
+| Auditability | Diffs are git-native and easy to review. | Deltas need to be rendered to unified patches for review; semantically equivalent but operationally newer. |
+| Concurrency | Multiple worktrees from the same repo safe by design. | Multiple AgentFS mounts safe per process, but mount points must be distinct paths under `sandboxesDir(root)`. |
+
+When to pick which:
+
+- **git-worktree** stays the default for code/docs missions on a trusted host. It is cheaper and friction-free.
+- **agentfs** is the right pick when (a) the runtime is untrusted, (b) the mission depends on out-of-repo state that must not leak in, or (c) the operator wants byte-level capture of every filesystem effect.
+
+## 5. Filesystem permission model
+
+The AgentFS backend treats every mount as a deny-by-default jail. Permissions are declared at create time and recorded in `metadata.yaml`; they are NOT mutable after creation.
+
+- **Mount root.** The mount MUST resolve under `sandboxesDir(root)` after symlink rejection. The same `isPathWithin` / `rejectSymlinkIfExists` checks the git-worktree backend uses apply to the mount point and to anything the user passes via `--mount`.
+- **Lower layer.** Read-only snapshot of the base ref. Processes inside the sandbox see it as the initial filesystem state. Writes are diverted to the overlay; the lower layer is never mutated.
+- **Overlay (upper layer).** Read-write. All process writes land here. The overlay is the unit of capture: `list_changes`, `collect_diff`, and `promote` read from it.
+- **Host passthroughs.** Off by default. Each `--allow-host-read <path>` becomes a bind mount in read-only mode. The backend MUST refuse `--allow-host-write` flags in v0; writeable host passthroughs defeat the isolation goal and need a separate design.
+- **Process environment.** The mount provides its own `$HOME`, `$XDG_*`, and shell rc files. Adapters launching processes inside the mount (Hermes, Claude Code, Pi/oh-my-pi) MUST NOT inherit the operator's `$HOME`. Per-adapter env scrubbing is already documented in [`adapter-claude-code.md`](./adapter-claude-code.md) §"Sandbox/worktree assumptions"; the AgentFS backend MUST surface a scrubbed env baseline that adapters extend.
+- **Credential exposure.** Secrets MUST be injected explicitly per mission (e.g. via env passed through `run_check`'s spawn options). The backend never auto-bind-mounts `~/.aws`, `~/.config/gh`, `~/.npmrc`, etc.
+- **Escape detection.** Any write attempt that resolves outside the mount MUST be reported as a security finding per [`sandboxing.md`](./sandboxing.md) §"Required safety rules". AgentFS exposes the namespace boundary cleanly, so the backend MUST log such attempts to `audit/events.ndjson` rather than swallowing them.
+- **Audit ownership.** The overlay database is the auditable artifact. The backend MUST treat it as append-only during the sandbox's life and MUST preserve it until `discard` succeeds.
+
+## 6. macOS vs Linux behavior notes
+
+AgentFS is platform-aware. The backend MUST account for the platform differences below; mission authors only see the unified CLI.
+
+### Linux
+
+- Backend: FUSE. Kernel module must be loaded; `/dev/fuse` must be accessible to the operator.
+- Privileges: rootless FUSE works for most distros (`fuse3` with `user_allow_other` off). The backend MUST detect the kernel/FUSE version and refuse to mount on unsupported kernels with a clear error.
+- Performance: low syscall overhead; acceptable for compile/test loops.
+- Cleanup: `fusermount -u` is the safe unmount path. The backend MUST attempt it before `rm -rf` and MUST refuse to delete the sandbox dir if unmount fails.
+- Containers: running inside Docker/Podman requires `--cap-add SYS_ADMIN` and `--device /dev/fuse`. The backend MUST emit a single, actionable error when those are missing rather than retrying.
+
+### macOS
+
+- Backend: FSKit (macOS 15 Sequoia or newer). macFUSE is NOT supported as a fallback; FSKit and macFUSE have incompatible semantics around extended attributes and Finder metadata, so silently switching backends would change promotion behavior.
+- Privileges: FSKit extensions need to be approved in System Settings → Privacy & Security on first use. The backend MUST detect the "not approved" state and surface it as a setup error, not a runtime crash.
+- Performance: FSKit overhead is higher than FUSE for small writes; expect slower `npm install`-style workloads inside the mount.
+- Finder/Spotlight: the mount appears as a real volume. The backend MUST mark it `noindex` so Spotlight does not crawl ephemeral overlays.
+- Cleanup: `diskutil unmount` is the safe path. The backend MUST treat "resource busy" errors as recoverable (wait + retry once) before giving up.
+- Apple Silicon vs Intel: no functional difference in v0; AgentFS already abstracts the kernel boundary.
+
+### Cross-platform invariants
+
+- Path separators inside `metadata.yaml` MUST be forward slashes regardless of platform (`toForwardSlash` already enforces this for the git-worktree backend).
+- File modes: the overlay MUST preserve `0o644`/`0o755` semantics. macOS resource forks and `._*` AppleDouble files MUST be ignored by `list_changes` to avoid noise in promotions.
+- Symlinks created inside the mount MUST resolve inside the mount. Symlinks crossing the mount boundary MUST be rejected at write time per the safety rules above.
+
+## 7. Failure cases
+
+The backend MUST treat each of these as an explicit, named error and MUST surface them through the same exception channel the git-worktree backend uses today (`Error` with a path-rich message). Silent fallbacks are forbidden.
+
+1. **AgentFS binary missing.** `create` MUST fail fast with an actionable message ("install agentfs and re-run") and MUST NOT register a partial sandbox in `index.yaml`.
+2. **Mount-point conflict.** If another process is already mounted at the resolved path, `create` MUST refuse rather than overlay-on-overlay. The registry stays clean.
+3. **Base-ref materialization failure.** If `base_ref` cannot be resolved or checked out into the lower layer, `create` MUST tear down any partially-allocated overlay and remove `.harness/sandboxes/<id>/` (mirroring the git-worktree `rm -rf` rollback in `createSandbox`).
+4. **Overlay-db corruption.** `status`, `diff`, and `promote` MUST detect a corrupted overlay db and refuse to proceed. Recovery is operator-driven (re-run `agentfs fsck` then retry); the harness does NOT silently repair.
+5. **Unmount stall on discard.** If unmount fails because a process still holds the mount, `discard` (without `--force`) MUST refuse to delete the sandbox dir. With `--force`, the backend MUST kill the holding process *only when it is a runtime adapter the harness launched*; never kill arbitrary processes.
+6. **Escape attempt detected.** A write resolving outside the mount MUST raise a sandbox-escape error and append an audit event. The mission's verification state flips to `blocked` and promotion is refused.
+7. **Capacity exhaustion.** Overlay running out of disk MUST fail the in-flight write with `ENOSPC` semantics and MUST flip the sandbox to `dirty` so the operator can decide between discarding or promoting partial work.
+8. **Platform unsupported.** On macOS < 15 or Linux without FUSE, `create` MUST refuse before attempting to mount and MUST point the operator at the git-worktree backend as a working alternative.
+9. **Adapter incompatibility.** Adapters that do not declare `agentfs` in `supported_sandbox_backends` MUST be refused at `prepare()` time (see the existing adapter contract). The sandbox backend MUST NOT silently downgrade an `agentfs` mission to `git-worktree`.
+10. **Promotion mid-overlay-mutation.** If `run_check`s are still mutating the overlay when `promote` runs, the promoter MUST snapshot the overlay first (read-only handle) and operate on the snapshot. Live overlay reads during promotion are forbidden because they make the diff non-reproducible.
+
+## 8. Open questions
+
+- **AgentFS distribution.** Does the harness require `agentfs` ≥ a pinned version, or do we vendor a known-good binary per platform? Pinning is simpler; vendoring is more reproducible but enlarges the install footprint.
+- **Snapshot semantics.** Should `--against <ref>` accept arbitrary overlay snapshot ids, or only the lower-layer base ref? Arbitrary snapshots enable interesting workflows (compare two runs of the same mission) but expand the CLI surface meaningfully.
+- **Per-mission overlay reuse.** When a mission re-runs (a retry of a failed verification), do we reuse the previous overlay or always start fresh? Reuse preserves intermediate state; fresh is more deterministic. The git-worktree backend implicitly preserves; AgentFS could default either way.
+- **Multi-mount hosts.** How many concurrent AgentFS mounts is a reasonable ceiling per machine? FUSE/FSKit both have practical limits before performance degrades. The backend may want a `max_concurrent_mounts` knob in `project.yaml`.
+- **Diff rendering parity.** Unified-patch rendering of overlay deltas needs to match `git diff` byte-for-byte where possible so review tooling stays unchanged. Some edge cases (binary diffs, mode changes, rename detection) need explicit fallback rules.
+- **Backend-aware adapter manifests.** Today every adapter manifest lists `supported_sandbox_backends`. Should `agentfs` require an additional capability flag (e.g. `sandbox-fs-native`) to signal that the adapter actually understands overlay semantics, or is backend-listing enough? Today's contract suggests backend-listing is enough; this should be re-checked once the first adapter wires AgentFS.
+- **CI/headless hosts.** macOS GitHub Actions runners do not allow FSKit approval flows. Does the harness restrict `agentfs` missions to Linux CI, or do we accept that CI workflows must use `git-worktree`?
+- **Cleanup of orphaned overlays.** If the harness crashes mid-mission, the overlay db can outlive the registry entry. A `uh sandbox gc` verb (out of scope for v0) would reconcile registry vs on-disk state. Worth tracking as a follow-up.
