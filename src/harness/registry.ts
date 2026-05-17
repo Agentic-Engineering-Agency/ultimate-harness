@@ -61,6 +61,22 @@ function assertSafeAdapterId(id: string): void {
   }
 }
 
+async function findManifestPath(root: string, id: string): Promise<string> {
+  const dir = adaptersDir(root);
+  for (const ext of MANIFEST_EXTENSIONS) {
+    const candidate = path.join(dir, `${id}${ext}`);
+    try {
+      await access(candidate);
+      return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw err;
+      }
+    }
+  }
+  throw new Error(`Adapter manifest not found: ${path.join(dir, `${id}.yaml`)}`);
+}
+
 
 async function readManifestFile(
   adapterPath: string,
@@ -150,6 +166,7 @@ export class RuntimeRegistry {
     for (const file of manifests) {
       const adapterPath = path.join(dir, file);
       const expectedId = manifestIdFromFilename(file);
+      assertSafeAdapterId(expectedId);
       entries.push(await readManifestFile(adapterPath, expectedId));
     }
     return entries;
@@ -163,12 +180,7 @@ export class RuntimeRegistry {
    */
   async load(root: string, id: string): Promise<AdapterManifestEntry> {
     assertSafeAdapterId(id);
-    const adapterPath = path.join(adaptersDir(root), `${id}.yaml`);
-    try {
-      await access(adapterPath);
-    } catch {
-      throw new Error(`Adapter manifest not found: ${adapterPath}`);
-    }
+    const adapterPath = await findManifestPath(root, id);
     return readManifestFile(adapterPath, id);
   }
 

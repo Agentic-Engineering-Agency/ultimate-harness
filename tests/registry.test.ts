@@ -112,7 +112,19 @@ describe("RuntimeRegistry.list", () => {
       /does not match file name/,
     );
   });
+  test("rejects unsafe manifest filenames during listing", async () => {
+    await writeFile(
+      join(TEST_ROOT, ".harness", "adapters", ".hidden.yaml"),
+      minimalManifest(".hidden"),
+      "utf-8",
+    );
+    const registry = new RuntimeRegistry();
+
+    await expect(registry.list(TEST_ROOT)).rejects.toThrow(/Unsafe adapter id/);
+  });
+
 });
+
 
 describe("RuntimeRegistry.load", () => {
   test("loads and validates a single manifest by id", async () => {
@@ -124,6 +136,21 @@ describe("RuntimeRegistry.load", () => {
     expect(entry.id).toBe("hermes");
     expect(entry.document.runtime).toBe("hermes");
     expect(entry.path).toBe(adapterPath("hermes"));
+  });
+
+  test("loads .yml manifests discovered by list", async () => {
+    await writeFile(
+      join(TEST_ROOT, ".harness", "adapters", "hermes.yml"),
+      minimalManifest("hermes"),
+      "utf-8",
+    );
+    const registry = new RuntimeRegistry();
+
+    const listed = await registry.list(TEST_ROOT);
+    const loaded = await registry.load(TEST_ROOT, "hermes");
+
+    expect(listed.map((entry) => entry.id)).toEqual(["hermes"]);
+    expect(loaded.path).toBe(join(TEST_ROOT, ".harness", "adapters", "hermes.yml"));
   });
 
   test("throws when the manifest file is missing", async () => {
