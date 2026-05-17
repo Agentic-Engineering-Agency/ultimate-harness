@@ -330,6 +330,21 @@ export async function planHermesRun(root: string, missionPath: string): Promise<
     errors.push(`Workflow profile not found: ${mission.workflow_profile}`);
   }
 
+  // UH-33: merge mission-level runtime_config_overrides on top of the
+  // adapter manifest defaults, then strict-parse via the per-runtime
+  // schema. HermesRuntimeConfigSchema is currently empty-strict, so any
+  // override key will fail load — but the wiring is in place for the day
+  // hermes gains runtime-specific config (e.g. hermes-proxy endpoint).
+  const mergedRuntimeConfig = {
+    ...(adapter.config?.runtime_config ?? {}),
+    ...mission.runtime_config_overrides,
+  };
+  try {
+    HermesRuntimeConfigSchema.parse(mergedRuntimeConfig);
+  } catch (e) {
+    throw new Error(`Mission runtime_config_overrides validation failed: ${(e as Error).message}`);
+  }
+
   const defaultConfig: z.infer<typeof AdapterConfigSchema> = {
     cli_command: "hermes",
     default_toolsets: [],

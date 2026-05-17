@@ -254,7 +254,6 @@ export async function dryRunCodex(root: string, missionPath: string): Promise<Dr
 export async function planCodexRun(root: string, missionPath: string): Promise<CodexRunPlan> {
   const errors: string[] = [];
   const adapter = await loadAdapterConfig(root, "codex");
-  const runtimeConfig = getCodexRuntimeConfig(adapter);
 
   let mission: MissionDocument;
   try {
@@ -263,6 +262,20 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
     mission = validateMission(parsed);
   } catch (e) {
     throw new Error(`Mission load error: ${(e as Error).message}`);
+  }
+
+  // UH-33: merge mission-level runtime_config_overrides on top of the
+  // adapter manifest defaults, then strict-parse via the per-runtime
+  // schema so UH-26 typo safety extends to mission overrides.
+  const mergedRuntimeConfig = {
+    ...(adapter.config?.runtime_config ?? {}),
+    ...mission.runtime_config_overrides,
+  };
+  let runtimeConfig;
+  try {
+    runtimeConfig = CodexRuntimeConfigSchema.parse(mergedRuntimeConfig);
+  } catch (e) {
+    throw new Error(`Mission runtime_config_overrides validation failed: ${(e as Error).message}`);
   }
 
   let workflow: WorkflowDocument | undefined;

@@ -155,6 +155,49 @@ config:
     expect(result.session_id_passthrough).toBe(false);
     expect(result.errors).toContain("Codex assigns its own thread id; set pass_session_id: false");
   });
+
+  test("merges mission runtime_config_overrides on top of adapter defaults (UH-33)", async () => {
+    const { missionPath } = await writeHarnessMission("override-sandbox-mode");
+    await writeFile(missionPath, `schema_version: uh.mission.v0
+id: override-sandbox-mode
+name: Override Sandbox Mode
+description: Promote sandbox mode via mission override.
+workflow_profile: research-docs
+issues: []
+read_first: []
+expected_artifacts: []
+verification:
+  checks: []
+runtime_config_overrides:
+  sandbox_mode: read-only
+`, "utf-8");
+
+    const result = await planCodexRun(TEST_ROOT, missionPath);
+
+    expect(result.errors).toEqual([]);
+    const sandboxIdx = result.args.indexOf("--sandbox");
+    expect(sandboxIdx).toBeGreaterThanOrEqual(0);
+    expect(result.args[sandboxIdx + 1]).toBe("read-only");
+  });
+
+  test("rejects typos in mission runtime_config_overrides (UH-33)", async () => {
+    const { missionPath } = await writeHarnessMission("typo-codex");
+    await writeFile(missionPath, `schema_version: uh.mission.v0
+id: typo-codex
+name: Typo Codex
+description: Bad key in override.
+workflow_profile: research-docs
+issues: []
+read_first: []
+expected_artifacts: []
+verification:
+  checks: []
+runtime_config_overrides:
+  sandbox_modd: read-only
+`, "utf-8");
+
+    await expect(planCodexRun(TEST_ROOT, missionPath)).rejects.toThrow(/runtime_config_overrides validation failed.*sandbox_modd/s);
+  });
 });
 
 describe("codex stream parsing", () => {
