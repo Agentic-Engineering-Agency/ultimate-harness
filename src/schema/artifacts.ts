@@ -1,13 +1,28 @@
 import { z } from "zod";
 
 export const SkillEntrySchema = z.object({
+  // Backward-compatible fields kept so older skills indexes still validate.
   name: z.string().min(1),
   description: z.string().optional(),
   source: z.string().optional(),
   path: z.string().optional(),
   required: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
+  // UH-6 skill format fields.
+  id: z.string().min(1).optional(),
+  triggers: z.array(z.string()).optional(),
+  prerequisites: z.array(z.string()).optional(),
+  related: z.array(z.string()).optional(),
 });
+
+export const SkillFrontmatterSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().min(1),
+  triggers: z.array(z.string()).optional().default([]),
+  prerequisites: z.array(z.string()).optional().default([]),
+  related: z.array(z.string()).optional().default([]),
+}).strict();
 
 export const SkillsIndexSchema = z.object({
   schema_version: z.literal("uh.skills-index.v0"),
@@ -96,6 +111,7 @@ export const RuntimeSessionSchema = z.object({
 }).strict();
 
 export type SkillsIndexDocument = z.infer<typeof SkillsIndexSchema>;
+export type SkillFrontmatter = z.infer<typeof SkillFrontmatterSchema>;
 export type SandboxesIndexDocument = z.infer<typeof SandboxesIndexSchema>;
 export type SandboxStatus = z.infer<typeof SandboxStatusSchema>;
 export type VerificationResultDocument = z.infer<typeof VerificationResultSchema>;
@@ -105,6 +121,10 @@ export type RuntimeSessionStatus = z.infer<typeof RuntimeSessionStatusSchema>;
 
 export function validateSkillsIndex(data: unknown): SkillsIndexDocument {
   return SkillsIndexSchema.parse(data);
+}
+
+export function validateSkillFrontmatter(data: unknown): SkillFrontmatter {
+  return SkillFrontmatterSchema.parse(data);
 }
 
 export function validateSandboxesIndex(data: unknown): SandboxesIndexDocument {
