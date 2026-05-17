@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { readFile, appendFile, lstat, writeFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
 import path from "node:path";
-import { AdapterDocument, AdapterConfigSchema } from "../schema/adapter.js";
+import { AdapterDocument, AdapterConfigSchema, registerRuntimeConfigSchema } from "../schema/adapter.js";
 import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
@@ -179,6 +179,16 @@ const hermesRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
 };
 
 runtimeRegistry.register("hermes", hermesRuntimeChecker);
+
+/**
+ * Hermes has no runtime-specific runtime_config keys today. Registering a
+ * strict empty schema ensures that any future typo or accidental key in
+ * `config.runtime_config:` for hermes manifests fails fast instead of being
+ * silently dropped.
+ */
+export const HermesRuntimeConfigSchema = z.object({}).strict();
+export type HermesRuntimeConfig = z.infer<typeof HermesRuntimeConfigSchema>;
+registerRuntimeConfigSchema("hermes", HermesRuntimeConfigSchema);
 
 /**
  * Convenience wrapper that mirrors the CLI's hermes check.
