@@ -4,8 +4,9 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 import { validateMission, type MissionDocument } from "../schema/mission.js";
 import { validateVerificationResult, type VerificationResultDocument } from "../schema/artifacts.js";
-import { harnessDir, missionsDir, projectYaml } from "./paths.js";
+import { harnessDir, missionsDir, projectYaml, sandboxesDir, sandboxesIndex } from "./paths.js";
 import { validateFile } from "./validate.js";
+import { SandboxesIndexSchema } from "../schema/artifacts.js";
 
 const SNIPPET_LIMIT = 800;
 const TIMEOUT_KILL_GRACE_MS = 100;
@@ -13,6 +14,13 @@ export const DEFAULT_VERIFY_COMMAND_TIMEOUT_MS = 30_000;
 
 export type VerifyMissionOptions = {
   commandTimeoutMs?: number;
+  /**
+   * When true (default), `verifyMission` resolves the sandbox bound to the
+   * mission via `.harness/sandboxes/index.yaml` and runs checks (and writes
+   * artifacts) inside that worktree. Pass `false` to force checks to run in
+   * the harness root regardless of bound sandboxes.
+   */
+  useSandbox?: boolean;
 };
 
 export type VerifyMissionResult = {
@@ -23,6 +31,11 @@ export type VerifyMissionResult = {
   checks_passed: number;
   checks_failed: number;
   checks_blocked: number;
+  /**
+   * Populated when verify auto-routed into a bound sandbox worktree. Undefined
+   * when checks ran in the harness root.
+   */
+  sandbox?: { id: string; path: string };
 };
 
 export async function verifyMission(root: string, missionId: string, options: VerifyMissionOptions = {}): Promise<VerifyMissionResult> {
@@ -32,7 +45,15 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   await rejectSymlinkIfExists(path.resolve(harnessDir(projectRoot)), "Harness directory");
   await requireInitializedProject(projectRoot);
 
-  const missionRoot = path.resolve(missionsDir(projectRoot));
+  const useSandbox = options.useSandbox !== false;
+  const boundSandbox = useSandbox ? await findBoundSandbox(projectRoot, missionId) : null;
+  const effectiveRoot = boundSandbox ? boundSandbox.path : projectRoot;
+  if (boundSandbox) {
+    await rejectSymlinkIfExists(path.resolve(harnessDir(effectiveRoot)), "Harness directory");
+    await requireInitializedProject(effectiveRoot);
+  }
+
+  const missionRoot = path.resolve(missionsDir(effectiveRoot));
   const missionDir = path.resolve(missionRoot, missionId);
   const missionPath = path.resolve(missionDir, "mission.yaml");
   const verificationPath = path.resolve(missionDir, "verification.yaml");
@@ -61,6 +82,7 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     type: "verification.started",
     mission_id: missionId,
     timestamp: new Date().toISOString(),
+    ...(boundSandbox ? { sandbox_id: boundSandbox.id } : {}),
   });
 
   const checks: VerificationResultDocument["checks"] = [];
@@ -79,7 +101,7 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     }
 
     executableChecks += 1;
-    const executed = await runCheck(projectRoot, check.name, check.command, commandTimeoutMs);
+    const executed = await runCheck(effectiveRoot, check.name, check.command, commandTimeoutMs);
     checks.push(executed.check);
     if (executed.finding) {
       findings.push(executed.finding);
@@ -116,6 +138,7 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     timestamp: new Date().toISOString(),
     status,
     checks_total: checks.length,
+    ...(boundSandbox ? { sandbox_id: boundSandbox.id } : {}),
   });
 
   return {
@@ -126,7 +149,46 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     checks_passed: checks.filter((check) => check.status === "passed").length,
     checks_failed: checks.filter((check) => check.status === "failed").length,
     checks_blocked: checks.filter((check) => check.status === "blocked").length,
+    ...(boundSandbox ? { sandbox: boundSandbox } : {}),
   };
+}
+
+export async function findBoundSandbox(
+  projectRoot: string,
+  missionId: string,
+): Promise<{ id: string; path: string } | null> {
+  const indexPath = sandboxesIndex(projectRoot);
+  if (!(await fileExists(indexPath))) {
+    return null;
+  }
+  let raw: string;
+  try {
+    raw = await readFile(indexPath, "utf-8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = parse(raw);
+  } catch {
+    return null;
+  }
+  const result = SandboxesIndexSchema.safeParse(parsed);
+  if (!result.success) {
+    return null;
+  }
+  const sandboxesRoot = path.resolve(sandboxesDir(projectRoot));
+  const candidates = result.data.sandboxes
+    .filter((entry) => entry.mission_id === missionId && entry.status !== "discarded" && typeof entry.path === "string" && entry.path.length > 0)
+    .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
+  for (const candidate of candidates) {
+    if (!candidate.path) continue;
+    const abs = path.resolve(projectRoot, candidate.path);
+    if (!isPathWithin(abs, sandboxesRoot)) continue;
+    if (!(await fileExists(abs))) continue;
+    return { id: candidate.id, path: abs };
+  }
+  return null;
 }
 
 async function readMissionAtLocation(missionPath: string): Promise<MissionDocument> {

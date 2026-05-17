@@ -21,10 +21,10 @@ Baseline command:
 ```text
 codex exec \
   --sandbox workspace-write \
-  --ask-for-approval on-request \
   --cd <sandbox-path> \
   --json \
   --output-last-message <mission-dir>/runtime-final.txt \
+  --skip-git-repo-check \
   "<mission-prompt>"
 ```
 
@@ -35,9 +35,13 @@ Flag rationale:
 - `--sandbox workspace-write` — Codex confines writes to the sandbox cwd and
   blocks unrelated filesystem effects. This is the recommended replacement for
   the deprecated `--full-auto` macro.
-- `--ask-for-approval on-request` — Codex pauses for elevation prompts instead
-  of silently failing on a blocked command; the adapter surfaces those
-  prompts as `runtime.blocked` events rather than answering them.
+- `--ask-for-approval` was retired in `codex-cli 0.130`. Under
+  `--sandbox workspace-write`, in-sandbox actions are auto-approved without
+  an explicit flag. Elevation prompts (network access, writes outside the
+  sandbox) still surface; the adapter exposes them as `runtime.blocked`
+  events rather than answering them. The `approval_policy` runtime_config
+  key is retained for backward-compat with manifests written against
+  pre-0.130 codex CLIs but is currently a no-op (see UH-30).
 - `--cd <sandbox-path>` — pins Codex to the worktree allocated by the sandbox
   backend. The adapter never invokes Codex from the canonical repo root.
 - `--json` — emits a JSON Lines event stream on stdout. The adapter consumes
@@ -227,10 +231,10 @@ adapter contract, not user policy):
 
 - `exec`
 - `--sandbox workspace-write`
-- `--ask-for-approval on-request`
 - `--cd <sandbox-path>`
 - `--json`
 - `--output-last-message <mission-dir>/runtime-final.txt`
+- `--skip-git-repo-check`
 
 The mission prompt is the trailing positional argument.
 
@@ -243,10 +247,10 @@ The mission prompt is the trailing positional argument.
 - **Deprecated `--full-auto`.** The flag still works but Codex warns on every
   run and may remove it. The adapter avoids it by default; the
   `compat_full_auto` escape hatch exists only for pinned older builds.
-- **Approval prompts block progress.** With `--ask-for-approval on-request`,
-  any blocked operation pauses Codex. The adapter exposes this as a
-  `runtime.blocked` event with the requested command; it does not auto-approve
-  to avoid silently widening permissions.
+- **Elevation prompts block progress.** In `codex-cli 0.130+`, any operation
+  outside the sandbox (network, writes outside cwd) still surfaces as an
+  elevation request. The adapter exposes it as a `runtime.blocked` event
+  rather than auto-approving, to avoid silently widening permissions.
 - **JSONL schema drift.** Codex event types (`thread.started`, `turn.*`,
   `item.*`, `mcp_tool_call`, …) evolve. The adapter parses by event name
   with a fallback bucket; unknown events are stored verbatim so we do not
@@ -266,3 +270,15 @@ The mission prompt is the trailing positional argument.
 - **No subagent fan-out.** Codex runs as a single thread. Missions that
   expect parallel subagent execution must route to an adapter that
   advertises `subagents`.
+
+## Implementation status (2026-05-17)
+
+- The adapter is now wired as `experimental` in `src/adapters/codex.ts` (CLI transport via `codex exec`, JSONL parsing, final-message capture, diff capture, runtime-result emission). End-to-end against the real Codex backend is gated on subscription quota and is NOT yet verified.
+- Local CLI probed: `codex-cli 0.130.0`. Supports `--cd`, `--sandbox`, `--ask-for-approval`, `--json`, `--output-last-message`, `--skip-git-repo-check`.
+- Quota / auth failures are classified as `runtime-result.status: blocked` with an explicit remediation message; they are NOT failures of the mission.
+
+## Why no direct ChatGPT backend OAuth client
+
+- Both `NousResearch/hermes-agent` and `can1357/oh-my-pi` treat the Codex backend (`https://chatgpt.com/backend-api`) as a specialized OAuth-backed surface (`OpenAI-Beta: responses=experimental`, `chatgpt-account-id` from a JWT claim, `originator` header). Implementing that wire protocol inside Ultimate Harness would duplicate fragile semi-private behavior and require credential/refresh storage decisions.
+- The official `codex exec` CLI already owns OAuth, account state, session ids, and rate-limit handling, and exposes the exact non-interactive primitives we need. Using it as the transport is the smallest correct slice.
+- Reuse of broker/gateway patterns (oh-my-pi `auth-broker`/`auth-gateway`) is parked as a future option — tracked in the [roadmap](../ROADMAP.md).

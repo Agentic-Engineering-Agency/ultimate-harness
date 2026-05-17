@@ -115,3 +115,79 @@ Adapters should not:
 - Rewrite specs without a workflow step.
 - Promote changes without approval.
 - Invent undocumented entity names.
+
+## Runtime-final-message capture protocol (UH-28)
+
+Every adapter participates in a uniform protocol for capturing the
+mission's final summary message into `runtime-final.txt`:
+
+### Prompt-side contract
+
+The harness appends the following instruction block to the mission
+prompt before handing it to the runtime (`runtimeFinalMessageInstruction()`
+in `src/harness/runtime-final-message.ts`):
+
+```text
+## Runtime final message
+
+At the very end of your response, emit your one-paragraph summary inside
+a fenced code block tagged `uh-runtime-final-message`:
+
+```uh-runtime-final-message
+<one-paragraph summary of what you did, what changed, and any caveats>
+```
+
+This fenced block MUST be the last block in your output. The harness
+extracts its content verbatim into `runtime-final.txt`.
+```
+
+### Extraction-side contract
+
+Each adapter calls `extractRuntimeFinalMessageSentinel(text)` over the
+captured model output and writes the matched content into
+`runtime-final.txt`. When the sentinel is absent, the adapter falls back
+to its runtime-native capture path (see table below).
+
+The extractor:
+
+- Matches `` ```uh-runtime-final-message ``` `` fenced blocks anywhere in
+  the captured text.
+- Returns the LAST occurrence (a mission may emit interim drafts; only
+  the terminal block is authoritative).
+- Tolerates CRLF line endings, leading/trailing whitespace inside the
+  fence, and optional spaces after the opening tag.
+- Returns `null` when no sentinel block is present.
+
+### Per-adapter resolution
+
+| Adapter   | Sentinel scan target                                       | Fallback when sentinel absent                                 |
+|-----------|------------------------------------------------------------|---------------------------------------------------------------|
+| codex     | Content of `--output-last-message` file (raw text)         | Raw file content (Codex's native final message)               |
+| oh-my-pi  | Heuristic-extracted last assistant text (JSON-decoded)     | Heuristic last assistant text (unchanged from pre-UH-28)      |
+| hermes    | Hermes stdout text                                         | Empty file (Hermes does not produce a native summary today)   |
+
+### Status semantics
+
+- The sentinel does NOT change `runtime-result.status`. Status remains
+  driven by exit code, runtime-native signals (Codex's
+  `--output-last-message` presence, Hermes' `uh.runtime-result.v0`
+  block, oh-my-pi's heuristic finalMessage non-empty check).
+- A mission may emit a runtime-result `status: passed` even when the
+  sentinel is omitted, as long as the runtime-native fallback path
+  satisfies the adapter's success criteria. The sentinel is the
+  *preferred* summary source, not a *required* one.
+
+### Why a single shared protocol
+
+Before UH-28 each adapter rolled its own final-message capture:
+Codex used a side-channel file, Hermes had no `runtime-final.txt` at all,
+oh-my-pi did a JSON heuristic. UH-28 lets missions explicitly bound the
+summary independent of runtime quirks, which:
+
+1. Makes the summary deterministic across runtimes for cross-runtime
+   QA comparisons.
+2. Removes the need for adapter-specific prompt instructions (each
+   buildMissionPrompt now appends the same sentinel block).
+3. Lets the harness add structured terminal annotations in the future
+   (e.g. `uh-runtime-blockers`, `uh-runtime-next-steps`) using the
+   same extraction pattern.

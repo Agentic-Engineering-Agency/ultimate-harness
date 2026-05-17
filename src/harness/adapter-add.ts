@@ -1,0 +1,148 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { adaptersDir } from "./paths.js";
+import { fileExists } from "./mission.js";
+
+/**
+ * Built-in adapter manifest templates. These mirror the canonical manifests
+ * that live in this repo's own `.harness/adapters/` directory. `uh adapter
+ * add <runtime>` writes the named template into the target project's
+ * `.harness/adapters/<runtime>.yaml`.
+ *
+ * Wired adapters (post v0.1.0):
+ * - `hermes`     — active   (reference adapter)
+ * - `codex`      — active   (verified end-to-end against codex-cli 0.130.0)
+ * - `oh-my-pi`   — experimental
+ *
+ * Adapters tracked on the roadmap (not yet templated):
+ * - `hermes-proxy` — see UH-32 / docs/ROADMAP.md
+ */
+const ADAPTER_TEMPLATES: Record<string, string> = {
+  hermes: `schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+description: Runtime adapter for Hermes Agent (Nous Research). Executes missions via hermes CLI. Requires hermes >= 0.14.0.
+runtime: hermes
+capabilities:
+  - cli-execution
+  - worktree-isolation
+  - skill-loading
+  - toolset-config
+  - session-resume
+status: active
+config:
+  cli_command: hermes
+  default_toolsets:
+    - terminal
+    - file
+    - web
+    - skills
+    - session_search
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true
+`,
+  codex: `schema_version: uh.adapter.v0
+id: codex
+name: OpenAI Codex
+description: >-
+  Runtime adapter for the OpenAI Codex CLI. Executes missions via
+  \`codex exec\` inside a git-worktree sandbox with --sandbox workspace-write.
+  Verified against codex-cli 0.130.0.
+  See docs/architecture/adapter-codex.md and docs/runbooks/codex-e2e-smoke.md.
+runtime: codex
+capabilities:
+  - cli-execution
+  - non-interactive
+  - one-shot
+  - background
+  - worktree-isolation
+  - json-output
+  - diff-output
+  - mcp-tools
+  - structured-events
+status: active
+config:
+  cli_command: codex
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: true
+  pass_session_id: false
+  runtime_config:
+    sandbox_mode: workspace-write
+    approval_policy: never
+    full_auto_compat: false
+`,
+  "oh-my-pi": `schema_version: uh.adapter.v0
+id: oh-my-pi
+name: oh-my-pi
+description: >-
+  Runtime adapter for oh-my-pi (omp), a multi-provider CLI coding agent.
+  Executes missions via \`omp --print --mode json\` with sessions ephemeral and
+  extensions/skills disabled by default for deterministic runs. Provider /
+  account auth flows through OMP's own credential store and env vars.
+  See docs/runbooks/anthropic-via-omp.md for the Anthropic-via-OMP routing
+  path and its ToS posture.
+runtime: oh-my-pi
+capabilities:
+  - cli-execution
+  - non-interactive
+  - one-shot
+  - background
+  - worktree-isolation
+  - json-output
+  - diff-output
+status: experimental
+config:
+  cli_command: omp
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    mode: json
+    thinking: ""
+    allow_extensions: false
+    allow_skills: false
+`,
+};
+
+export type AddAdapterResult = {
+  runtime: string;
+  path: string;
+  created: boolean;
+};
+
+export type AddAdapterOptions = {
+  force?: boolean;
+};
+
+export function listAdapterTemplates(): string[] {
+  return Object.keys(ADAPTER_TEMPLATES).sort();
+}
+
+export async function addAdapter(
+  root: string,
+  runtime: string,
+  options: AddAdapterOptions = {},
+): Promise<AddAdapterResult> {
+  const template = ADAPTER_TEMPLATES[runtime];
+  if (!template) {
+    throw new Error(
+      `Unknown adapter template: ${runtime}. Available: ${listAdapterTemplates().join(", ")}`,
+    );
+  }
+  const dir = adaptersDir(root);
+  await mkdir(dir, { recursive: true });
+  const target = path.join(dir, `${runtime}.yaml`);
+  if (!options.force && (await fileExists(target))) {
+    throw new Error(
+      `Adapter manifest already exists at ${target}. Pass --force to overwrite.`,
+    );
+  }
+  await writeFile(target, template, "utf-8");
+  return { runtime, path: target, created: true };
+}

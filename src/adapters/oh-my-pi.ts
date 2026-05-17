@@ -1,11 +1,11 @@
-import { z } from "zod";
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, appendFile, lstat, writeFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
 import path from "node:path";
-import { AdapterDocument, AdapterConfigSchema, registerRuntimeConfigSchema } from "../schema/adapter.js";
+import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.js";
+import { z } from "zod";
 import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
@@ -55,7 +55,7 @@ export type DryRunResult = {
   errors: string[];
 };
 
-export type HermesRunPlan = {
+export type OhMyPiRunPlan = {
   command: string;
   args: string[];
   prompt: string;
@@ -66,14 +66,14 @@ export type HermesRunPlan = {
 };
 
 /**
- * Input the adapter hands to a Hermes runner.
+ * Input the adapter hands to a OhMyPi runner.
  *
  * Runners are responsible for invoking the configured CLI with the given
  * arguments inside `cwd`. They MUST honor `timeoutMs` when set; on expiry,
  * return `timedOut: true` and a non-zero exit code. The default runner uses
  * `child_process.spawn`; tests inject deterministic stubs.
  */
-export interface HermesRunnerInput {
+export interface OhMyPiRunnerInput {
   command: string;
   args: string[];
   cwd: string;
@@ -81,13 +81,13 @@ export interface HermesRunnerInput {
 }
 
 /**
- * Output a Hermes runner returns to the adapter.
+ * Output a OhMyPi runner returns to the adapter.
  *
  * Errors are surfaced explicitly rather than swallowed: a spawn failure sets
  * `spawnError`; a timeout sets `timedOut`. The adapter translates these into
  * `failed` runtime-result entries with explicit `errors[]` items.
  */
-export interface HermesRunnerOutput {
+export interface OhMyPiRunnerOutput {
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -95,7 +95,7 @@ export interface HermesRunnerOutput {
   spawnError?: string;
 }
 
-export type HermesRunner = (input: HermesRunnerInput) => Promise<HermesRunnerOutput>;
+export type OhMyPiRunner = (input: OhMyPiRunnerInput) => Promise<OhMyPiRunnerOutput>;
 
 export interface DiffCaptureResult {
   patch: string;
@@ -104,30 +104,30 @@ export interface DiffCaptureResult {
 
 export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
 
-export interface RunHermesOptions {
-  runner?: HermesRunner;
+export interface RunOhMyPiOptions {
+  runner?: OhMyPiRunner;
   timeoutMs?: number;
   collectDiff?: DiffCollector;
 }
 
-export interface RunHermesResult {
+export interface RunOhMyPiResult {
   exitCode: number;
   stdout: string;
   stderr: string;
   result?: RuntimeResultDocument;
 }
 
-export interface HermesCollectInput {
+export interface OhMyPiCollectInput {
   root: string;
   artifacts: MissionArtifactContext | null;
-  plan: HermesRunPlan;
+  plan: OhMyPiRunPlan;
   startedAt: string;
   finishedAt: string;
-  runnerResult: HermesRunnerOutput;
+  runnerResult: OhMyPiRunnerOutput;
   diff: DiffCaptureResult;
 }
 
-export interface HermesCollectOutput {
+export interface OhMyPiCollectOutput {
   exitCode: number;
   stderr: string;
   result?: RuntimeResultDocument;
@@ -140,142 +140,90 @@ export async function loadAdapterConfig(root: string, runtimeId: string): Promis
   return entry.document;
 }
 
-/**
- * Minimum Hermes Agent version required by Ultimate Harness.
- *
- * Hermes Agent v0.14.0 introduced the `hermes proxy` OAI-compatible local
- * endpoint (UH-32), the per-turn file-mutation verifier footer, and the
- * codex app-server runtime with OAuth refresh classification. Older Hermes
- * builds are missing those capabilities and produce subtly different
- * runtime artifacts; gate explicitly rather than silently accept.
- */
-export const MINIMUM_HERMES_VERSION = { major: 0, minor: 14, patch: 0 } as const;
-
-export type HermesSemver = { major: number; minor: number; patch: number };
-
-/**
- * Pull the first M.N.P (or M.N.P-pre / M.N.P+build) number out of a `hermes
- * --version` output. Returns null when no semver-like sequence is found.
- *
- * Tolerates the variants we have observed in the wild:
- * - "hermes 0.14.0"
- * - "Hermes Agent 0.14.0"
- * - "hermes-agent 0.14.0-beta.1"
- * - "hermes 0.14.0 (build abc)"
- */
-export function parseHermesVersion(output: string): HermesSemver | null {
-  const match = output.match(/(\d+)\.(\d+)\.(\d+)/);
-  if (!match) return null;
-  return {
-    major: Number.parseInt(match[1], 10),
-    minor: Number.parseInt(match[2], 10),
-    patch: Number.parseInt(match[3], 10),
-  };
-}
-
-/**
- * Returns true when `version` is at least `MINIMUM_HERMES_VERSION` in semver
- * order. Pre-release / build suffixes are ignored; we compare the base triple.
- */
-export function meetsMinimumHermesVersion(version: HermesSemver): boolean {
-  const min = MINIMUM_HERMES_VERSION;
-  if (version.major !== min.major) return version.major > min.major;
-  if (version.minor !== min.minor) return version.minor > min.minor;
-  return version.patch >= min.patch;
-}
-
-/**
- * Hermes runtime availability check.
- *
- * Runs `<cli_command> --version` and `<cli_command> status`; the manifest is
- * trusted because it has already been loaded and validated by the registry.
- * Hard failures from missing manifests never reach here — they are surfaced
- * by `RuntimeRegistry.load`/`check` upstream.
- */
-async function runHermesCliCheck(command: string): Promise<AdapterCheckResult> {
+async function runOhMyPiCliCheck(command: string): Promise<AdapterCheckResult> {
   const result: AdapterCheckResult = {
-    runtime: "hermes",
+    runtime: "oh-my-pi",
     found: false,
     version: "",
     errors: [],
   };
 
-  let versionOutput: string;
   try {
     const { stdout } = await execFileP(command, ["--version"]);
-    versionOutput = stdout.trim();
+    result.found = true;
+    result.version = stdout.trim();
   } catch {
     result.errors.push(
-      "hermes CLI not found in PATH. Install: curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+      "omp CLI not found in PATH. Install: https://github.com/can1357/oh-my-pi",
     );
-    return result;
-  }
-
-  result.found = true;
-  result.version = versionOutput;
-
-  const parsed = parseHermesVersion(versionOutput);
-  if (!parsed) {
-    result.errors.push(
-      `hermes --version output not recognized; expected M.N.P somewhere in: ${versionOutput}`,
-    );
-  } else if (!meetsMinimumHermesVersion(parsed)) {
-    const min = MINIMUM_HERMES_VERSION;
-    result.errors.push(
-      `hermes ${min.major}.${min.minor}.${min.patch}+ required (you have ${parsed.major}.${parsed.minor}.${parsed.patch}); upgrade with: pip install --upgrade hermes-agent`,
-    );
-  }
-
-  try {
-    await execFileP(command, ["status"]);
-  } catch {
-    result.errors.push("hermes status failed; may need initial setup (hermes setup or hermes model)");
   }
 
   return result;
 }
 
-const hermesRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
-  const command = manifest.config?.cli_command || "hermes";
-  return runHermesCliCheck(command);
+const ohMyPiRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
+  const command = manifest.config?.cli_command ? manifest.config.cli_command : "omp";
+  return runOhMyPiCliCheck(command);
 };
 
-runtimeRegistry.register("hermes", hermesRuntimeChecker);
+runtimeRegistry.register("oh-my-pi", ohMyPiRuntimeChecker);
 
 /**
- * Hermes has no runtime-specific runtime_config keys today. Registering a
- * strict empty schema ensures that any future typo or accidental key in
- * `config.runtime_config:` for hermes manifests fails fast instead of being
- * silently dropped.
+ * Strict Zod schema for `config.runtime_config` of the oh-my-pi adapter.
+ *
+ * Registered with the adapter-schema registry so manifests are validated at
+ * load time; unknown keys raise a Zod error.
  */
-export const HermesRuntimeConfigSchema = z.object({}).strict();
-export type HermesRuntimeConfig = z.infer<typeof HermesRuntimeConfigSchema>;
-registerRuntimeConfigSchema("hermes", HermesRuntimeConfigSchema);
+export const OhMyPiRuntimeConfigSchema = z.object({
+  mode: z
+    .enum(["json", "text", "rpc", "rpc-ui"])
+    .optional()
+    .default("json"),
+  thinking: z
+    .union([
+      z.literal(""),
+      z.enum(["minimal", "low", "medium", "high", "xhigh"]),
+    ])
+    .optional()
+    .default(""),
+  allow_extensions: z.boolean().optional().default(false),
+  allow_skills: z.boolean().optional().default(false),
+  model: z.string().optional(),
+}).strict();
+
+export type OhMyPiRuntimeConfig = z.infer<typeof OhMyPiRuntimeConfigSchema>;
+
+registerRuntimeConfigSchema("oh-my-pi", OhMyPiRuntimeConfigSchema);
+
+/** Extract the strongly-typed oh-my-pi `runtime_config` from an adapter manifest. */
+export function getOhMyPiRuntimeConfig(adapter: AdapterDocument): OhMyPiRuntimeConfig {
+  return OhMyPiRuntimeConfigSchema.parse(adapter.config?.runtime_config ?? {});
+}
 
 /**
- * Convenience wrapper that mirrors the CLI's hermes check.
+ * Convenience wrapper that mirrors the CLI's oh-my-pi check.
  *
  * - With `root`: dispatches through the registry so manifest errors and CLI
  *   errors share the same structured shape.
- * - Without `root`: probes the hermes CLI directly (used in environments
+ * - Without `root`: probes the oh-my-pi CLI directly (used in environments
  *   without an initialized `.harness/`).
  */
-export async function checkHermes(root?: string): Promise<CheckResult> {
+export async function checkOhMyPi(root?: string): Promise<CheckResult> {
   if (root) {
-    return runtimeRegistry.check(root, "hermes");
+    return runtimeRegistry.check(root, "oh-my-pi");
   }
-  return runHermesCliCheck("hermes");
+  return runOhMyPiCliCheck("omp");
 }
 
-export async function dryRunHermes(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunOhMyPi(root: string, missionPath: string): Promise<DryRunResult> {
   try {
-    const plan = await planHermesRun(root, missionPath);
+    const plan = await planOhMyPiRun(root, missionPath);
     const artifacts = await getMissionArtifactContext(root, missionPath);
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
         schema_version: "uh.runtime-session.v0",
         mission_id: plan.mission.id,
-        runtime: "hermes",
+        runtime: "oh-my-pi",
         status: "planned",
         command: plan.command,
         args: plan.args,
@@ -302,14 +250,14 @@ export async function dryRunHermes(root: string, missionPath: string): Promise<D
 }
 
 /**
- * Compile a mission into the command, args, and prompt the Hermes runner
+ * Compile a mission into the command, args, and prompt the OhMyPi runner
  * needs. Throws when the mission or adapter manifest cannot be loaded;
  * recoverable issues (missing workflow profile) are returned in `errors[]`
  * so the caller decides whether to proceed.
  */
-export async function planHermesRun(root: string, missionPath: string): Promise<HermesRunPlan> {
+export async function planOhMyPiRun(root: string, missionPath: string): Promise<OhMyPiRunPlan> {
   const errors: string[] = [];
-  const adapter = await loadAdapterConfig(root, "hermes");
+  const adapter = await loadAdapterConfig(root, "oh-my-pi");
 
   let mission: MissionDocument;
   try {
@@ -318,6 +266,19 @@ export async function planHermesRun(root: string, missionPath: string): Promise<
     mission = validateMission(parsed);
   } catch (e) {
     throw new Error(`Mission load error: ${(e as Error).message}`);
+  }
+
+  // Merge mission-level overrides on top of adapter defaults, then strict-parse.
+  // The strict schema catches typos in either source (adapter manifest or mission override).
+  const mergedRuntimeConfig = {
+    ...(adapter.config?.runtime_config ?? {}),
+    ...mission.runtime_config_overrides,
+  };
+  let runtimeConfig;
+  try {
+    runtimeConfig = OhMyPiRuntimeConfigSchema.parse(mergedRuntimeConfig);
+  } catch (e) {
+    throw new Error(`Mission runtime_config_overrides validation failed: ${(e as Error).message}`);
   }
 
   let workflow: WorkflowDocument | undefined;
@@ -330,57 +291,47 @@ export async function planHermesRun(root: string, missionPath: string): Promise<
     errors.push(`Workflow profile not found: ${mission.workflow_profile}`);
   }
 
-  // UH-33: merge mission-level runtime_config_overrides on top of the
-  // adapter manifest defaults, then strict-parse via the per-runtime
-  // schema. HermesRuntimeConfigSchema is currently empty-strict, so any
-  // override key will fail load — but the wiring is in place for the day
-  // hermes gains runtime-specific config (e.g. hermes-proxy endpoint).
-  const mergedRuntimeConfig = {
-    ...(adapter.config?.runtime_config ?? {}),
-    ...mission.runtime_config_overrides,
-  };
-  try {
-    HermesRuntimeConfigSchema.parse(mergedRuntimeConfig);
-  } catch (e) {
-    throw new Error(`Mission runtime_config_overrides validation failed: ${(e as Error).message}`);
+  const config = adapter.config;
+  const cliCommand = config?.cli_command ? config.cli_command : "omp";
+  const worktreeMode = config?.worktree_mode === true;
+  if (config?.pass_session_id === true) {
+    errors.push("OhMyPi assigns its own thread id; set pass_session_id: false");
   }
 
-  const defaultConfig: z.infer<typeof AdapterConfigSchema> = {
-    cli_command: "hermes",
-    default_toolsets: [],
-    default_provider: "",
-    default_model: "",
-    worktree_mode: false,
-    pass_session_id: true,
-    runtime_config: {},
-  };
-  const config = adapter.config ?? defaultConfig;
-  const toolsets = config.default_toolsets.length > 0
-    ? config.default_toolsets.join(",")
-    : "terminal,file,web";
+  const mode = runtimeConfig.mode;
+  if (mode === "rpc-ui") {
+    errors.push("oh-my-pi mode rpc-ui expects a TUI parent; use mode: json, text, or rpc for headless runs");
+  }
+  const model = runtimeConfig.model && runtimeConfig.model.length > 0 ? runtimeConfig.model : undefined;
+  const thinking = runtimeConfig.thinking === "" ? undefined : runtimeConfig.thinking;
+  const allowExtensions = runtimeConfig.allow_extensions;
+  const allowSkills = runtimeConfig.allow_skills;
 
   const prompt = buildMissionPrompt(mission, workflow);
   const args = [
-    "chat",
-    "-q",
-    prompt,
-    "--toolsets",
-    toolsets,
-    "--source",
-    "ultimate-harness",
+    "--print",
   ];
-
-  if (config.worktree_mode) args.push("-w");
-  if (config.pass_session_id) args.push("--pass-session-id");
-  if (config.default_model) args.push("--model", config.default_model);
-  if (config.default_provider) args.push("--provider", config.default_provider);
+  if (model) {
+    args.push("--model", model);
+  }
+  if (thinking) {
+    args.push("--thinking", thinking);
+  }
+  args.push("--mode", mode, "--no-session");
+  if (!allowExtensions) {
+    args.push("--no-extensions");
+  }
+  if (!allowSkills) {
+    args.push("--no-skills");
+  }
+  args.push("--no-title", prompt);
 
   return {
-    command: config.cli_command || "hermes",
+    command: cliCommand,
     args,
     prompt,
-    worktree: config.worktree_mode,
-    session_id_passthrough: config.pass_session_id,
+    worktree: worktreeMode,
+    session_id_passthrough: false,
     errors,
     mission,
   };
@@ -392,7 +343,7 @@ export async function planHermesRun(root: string, missionPath: string): Promise<
  * `timedOut` on the returned record so the adapter can translate them into a
  * `failed` runtime-result with explicit errors.
  */
-export const defaultHermesRunner: HermesRunner = (input) => {
+export const defaultOhMyPiRunner: OhMyPiRunner = (input) => {
   return new Promise((resolve) => {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
@@ -440,20 +391,20 @@ export const defaultDiffCollector: DiffCollector = async (cwd) => {
 };
 
 /**
- * Execute a mission against the Hermes runtime end-to-end.
+ * Execute a mission against the OhMyPi runtime end-to-end.
  *
- * Orchestrates: `planHermesRun` -> writeable artifact context ->
+ * Orchestrates: `planOhMyPiRun` -> writeable artifact context ->
  * `runtime.started` audit -> runner invocation -> diff capture ->
- * `collectHermesSession`. The runner and diff collector are injectable so
+ * `collectOhMyPiSession`. The runner and diff collector are injectable so
  * tests can drive deterministic outcomes (success, non-zero exit, timeout,
- * malformed result block) without invoking a real `hermes` binary.
+ * malformed result block) without invoking a real `oh-my-pi` binary.
  */
-export async function runHermes(
+export async function runOhMyPi(
   root: string,
   missionPath: string,
-  options: RunHermesOptions = {},
-): Promise<RunHermesResult> {
-  const plan = await planHermesRun(root, missionPath);
+  options: RunOhMyPiOptions = {},
+): Promise<RunOhMyPiResult> {
+  const plan = await planOhMyPiRun(root, missionPath);
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
@@ -465,7 +416,7 @@ export async function runHermes(
     await persistPromptAndSession(artifacts, plan.prompt, {
       schema_version: "uh.runtime-session.v0",
       mission_id: plan.mission.id,
-      runtime: "hermes",
+      runtime: "oh-my-pi",
       status: "running",
       command: plan.command,
       args: plan.args,
@@ -474,7 +425,7 @@ export async function runHermes(
     await appendMissionEvent(artifacts, {
       event: "runtime.started",
       timestamp: startedAt,
-      runtime: "hermes",
+      runtime: "oh-my-pi",
       mission_id: plan.mission.id,
       command: plan.command,
       args: plan.args,
@@ -487,7 +438,7 @@ export async function runHermes(
     const auditEntry = JSON.stringify({
       event: "mission.run",
       timestamp: new Date().toISOString(),
-      runtime: "hermes",
+      runtime: "oh-my-pi",
       mission_id: plan.mission.id,
       mission_name: plan.mission.name,
       workflow: plan.mission.workflow_profile,
@@ -497,7 +448,7 @@ export async function runHermes(
     // audit failure shouldn't block run
   }
 
-  const runner = options.runner ?? defaultHermesRunner;
+  const runner = options.runner ?? defaultOhMyPiRunner;
   const runnerResult = await runner({
     command: plan.command,
     args: plan.args,
@@ -509,7 +460,7 @@ export async function runHermes(
   const diff = await collectDiff(root);
   const finishedAt = new Date().toISOString();
 
-  const collection = await collectHermesSession({
+  const collection = await collectOhMyPiSession({
     root,
     artifacts,
     plan,
@@ -528,10 +479,10 @@ export async function runHermes(
 }
 
 /**
- * Persist a completed Hermes session: stdout.log, stderr.log, diff.patch,
+ * Persist a completed OhMyPi session: stdout.log, stderr.log, diff.patch,
  * runtime-result.yaml, and the back-compat runtime-session.yaml. Determines
  * the runtime-result `status` from the runner outcome and any final
- * `uh.runtime-result.v0` block emitted by Hermes on stdout.
+ * `uh.runtime-result.v0` block emitted by OhMyPi on stdout.
  *
  * Status rules:
  *  - `spawnError` -> failed (with explicit "Spawn error: ..." stderr)
@@ -539,14 +490,14 @@ export async function runHermes(
  *  - `exitCode != 0` -> failed
  *  - `exitCode == 0` + valid final block with status passed/completed -> passed
  *  - `exitCode == 0` + any other final block status -> that block's status
- *  - `exitCode == 0` + missing/malformed block -> blocked
+ *  - `exitCode == 0` + missing final assistant message -> blocked
  *
  * Artifact-write failures are caught and surfaced via stderr so callers see
  * the cause instead of getting a silent partial commit.
  */
-export async function collectHermesSession(
-  input: HermesCollectInput,
-): Promise<HermesCollectOutput> {
+export async function collectOhMyPiSession(
+  input: OhMyPiCollectInput,
+): Promise<OhMyPiCollectOutput> {
   const { artifacts, plan, runnerResult, diff, startedAt, finishedAt, root } = input;
 
   const errors: string[] = [];
@@ -567,24 +518,40 @@ export async function collectHermesSession(
     errors.push(...diff.errors);
   }
 
-  const finalBlock = parseHermesFinalBlock(runnerResult.stdout);
+  const quotaError = detectOhMyPiQuotaError(runnerResult.stdout, stderr);
+  if (quotaError) {
+    errors.push(quotaError);
+  }
+
+  const parsedStream = parseOhMyPiOutput(runnerResult.stdout);
+  errors.push(...parsedStream.parseErrors);
+
+  // Prefer the UH-28 runtime-final-message sentinel over the heuristic
+  // (last assistant-like JSON entry). Scans the heuristic-extracted last
+  // assistant text (which is the JSON-decoded content, with real newlines)
+  // rather than the raw NDJSON stdout where newlines are JSON-escaped.
+  // Falls back to the heuristic when the sentinel is absent.
+  const heuristicFinal = parsedStream.finalMessage;
+  const sentinel = extractRuntimeFinalMessageSentinel(heuristicFinal);
+  const finalMessage = sentinel ?? heuristicFinal;
+  const finalMessageMissing = finalMessage.length === 0;
+  if (finalMessageMissing) {
+    errors.push("oh-my-pi did not emit a final assistant message");
+  }
 
   let status: RuntimeResultStatus;
-  if (exitCode !== 0) {
+  if (runnerResult.spawnError) {
     status = "failed";
-    if (!finalBlock.valid && finalBlock.found) {
-      errors.push(...finalBlock.errors);
-    }
-  } else if (!finalBlock.found) {
+  } else if (runnerResult.timedOut) {
+    status = "failed";
+  } else if (quotaError) {
     status = "blocked";
-    errors.push("Hermes did not emit a uh.runtime-result.v0 block on stdout");
-  } else if (!finalBlock.valid) {
+  } else if (exitCode !== 0) {
+    status = "failed";
+  } else if (finalMessageMissing) {
     status = "blocked";
-    errors.push(...finalBlock.errors);
-  } else if (finalBlock.status === "passed") {
-    status = "passed";
   } else {
-    status = finalBlock.status;
+    status = "passed";
   }
 
   if (!artifacts) {
@@ -596,22 +563,20 @@ export async function collectHermesSession(
     await writeArtifactFile(artifacts.missionDir, artifacts.stdoutPath, runnerResult.stdout);
     await writeArtifactFile(artifacts.missionDir, artifacts.stderrPath, stderr);
     await writeArtifactFile(artifacts.missionDir, artifacts.diffPath, diff.patch);
-    // UH-28: extract the runtime-final-message sentinel from Hermes stdout.
-    // Hermes does not produce its own runtime-final.txt; this is the only path
-    // by which the sentinel block becomes a first-class artifact. When the
-    // model omits the sentinel, runtime-final.txt is written as an empty file
-    // for parity with codex/oh-my-pi.
-    const hermesSentinel = extractRuntimeFinalMessageSentinel(runnerResult.stdout);
-    await writeArtifactFile(
-      artifacts.missionDir,
-      artifacts.finalMessagePath,
-      hermesSentinel ?? "",
-    );
+    await persistFinalMessage(artifacts, finalMessage);
+    for (const event of parsedStream.events) {
+      if (typeof event.type === "string") {
+        await appendMissionEvent(artifacts, {
+          ...event,
+          event: `oh-my-pi.${event.type}`,
+        });
+      }
+    }
 
     const draft: RuntimeResultDocument = {
       schema_version: "uh.runtime-result.v0",
       mission_id: plan.mission.id,
-      runtime: "hermes",
+      runtime: "oh-my-pi",
       status,
       started_at: startedAt,
       finished_at: finishedAt,
@@ -643,85 +608,129 @@ export async function collectHermesSession(
   return { exitCode, stderr, result };
 }
 
-interface FinalBlock {
-  found: boolean;
-  valid: boolean;
-  status: RuntimeResultStatus;
-  errors: string[];
+export function parseOhMyPiOutput(stdout: string): { events: Array<Record<string, unknown>>; parseErrors: string[]; finalMessage: string } {
+  const events: Array<Record<string, unknown>> = [];
+  const parseErrors: string[] = [];
+  const lines = stdout.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line.length === 0) continue;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        events.push(parsed as Record<string, unknown>);
+      } else {
+        parseErrors.push(`OhMyPi JSON line ${index + 1} is not an object`);
+      }
+    } catch (err) {
+      parseErrors.push(`OhMyPi JSON line ${index + 1} parse error: ${(err as Error).message}`);
+    }
+  }
+
+  if (events.length === 0 && stdout.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(stdout) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        events.push(parsed as Record<string, unknown>);
+        parseErrors.length = 0;
+      } else {
+        parseErrors.push("OhMyPi JSON output is not an object");
+      }
+    } catch {
+      // Keep line-by-line parse errors; they are more actionable.
+    }
+  }
+
+  return {
+    events,
+    parseErrors,
+    finalMessage: extractFinalMessage(events),
+  };
 }
 
-const VALID_RUNTIME_RESULT_STATUSES = new Set<RuntimeResultStatus>([
-  "passed",
-  "failed",
-  "blocked",
-  "cancelled",
-]);
+export function detectOhMyPiQuotaError(stdout: string, stderr: string): string | null {
+  const combined = `${stdout}\n${stderr}`;
+  const pattern = /usage limit|rate limit|not authenticated|auth(orization)? required|please log in|quota|credit|401|403|api[- ]?key/i;
+  if (!pattern.test(combined)) {
+    return null;
+  }
+  const firstMatch = combined
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => pattern.test(line));
+  const detail = firstMatch && firstMatch.length > 0 ? `: ${firstMatch}` : "";
+  return `oh-my-pi auth or quota error${detail}`;
+}
 
-/**
- * Locate the trailing fenced ```yaml block in the Hermes stdout, parse it,
- * and confirm it looks like a `uh.runtime-result.v0` packet. The adapter
- * does not require every field — only `schema_version` and a `status` that
- * maps onto our enum. The runtime-result is authored by the harness; the
- * model only signals its terminal status.
- *
- * Normalizes the contract doc's `completed` synonym to our `passed` enum.
- */
-function parseHermesFinalBlock(stdout: string): FinalBlock {
-  const matches = stdout.match(/```yaml\s*\n([\s\S]*?)\n```/g);
-  if (!matches || matches.length === 0) {
-    return { found: false, valid: false, status: "blocked", errors: [] };
+function extractFinalMessage(events: Array<Record<string, unknown>>): string {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const extracted = extractAssistantText(events[index]);
+    if (extracted.length > 0) {
+      return extracted;
+    }
   }
-  const raw = matches[matches.length - 1];
-  const body = raw.replace(/^```yaml\s*\n/, "").replace(/\n```$/, "");
-  let parsed: unknown;
-  try {
-    parsed = parse(body);
-  } catch (err) {
-    return {
-      found: true,
-      valid: false,
-      status: "blocked",
-      errors: [`Runtime-result block YAML parse error: ${(err as Error).message}`],
-    };
+  return "";
+}
+
+function extractAssistantText(event: Record<string, unknown>): string {
+  const role = event.role;
+  const type = event.type;
+  const isAssistantLike = role === "assistant" || type === "assistant" || type === "message" || type === "result";
+  if (isAssistantLike) {
+    const direct = extractStringBody(event);
+    if (direct.length > 0) return direct;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return {
-      found: true,
-      valid: false,
-      status: "blocked",
-      errors: ["Runtime-result block is not a YAML mapping"],
-    };
+
+  const messages = event.messages;
+  if (Array.isArray(messages)) {
+    const extracted = extractLastAssistantFromArray(messages);
+    if (extracted.length > 0) return extracted;
   }
-  const obj = parsed as Record<string, unknown>;
-  if (obj.schema_version !== "uh.runtime-result.v0") {
-    return {
-      found: true,
-      valid: false,
-      status: "blocked",
-      errors: [
-        `Runtime-result block has unexpected schema_version: ${String(obj.schema_version)}`,
-      ],
-    };
+
+  const transcript = event.transcript;
+  if (Array.isArray(transcript)) {
+    const extracted = extractLastAssistantFromArray(transcript);
+    if (extracted.length > 0) return extracted;
   }
-  const raw_status = obj.status;
-  if (typeof raw_status !== "string") {
-    return {
-      found: true,
-      valid: false,
-      status: "blocked",
-      errors: ["Runtime-result block missing status"],
-    };
+
+  const final = event.final;
+  if (typeof final === "string") return final;
+  if (final && typeof final === "object" && !Array.isArray(final)) {
+    const extracted = extractAssistantText(final as Record<string, unknown>);
+    if (extracted.length > 0) return extracted;
   }
-  const normalized: string = raw_status === "completed" ? "passed" : raw_status;
-  if (!VALID_RUNTIME_RESULT_STATUSES.has(normalized as RuntimeResultStatus)) {
-    return {
-      found: true,
-      valid: false,
-      status: "blocked",
-      errors: [`Runtime-result block has invalid status: ${raw_status}`],
-    };
+
+  const result = event.result;
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    return extractStringBody(result as Record<string, unknown>);
   }
-  return { found: true, valid: true, status: normalized as RuntimeResultStatus, errors: [] };
+
+  return "";
+}
+
+function extractLastAssistantFromArray(items: unknown[]): string {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const extracted = extractAssistantText(item as Record<string, unknown>);
+    if (extracted.length > 0) return extracted;
+  }
+  return "";
+}
+
+function extractStringBody(event: Record<string, unknown>): string {
+  for (const key of ["content", "text", "message", "body", "output"]) {
+    const value = event[key];
+    if (typeof value === "string") return value;
+  }
+  return "";
+}
+
+async function persistFinalMessage(
+  artifacts: MissionArtifactContext,
+  finalMessage: string,
+): Promise<void> {
+  await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, finalMessage);
 }
 
 async function getMissionArtifactContext(root: string, missionPath: string): Promise<MissionArtifactContext | null> {
@@ -832,7 +841,7 @@ async function appendMissionEvent(artifacts: MissionArtifactContext, event: Reco
 
 async function persistFinalRuntimeSession(
   artifacts: MissionArtifactContext,
-  plan: HermesRunPlan,
+  plan: OhMyPiRunPlan,
   startedAt: string,
   finishedAt: string,
   exitCode: number,
@@ -841,7 +850,7 @@ async function persistFinalRuntimeSession(
   await persistPromptAndSession(artifacts, plan.prompt, {
     schema_version: "uh.runtime-session.v0",
     mission_id: plan.mission.id,
-    runtime: "hermes",
+    runtime: "oh-my-pi",
     status: sessionStatus,
     command: plan.command,
     args: plan.args,
@@ -852,7 +861,7 @@ async function persistFinalRuntimeSession(
   await appendMissionEvent(artifacts, {
     event: "runtime.finished",
     timestamp: finishedAt,
-    runtime: "hermes",
+    runtime: "oh-my-pi",
     mission_id: plan.mission.id,
     exit_code: exitCode,
     status: sessionStatus,

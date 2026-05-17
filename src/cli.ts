@@ -9,15 +9,91 @@ import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
+import { dryRunCodex, runCodex } from "./adapters/codex.js";
+import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
 import { runtimeRegistry } from "./harness/registry.js";
+import { findBoundSandbox } from "./harness/verify.js";
+import { parse as parseYaml } from "yaml";
+import { readFile as readFileAsync } from "node:fs/promises";
 import {
   createSandbox,
   discardSandbox,
   getSandboxStatus,
   listSandboxes,
 } from "./harness/sandbox.js";
+import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 const VERSION = "0.0.0";
+
+/**
+ * Runtime dispatch table for `uh mission dry-run` and `uh mission run`.
+ *
+ * Adapters live in `src/adapters/<runtime>.ts` and self-register their
+ * availability checkers with `runtimeRegistry`. Mission execution is dispatched
+ * here through a uniform `{ dryRun, run }` shape so adding a runtime is one
+ * map entry instead of a new branch in two long if/else ladders.
+ *
+ * `surfaceBlocked: true` means the CLI exits 1 with `[BLOCKED]` when the
+ * adapter's `runtime-result.status === "blocked"`. Hermes opts out because
+ * historical missions tolerate blocked results without a CLI-level failure;
+ * Codex/oh-my-pi opt in because their `blocked` paths (quota, missing final
+ * message) MUST surface as non-zero exits for verification gates upstream.
+ */
+type RuntimeRunResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  result?: { status?: string; errors?: string[] };
+};
+type RuntimeDryRunResult = {
+  command: string;
+  args: string[];
+  prompt: string;
+  worktree: boolean;
+  session_id_passthrough: boolean;
+  errors: string[];
+};
+interface RuntimeWiring {
+  dryRun(root: string, missionPath: string): Promise<RuntimeDryRunResult>;
+  run(root: string, missionPath: string): Promise<RuntimeRunResult>;
+  surfaceBlocked: boolean;
+}
+const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
+  hermes: { dryRun: dryRunHermes, run: runHermes, surfaceBlocked: false },
+  codex: { dryRun: dryRunCodex, run: runCodex, surfaceBlocked: true },
+  "oh-my-pi": { dryRun: dryRunOhMyPi, run: runOhMyPi, surfaceBlocked: true },
+};
+
+/**
+ * Auto-route a mission invocation into its bound sandbox worktree.
+ *
+ * Mirrors `verifyMission`'s sandbox-routing: when a mission has an active
+ * sandbox entry in `.harness/sandboxes/index.yaml`, the adapter is invoked
+ * with the worktree path as `root` so prompts, artifacts, and diff capture
+ * all see the worktree, not the canonical repo. Returns the original root
+ * untouched when `--no-sandbox` is passed or no bound sandbox exists.
+ */
+async function resolveMissionRoot(
+  root: string,
+  missionPath: string,
+  useSandbox: boolean,
+): Promise<{ effectiveRoot: string; sandbox?: { id: string; path: string } }> {
+  if (!useSandbox) return { effectiveRoot: root };
+  let missionId: string;
+  try {
+    const raw = await readFileAsync(missionPath, "utf-8");
+    const parsed = parseYaml(raw) as { id?: unknown } | null;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.id !== "string" || parsed.id.length === 0) {
+      return { effectiveRoot: root };
+    }
+    missionId = parsed.id;
+  } catch {
+    return { effectiveRoot: root };
+  }
+  const sandbox = await findBoundSandbox(root, missionId);
+  if (!sandbox) return { effectiveRoot: root };
+  return { effectiveRoot: sandbox.path, sandbox };
+}
 
 const program = new Command();
 
@@ -114,14 +190,18 @@ program
   .argument("<mission-id>", "Mission id")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--timeout-ms <ms>", `Verification command timeout in milliseconds (default: ${DEFAULT_VERIFY_COMMAND_TIMEOUT_MS})`)
-  .action(async (missionId: string, opts: { root?: string; timeoutMs?: string }) => {
+  .option("--no-sandbox", "Force checks to run in the harness root instead of auto-routing into the bound sandbox worktree")
+  .action(async (missionId: string, opts: { root?: string; timeoutMs?: string; sandbox: boolean }) => {
     const root = resolveRoot(opts.root);
     try {
       const commandTimeoutMs = opts.timeoutMs === undefined ? undefined : parsePositiveIntegerOption("--timeout-ms", opts.timeoutMs);
-      const result = await verifyMission(root, missionId, { commandTimeoutMs });
+      const result = await verifyMission(root, missionId, { commandTimeoutMs, useSandbox: opts.sandbox });
       const label = result.status === "passed" ? "PASS" : result.status === "failed" ? "FAIL" : "BLOCKED";
       console.log(`[${label}] ${result.mission_id}`);
       console.log(`checks: ${result.checks_passed} passed, ${result.checks_failed} failed, ${result.checks_blocked} blocked`);
+      if (result.sandbox) {
+        console.log(`sandbox: ${result.sandbox.id} (${result.sandbox.path})`);
+      }
       console.log(`artifact: ${result.path}`);
       process.exit(result.status === "passed" ? 0 : 1);
     } catch (err) {
@@ -189,7 +269,7 @@ program
   .option("--suggested-skill <name>", "Suggested skill; repeatable", collectRepeatedOption, [])
   .option("--expected-output <path>", "Expected output file path; repeatable", collectRepeatedOption, [])
   .option("--completion <text>", "Completion criterion; repeatable", collectRepeatedOption, [])
-  .option("--required-check <name[=command]>", "Required verification check; repeatable", collectRequiredCheckOption, [] as ProposeRequiredCheck[])
+  .option("--required-check <name[=command]>", 'Required verification check; repeatable. Quote the entire value when the command contains short flags or spaces, e.g. --required-check "lint=pnpm -r lint"', collectRequiredCheckOption, [] as ProposeRequiredCheck[])
   .option("--review-gate <name>", "Review gate; repeatable", collectRepeatedOption, [])
   .option("--sandbox-backend <name>", "Sandbox backend (default: git-worktree)")
   .option("--promotion-policy <name>", "Promotion policy (default: human-approved)")
@@ -334,6 +414,25 @@ adapterCmd
     }
   });
 
+adapterCmd
+  .command("add")
+  .description("Write a built-in adapter manifest template into .harness/adapters/")
+  .argument("<runtime>", `Runtime template id (one of: ${listAdapterTemplates().join(", ")})`)
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--force", "Overwrite an existing manifest at the same path")
+  .action(async (runtime: string, opts: { root?: string; force?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await addAdapter(root, runtime, { force: opts.force ?? false });
+      console.log(`[ADDED] ${result.runtime}`);
+      console.log(`  manifest: ${result.path}`);
+    } catch (err) {
+      console.error(`[FAIL] adapter add error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
 // uh mission
 const missionCmd = program
   .command("mission")
@@ -373,31 +472,37 @@ missionCmd
   .argument("[file]", "Mission file path")
   .option("--runtime <runtime>", "Runtime to use (default: hermes)")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string }) => {
+  .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
-    if (runtime === "hermes") {
-      const result = await dryRunHermes(root, filePath);
-      if (result.errors.length > 0) {
-        console.log("[FAIL] dry-run errors:");
-        for (const e of result.errors) {
-          console.log(`  error: ${e}`);
-        }
-        process.exit(1);
-      }
-      console.log(`Command: ${result.command} ${result.args.join(" ")}`);
-      console.log(`Worktree mode: ${result.worktree}`);
-      console.log(`Session ID passthrough: ${result.session_id_passthrough}`);
-      console.log("");
-      console.log("=== Rendered mission prompt ===");
-      console.log(result.prompt);
-      console.log("=== End mission prompt ===");
-    } else {
+    const wiring = RUNTIME_WIRINGS[runtime];
+    if (!wiring) {
       console.error(`Unknown runtime: ${runtime}`);
       process.exit(1);
+      return;
     }
+    const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    if (routing.sandbox) {
+      console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
+    }
+    const result = await wiring.dryRun(routing.effectiveRoot, filePath);
+    if (result.errors.length > 0) {
+      console.log("[FAIL] dry-run errors:");
+      for (const e of result.errors) {
+        console.log(`  error: ${e}`);
+      }
+      process.exit(1);
+    }
+    console.log(`Command: ${result.command} ${result.args.join(" ")}`);
+    console.log(`Worktree mode: ${result.worktree}`);
+    console.log(`Session ID passthrough: ${result.session_id_passthrough}`);
+    console.log("");
+    console.log("=== Rendered mission prompt ===");
+    console.log(result.prompt);
+    console.log("=== End mission prompt ===");
   });
 
 missionCmd
@@ -406,36 +511,50 @@ missionCmd
   .argument("[file]", "Mission file path")
   .option("--runtime <runtime>", "Runtime to use (default: hermes)")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string }) => {
+  .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
-    if (runtime === "hermes") {
-      console.log(`Running mission: ${filePath}`);
-      console.log(`Runtime: ${runtime}`);
-      console.log("");
-      let result: Awaited<ReturnType<typeof runHermes>>;
-      try {
-        result = await runHermes(root, filePath);
-      } catch (err) {
-        console.log("[FAIL] mission run error:");
-        console.log(`  error: ${(err as Error).message}`);
-        process.exit(1);
-      }
-      if (result.stdout) {
-        console.log(result.stdout);
-      }
-      if (result.stderr) {
-        console.error(result.stderr);
-      }
-      if (result.exitCode !== 0) {
-        console.log(`[FAIL] mission exited with code ${result.exitCode}`);
-        process.exit(result.exitCode);
-      }
-    } else {
+    const wiring = RUNTIME_WIRINGS[runtime];
+    if (!wiring) {
       console.error(`Unknown runtime: ${runtime}`);
       process.exit(1);
+      return;
+    }
+    const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    console.log(`Running mission: ${filePath}`);
+    console.log(`Runtime: ${runtime}`);
+    if (routing.sandbox) {
+      console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
+    }
+    console.log("");
+    let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] } };
+    try {
+      result = await wiring.run(routing.effectiveRoot, filePath);
+    } catch (err) {
+      console.log("[FAIL] mission run error:");
+      console.log(`  error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (result.stdout) {
+      console.log(result.stdout);
+    }
+    if (result.stderr) {
+      console.error(result.stderr);
+    }
+    if (wiring.surfaceBlocked && result.result?.status === "blocked") {
+      console.log(`[BLOCKED] mission classified as blocked`);
+      for (const e of result.result.errors ?? []) {
+        console.log(`  error: ${e}`);
+      }
+      process.exit(1);
+    }
+    if (result.exitCode !== 0) {
+      console.log(`[FAIL] mission exited with code ${result.exitCode}`);
+      process.exit(result.exitCode);
     }
   });
 
@@ -528,11 +647,12 @@ sandboxCmd
   .description("Remove a sandbox worktree and registry entry")
   .argument("<id>", "Sandbox id")
   .option("--force", "Discard even if the worktree has uncommitted changes")
+  .option("--keep-branch", "Preserve the git branch after removing the worktree")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (id: string, opts: { force?: boolean; root?: string }) => {
+  .action(async (id: string, opts: { force?: boolean; keepBranch?: boolean; root?: string }) => {
     const root = resolveRoot(opts.root);
     try {
-      const result = await discardSandbox(root, id, { force: opts.force ?? false });
+      const result = await discardSandbox(root, id, { force: opts.force ?? false, keepBranch: opts.keepBranch ?? false });
       console.log(`[DISCARDED] ${result.id}`);
       console.log(`  removed: ${result.worktree_path}`);
       if (result.branch) {

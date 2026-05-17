@@ -307,6 +307,67 @@ describe("sandbox module", () => {
     expect(() => assertSafeSandboxId("")).toThrow();
     expect(() => assertSafeSandboxId("ok-id_1.2")).not.toThrow();
   });
+
+  test("createSandbox seeds the bound mission directory into the worktree (UH-29)", async () => {
+    // Pre-create an uncommitted mission directory on the host.
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "smoke");
+    await execFileP("mkdir", ["-p", missionDir]);
+    await writeFile(
+      join(missionDir, "mission.yaml"),
+      "schema_version: uh.mission.v0\nid: smoke\nname: Smoke\nworkflow_profile: research-docs\n",
+      "utf-8",
+    );
+    await writeFile(join(missionDir, "extra.txt"), "companion artifact\n", "utf-8");
+
+    await createSandbox(TEST_ROOT, { id: "seeded", missionId: "smoke" });
+
+    const seededMissionYaml = join(
+      TEST_ROOT,
+      ".harness",
+      "sandboxes",
+      "seeded",
+      "worktree",
+      ".harness",
+      "missions",
+      "smoke",
+      "mission.yaml",
+    );
+    const content = await readFile(seededMissionYaml, "utf-8");
+    expect(content).toContain("id: smoke");
+
+    const seededCompanion = join(
+      TEST_ROOT,
+      ".harness",
+      "sandboxes",
+      "seeded",
+      "worktree",
+      ".harness",
+      "missions",
+      "smoke",
+      "extra.txt",
+    );
+    expect(await readFile(seededCompanion, "utf-8")).toBe("companion artifact\n");
+  });
+
+  test("createSandbox tolerates a missing host mission directory (sandbox bound by id only)", async () => {
+    const record = await createSandbox(TEST_ROOT, { id: "no-mission", missionId: "future" });
+    expect(record.mission_id).toBe("future");
+    // No mission directory should appear inside the worktree because none exists on the host.
+    await expect(
+      stat(
+        join(
+          TEST_ROOT,
+          ".harness",
+          "sandboxes",
+          "no-mission",
+          "worktree",
+          ".harness",
+          "missions",
+          "future",
+        ),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("uh sandbox CLI", () => {
