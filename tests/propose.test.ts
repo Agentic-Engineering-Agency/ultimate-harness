@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -251,6 +251,25 @@ describe("proposeMission", () => {
     })).rejects.toThrow(/invalid mission id/i);
 
     await expect(access(join(TEST_ROOT, ".harness", "evil", "mission.yaml"))).rejects.toThrow();
+  });
+
+  test("rejects a symlinked missions directory before writing", async () => {
+    const outsideRoot = await mkdtemp(join(tmpdir(), "uh-test-propose-missions-link-"));
+    await rm(join(TEST_ROOT, ".harness", "missions"), { recursive: true, force: true });
+    await symlink(outsideRoot, join(TEST_ROOT, ".harness", "missions"));
+    try {
+      await expect(proposeMission(TEST_ROOT, {
+        id: "symlinked",
+        title: "Symlinked missions",
+        workflow: "research-docs",
+        objective: "Reject writes through the missions directory symlink.",
+      })).rejects.toThrow(/Missions directory must not be a symlink/);
+
+      await expect(access(join(outsideRoot, "symlinked", "mission.yaml"))).rejects.toThrow();
+    } finally {
+      await rm(join(TEST_ROOT, ".harness", "missions"), { force: true });
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
   });
 
   test("rejects empty title", async () => {

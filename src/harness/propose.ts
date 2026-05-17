@@ -71,6 +71,9 @@ export async function proposeMission(
   await requireWorkflowProfile(root, opts.workflow);
 
   const missionPath = resolveMissionPath(root, opts);
+  if (opts.outputPath === undefined) {
+    await rejectSymlinkIfExists(path.resolve(missionsDir(root)), "Missions directory");
+  }
   await rejectSymlinkIfExists(path.dirname(missionPath), "Mission directory");
   await rejectSymlinkIfExists(missionPath, "Mission file");
   const exists = await fileExists(missionPath);
