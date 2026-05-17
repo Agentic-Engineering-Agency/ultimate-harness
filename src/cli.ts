@@ -16,6 +16,7 @@ import {
   getSandboxStatus,
   listSandboxes,
 } from "./harness/sandbox.js";
+import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 const VERSION = "0.0.0";
 
 const program = new Command();
@@ -539,6 +540,92 @@ sandboxCmd
       }
     } catch (err) {
       console.error(`[FAIL] sandbox discard error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh skill
+const skillCmd = program
+  .command("skill")
+  .description("Manage skills: SKILL.md-backed reusable capabilities");
+
+skillCmd
+  .command("add")
+  .description("Register a skill from a directory containing SKILL.md")
+  .argument("<dir>", "Path to skill directory containing SKILL.md")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (dir: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await addSkill(root, dir);
+      console.log(`[ADDED] ${result.id}`);
+      console.log(`  path: ${result.path}`);
+      console.log(`  index: ${result.index_path}`);
+    } catch (err) {
+      console.error(`[FAIL] skill add error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+skillCmd
+  .command("list")
+  .description("List registered skills")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const skills = await listSkills(root);
+      if (skills.length === 0) {
+        console.log("No skills registered.");
+        return;
+      }
+      for (const s of skills) {
+        console.log(`- ${s.id} (${s.name})`);
+        if (s.description) {
+          console.log(`    description: ${s.description}`);
+        }
+        if (s.path) {
+          console.log(`    path: ${s.path}`);
+        }
+        if (s.triggers.length > 0) {
+          console.log(`    triggers: ${s.triggers.join(", ")}`);
+        }
+        if (s.prerequisites.length > 0) {
+          console.log(`    prerequisites: ${s.prerequisites.join(", ")}`);
+        }
+        if (s.related.length > 0) {
+          console.log(`    related: ${s.related.join(", ")}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[FAIL] skill list error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+skillCmd
+  .command("check")
+  .description("Re-validate an indexed skill against its on-disk SKILL.md")
+  .argument("<id>", "Skill id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await checkSkill(root, id);
+      if (result.ok) {
+        console.log(`[OK] ${result.id}`);
+        return;
+      }
+      console.log(`[DRIFT] ${result.id}`);
+      for (const e of result.errors) {
+        console.log(`  error: ${e}`);
+      }
+      process.exit(1);
+    } catch (err) {
+      console.error(`[FAIL] skill check error:`);
       console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }
