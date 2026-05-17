@@ -243,4 +243,31 @@ describe("uh mission run --runtime codex", () => {
     expect(result.result?.status).toBe("blocked");
     expect(result.result?.errors).toContain("Codex did not write --output-last-message");
   });
+
+  test("prefers UH-28 sentinel block over raw --output-last-message content", async () => {
+    const { missionDir, missionPath } = await writeHarnessMission("sentinel-prefer");
+    // Codex writes its raw last-message to runtime-final.txt; the file
+    // contains preamble plus the sentinel fenced block at the tail.
+    await writeFile(join(missionDir, "runtime-final.txt"), [
+      "Some preamble Codex emitted as its raw final message.",
+      "",
+      "```uh-runtime-final-message",
+      "Bounded sentinel summary.",
+      "```",
+      "",
+    ].join("\n"), "utf-8");
+    const runner: CodexRunner = async () => ({
+      stdout: '{"type":"turn.completed"}\n',
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+    });
+    const collectDiff: DiffCollector = async () => ({ patch: "" });
+
+    const result = await runCodex(TEST_ROOT, missionPath, { runner, collectDiff });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.result?.status).toBe("passed");
+    expect(await readFile(join(missionDir, "runtime-final.txt"), "utf-8")).toBe("Bounded sentinel summary.");
+  });
 });

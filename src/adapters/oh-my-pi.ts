@@ -21,6 +21,10 @@ import {
   type AdapterCheckResult,
   type AdapterRuntimeChecker,
 } from "../harness/registry.js";
+import {
+  extractRuntimeFinalMessageSentinel,
+  runtimeFinalMessageInstruction,
+} from "../harness/runtime-final-message.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -530,7 +534,14 @@ export async function collectOhMyPiSession(
   const parsedStream = parseOhMyPiOutput(runnerResult.stdout);
   errors.push(...parsedStream.parseErrors);
 
-  const finalMessage = parsedStream.finalMessage;
+  // Prefer the UH-28 runtime-final-message sentinel over the heuristic
+  // (last assistant-like JSON entry). Scans the heuristic-extracted last
+  // assistant text (which is the JSON-decoded content, with real newlines)
+  // rather than the raw NDJSON stdout where newlines are JSON-escaped.
+  // Falls back to the heuristic when the sentinel is absent.
+  const heuristicFinal = parsedStream.finalMessage;
+  const sentinel = extractRuntimeFinalMessageSentinel(heuristicFinal);
+  const finalMessage = sentinel ?? heuristicFinal;
   const finalMessageMissing = finalMessage.length === 0;
   if (finalMessageMissing) {
     errors.push("oh-my-pi did not emit a final assistant message");
@@ -915,8 +926,8 @@ function buildMissionPrompt(
     prompt += "\n";
   }
 
-  prompt += "Execute this mission and produce the expected artifacts.\n\n";
-  prompt += "## Final output\nWhen you finish, write a one-paragraph status summary as your last response. The harness captures it from the JSON output.";
+  prompt += "Execute this mission and produce the expected artifacts.\n";
+  prompt += runtimeFinalMessageInstruction();
 
   return prompt;
 }
