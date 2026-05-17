@@ -565,7 +565,7 @@ describe("uh adapter add", () => {
     expect(result.created).toBe(true);
 
     const content = await readFile(result.path, "utf-8");
-    expect(content).toContain("status: experimental");
+    expect(content).toContain("status: active");
 
     // duplicate without force should throw
     await expect(addAdapter(TEST_ROOT, "codex")).rejects.toThrow("already exists");
