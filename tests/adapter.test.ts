@@ -145,6 +145,85 @@ describe("adapter schema", () => {
   });
 });
 
+describe("hermes version pin (UH-31)", () => {
+  test("parseHermesVersion extracts the first M.N.P from a few wire formats", async () => {
+    const { parseHermesVersion } = await import("../src/adapters/hermes.js");
+    expect(parseHermesVersion("hermes 0.14.0")).toEqual({ major: 0, minor: 14, patch: 0 });
+    expect(parseHermesVersion("Hermes Agent 0.14.0")).toEqual({ major: 0, minor: 14, patch: 0 });
+    expect(parseHermesVersion("hermes-agent 0.14.0-beta.1")).toEqual({ major: 0, minor: 14, patch: 0 });
+    expect(parseHermesVersion("hermes 1.2.3 (build abc)")).toEqual({ major: 1, minor: 2, patch: 3 });
+    expect(parseHermesVersion("garbage no version")).toBeNull();
+  });
+
+  test("meetsMinimumHermesVersion compares against 0.14.0 floor", async () => {
+    const { meetsMinimumHermesVersion } = await import("../src/adapters/hermes.js");
+    expect(meetsMinimumHermesVersion({ major: 0, minor: 13, patch: 99 })).toBe(false);
+    expect(meetsMinimumHermesVersion({ major: 0, minor: 14, patch: 0 })).toBe(true);
+    expect(meetsMinimumHermesVersion({ major: 0, minor: 14, patch: 5 })).toBe(true);
+    expect(meetsMinimumHermesVersion({ major: 0, minor: 15, patch: 0 })).toBe(true);
+    expect(meetsMinimumHermesVersion({ major: 1, minor: 0, patch: 0 })).toBe(true);
+    expect(meetsMinimumHermesVersion({ major: 0, minor: 5, patch: 0 })).toBe(false);
+  });
+
+  test("checkHermes surfaces an upgrade error when CLI reports a pre-0.14 version", async () => {
+    const fakeHermes = join(TEST_ROOT, "fake-hermes-old.mjs");
+    await writeFile(fakeHermes, "#!/usr/bin/env node\nconsole.log('hermes 0.13.5');\n", "utf-8");
+    await chmod(fakeHermes, 0o755);
+    await writeFile(
+      join(TEST_ROOT, ".harness", "adapters", "hermes.yaml"),
+      `schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+runtime: hermes
+capabilities:
+  - cli-execution
+status: experimental
+config:
+  cli_command: ${fakeHermes}
+  default_toolsets:
+    - terminal
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true
+`,
+      "utf-8",
+    );
+    const result = await checkHermes(TEST_ROOT);
+    expect(result.found).toBe(true);
+    expect(result.errors.some((e) => /0\.14\.0\+ required.*0\.13\.5/.test(e))).toBe(true);
+  });
+
+  test("checkHermes accepts 0.14.0 and newer without a version error", async () => {
+    const fakeHermes = join(TEST_ROOT, "fake-hermes-current.mjs");
+    await writeFile(fakeHermes, "#!/usr/bin/env node\nconsole.log('hermes 0.14.0');\n", "utf-8");
+    await chmod(fakeHermes, 0o755);
+    await writeFile(
+      join(TEST_ROOT, ".harness", "adapters", "hermes.yaml"),
+      `schema_version: uh.adapter.v0
+id: hermes
+name: Hermes Agent
+runtime: hermes
+capabilities:
+  - cli-execution
+status: experimental
+config:
+  cli_command: ${fakeHermes}
+  default_toolsets:
+    - terminal
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true
+`,
+      "utf-8",
+    );
+    const result = await checkHermes(TEST_ROOT);
+    expect(result.found).toBe(true);
+    expect(result.errors.filter((e) => /required/.test(e))).toEqual([]);
+  });
+});
+
 describe("uh adapter check hermes", () => {
   test("returns valid check result when hermes is installed", async () => {
     const result = await checkHermes();
