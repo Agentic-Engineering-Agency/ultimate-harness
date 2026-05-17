@@ -139,6 +139,62 @@ describe("uh mission dry-run --runtime oh-my-pi", () => {
 
     expect(result.errors).toContain("oh-my-pi mode rpc-ui expects a TUI parent; use mode: json, text, or rpc for headless runs");
   });
+
+  test("merges mission runtime_config_overrides on top of adapter defaults", async () => {
+    const { missionDir, missionPath } = await writeHarnessMission("override-model");
+    await writeFile(missionPath, `schema_version: uh.mission.v0
+id: override-model
+name: Override Model
+description: Use Anthropic via OMP for this mission.
+workflow_profile: research-docs
+issues: []
+read_first: []
+expected_artifacts: []
+verification:
+  checks: []
+runtime_config_overrides:
+  model: anthropic/claude-opus-4-7
+  thinking: high
+`, "utf-8");
+
+    const result = await planOhMyPiRun(TEST_ROOT, missionPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.args).toEqual([
+      "--print",
+      "--model",
+      "anthropic/claude-opus-4-7",
+      "--thinking",
+      "high",
+      "--mode",
+      "json",
+      "--no-session",
+      "--no-extensions",
+      "--no-skills",
+      "--no-title",
+      result.prompt,
+    ]);
+    expect(missionDir).toContain("override-model");
+  });
+
+  test("rejects typos in mission runtime_config_overrides via strict schema", async () => {
+    const { missionPath } = await writeHarnessMission("typo-override");
+    await writeFile(missionPath, `schema_version: uh.mission.v0
+id: typo-override
+name: Typo Override
+description: Mistyped override key.
+workflow_profile: research-docs
+issues: []
+read_first: []
+expected_artifacts: []
+verification:
+  checks: []
+runtime_config_overrides:
+  modell: anthropic/claude-opus-4-7
+`, "utf-8");
+
+    await expect(planOhMyPiRun(TEST_ROOT, missionPath)).rejects.toThrow(/runtime_config_overrides validation failed.*modell/s);
+  });
 });
 
 describe("oh-my-pi output parsing", () => {

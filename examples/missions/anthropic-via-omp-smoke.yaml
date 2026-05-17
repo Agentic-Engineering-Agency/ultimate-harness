@@ -1,0 +1,35 @@
+schema_version: uh.mission.v0
+id: anthropic-via-omp-smoke
+name: Anthropic via OMP Smoke
+workflow_profile: research-docs
+description: >-
+  Minimum-cost end-to-end smoke for routing Claude through the oh-my-pi
+  adapter. Mission-level `runtime_config_overrides.model` selects an
+  Anthropic-tier model (e.g. anthropic/claude-opus-4-7) without changing
+  the shared `.harness/adapters/oh-my-pi.yaml` manifest, so other missions
+  can keep their own model choice.
+
+  See docs/runbooks/anthropic-via-omp.md for the ToS posture (this route
+  inherits OMP's Claude Code stealth surface — banned by Anthropic
+  Consumer ToS even though detection is currently bypassed) and for
+  prerequisites (OMP installed and `omp auth login anthropic`
+  completed).
+issues:
+  - source: linear
+    reference: UH-27
+    url: https://linear.app/agentic-eng/issue/UH-27
+read_first:
+  - docs/runbooks/anthropic-via-omp.md
+expected_artifacts:
+  - path: docs/anthropic-via-omp-smoke.txt
+    type: text
+sandbox:
+  backend: git-worktree
+  config:
+    branch: anthropic-via-omp/smoke
+runtime_config_overrides:
+  model: anthropic/claude-opus-4-7
+  thinking: medium
+verification:
+  checks:
+    - docs/anthropic-via-omp-smoke.txt exists and contains a single ISO 8601 timestamp line

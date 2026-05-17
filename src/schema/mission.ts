@@ -63,6 +63,7 @@ const MissionInputSchema = z.object({
     required_checks: z.array(RequiredCheckSchema).optional().default([]),
     review_gates: z.array(z.string()).optional().default([]),
   }).optional().default({ checks: [], required_checks: [], review_gates: [] }),
+  runtime_config_overrides: z.record(z.string(), z.unknown()).optional().default({}),
 }).superRefine((mission, ctx) => {
   if (!mission.name && !mission.title) {
     ctx.addIssue({

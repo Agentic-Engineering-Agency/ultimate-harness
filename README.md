@@ -25,6 +25,8 @@ The design remains runtime-agnostic. Hermes is the first runtime adapter impleme
 
 Codex is wired as an experimental adapter that drives the `codex exec` CLI inside a `workspace-write` sandbox with `--ask-for-approval never` and consumes the JSONL event stream. End-to-end runs against the real Codex backend require an unexhausted ChatGPT subscription quota; in the meantime the adapter classifies quota/auth failures as a `blocked` runtime-result with a clear remediation message. See `docs/architecture/adapter-codex.md`.
 
+Oh-my-pi is wired as an experimental adapter that drives `omp --print --mode json`. Missions can select an Anthropic-tier (or any other OMP-supported) model with `runtime_config_overrides.model:` — no per-route adapter manifest needed. **Be aware of the ToS posture** before using Anthropic via OMP: see `docs/runbooks/anthropic-via-omp.md` for the stealth surface and risks.
+
 Start with the documentation spine for product and architecture context:
 
 - [Documentation home](./docs/README.md)
