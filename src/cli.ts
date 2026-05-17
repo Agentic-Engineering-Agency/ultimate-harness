@@ -3,11 +3,20 @@ import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
 import { createMission } from "./harness/mission.js";
+import { parseIssueRef, parseRequiredCheck, proposeMission, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
 import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
+import { runtimeRegistry } from "./harness/registry.js";
+import {
+  createSandbox,
+  discardSandbox,
+  getSandboxStatus,
+  listSandboxes,
+} from "./harness/sandbox.js";
+import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 const VERSION = "0.0.0";
 
 const program = new Command();
@@ -162,33 +171,165 @@ function parsePositiveIntegerOption(name: string, value: string): number {
   return parsed;
 }
 
+// uh propose
+program
+  .command("propose")
+  .description("Generate a mission packet from request/issue metadata")
+  .argument("<id>", "Mission id")
+  .requiredOption("--title <title>", "Mission title")
+  .requiredOption("--workflow <profile>", "Workflow profile")
+  .requiredOption("--objective <text>", "Mission objective")
+  .option("--priority <priority>", "Mission priority (default: medium)")
+  .option("--issue <provider:id[:url]>", "Issue ref; repeatable", collectIssueRefOption, [] as ProposeIssueRef[])
+  .option("--read-first <path>", "Read-first context path; repeatable", collectRepeatedOption, [])
+  .option("--source-link <url>", "Source link; repeatable", collectRepeatedOption, [])
+  .option("--repo-root <path>", "Repository root recorded in mission context")
+  .option("--constraint <text>", "Mission constraint; repeatable", collectRepeatedOption, [])
+  .option("--required-skill <name>", "Required skill; repeatable", collectRepeatedOption, [])
+  .option("--suggested-skill <name>", "Suggested skill; repeatable", collectRepeatedOption, [])
+  .option("--expected-output <path>", "Expected output file path; repeatable", collectRepeatedOption, [])
+  .option("--completion <text>", "Completion criterion; repeatable", collectRepeatedOption, [])
+  .option("--required-check <name[=command]>", "Required verification check; repeatable", collectRequiredCheckOption, [] as ProposeRequiredCheck[])
+  .option("--review-gate <name>", "Review gate; repeatable", collectRepeatedOption, [])
+  .option("--sandbox-backend <name>", "Sandbox backend (default: git-worktree)")
+  .option("--promotion-policy <name>", "Promotion policy (default: human-approved)")
+  .option("--output <path>", "Explicit output path (default: .harness/missions/<id>/mission.yaml)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--force", "Overwrite existing mission file")
+  .action(async (id: string, opts: {
+    title: string;
+    workflow: string;
+    objective: string;
+    priority?: string;
+    issue: ProposeIssueRef[];
+    readFirst: string[];
+    sourceLink: string[];
+    repoRoot?: string;
+    constraint: string[];
+    requiredSkill: string[];
+    suggestedSkill: string[];
+    expectedOutput: string[];
+    completion: string[];
+    requiredCheck: ProposeRequiredCheck[];
+    reviewGate: string[];
+    sandboxBackend?: string;
+    promotionPolicy?: string;
+    output?: string;
+    root?: string;
+    force?: boolean;
+  }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await proposeMission(root, {
+        id,
+        title: opts.title,
+        workflow: opts.workflow,
+        objective: opts.objective,
+        priority: opts.priority,
+        issueRefs: opts.issue,
+        readFirst: opts.readFirst,
+        sourceLinks: opts.sourceLink,
+        repoRoot: opts.repoRoot,
+        constraints: opts.constraint,
+        requiredSkills: opts.requiredSkill,
+        suggestedSkills: opts.suggestedSkill,
+        expectedOutputs: opts.expectedOutput,
+        completionCriteria: opts.completion,
+        requiredChecks: opts.requiredCheck,
+        reviewGates: opts.reviewGate,
+        sandboxBackend: opts.sandboxBackend,
+        promotionPolicy: opts.promotionPolicy,
+        outputPath: opts.output,
+        force: opts.force ?? false,
+      });
+      console.log(`${result.created ? "Created" : "Updated"} mission: ${id}`);
+      console.log(`Path: ${result.path}`);
+    } catch (err) {
+      console.error(`[FAIL] propose error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+function collectIssueRefOption(value: string, previous: ProposeIssueRef[]): ProposeIssueRef[] {
+  return [...previous, parseIssueRef(value)];
+}
+
+function collectRequiredCheckOption(value: string, previous: ProposeRequiredCheck[]): ProposeRequiredCheck[] {
+  return [...previous, parseRequiredCheck(value)];
+}
+
 // uh adapter
 const adapterCmd = program
   .command("adapter")
   .description("Manage runtime adapters");
 
 adapterCmd
+  .command("list")
+  .description("List configured adapter manifests")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const entries = await runtimeRegistry.list(root);
+      if (entries.length === 0) {
+        console.log("No adapter manifests configured.");
+        return;
+      }
+      for (const entry of entries) {
+        const doc = entry.document;
+        const checker = runtimeRegistry.hasChecker(doc.runtime) ? "yes" : "no";
+        console.log(`- ${doc.id} (runtime=${doc.runtime}, status=${doc.status}, checker=${checker})`);
+        console.log(`    manifest: ${entry.path}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] adapter list error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+adapterCmd
   .command("check")
   .description("Check if a runtime adapter is available and configured")
-  .argument("[runtime]", "Runtime to check (e.g. hermes)")
+  .argument("[runtime]", "Runtime id to check; defaults to every configured adapter")
   .option("--root <path>", "Root directory (default: cwd)")
   .action(async (runtime: string | undefined, opts: { root?: string }) => {
     const root = resolveRoot(opts.root);
-    if (!runtime || runtime === "hermes") {
-      const result = await checkHermes(root);
-      if (result.errors.length === 0 && result.found) {
-        console.log(`[PASS] hermes adapter`);
+    let ids: string[];
+    if (runtime) {
+      ids = [runtime];
+    } else {
+      try {
+        ids = (await runtimeRegistry.list(root)).map((entry) => entry.id);
+      } catch (err) {
+        console.error(`[FAIL] adapter check error:`);
+        console.error(`  error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    }
+    if (ids.length === 0) {
+      console.log("No adapter manifests to check.");
+      return;
+    }
+    let failures = 0;
+    for (const id of ids) {
+      const result = await runtimeRegistry.check(root, id);
+      if (result.found && result.errors.length === 0) {
+        console.log(`[PASS] ${id} adapter`);
         console.log(`  runtime: ${result.runtime}`);
-        console.log(`  version: ${result.version}`);
+        if (result.version) {
+          console.log(`  version: ${result.version}`);
+        }
       } else {
-        console.log(`[FAIL] hermes adapter`);
+        failures++;
+        console.log(`[FAIL] ${id} adapter`);
         for (const e of result.errors) {
           console.log(`  error: ${e}`);
         }
-        process.exit(1);
       }
-    } else {
-      console.error(`Unknown runtime: ${runtime}`);
+    }
+    if (failures > 0) {
       process.exit(1);
     }
   });
@@ -294,6 +435,198 @@ missionCmd
       }
     } else {
       console.error(`Unknown runtime: ${runtime}`);
+      process.exit(1);
+    }
+  });
+
+// uh sandbox
+const sandboxCmd = program
+  .command("sandbox")
+  .description("Manage git worktree sandboxes");
+
+sandboxCmd
+  .command("create")
+  .description("Create a new git worktree sandbox bound to a mission")
+  .argument("<id>", "Sandbox id")
+  .requiredOption("--mission <id>", "Mission id this sandbox belongs to")
+  .option("--base <ref>", "Base git ref to branch from (default: HEAD)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { mission: string; base?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const record = await createSandbox(root, {
+        id,
+        missionId: opts.mission,
+        baseRef: opts.base,
+      });
+      console.log(`[CREATED] ${record.id}`);
+      console.log(`  mission: ${record.mission_id}`);
+      console.log(`  branch: ${record.branch}`);
+      console.log(`  base: ${record.base_ref}`);
+      console.log(`  path: ${record.path}`);
+    } catch (err) {
+      console.error(`[FAIL] sandbox create error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("list")
+  .description("List registered sandboxes")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const entries = await listSandboxes(root);
+      if (entries.length === 0) {
+        console.log("No sandboxes registered.");
+        return;
+      }
+      for (const entry of entries) {
+        console.log(`- ${entry.id} (mission=${entry.mission_id}, status=${entry.status}, backend=${entry.backend})`);
+        if (entry.path) {
+          console.log(`    path: ${entry.path}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox list error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("status")
+  .description("Show a sandbox's metadata and working tree status")
+  .argument("<id>", "Sandbox id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const info = await getSandboxStatus(root, id);
+      console.log(`- ${info.id}`);
+      console.log(`  mission: ${info.mission_id}`);
+      console.log(`  status: ${info.status}`);
+      console.log(`  branch: ${info.branch}`);
+      console.log(`  base: ${info.base_ref}`);
+      console.log(`  path: ${info.path}`);
+      console.log(`  dirty: ${info.dirty ? "yes" : "no"}`);
+      console.log(`  changes: ${info.changes.length}`);
+      for (const change of info.changes) {
+        console.log(`    ${change}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox status error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("discard")
+  .description("Remove a sandbox worktree and registry entry")
+  .argument("<id>", "Sandbox id")
+  .option("--force", "Discard even if the worktree has uncommitted changes")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { force?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await discardSandbox(root, id, { force: opts.force ?? false });
+      console.log(`[DISCARDED] ${result.id}`);
+      console.log(`  removed: ${result.worktree_path}`);
+      if (result.branch) {
+        console.log(`  branch: ${result.branch} (${result.branch_removed ? "deleted" : "kept"})`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox discard error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh skill
+const skillCmd = program
+  .command("skill")
+  .description("Manage skills: SKILL.md-backed reusable capabilities");
+
+skillCmd
+  .command("add")
+  .description("Register a skill from a directory containing SKILL.md")
+  .argument("<dir>", "Path to skill directory containing SKILL.md")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (dir: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await addSkill(root, dir);
+      console.log(`[ADDED] ${result.id}`);
+      console.log(`  path: ${result.path}`);
+      console.log(`  index: ${result.index_path}`);
+    } catch (err) {
+      console.error(`[FAIL] skill add error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+skillCmd
+  .command("list")
+  .description("List registered skills")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const skills = await listSkills(root);
+      if (skills.length === 0) {
+        console.log("No skills registered.");
+        return;
+      }
+      for (const s of skills) {
+        console.log(`- ${s.id} (${s.name})`);
+        if (s.description) {
+          console.log(`    description: ${s.description}`);
+        }
+        if (s.path) {
+          console.log(`    path: ${s.path}`);
+        }
+        if (s.triggers.length > 0) {
+          console.log(`    triggers: ${s.triggers.join(", ")}`);
+        }
+        if (s.prerequisites.length > 0) {
+          console.log(`    prerequisites: ${s.prerequisites.join(", ")}`);
+        }
+        if (s.related.length > 0) {
+          console.log(`    related: ${s.related.join(", ")}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[FAIL] skill list error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+skillCmd
+  .command("check")
+  .description("Re-validate an indexed skill against its on-disk SKILL.md")
+  .argument("<id>", "Skill id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await checkSkill(root, id);
+      if (result.ok) {
+        console.log(`[OK] ${result.id}`);
+        return;
+      }
+      console.log(`[DRIFT] ${result.id}`);
+      for (const e of result.errors) {
+        console.log(`  error: ${e}`);
+      }
+      process.exit(1);
+    } catch (err) {
+      console.error(`[FAIL] skill check error:`);
+      console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }
   });

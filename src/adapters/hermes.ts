@@ -1,20 +1,36 @@
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { readFile, appendFile, access, lstat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile, appendFile, lstat, writeFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
 import path from "node:path";
-import { validateAdapter, AdapterDocument, AdapterConfigSchema } from "../schema/adapter.js";
+import { AdapterDocument, AdapterConfigSchema } from "../schema/adapter.js";
 import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
-import { adaptersDir, auditLog, workflowsDir } from "../harness/paths.js";
-import { RuntimeSessionDocument } from "../schema/artifacts.js";
+import { auditLog, workflowsDir } from "../harness/paths.js";
+import {
+  RuntimeSessionDocument,
+  RuntimeResultDocument,
+  RuntimeResultStatus,
+  validateRuntimeResult,
+} from "../schema/artifacts.js";
+import {
+  runtimeRegistry,
+  type AdapterCheckResult,
+  type AdapterRuntimeChecker,
+} from "../harness/registry.js";
 
 type MissionArtifactContext = {
   missionDir: string;
   promptPath: string;
   runtimeSessionPath: string;
   eventsPath: string;
+  stdoutPath: string;
+  stderrPath: string;
+  diffPath: string;
+  runtimeResultPath: string;
 };
 
 export type CheckResult = {
@@ -33,7 +49,7 @@ export type DryRunResult = {
   errors: string[];
 };
 
-type HermesRunPlan = {
+export type HermesRunPlan = {
   command: string;
   args: string[];
   prompt: string;
@@ -43,41 +59,96 @@ type HermesRunPlan = {
   mission: MissionDocument;
 };
 
-export async function loadAdapterConfig(root: string, runtimeId: string): Promise<AdapterDocument> {
-  const path = await import("node:path");
-  const adapterPath = path.join(adaptersDir(root), `${runtimeId}.yaml`);
-  try {
-    await access(adapterPath);
-  } catch {
-    throw new Error(`Adapter manifest not found: ${adapterPath}`);
-  }
-  const content = await readFile(adapterPath, "utf-8");
-  const parsed = parse(content);
-  return validateAdapter(parsed);
+/**
+ * Input the adapter hands to a Hermes runner.
+ *
+ * Runners are responsible for invoking the configured CLI with the given
+ * arguments inside `cwd`. They MUST honor `timeoutMs` when set; on expiry,
+ * return `timedOut: true` and a non-zero exit code. The default runner uses
+ * `child_process.spawn`; tests inject deterministic stubs.
+ */
+export interface HermesRunnerInput {
+  command: string;
+  args: string[];
+  cwd: string;
+  timeoutMs?: number;
 }
 
-export async function checkHermes(root?: string): Promise<CheckResult> {
-  const result: CheckResult = {
+/**
+ * Output a Hermes runner returns to the adapter.
+ *
+ * Errors are surfaced explicitly rather than swallowed: a spawn failure sets
+ * `spawnError`; a timeout sets `timedOut`. The adapter translates these into
+ * `failed` runtime-result entries with explicit `errors[]` items.
+ */
+export interface HermesRunnerOutput {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+  spawnError?: string;
+}
+
+export type HermesRunner = (input: HermesRunnerInput) => Promise<HermesRunnerOutput>;
+
+export interface DiffCaptureResult {
+  patch: string;
+  errors?: string[];
+}
+
+export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
+
+export interface RunHermesOptions {
+  runner?: HermesRunner;
+  timeoutMs?: number;
+  collectDiff?: DiffCollector;
+}
+
+export interface RunHermesResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  result?: RuntimeResultDocument;
+}
+
+export interface HermesCollectInput {
+  root: string;
+  artifacts: MissionArtifactContext | null;
+  plan: HermesRunPlan;
+  startedAt: string;
+  finishedAt: string;
+  runnerResult: HermesRunnerOutput;
+  diff: DiffCaptureResult;
+}
+
+export interface HermesCollectOutput {
+  exitCode: number;
+  stderr: string;
+  result?: RuntimeResultDocument;
+}
+
+const execFileP = promisify(execFile);
+
+export async function loadAdapterConfig(root: string, runtimeId: string): Promise<AdapterDocument> {
+  const entry = await runtimeRegistry.load(root, runtimeId);
+  return entry.document;
+}
+
+/**
+ * Hermes runtime availability check.
+ *
+ * Runs `<cli_command> --version` and `<cli_command> status`; the manifest is
+ * trusted because it has already been loaded and validated by the registry.
+ * Hard failures from missing manifests never reach here — they are surfaced
+ * by `RuntimeRegistry.load`/`check` upstream.
+ */
+async function runHermesCliCheck(command: string): Promise<AdapterCheckResult> {
+  const result: AdapterCheckResult = {
     runtime: "hermes",
     found: false,
     version: "",
     errors: [],
   };
-
-  const { promisify } = await import("node:util");
-  const { execFile } = await import("node:child_process");
-  const execFileP = promisify(execFile);
-
-  let command = "hermes";
-  if (root) {
-    try {
-      const adapter = await loadAdapterConfig(root, "hermes");
-      command = adapter.config?.cli_command || command;
-    } catch (e) {
-      result.errors.push((e as Error).message);
-      return result;
-    }
-  }
 
   let versionOutput: string;
   try {
@@ -85,7 +156,7 @@ export async function checkHermes(root?: string): Promise<CheckResult> {
     versionOutput = stdout.trim();
   } catch {
     result.errors.push(
-      "hermes CLI not found in PATH. Install: curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
+      "hermes CLI not found in PATH. Install: curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
     );
     return result;
   }
@@ -100,6 +171,28 @@ export async function checkHermes(root?: string): Promise<CheckResult> {
   }
 
   return result;
+}
+
+const hermesRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
+  const command = manifest.config?.cli_command || "hermes";
+  return runHermesCliCheck(command);
+};
+
+runtimeRegistry.register("hermes", hermesRuntimeChecker);
+
+/**
+ * Convenience wrapper that mirrors the CLI's hermes check.
+ *
+ * - With `root`: dispatches through the registry so manifest errors and CLI
+ *   errors share the same structured shape.
+ * - Without `root`: probes the hermes CLI directly (used in environments
+ *   without an initialized `.harness/`).
+ */
+export async function checkHermes(root?: string): Promise<CheckResult> {
+  if (root) {
+    return runtimeRegistry.check(root, "hermes");
+  }
+  return runHermesCliCheck("hermes");
 }
 
 export async function dryRunHermes(root: string, missionPath: string): Promise<DryRunResult> {
@@ -136,7 +229,13 @@ export async function dryRunHermes(root: string, missionPath: string): Promise<D
   }
 }
 
-async function planHermesRun(root: string, missionPath: string): Promise<HermesRunPlan> {
+/**
+ * Compile a mission into the command, args, and prompt the Hermes runner
+ * needs. Throws when the mission or adapter manifest cannot be loaded;
+ * recoverable issues (missing workflow profile) are returned in `errors[]`
+ * so the caller decides whether to proceed.
+ */
+export async function planHermesRun(root: string, missionPath: string): Promise<HermesRunPlan> {
   const errors: string[] = [];
   const adapter = await loadAdapterConfig(root, "hermes");
 
@@ -150,7 +249,6 @@ async function planHermesRun(root: string, missionPath: string): Promise<HermesR
   }
 
   let workflow: WorkflowDocument | undefined;
-  const path = await import("node:path");
   const workflowPath = path.join(workflowsDir(root), `${mission.workflow_profile}.yaml`);
   try {
     const wfContent = await readFile(workflowPath, "utf-8");
@@ -200,11 +298,82 @@ async function planHermesRun(root: string, missionPath: string): Promise<HermesR
   };
 }
 
-export async function runHermes(root: string, missionPath: string): Promise<{
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}> {
+/**
+ * Default runner. Streams stdout/stderr from a spawned child, applies a
+ * SIGKILL on timeout, and never throws — failures surface as `spawnError` or
+ * `timedOut` on the returned record so the adapter can translate them into a
+ * `failed` runtime-result with explicit errors.
+ */
+export const defaultHermesRunner: HermesRunner = (input) => {
+  return new Promise((resolve) => {
+    const child = spawn(input.command, input.args, {
+      cwd: input.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const finalize = (exitCode: number, spawnError?: string): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ stdout, stderr, exitCode, timedOut, spawnError });
+    };
+
+    if (typeof input.timeoutMs === "number" && input.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try { child.kill("SIGKILL"); } catch { /* child already exited */ }
+      }, input.timeoutMs);
+    }
+
+    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on("close", (code: number | null) => {
+      finalize(timedOut ? 1 : code ?? 1);
+    });
+    child.on("error", (err: Error) => {
+      finalize(1, err.message);
+    });
+  });
+};
+
+/**
+ * Default diff collector. Runs `git diff --no-color` against the working
+ * tree from `cwd`. When git is unavailable or `cwd` is not a git checkout,
+ * returns an empty patch and records the failure in `errors[]` so the
+ * runtime-result still has a diff_path but the cause is visible.
+ */
+export const defaultDiffCollector: DiffCollector = async (cwd) => {
+  try {
+    const { stdout } = await execFileP("git", ["diff", "--no-color"], {
+      cwd,
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    return { patch: stdout };
+  } catch (err) {
+    return { patch: "", errors: [`Diff capture failed: ${(err as Error).message}`] };
+  }
+};
+
+/**
+ * Execute a mission against the Hermes runtime end-to-end.
+ *
+ * Orchestrates: `planHermesRun` -> writeable artifact context ->
+ * `runtime.started` audit -> runner invocation -> diff capture ->
+ * `collectHermesSession`. The runner and diff collector are injectable so
+ * tests can drive deterministic outcomes (success, non-zero exit, timeout,
+ * malformed result block) without invoking a real `hermes` binary.
+ */
+export async function runHermes(
+  root: string,
+  missionPath: string,
+  options: RunHermesOptions = {},
+): Promise<RunHermesResult> {
   const plan = await planHermesRun(root, missionPath);
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
@@ -212,6 +381,7 @@ export async function runHermes(root: string, missionPath: string): Promise<{
 
   const artifacts = await getMissionArtifactContext(root, missionPath);
   const startedAt = new Date().toISOString();
+
   if (artifacts) {
     await persistPromptAndSession(artifacts, plan.prompt, {
       schema_version: "uh.runtime-session.v0",
@@ -248,57 +418,223 @@ export async function runHermes(root: string, missionPath: string): Promise<{
     // audit failure shouldn't block run
   }
 
-  return new Promise((resolve) => {
-    const child = spawn(plan.command, plan.args, {
-      cwd: root,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let completed = false;
-    let finalizePromise: Promise<void> | null = null;
-
-    async function finalize(exitCode: number): Promise<void> {
-      if (!finalizePromise) {
-        finalizePromise = artifacts
-          ? persistFinalRuntimeSession(artifacts, plan, startedAt, exitCode)
-          : Promise.resolve();
-      }
-      await finalizePromise;
-    }
-
-    async function complete(exitCode: number, extraStderr = ""): Promise<void> {
-      if (completed) return;
-      completed = true;
-      let resolvedExitCode = exitCode;
-      let resolvedStderr = extraStderr ? `${stderr}${extraStderr}` : stderr;
-      try {
-        await finalize(exitCode);
-      } catch (err) {
-        resolvedExitCode = 1;
-        const message = (err as Error).message;
-        const separator = resolvedStderr && !resolvedStderr.endsWith("\n") ? "\n" : "";
-        resolvedStderr = `${resolvedStderr}${separator}Artifact persistence failure: ${message}`;
-      }
-      resolve({ exitCode: resolvedExitCode, stdout, stderr: resolvedStderr });
-    }
-
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
-    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
-
-    child.on("close", (code: number | null) => {
-      void complete(code ?? 1);
-    });
-
-    child.on("error", (err: Error) => {
-      void complete(1, `Spawn error: ${err.message}`);
-    });
+  const runner = options.runner ?? defaultHermesRunner;
+  const runnerResult = await runner({
+    command: plan.command,
+    args: plan.args,
+    cwd: root,
+    timeoutMs: options.timeoutMs,
   });
+
+  const collectDiff = options.collectDiff ?? defaultDiffCollector;
+  const diff = await collectDiff(root);
+  const finishedAt = new Date().toISOString();
+
+  const collection = await collectHermesSession({
+    root,
+    artifacts,
+    plan,
+    startedAt,
+    finishedAt,
+    runnerResult,
+    diff,
+  });
+
+  return {
+    exitCode: collection.exitCode,
+    stdout: runnerResult.stdout,
+    stderr: collection.stderr,
+    result: collection.result,
+  };
+}
+
+/**
+ * Persist a completed Hermes session: stdout.log, stderr.log, diff.patch,
+ * runtime-result.yaml, and the back-compat runtime-session.yaml. Determines
+ * the runtime-result `status` from the runner outcome and any final
+ * `uh.runtime-result.v0` block emitted by Hermes on stdout.
+ *
+ * Status rules:
+ *  - `spawnError` -> failed (with explicit "Spawn error: ..." stderr)
+ *  - `timedOut`   -> failed (with timeout error)
+ *  - `exitCode != 0` -> failed
+ *  - `exitCode == 0` + valid final block with status passed/completed -> passed
+ *  - `exitCode == 0` + any other final block status -> that block's status
+ *  - `exitCode == 0` + missing/malformed block -> blocked
+ *
+ * Artifact-write failures are caught and surfaced via stderr so callers see
+ * the cause instead of getting a silent partial commit.
+ */
+export async function collectHermesSession(
+  input: HermesCollectInput,
+): Promise<HermesCollectOutput> {
+  const { artifacts, plan, runnerResult, diff, startedAt, finishedAt, root } = input;
+
+  const errors: string[] = [];
+  let stderr = runnerResult.stderr;
+  let exitCode = runnerResult.exitCode;
+
+  if (runnerResult.spawnError) {
+    const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";
+    stderr = `${stderr}${separator}Spawn error: ${runnerResult.spawnError}`;
+    errors.push(`Spawn error: ${runnerResult.spawnError}`);
+    if (exitCode === 0) exitCode = 1;
+  }
+  if (runnerResult.timedOut) {
+    errors.push("Runtime timed out");
+    if (exitCode === 0) exitCode = 1;
+  }
+  if (diff.errors) {
+    errors.push(...diff.errors);
+  }
+
+  const finalBlock = parseHermesFinalBlock(runnerResult.stdout);
+
+  let status: RuntimeResultStatus;
+  if (exitCode !== 0) {
+    status = "failed";
+    if (!finalBlock.valid && finalBlock.found) {
+      errors.push(...finalBlock.errors);
+    }
+  } else if (!finalBlock.found) {
+    status = "blocked";
+    errors.push("Hermes did not emit a uh.runtime-result.v0 block on stdout");
+  } else if (!finalBlock.valid) {
+    status = "blocked";
+    errors.push(...finalBlock.errors);
+  } else if (finalBlock.status === "passed") {
+    status = "passed";
+  } else {
+    status = finalBlock.status;
+  }
+
+  if (!artifacts) {
+    return { exitCode, stderr };
+  }
+
+  let result: RuntimeResultDocument | undefined;
+  try {
+    await writeArtifactFile(artifacts.missionDir, artifacts.stdoutPath, runnerResult.stdout);
+    await writeArtifactFile(artifacts.missionDir, artifacts.stderrPath, stderr);
+    await writeArtifactFile(artifacts.missionDir, artifacts.diffPath, diff.patch);
+
+    const draft: RuntimeResultDocument = {
+      schema_version: "uh.runtime-result.v0",
+      mission_id: plan.mission.id,
+      runtime: "hermes",
+      status,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      exit_code: exitCode,
+      prompt_path: path.relative(root, artifacts.promptPath),
+      stdout_path: path.relative(root, artifacts.stdoutPath),
+      stderr_path: path.relative(root, artifacts.stderrPath),
+      diff_path: path.relative(root, artifacts.diffPath),
+      errors,
+    };
+    result = validateRuntimeResult(draft);
+    await writeArtifactFile(artifacts.missionDir, artifacts.runtimeResultPath, stringify(result));
+
+    await persistFinalRuntimeSession(
+      artifacts,
+      plan,
+      startedAt,
+      finishedAt,
+      exitCode,
+      exitCode === 0 ? "succeeded" : "failed",
+    );
+  } catch (err) {
+    const message = (err as Error).message;
+    const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";
+    stderr = `${stderr}${separator}Artifact persistence failure: ${message}`;
+    return { exitCode: exitCode === 0 ? 1 : exitCode, stderr };
+  }
+
+  return { exitCode, stderr, result };
+}
+
+interface FinalBlock {
+  found: boolean;
+  valid: boolean;
+  status: RuntimeResultStatus;
+  errors: string[];
+}
+
+const VALID_RUNTIME_RESULT_STATUSES = new Set<RuntimeResultStatus>([
+  "passed",
+  "failed",
+  "blocked",
+  "cancelled",
+]);
+
+/**
+ * Locate the trailing fenced ```yaml block in the Hermes stdout, parse it,
+ * and confirm it looks like a `uh.runtime-result.v0` packet. The adapter
+ * does not require every field — only `schema_version` and a `status` that
+ * maps onto our enum. The runtime-result is authored by the harness; the
+ * model only signals its terminal status.
+ *
+ * Normalizes the contract doc's `completed` synonym to our `passed` enum.
+ */
+function parseHermesFinalBlock(stdout: string): FinalBlock {
+  const matches = stdout.match(/```yaml\s*\n([\s\S]*?)\n```/g);
+  if (!matches || matches.length === 0) {
+    return { found: false, valid: false, status: "blocked", errors: [] };
+  }
+  const raw = matches[matches.length - 1];
+  const body = raw.replace(/^```yaml\s*\n/, "").replace(/\n```$/, "");
+  let parsed: unknown;
+  try {
+    parsed = parse(body);
+  } catch (err) {
+    return {
+      found: true,
+      valid: false,
+      status: "blocked",
+      errors: [`Runtime-result block YAML parse error: ${(err as Error).message}`],
+    };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      found: true,
+      valid: false,
+      status: "blocked",
+      errors: ["Runtime-result block is not a YAML mapping"],
+    };
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.schema_version !== "uh.runtime-result.v0") {
+    return {
+      found: true,
+      valid: false,
+      status: "blocked",
+      errors: [
+        `Runtime-result block has unexpected schema_version: ${String(obj.schema_version)}`,
+      ],
+    };
+  }
+  const raw_status = obj.status;
+  if (typeof raw_status !== "string") {
+    return {
+      found: true,
+      valid: false,
+      status: "blocked",
+      errors: ["Runtime-result block missing status"],
+    };
+  }
+  const normalized: string = raw_status === "completed" ? "passed" : raw_status;
+  if (!VALID_RUNTIME_RESULT_STATUSES.has(normalized as RuntimeResultStatus)) {
+    return {
+      found: true,
+      valid: false,
+      status: "blocked",
+      errors: [`Runtime-result block has invalid status: ${raw_status}`],
+    };
+  }
+  return { found: true, valid: true, status: normalized as RuntimeResultStatus, errors: [] };
 }
 
 async function getMissionArtifactContext(root: string, missionPath: string): Promise<MissionArtifactContext | null> {
-  const path = await import("node:path");
   const rootResolved = path.resolve(root);
   const missionsRoot = path.join(rootResolved, ".harness", "missions");
   const resolvedMissionPath = path.isAbsolute(missionPath)
@@ -337,14 +673,26 @@ async function getMissionArtifactContext(root: string, missionPath: string): Pro
     throw new Error(`Refusing to persist artifacts into non-directory mission path: ${missionDir}`);
   }
 
-  const context = {
+  const context: MissionArtifactContext = {
     missionDir,
     promptPath: path.join(missionDir, "prompt.md"),
     runtimeSessionPath: path.join(missionDir, "runtime-session.yaml"),
     eventsPath: path.join(missionDir, "events.ndjson"),
+    stdoutPath: path.join(missionDir, "runtime.stdout.log"),
+    stderrPath: path.join(missionDir, "runtime.stderr.log"),
+    diffPath: path.join(missionDir, "diff.patch"),
+    runtimeResultPath: path.join(missionDir, "runtime-result.yaml"),
   };
 
-  for (const artifactPath of [context.promptPath, context.runtimeSessionPath, context.eventsPath]) {
+  for (const artifactPath of [
+    context.promptPath,
+    context.runtimeSessionPath,
+    context.eventsPath,
+    context.stdoutPath,
+    context.stderrPath,
+    context.diffPath,
+    context.runtimeResultPath,
+  ]) {
     assertPathInsideMissionDir(missionDir, artifactPath);
   }
 
@@ -371,15 +719,18 @@ function assertPathInsideMissionDir(missionDir: string, artifactPath: string): v
   }
 }
 
+async function writeArtifactFile(missionDir: string, artifactPath: string, content: string): Promise<void> {
+  await assertWritableArtifact(missionDir, artifactPath);
+  await writeFile(artifactPath, content, "utf-8");
+}
+
 async function persistPromptAndSession(
   artifacts: MissionArtifactContext,
   prompt: string,
   session: RuntimeSessionDocument,
 ): Promise<void> {
-  await assertWritableArtifact(artifacts.missionDir, artifacts.promptPath);
-  await assertWritableArtifact(artifacts.missionDir, artifacts.runtimeSessionPath);
-  await writeFile(artifacts.promptPath, prompt, "utf-8");
-  await writeFile(artifacts.runtimeSessionPath, stringify(session), "utf-8");
+  await writeArtifactFile(artifacts.missionDir, artifacts.promptPath, prompt);
+  await writeArtifactFile(artifacts.missionDir, artifacts.runtimeSessionPath, stringify(session));
 }
 
 async function appendMissionEvent(artifacts: MissionArtifactContext, event: Record<string, unknown>): Promise<void> {
@@ -391,15 +742,15 @@ async function persistFinalRuntimeSession(
   artifacts: MissionArtifactContext,
   plan: HermesRunPlan,
   startedAt: string,
+  finishedAt: string,
   exitCode: number,
+  sessionStatus: "succeeded" | "failed",
 ): Promise<void> {
-  const finishedAt = new Date().toISOString();
-  const status = exitCode === 0 ? "succeeded" : "failed";
   await persistPromptAndSession(artifacts, plan.prompt, {
     schema_version: "uh.runtime-session.v0",
     mission_id: plan.mission.id,
     runtime: "hermes",
-    status,
+    status: sessionStatus,
     command: plan.command,
     args: plan.args,
     exit_code: exitCode,
@@ -412,7 +763,7 @@ async function persistFinalRuntimeSession(
     runtime: "hermes",
     mission_id: plan.mission.id,
     exit_code: exitCode,
-    status,
+    status: sessionStatus,
   });
 }
 

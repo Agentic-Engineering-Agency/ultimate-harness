@@ -1,0 +1,24 @@
+schema_version: uh.adapter.v0
+id: pi
+name: Pi runtime
+description: >-
+  Design-only adapter stub for Pi, a minimal customizable terminal coding harness
+  with interactive, print/JSON, RPC, and SDK execution surfaces. The harness will
+  drive Pi via `pi -p` (print mode) once wiring lands. See
+  docs/architecture/adapter-pi-omp.md for the full design.
+runtime: pi
+capabilities:
+  - cli-execution
+  - non-interactive-run
+  - json-output
+  - session-resume
+  - file-tools
+  - terminal
+status: experimental
+config:
+  cli_command: pi
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: true

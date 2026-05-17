@@ -1,0 +1,33 @@
+schema_version: uh.adapter.v0
+id: claude-code
+name: Claude Code Adapter
+description: |
+  Runtime adapter for Anthropic's Claude Code CLI. Drives missions via
+  non-interactive `claude -p` with stream-json output, scoped tool allowlists,
+  and sandbox-bounded `--add-dir`. Design only; no runtime wiring yet
+  (status: planned). See docs/architecture/adapter-claude-code.md.
+runtime: claude-code
+capabilities:
+  - cli-execution
+  - non-interactive-run
+  - structured-events
+  - file-tools
+  - shell-tools-scoped
+  - subagents
+  - skills
+  - worktree-isolation
+  - diff-output
+  - json-output
+status: experimental
+config:
+  cli_command: claude
+  default_toolsets:
+    - read
+    - edit
+    - write
+    - bash-scoped
+    - task
+  default_provider: anthropic
+  default_model: ""
+  worktree_mode: true
+  pass_session_id: true

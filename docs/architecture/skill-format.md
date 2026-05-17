@@ -1,0 +1,181 @@
+# Skill Format
+
+## Purpose
+
+Skills are reusable procedural capabilities that a runtime adapter loads or that a
+human can read directly. Ultimate Harness owns the **format** of a skill so that
+adapters, mission packets, and reviewers can rely on a common shape regardless of
+which runtime executes the work.
+
+This document defines the on-disk layout of a single skill, the YAML frontmatter
+that identifies it, the supporting `references/`, `templates/`, and `scripts/`
+conventions, and the selection model the harness uses to decide which skills are
+applied to a mission.
+
+## Skill directory layout
+
+A skill is a directory that contains, at minimum, a `SKILL.md` file. Optional
+sibling directories carry supporting material:
+
+```text
+<skill-dir>/
+  SKILL.md          # required: frontmatter + body
+  references/       # optional: docs, links, snippets the skill body cites
+  templates/        # optional: parameterized files the skill produces or seeds
+  scripts/          # optional: executable helpers invoked by the skill body
+```
+
+Rules:
+
+- `SKILL.md` must be a regular file (no symlinks). The harness refuses to register
+  a skill whose `SKILL.md` is a symlink or whose containing directory is a symlink.
+- `references/`, `templates/`, and `scripts/` are reserved names. When present they
+  must be regular directories.
+- The skill directory must live inside the project root. The harness refuses
+  out-of-root paths.
+- Scripts under `scripts/` should be self-contained and runnable from the skill
+  directory; they should not assume a checkout layout outside the skill.
+- Templates under `templates/` should be inert by default; the skill body
+  describes how to materialize them.
+- References under `references/` are read-only and link-friendly: prefer relative
+  links to other repo files over absolute URLs that may rot.
+
+## `SKILL.md` frontmatter
+
+`SKILL.md` begins with a YAML frontmatter block delimited by `---`, followed by a
+Markdown body. The frontmatter is the contract; the body is the human-readable
+procedure.
+
+```markdown
+---
+id: code-review
+name: Code Review
+description: Review a diff for correctness, regression risk, and style alignment.
+triggers:
+  - "review my code"
+  - "look at this diff"
+prerequisites:
+  - linting
+related:
+  - test-authoring
+---
+
+# Code Review
+
+1. Skim the diff for unrelated changes.
+2. ...
+```
+
+### Field rules
+
+| Field            | Type          | Required | Notes |
+|------------------|---------------|----------|-------|
+| `id`             | string        | yes      | Stable slug. Matches `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`. Used as the index key. |
+| `name`           | string        | yes      | Human-readable name shown in CLI listings. |
+| `description`    | string        | yes      | One-sentence summary of what the skill does and when to use it. |
+| `triggers`       | string[]      | no       | Verbatim phrases or short patterns that suggest the skill is relevant. |
+| `prerequisites`  | string[]      | no       | Skill ids or capabilities required before this skill can be applied. |
+| `related`        | string[]      | no       | Skill ids that pair with this one or are reasonable substitutes. |
+
+Additional rules:
+
+- No unknown frontmatter keys are allowed. The frontmatter schema is strict so that
+  drift or typos surface at `uh skill add` rather than silently disappearing.
+- `id` is the only field used to look up a skill from the index. Two skills with
+  the same `id` may not coexist.
+- `triggers`, `prerequisites`, and `related` are optional arrays of strings.
+  Empty arrays are equivalent to omitting the field; the index normalizes both to
+  an empty list.
+- The frontmatter delimiter must be `---` on its own line at the very start of
+  the file; the closing `---` must also be on its own line.
+
+## `.harness/skills/index.yaml`
+
+The skills index is the durable list of skills the harness knows about for a
+project. It uses `schema_version: uh.skills-index.v0` and is created empty by
+`uh init`. Each entry records the indexed projection of the SKILL.md frontmatter
+plus the relative path to the skill directory:
+
+```yaml
+schema_version: uh.skills-index.v0
+skills:
+  - id: code-review
+    name: Code Review
+    description: Review a diff for correctness, regression risk, and style alignment.
+    path: skills/code-review
+    triggers:
+      - "review my code"
+      - "look at this diff"
+    prerequisites:
+      - linting
+    related:
+      - test-authoring
+```
+
+Notes:
+
+- `path` is relative to the project root and points at the directory containing
+  `SKILL.md`. It is not a path to `SKILL.md` itself.
+- The index is rewritten as a whole on every `uh skill add`. The schema is
+  validated before and after the write.
+- Older entries that predate UH-6 (with only `name` and friends) remain valid for
+  backward compatibility; new entries always carry the full UH-6 shape.
+
+## Lifecycle commands
+
+`uh skill add <dir>` registers a skill:
+
+1. Validates that the project is initialized.
+2. Resolves `<dir>` against the project root and refuses out-of-root paths.
+3. Refuses symlinked skill directories, `SKILL.md` files, and index files.
+4. Parses the SKILL.md frontmatter and validates it strictly.
+5. Refuses duplicates by `id`.
+6. Appends the new entry to `.harness/skills/index.yaml` and revalidates.
+
+`uh skill list` reads `.harness/skills/index.yaml` and prints registered skills.
+
+`uh skill check <id>` re-validates an indexed skill against its on-disk SKILL.md:
+
+1. Re-reads the SKILL.md at the indexed `path`.
+2. Re-parses and re-validates the frontmatter.
+3. Compares every recorded field (`name`, `description`, `triggers`,
+   `prerequisites`, `related`) against the index entry.
+4. Returns `ok` only when every field matches and the `id` still equals the
+   queried id. Any drift, missing file, or symlinked path produces a structured
+   error rather than a silent pass.
+
+## Selection model
+
+The harness does not auto-apply skills at runtime. Selection happens explicitly
+at mission compile time, with three roles:
+
+- **Required** skills — listed under `skills.required` in a mission packet. The
+  runtime adapter must load and apply them. A mission packet with required
+  skills that are not in `.harness/skills/index.yaml` is a mission authoring
+  bug; `uh propose` and `uh mission create` surface this so that the runtime
+  never silently drops requirements.
+- **Suggested** skills — listed under `skills.suggested`. The runtime adapter
+  should make them available; whether they are activated is up to the runtime's
+  selection policy.
+- **Triggered** skills — the `triggers` field exists so a runtime that supports
+  natural-language activation can offer the skill when the user's request
+  matches a trigger phrase. The harness itself does not perform trigger
+  matching; it only persists the phrases so adapters and humans can use them.
+
+Prerequisites (`prerequisites`) and relationships (`related`) are advisory
+metadata for humans and review-time tooling. The MVP harness does not enforce
+prerequisite ordering at execution time; verification gates and mission packets
+remain the source of truth for what must run before what.
+
+## Non-goals (MVP)
+
+- No runtime-specific skill packaging (Codex prompt patches, Claude Code
+  toolsets, etc.). Adapters translate the canonical skill into their native
+  shape when they consume a mission packet.
+- No automated dependency resolution. The harness records `prerequisites` and
+  `related` but does not topologically apply them.
+- No skill versioning beyond `id`. If a skill's contract changes, the change is
+  recorded by editing the SKILL.md and re-running `uh skill check` to confirm
+  the index is back in sync.
+- No live trigger matching inside the harness CLI; that is a runtime adapter
+  concern.
