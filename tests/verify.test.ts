@@ -136,13 +136,15 @@ describe("uh verify", () => {
   }, 1000);
 
   test("CLI timeout option fails timed out verification promptly", async () => {
-    await writeMission("timeout-cli", [{ name: "node hang", command: "node -e \"setTimeout(() => {}, 500)\"" }]);
+    await writeMission("timeout-cli", [{ name: "node hang", command: "node -e \"setTimeout(() => {}, 60000)\"" }]);
 
     const startedAt = Date.now();
     const { stdout, stderr } = await runUhFailure(["verify", "timeout-cli", "--root", TEST_ROOT, "--timeout-ms", "25"]);
     const elapsedMs = Date.now() - startedAt;
-
-    expect(elapsedMs).toBeLessThan(450);
+    // Generous bound: CLI startup on slow CI runners can be >1s; the
+    // assertion that matters is "we return well before the inner 500ms
+    // setTimeout could naturally complete + propagate", not micro-latency.
+    expect(elapsedMs).toBeLessThan(3000);
     expect(`${stdout}${stderr}`).toContain("[FAIL] timeout-cli");
     const verification = await readVerification("timeout-cli");
     expect(verification.status).toBe("failed");
