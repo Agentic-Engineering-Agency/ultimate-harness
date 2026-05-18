@@ -39,6 +39,7 @@ import {
 import type { RunEvent } from "./run-events.js";
 import type { RunOutcome, RunRuntime } from "./run-orchestrator.js";
 import { createDefaultRunStarter, type RunSession, type RunStarter } from "./run-session.js";
+import { createSandbox as defaultCreateSandbox, discardSandbox as defaultDiscardSandbox, type CreateSandboxOptions, type DiscardSandboxOptions, type SandboxRecord, type DiscardSandboxResult } from "../harness/sandbox.js";
 
 export const DEBOUNCE_MS = 200;
 export const ADAPTER_CHECK_TTL_MS = 5_000;
@@ -58,7 +59,14 @@ export type WatcherFactory = (
 /** Test seam: per-id adapter availability check. Defaults to `runtimeRegistry.check`. */
 export type AdapterChecker = (root: string, id: string) => Promise<AdapterCheckResult>;
 
+/** Test seam: injected sandbox lifecycle ops. */
+export interface SandboxOps {
+  create: (root: string, opts: CreateSandboxOptions) => Promise<SandboxRecord>;
+  discard: (root: string, id: string, opts?: DiscardSandboxOptions) => Promise<DiscardSandboxResult>;
+}
+
 export type RunStatus = "idle" | "running" | "succeeded" | "failed" | "cancelled" | "error";
+export type SandboxAction = "idle" | "creating" | "discarding" | "created" | "discarded" | "error";
 
 export interface DashboardStateOptions {
   watcherFactory?: WatcherFactory;
@@ -78,6 +86,8 @@ export interface DashboardStateOptions {
   runStarter?: RunStarter;
   /** Cap on retained live event history. Defaults to RUN_EVENTS_HISTORY_CAP. */
   runEventsHistoryCap?: number;
+  /** Test seam for sandbox create/discard ops. Defaults to harness/sandbox.ts. */
+  sandboxOps?: SandboxOps;
 }
 
 export interface DashboardState {
@@ -105,6 +115,14 @@ export interface DashboardState {
   runDialogOpen: Accessor<boolean>;
   runDialogRuntime: Accessor<RunRuntime>;
   runDialogNoSandbox: Accessor<boolean>;
+  sandboxAction: Accessor<SandboxAction>;
+  sandboxActionError: Accessor<Error | null>;
+  createSandboxDialogOpen: Accessor<boolean>;
+  createSandboxId: Accessor<string>;
+  createSandboxMissionId: Accessor<string>;
+  createSandboxBaseRef: Accessor<string>;
+  discardSandboxConfirmOpen: Accessor<boolean>;
+  discardSandboxForce: Accessor<boolean>;
   selectAdapter: (row: AdapterRow | null) => void;
   selectMission: (row: MissionRow | null) => void;
   selectSandbox: (row: SandboxRow | null) => void;
@@ -127,6 +145,18 @@ export interface DashboardState {
   startMissionRun: () => Promise<void>;
   stopMissionRun: () => void;
   clearRunHistory: () => void;
+  forceCheckAdapter: (id: string) => Promise<AdapterCheckResult | null>;
+  openCreateSandboxDialog: () => void;
+  closeCreateSandboxDialog: () => void;
+  setCreateSandboxId: (id: string) => void;
+  setCreateSandboxMissionId: (missionId: string) => void;
+  setCreateSandboxBaseRef: (ref: string) => void;
+  submitCreateSandbox: () => Promise<void>;
+  openDiscardSandboxConfirm: () => void;
+  closeDiscardSandboxConfirm: () => void;
+  toggleDiscardSandboxForce: () => void;
+  submitDiscardSandbox: () => Promise<void>;
+  clearSandboxAction: () => void;
 
   /** Force a fresh load now (e.g. wired to `r` keybinding). */
   refresh: () => Promise<void>;
@@ -179,6 +209,8 @@ export function createDashboardState(
   const runHistoryCap = options.runEventsHistoryCap ?? RUN_EVENTS_HISTORY_CAP;
   let currentRunSession: RunSession | null = null;
   let runRequestId = 0;
+  const sandboxOps: SandboxOps = options.sandboxOps ?? { create: defaultCreateSandbox, discard: defaultDiscardSandbox };
+  let sandboxActionRequestId = 0;
 
   let disposed = false;
   let missionDetailRequestId = 0;
@@ -196,8 +228,10 @@ export function createDashboardState(
     result: AdapterCheckResult | null;
     expiresAt: number;
     inFlight: Promise<AdapterCheckResult | null> | null;
+    generation: number;
   }
   const checkCache = new Map<string, CheckCacheEntry>();
+  let nextCheckGeneration = 0;
 
   const targets = [
     adaptersDir(root),
@@ -229,6 +263,14 @@ export function createDashboardState(
     const [runDialogOpen, setRunDialogOpen] = createSignal(false);
     const [runDialogRuntime, setRunDialogRuntime] = createSignal<RunRuntime>("hermes");
     const [runDialogNoSandbox, setRunDialogNoSandbox] = createSignal(false);
+    const [sandboxAction, setSandboxAction] = createSignal<SandboxAction>("idle");
+    const [sandboxActionError, setSandboxActionError] = createSignal<Error | null>(null);
+    const [createSandboxDialogOpen, setCreateSandboxDialogOpen] = createSignal(false);
+    const [createSandboxId, setCreateSandboxIdSignal] = createSignal("");
+    const [createSandboxMissionId, setCreateSandboxMissionIdSignal] = createSignal("");
+    const [createSandboxBaseRef, setCreateSandboxBaseRefSignal] = createSignal("");
+    const [discardSandboxConfirmOpen, setDiscardSandboxConfirmOpen] = createSignal(false);
+    const [discardSandboxForce, setDiscardSandboxForce] = createSignal(false);
     // Tick counter that bumps whenever adapterCheck cache changes, so
     // Solid views reading `adapterCheck(id)` re-evaluate.
     const [checkTick, setCheckTick] = createSignal(0);
@@ -335,14 +377,18 @@ export function createDashboardState(
       if (existing && existing.result && existing.expiresAt > now()) {
         return existing.result;
       }
+      const generation = ++nextCheckGeneration;
       const promise = (async (): Promise<AdapterCheckResult | null> => {
         try {
           const result = await adapterChecker(root, id);
           if (disposed) return null;
+          const current = checkCache.get(id);
+          if (current && current.generation > generation) return result;
           checkCache.set(id, {
             result,
             expiresAt: now() + checkTtlMs,
             inFlight: null,
+            generation,
           });
           setCheckTick((n) => n + 1);
           return result;
@@ -354,10 +400,13 @@ export function createDashboardState(
             version: "",
             errors: [(err as Error).message],
           };
+          const current = checkCache.get(id);
+          if (current && current.generation > generation) return errorResult;
           checkCache.set(id, {
             result: errorResult,
             expiresAt: now() + checkTtlMs,
             inFlight: null,
+            generation,
           });
           setCheckTick((n) => n + 1);
           return errorResult;
@@ -367,6 +416,7 @@ export function createDashboardState(
         result: existing?.result ?? null,
         expiresAt: existing?.expiresAt ?? 0,
         inFlight: promise,
+        generation,
       });
       return promise;
     };
@@ -385,7 +435,107 @@ export function createDashboardState(
       setSelectedMissionArtifactIndex((current) => clampMissionArtifactIndex(current + delta));
     };
 
-    const pushRunEvent = (event: RunEvent): void => {
+    const forceCheckAdapter = async (id: string): Promise<AdapterCheckResult | null> => {
+      checkCache.delete(id);
+      setCheckTick((n) => n + 1);
+      return refreshAdapterCheck(id);
+    };
+
+    const openCreateSandboxDialog = (): void => {
+      if (disposed) return;
+      setCreateSandboxIdSignal("");
+      setCreateSandboxBaseRefSignal("");
+      setCreateSandboxMissionIdSignal(selectedMission()?.id ?? "");
+      setCreateSandboxDialogOpen(true);
+    };
+
+    const closeCreateSandboxDialog = (): void => {
+      setCreateSandboxDialogOpen(false);
+    };
+
+    const setCreateSandboxId = (id: string): void => {
+      setCreateSandboxIdSignal(id);
+    };
+
+    const setCreateSandboxMissionId = (id: string): void => {
+      setCreateSandboxMissionIdSignal(id);
+    };
+
+    const setCreateSandboxBaseRef = (ref: string): void => {
+      setCreateSandboxBaseRefSignal(ref);
+    };
+
+    const submitCreateSandbox = async (): Promise<void> => {
+      if (disposed) return;
+      if (sandboxAction() === "creating" || sandboxAction() === "discarding") return;
+      const id = createSandboxId().trim();
+      const missionId = createSandboxMissionId().trim();
+      if (id.length === 0 || missionId.length === 0) {
+        setSandboxActionError(new Error("id and missionId required"));
+        setSandboxAction("error");
+        return;
+      }
+      const requestId = ++sandboxActionRequestId;
+      setSandboxAction("creating");
+      setSandboxActionError(null);
+      try {
+        const baseRef = createSandboxBaseRef().trim();
+        await sandboxOps.create(root, { id, missionId, baseRef: baseRef.length > 0 ? baseRef : undefined });
+        if (disposed || requestId !== sandboxActionRequestId) return;
+        setSandboxAction("created");
+        setCreateSandboxDialogOpen(false);
+        void refresh();
+      } catch (err) {
+        if (disposed || requestId !== sandboxActionRequestId) return;
+        setSandboxActionError(err instanceof Error ? err : new Error(String(err)));
+        setSandboxAction("error");
+      }
+    };
+
+    const openDiscardSandboxConfirm = (): void => {
+      if (disposed) return;
+      if (!selectedSandbox()) return;
+      setDiscardSandboxForce(false);
+      setDiscardSandboxConfirmOpen(true);
+    };
+
+    const closeDiscardSandboxConfirm = (): void => {
+      setDiscardSandboxConfirmOpen(false);
+    };
+
+    const toggleDiscardSandboxForce = (): void => {
+      setDiscardSandboxForce((v) => !v);
+    };
+
+    const submitDiscardSandbox = async (): Promise<void> => {
+      if (disposed) return;
+      if (sandboxAction() === "creating" || sandboxAction() === "discarding") return;
+      const sandbox = selectedSandbox();
+      if (!sandbox) return;
+      const requestId = ++sandboxActionRequestId;
+      const force = discardSandboxForce();
+      setSandboxAction("discarding");
+      setSandboxActionError(null);
+      try {
+        await sandboxOps.discard(root, sandbox.id, { force });
+        if (disposed || requestId !== sandboxActionRequestId) return;
+        setSandboxAction("discarded");
+        setDiscardSandboxConfirmOpen(false);
+        setSelectedSandbox(null);
+        void refresh();
+      } catch (err) {
+        if (disposed || requestId !== sandboxActionRequestId) return;
+        setSandboxActionError(err instanceof Error ? err : new Error(String(err)));
+        setSandboxAction("error");
+      }
+    };
+
+    const clearSandboxAction = (): void => {
+      setSandboxAction("idle");
+      setSandboxActionError(null);
+    };
+
+        const pushRunEvent = (event: RunEvent): void => {
       if (disposed) return;
       setRunEvents((current) => {
         const next = current.length >= runHistoryCap
@@ -541,6 +691,14 @@ export function createDashboardState(
       runDialogOpen,
       runDialogRuntime,
       runDialogNoSandbox,
+      sandboxAction,
+      sandboxActionError,
+      createSandboxDialogOpen,
+      createSandboxId,
+      createSandboxMissionId,
+      createSandboxBaseRef,
+      discardSandboxConfirmOpen,
+      discardSandboxForce,
       selectAdapter: setSelectedAdapter,
       selectMission: setSelectedMission,
       selectSandbox: setSelectedSandbox,
@@ -560,6 +718,18 @@ export function createDashboardState(
       startMissionRun,
       stopMissionRun,
       clearRunHistory,
+      forceCheckAdapter,
+      openCreateSandboxDialog,
+      closeCreateSandboxDialog,
+      setCreateSandboxId,
+      setCreateSandboxMissionId,
+      setCreateSandboxBaseRef,
+      submitCreateSandbox,
+      openDiscardSandboxConfirm,
+      closeDiscardSandboxConfirm,
+      toggleDiscardSandboxForce,
+      submitDiscardSandbox,
+      clearSandboxAction,
       refresh,
     };
   });
