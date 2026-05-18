@@ -15,6 +15,9 @@ import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { parse as parseYaml } from "yaml";
+import { spawn, spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { readFile as readFileAsync } from "node:fs/promises";
 import {
   createSandbox,
@@ -763,5 +766,41 @@ function printValidationResult(r: { valid: boolean; path: string; schema_version
     console.log(`  error: ${e}`);
   }
 }
+
+// uh tui
+program
+  .command("tui")
+  .description("Open the interactive terminal UI (Mission Control)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--once", "Render one frame and exit (CI / smoke / docs)")
+  .action(async (opts: { root?: string; once?: boolean }) => {
+    const bunCheck = spawnSync("bun", ["--version"], { stdio: "ignore" });
+    if (bunCheck.status !== 0) {
+      process.stderr.write(
+        "uh tui requires Bun. Install: curl -fsSL https://bun.sh/install | bash\n",
+      );
+      process.exit(1);
+    }
+    const entry = fileURLToPath(new URL("../src/tui/index.tsx", import.meta.url));
+    const cwd = opts.root ? path.resolve(opts.root) : process.cwd();
+    const args = ["--preload", "@opentui/solid/preload", entry];
+    if (opts.once) args.push("--once");
+    const child = spawn("bun", args, {
+      stdio: "inherit",
+      cwd,
+      env: { ...process.env, UH_TUI_ROOT: cwd },
+    });
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        process.exit(1);
+      } else {
+        process.exit(code ?? 0);
+      }
+    });
+    child.on("error", (err) => {
+      process.stderr.write(`uh tui: failed to spawn bun: ${err.message}\n`);
+      process.exit(1);
+    });
+  });
 
 program.parse();

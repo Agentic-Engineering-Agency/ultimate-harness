@@ -12,6 +12,6 @@
     "jsxImportSource": "@opentui/solid",
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "bin/**/*.ts", "bin/**/*.tsx"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "bin/**/*.ts", "bin/**/*.tsx"],
   "exclude": ["dist", "node_modules"]
 }
