@@ -480,3 +480,146 @@ describe("tui/state — overlay", () => {
   });
 });
 
+
+describe("tui/state — mission run flow", () => {
+  function fakeStarter(options: {
+    onStart?: (req: { runtime: string; noSandbox?: boolean }) => void;
+    emit?: (push: (event: any) => void) => void | Promise<void>;
+    outcome?: "succeeded" | "failed" | "cancelled";
+    code?: number;
+    spawnError?: Error;
+    autoExit?: boolean;
+  } = {}) {
+    return {
+      stopCalls: 0,
+      starts: 0,
+      async start(req: any, onEvent: any) {
+        this.starts += 1;
+        options.onStart?.(req);
+        if (options.spawnError) throw options.spawnError;
+        await options.emit?.(onEvent);
+        let resolveExit!: (v: any) => void;
+        const exit = new Promise<any>((r) => { resolveExit = r; });
+        if (options.autoExit !== false) {
+          setTimeout(() => resolveExit({ status: options.outcome ?? "succeeded", code: options.code ?? 0 }), 10);
+        }
+        return {
+          pid: 12345,
+          exit,
+          stop: () => {
+            this.stopCalls += 1;
+            resolveExit({ status: "cancelled", signal: "SIGTERM" });
+          },
+        };
+      },
+    };
+  }
+
+  test("runs selected mission through to succeeded", async () => {
+    const row = mission("m-run");
+    const starter = fakeStarter({
+      emit: (push) => {
+        push({ timestamp: "t1", kind: "runtime.started", record: {}, raw: "" });
+        push({ timestamp: "t2", kind: "runtime.finished", record: {}, raw: "" });
+      },
+      outcome: "succeeded",
+    });
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [row] }),
+      missionDetailLoader: async (m) => detailFor(m),
+      runStarter: (req, push) => starter.start(req, push),
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.selectMission(row);
+    state.setRunDialogRuntime("codex");
+    state.toggleRunDialogNoSandbox();
+    await state.startMissionRun();
+    expect(state.runStatus()).toBe("succeeded");
+    expect(state.runEvents().map((e) => e.kind)).toEqual(["runtime.started", "runtime.finished"]);
+    expect(state.runMissionId()).toBe("m-run");
+    expect(state.runFinishedAt()).not.toBeNull();
+    expect(starter.starts).toBe(1);
+    state.dispose();
+  });
+
+  test("stop sends SIGTERM and marks status cancelled", async () => {
+    const row = mission("m-stop");
+    const starter = fakeStarter({ autoExit: false });
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [row] }),
+      runStarter: (req, push) => starter.start(req, push),
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.selectMission(row);
+    const run = state.startMissionRun();
+    await delay(15);
+    expect(state.runStatus()).toBe("running");
+    state.stopMissionRun();
+    await run;
+    expect(state.runStatus()).toBe("cancelled");
+    expect(starter.stopCalls).toBe(1);
+    state.dispose();
+  });
+
+  test("surfaces spawn errors without crashing the dashboard", async () => {
+    const row = mission("m-fail");
+    const starter = fakeStarter({ spawnError: new Error("node missing") });
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [row] }),
+      runStarter: (req, push) => starter.start(req, push),
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.selectMission(row);
+    await state.startMissionRun();
+    expect(state.runStatus()).toBe("error");
+    expect(state.runError()?.message).toBe("node missing");
+    state.dispose();
+  });
+
+  test("caps run event history", async () => {
+    const row = mission("m-cap");
+    const starter = fakeStarter({
+      emit: (push) => {
+        for (let i = 0; i < 600; i++) push({ timestamp: "t", kind: `e-${i}`, record: {}, raw: "" });
+      },
+    });
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [row] }),
+      runStarter: (req, push) => starter.start(req, push),
+      runEventsHistoryCap: 100,
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.selectMission(row);
+    await state.startMissionRun();
+    const events = state.runEvents();
+    expect(events).toHaveLength(100);
+    expect(events[0].kind).toBe("e-500");
+    expect(events[events.length - 1].kind).toBe("e-599");
+    state.dispose();
+  });
+
+  test("refuses to start without a selected mission", async () => {
+    const starter = fakeStarter();
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap(),
+      runStarter: (req, push) => starter.start(req, push),
+      debounceMs: 10,
+    });
+    await delay(5);
+    await state.startMissionRun();
+    expect(state.runStatus()).toBe("error");
+    expect(state.runError()?.message).toBe("No mission selected");
+    expect(starter.starts).toBe(0);
+    state.dispose();
+  });
+});
+

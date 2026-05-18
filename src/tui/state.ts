@@ -36,10 +36,15 @@ import {
   runtimeRegistry,
   type AdapterCheckResult,
 } from "../harness/registry.js";
+import type { RunEvent } from "./run-events.js";
+import type { RunOutcome, RunRuntime } from "./run-orchestrator.js";
+import { createDefaultRunStarter, type RunSession, type RunStarter } from "./run-session.js";
 
 export const DEBOUNCE_MS = 200;
 export const ADAPTER_CHECK_TTL_MS = 5_000;
 export const WATCHER_WARN_TTL_MS = 5_000;
+export const RUN_EVENTS_HISTORY_CAP = 500;
+export const RUN_RUNTIMES: RunRuntime[] = ["hermes", "codex", "oh-my-pi", "hermes-proxy"];
 
 type WatcherHandle = { close: () => void };
 
@@ -52,6 +57,8 @@ export type WatcherFactory = (
 
 /** Test seam: per-id adapter availability check. Defaults to `runtimeRegistry.check`. */
 export type AdapterChecker = (root: string, id: string) => Promise<AdapterCheckResult>;
+
+export type RunStatus = "idle" | "running" | "succeeded" | "failed" | "cancelled" | "error";
 
 export interface DashboardStateOptions {
   watcherFactory?: WatcherFactory;
@@ -67,6 +74,10 @@ export interface DashboardStateOptions {
   watcherWarnTtlMs?: number;
   /** Inject a clock for deterministic TTL tests. */
   now?: () => number;
+  /** Test seam for run subprocess + event tail. */
+  runStarter?: RunStarter;
+  /** Cap on retained live event history. Defaults to RUN_EVENTS_HISTORY_CAP. */
+  runEventsHistoryCap?: number;
 }
 
 export interface DashboardState {
@@ -85,6 +96,15 @@ export interface DashboardState {
   isMissionDetailLoading: Accessor<boolean>;
   missionDetailError: Accessor<Error | null>;
   overlayOpen: Accessor<boolean>;
+  runStatus: Accessor<RunStatus>;
+  runEvents: Accessor<RunEvent[]>;
+  runMissionId: Accessor<string | null>;
+  runStartedAt: Accessor<string | null>;
+  runFinishedAt: Accessor<string | null>;
+  runError: Accessor<Error | null>;
+  runDialogOpen: Accessor<boolean>;
+  runDialogRuntime: Accessor<RunRuntime>;
+  runDialogNoSandbox: Accessor<boolean>;
   selectAdapter: (row: AdapterRow | null) => void;
   selectMission: (row: MissionRow | null) => void;
   selectSandbox: (row: SandboxRow | null) => void;
@@ -100,6 +120,13 @@ export interface DashboardState {
   toggleOverlay: () => void;
   closeOverlay: () => void;
   openOverlay: () => void;
+  openRunDialog: () => void;
+  closeRunDialog: () => void;
+  setRunDialogRuntime: (runtime: RunRuntime) => void;
+  toggleRunDialogNoSandbox: () => void;
+  startMissionRun: () => Promise<void>;
+  stopMissionRun: () => void;
+  clearRunHistory: () => void;
 
   /** Force a fresh load now (e.g. wired to `r` keybinding). */
   refresh: () => Promise<void>;
@@ -148,6 +175,10 @@ export function createDashboardState(
   const checkTtlMs = options.adapterCheckTtlMs ?? ADAPTER_CHECK_TTL_MS;
   const warnTtlMs = options.watcherWarnTtlMs ?? WATCHER_WARN_TTL_MS;
   const now = options.now ?? (() => Date.now());
+  const runStarter = options.runStarter ?? createDefaultRunStarter();
+  const runHistoryCap = options.runEventsHistoryCap ?? RUN_EVENTS_HISTORY_CAP;
+  let currentRunSession: RunSession | null = null;
+  let runRequestId = 0;
 
   let disposed = false;
   let missionDetailRequestId = 0;
@@ -189,6 +220,15 @@ export function createDashboardState(
     const [isMissionDetailLoading, setMissionDetailLoading] = createSignal(false);
     const [missionDetailError, setMissionDetailError] = createSignal<Error | null>(null);
     const [overlayOpen, setOverlayOpen] = createSignal(false);
+    const [runStatus, setRunStatus] = createSignal<RunStatus>("idle");
+    const [runEvents, setRunEvents] = createSignal<RunEvent[]>([]);
+    const [runMissionId, setRunMissionId] = createSignal<string | null>(null);
+    const [runStartedAt, setRunStartedAt] = createSignal<string | null>(null);
+    const [runFinishedAt, setRunFinishedAt] = createSignal<string | null>(null);
+    const [runError, setRunError] = createSignal<Error | null>(null);
+    const [runDialogOpen, setRunDialogOpen] = createSignal(false);
+    const [runDialogRuntime, setRunDialogRuntime] = createSignal<RunRuntime>("hermes");
+    const [runDialogNoSandbox, setRunDialogNoSandbox] = createSignal(false);
     // Tick counter that bumps whenever adapterCheck cache changes, so
     // Solid views reading `adapterCheck(id)` re-evaluate.
     const [checkTick, setCheckTick] = createSignal(0);
@@ -345,7 +385,107 @@ export function createDashboardState(
       setSelectedMissionArtifactIndex((current) => clampMissionArtifactIndex(current + delta));
     };
 
-    const openSelectedMission = async (): Promise<MissionDetail | null> => {
+    const pushRunEvent = (event: RunEvent): void => {
+      if (disposed) return;
+      setRunEvents((current) => {
+        const next = current.length >= runHistoryCap
+          ? [...current.slice(current.length - runHistoryCap + 1), event]
+          : [...current, event];
+        return next;
+      });
+    };
+
+    const openRunDialog = (): void => {
+      if (disposed) return;
+      const mission = selectedMission();
+      if (!mission) return;
+      setRunDialogOpen(true);
+    };
+
+    const closeRunDialog = (): void => {
+      setRunDialogOpen(false);
+    };
+
+    const setRunDialogRuntimeAction = (runtime: RunRuntime): void => {
+      setRunDialogRuntime(runtime);
+    };
+
+    const toggleRunDialogNoSandboxAction = (): void => {
+      setRunDialogNoSandbox((v) => !v);
+    };
+
+    const clearRunHistory = (): void => {
+      setRunEvents([]);
+      setRunMissionId(null);
+      setRunStartedAt(null);
+      setRunFinishedAt(null);
+      setRunError(null);
+      setRunStatus("idle");
+    };
+
+    const startMissionRun = async (): Promise<void> => {
+      if (disposed) return;
+      if (currentRunSession) return;
+      const mission = selectedMission();
+      if (!mission) {
+        setRunError(new Error("No mission selected"));
+        setRunStatus("error");
+        return;
+      }
+      const requestId = ++runRequestId;
+      setRunDialogOpen(false);
+      setRunEvents([]);
+      setRunMissionId(mission.id);
+      setRunStartedAt(new Date(now()).toISOString());
+      setRunFinishedAt(null);
+      setRunError(null);
+      setRunStatus("running");
+      const missionPath = `${mission.missionDir}/mission.yaml`;
+      let session: RunSession;
+      try {
+        session = await runStarter({
+          missionPath,
+          root,
+          runtime: runDialogRuntime(),
+          noSandbox: runDialogNoSandbox(),
+          missionDir: mission.missionDir,
+        }, pushRunEvent);
+      } catch (err) {
+        if (disposed || requestId !== runRequestId) return;
+        setRunError(err instanceof Error ? err : new Error(String(err)));
+        setRunStatus("error");
+        setRunFinishedAt(new Date(now()).toISOString());
+        return;
+      }
+      if (disposed || requestId !== runRequestId) {
+        try { session.stop(); } catch { /* nothing */ }
+        return;
+      }
+      currentRunSession = session;
+      let outcome: RunOutcome;
+      try {
+        outcome = await session.exit;
+      } catch (err) {
+        if (disposed || requestId !== runRequestId) return;
+        setRunError(err instanceof Error ? err : new Error(String(err)));
+        setRunStatus("error");
+        setRunFinishedAt(new Date(now()).toISOString());
+        currentRunSession = null;
+        return;
+      }
+      if (disposed || requestId !== runRequestId) return;
+      currentRunSession = null;
+      setRunFinishedAt(new Date(now()).toISOString());
+      setRunStatus(outcome.status);
+      void refresh();
+    };
+
+    const stopMissionRun = (): void => {
+      if (!currentRunSession) return;
+      try { currentRunSession.stop(); } catch { /* already gone */ }
+    };
+
+        const openSelectedMission = async (): Promise<MissionDetail | null> => {
       const mission = selectedMission();
       if (!mission || disposed) return null;
       const requestId = ++missionDetailRequestId;
@@ -392,6 +532,15 @@ export function createDashboardState(
       isMissionDetailLoading,
       missionDetailError,
       overlayOpen,
+      runStatus,
+      runEvents,
+      runMissionId,
+      runStartedAt,
+      runFinishedAt,
+      runError,
+      runDialogOpen,
+      runDialogRuntime,
+      runDialogNoSandbox,
       selectAdapter: setSelectedAdapter,
       selectMission: setSelectedMission,
       selectSandbox: setSelectedSandbox,
@@ -404,6 +553,13 @@ export function createDashboardState(
       toggleOverlay: () => setOverlayOpen((v) => !v),
       closeOverlay: () => setOverlayOpen(false),
       openOverlay: () => setOverlayOpen(true),
+      openRunDialog,
+      closeRunDialog,
+      setRunDialogRuntime: setRunDialogRuntimeAction,
+      toggleRunDialogNoSandbox: toggleRunDialogNoSandboxAction,
+      startMissionRun,
+      stopMissionRun,
+      clearRunHistory,
       refresh,
     };
   });
@@ -414,6 +570,10 @@ export function createDashboardState(
     if (pendingTimer) {
       clearTimeout(pendingTimer);
       pendingTimer = null;
+    }
+    if (currentRunSession) {
+      try { currentRunSession.stop(); } catch { /* nothing */ }
+      currentRunSession = null;
     }
     if (warnTimer) {
       clearTimeout(warnTimer);

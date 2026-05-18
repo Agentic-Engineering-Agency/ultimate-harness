@@ -33,7 +33,8 @@ import { useKeyboard, useRenderer } from "@opentui/solid";
 import { SyntaxStyle } from "@opentui/core";
 import type { MissionDetail } from "./model.js";
 import { footerHint, keymapForView, type KeymapSection } from "./keymap.js";
-import { createDashboardState } from "./state.js";
+import { createDashboardState, RUN_RUNTIMES } from "./state.js";
+import type { RunEvent } from "./run-events.js";
 import type {
   AdapterRow,
   MissionRow,
@@ -144,6 +145,7 @@ export function Dashboard(props: DashboardProps) {
   const renderer = useRenderer();
   const [focused, setFocused] = createSignal<PaneId>("missions");
   const [detailFocus, setDetailFocus] = createSignal<"artifacts" | "viewer">("artifacts");
+  const [showLive, setShowLive] = createSignal(false);
   // Create state synchronously so JSX accessors subscribe to its Solid
   // signals from frame zero. Creating it inside onMount assigns a plain
   // closure variable after the first render, which does not trigger a
@@ -210,6 +212,32 @@ export function Dashboard(props: DashboardProps) {
       return;
     }
 
+    // Run-dialog modal traps input until closed.
+    if (state.runDialogOpen()) {
+      switch (event.name) {
+        case "escape":
+          state.closeRunDialog();
+          return;
+        case "enter":
+        case "linefeed":
+        case "return":
+          void state.startMissionRun();
+          return;
+        case "left":
+        case "right": {
+          const idx = RUN_RUNTIMES.indexOf(state.runDialogRuntime());
+          const dir = event.name === "right" ? 1 : -1;
+          const next = RUN_RUNTIMES[(idx + dir + RUN_RUNTIMES.length) % RUN_RUNTIMES.length];
+          state.setRunDialogRuntime(next);
+          return;
+        }
+        case "tab":
+          state.toggleRunDialogNoSandbox();
+          return;
+      }
+      return;
+    }
+
     if (state.activeView() === "missionDetail") {
       switch (event.name) {
         case "escape":
@@ -241,6 +269,24 @@ export function Dashboard(props: DashboardProps) {
             state.selectMissionArtifactIndex(0);
           }
           return;
+        case "r":
+          if (event.shift) {
+            state.openRunDialog();
+            return;
+          }
+          return;
+        case "s":
+          if (event.shift) {
+            state.stopMissionRun();
+            return;
+          }
+          return;
+        case "l":
+          if (event.shift) {
+            setShowLive((v) => !v);
+            return;
+          }
+          return;
       }
       return;
     }
@@ -255,6 +301,7 @@ export function Dashboard(props: DashboardProps) {
           void state.openSelectedMission();
         }
         return;
+
       case "a":
         setFocused("adapters");
         return;
@@ -271,6 +318,10 @@ export function Dashboard(props: DashboardProps) {
         return;
       }
       case "r":
+        if (event.shift) {
+          state.openRunDialog();
+          return;
+        }
         void state.refresh();
         return;
     }
@@ -310,6 +361,12 @@ export function Dashboard(props: DashboardProps) {
     if (adapter) {
       void state.refreshAdapterCheck(adapter.id);
     }
+  }));
+
+  // UH-44: when a run starts, surface the live events panel automatically.
+  // Keep showLive set until the user dismisses it with `L`.
+  createEffect(on(() => state.runStatus(), (status) => {
+    if (status === "running") setShowLive(true);
   }));
 
   const adapterIndex = () => {
@@ -460,6 +517,78 @@ export function Dashboard(props: DashboardProps) {
     );
   };
 
+  const runStatusBadge = (): string => {
+    switch (state.runStatus()) {
+      case "running":    return "▶ running";
+      case "succeeded":  return "✓ succeeded";
+      case "failed":     return "✖ failed";
+      case "cancelled":  return "■ cancelled";
+      case "error":      return "! error";
+      default:           return "○ idle";
+    }
+  };
+
+  const formatEventRow = (event: RunEvent): string => {
+    const ts = event.timestamp.length >= 19 ? event.timestamp.slice(11, 19) : event.timestamp;
+    return `${ts}  ${event.kind}`;
+  };
+
+  const renderRunDialog = () => (
+    <box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      padding={2}
+      alignItems="center"
+      justifyContent="center"
+    >
+      <box
+        flexDirection="column"
+        border
+        borderStyle="rounded"
+        title=" Run mission "
+        titleAlignment="left"
+        padding={2}
+        width={68}
+      >
+        <text>{`Mission: ${selectedMission()?.id ?? "—"}`}</text>
+        <text marginTop={1}>Runtime (←/→ to change):</text>
+        <text>{`  ${RUN_RUNTIMES.map((r) => r === state.runDialogRuntime() ? `[${r}]` : ` ${r} `).join(" ")}`}</text>
+        <text marginTop={1}>{`Sandbox: ${state.runDialogNoSandbox() ? "[no-sandbox] (Tab to toggle)" : "[auto-route] (Tab to toggle)"}`}</text>
+        <text marginTop={1}>Enter to start · Esc to cancel</text>
+      </box>
+    </box>
+  );
+
+  const renderLivePane = () => {
+    const events = state.runEvents();
+    const status = state.runStatus();
+    const mission = state.runMissionId() ?? "(none)";
+    const startedAt = state.runStartedAt();
+    const finishedAt = state.runFinishedAt();
+    return (
+      <box
+        flexGrow={3}
+        flexDirection="column"
+        border
+        borderStyle="rounded"
+        title={` Live events · ${runStatusBadge()} · ${mission} `}
+        titleAlignment="left"
+        padding={1}
+      >
+        <text>{`started=${startedAt ?? "—"}  finished=${finishedAt ?? "—"}  events=${events.length}`}</text>
+        <scrollbox flexGrow={1} width="100%" height="100%" stickyScroll stickyStart="bottom">
+          {events.length === 0
+            ? <text>(no events yet — adapter has not written events.ndjson)</text>
+            : events.map((event) => <text>{formatEventRow(event)}</text>)}
+        </scrollbox>
+        {status === "error" && state.runError()
+          ? <text>{`error: ${state.runError()!.message}`}</text>
+          : null}
+      </box>
+    );
+  };
+
   const renderMissionDetail = () => {
     const detail = missionDetail();
     const mission = selectedMission();
@@ -494,17 +623,19 @@ export function Dashboard(props: DashboardProps) {
               onSelect={() => setDetailFocus("viewer")}
             />
           </box>
-          <box
-            flexGrow={3}
-            flexDirection="column"
-            border
-            borderStyle="rounded"
-            title={detailFocus() === "viewer" ? ` ${activeArtifact()?.label ?? "Viewer"} ◀ ` : ` ${activeArtifact()?.label ?? "Viewer"} `}
-            titleAlignment="left"
-            padding={1}
-          >
-            {state.isMissionDetailLoading() ? <text>loading mission artifacts…</text> : renderArtifactViewer()}
-          </box>
+          {showLive() || state.runStatus() === "running" ? renderLivePane() : (
+            <box
+              flexGrow={3}
+              flexDirection="column"
+              border
+              borderStyle="rounded"
+              title={detailFocus() === "viewer" ? ` ${activeArtifact()?.label ?? "Viewer"} ◀ ` : ` ${activeArtifact()?.label ?? "Viewer"} `}
+              titleAlignment="left"
+              padding={1}
+            >
+              {state.isMissionDetailLoading() ? <text>loading mission artifacts…</text> : renderArtifactViewer()}
+            </box>
+          )}
         </box>
         <box flexDirection="column" paddingLeft={1} paddingRight={1}>
           <text>
@@ -520,7 +651,7 @@ export function Dashboard(props: DashboardProps) {
 
   return (
     <>
-      {state.overlayOpen() ? renderOverlay() : state.activeView() === "missionDetail" ? renderMissionDetail() : hasLoaded() && !harness().initialized ? (
+      {state.runDialogOpen() ? renderRunDialog() : state.overlayOpen() ? renderOverlay() : state.activeView() === "missionDetail" ? renderMissionDetail() : hasLoaded() && !harness().initialized ? (
         <box
           flexDirection="column"
           width="100%"
