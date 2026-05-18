@@ -7,6 +7,7 @@ import { validateVerificationResult, type VerificationResultDocument } from "../
 import { harnessDir, missionsDir, projectYaml, sandboxesDir, sandboxesIndex } from "./paths.js";
 import { validateFile } from "./validate.js";
 import { SandboxesIndexSchema } from "../schema/artifacts.js";
+import { classifyDiff } from "./diff-classifier.js";
 
 const SNIPPET_LIMIT = 800;
 const TIMEOUT_KILL_GRACE_MS = 100;
@@ -168,6 +169,70 @@ export async function verifyMission(root: string, missionId: string, options: Ve
       exit_code: metrics.exitCode,
       duration_ms: metrics.durationMs,
       timed_out: metrics.timedOut,
+    });
+  }
+
+  // UH-55 TDD gate. When the mission opts in, classify the captured diff
+  // and add a synthetic acceptance_criteria entry that blocks the run on
+  // a tests-absent change. Treated as a regular AC for status escalation
+  // and audit-trail purposes so consumers don't need a separate code path.
+  if (mission.tdd?.enforce_tests_first) {
+    const diffPath = path.resolve(missionDir, "diff.patch");
+    let diffText = "";
+    try {
+      diffText = await readFile(diffPath, "utf-8");
+    } catch {
+      // No captured diff yet — the adapter didn't write one. Surface as a
+      // blocked AC so verification cannot quietly pass without evidence.
+    }
+    const synthetic: { id: string; description: string; status: VerificationResultDocument["status"]; severity: "block"; check_command: string; exit_code: number; duration_ms: number; stdout_snippet?: string; stderr_snippet?: string } = {
+      id: "ac-tdd-tests-precede-code",
+      description: "TDD: every diff that touches source files must also touch tests",
+      status: "passed",
+      severity: "block",
+      check_command: "(internal: tdd-test-first classifier)",
+      exit_code: 0,
+      duration_ms: 0,
+    };
+    if (diffText.length === 0) {
+      synthetic.status = "blocked";
+      synthetic.exit_code = 0;
+      synthetic.stderr_snippet = `no diff.patch captured at ${diffPath}; adapter must write one before verify can gate TDD`;
+      findings.push({ severity: "error", message: `TDD gate cannot run: no diff.patch at ${diffPath}` });
+    } else {
+      const classified = classifyDiff(diffText, {
+        test_paths: mission.tdd.test_paths,
+        source_paths: mission.tdd.source_paths,
+      });
+      if (classified.source.length > 0 && classified.tests.length === 0) {
+        synthetic.status = "failed";
+        synthetic.exit_code = 1;
+        synthetic.stderr_snippet = snippet(
+          `source files changed without tests:\n${classified.source.map((p) => `  - ${p}`).join("\n")}`,
+        );
+      } else {
+        synthetic.status = "passed";
+        synthetic.stdout_snippet = snippet(
+          `tests=${classified.tests.length} source=${classified.source.length} other=${classified.other.length}`,
+        );
+      }
+    }
+    acceptanceResults.push(synthetic);
+    if (synthetic.status === "failed") {
+      findings.push({
+        severity: "error",
+        message: `TDD gate failed: source files changed without tests`,
+      });
+    }
+    await appendMissionEvent(eventsPath, {
+      type: "acceptance.checked",
+      mission_id: missionId,
+      timestamp: new Date().toISOString(),
+      ac_id: synthetic.id,
+      status: synthetic.status,
+      severity: "block",
+      synthetic: true,
+      kind: "tdd-tests-precede-code",
     });
   }
 

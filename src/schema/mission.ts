@@ -31,6 +31,28 @@ const RequiredCheckSchema = z.object({
   command: z.string().optional(),
 });
 
+const DEFAULT_TEST_PATHS = [
+  "tests/**",
+  "test/**",
+  "**/*.test.ts",
+  "**/*.test.tsx",
+  "**/*.test.js",
+  "**/*.test.jsx",
+  "**/*.spec.ts",
+  "**/*.spec.tsx",
+  "**/*.spec.js",
+  "**/*.spec.jsx",
+  "**/__tests__/**",
+];
+
+const DEFAULT_SOURCE_PATHS = ["src/**"];
+
+const TddOptionsSchema = z.object({
+  enforce_tests_first: z.boolean().optional().default(true),
+  test_paths: z.array(z.string().min(1)).optional().default(DEFAULT_TEST_PATHS),
+  source_paths: z.array(z.string().min(1)).optional().default(DEFAULT_SOURCE_PATHS),
+}).strict();
+
 const MissionInputSchema = z.object({
   schema_version: z.literal("uh.mission.v0"),
   id: z.string().min(1),
@@ -56,6 +78,7 @@ const MissionInputSchema = z.object({
   }).optional().default({ files: [] }),
   completion_criteria: z.array(z.string()).optional().default([]),
   acceptance_criteria: z.array(AcceptanceCriterionSchema).optional().default([]),
+  tdd: TddOptionsSchema.optional(),
 
   // Backward-compatible fields.
   name: z.string().min(1).optional(),
@@ -133,6 +156,9 @@ export const MissionSchema = MissionInputSchema;
 
 export type MissionDocument = z.infer<typeof MissionSchema>;
 export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>;
+export type TddOptions = z.infer<typeof TddOptionsSchema>;
+export const TDD_DEFAULT_TEST_PATHS = DEFAULT_TEST_PATHS;
+export const TDD_DEFAULT_SOURCE_PATHS = DEFAULT_SOURCE_PATHS;
 
 export function validateMission(data: unknown): MissionDocument {
   return MissionSchema.parse(data);
