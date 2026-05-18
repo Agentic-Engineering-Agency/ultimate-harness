@@ -8,7 +8,7 @@
   },
   "files": [
     "dist/",
-    "src/tui/"
+    "src/"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts",

@@ -17,7 +17,7 @@ uh tui  →  src/cli.ts  →  spawn("bun", ["--preload", "@opentui/solid/preload
                                         └─ Babel transforms .tsx at module load
 ```
 
-The `--preload` flag is bunfig-independent, so the TUI works from any cwd. `src/tui/` ships in the npm tarball via `package.json#files`.
+The `--preload` flag is bunfig-independent, so the TUI works from any cwd. `src/` ships in the npm tarball via `package.json#files` because this entry imports shared harness, schema, and adapter modules from sibling source directories.
 
 ## Architecture + decisions
 

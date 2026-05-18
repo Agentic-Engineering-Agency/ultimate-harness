@@ -65,6 +65,59 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
     state.dispose();
   });
 
+  test("queues one follow-up load for events received during an in-flight snapshot", async () => {
+    let calls = 0;
+    let fire: (() => void) | null = null;
+    let releaseFirst: (v: DashboardSnapshot) => void = () => {};
+    const first = new Promise<DashboardSnapshot>((r) => { releaseFirst = r; });
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: (_target, onEvent) => {
+        if (!fire) fire = onEvent;
+        return { close: () => {} };
+      },
+      loader: () => {
+        calls += 1;
+        return calls === 1 ? first : Promise.resolve(snap({ capturedAt: `call-${calls}` }));
+      },
+      debounceMs: 10,
+    });
+
+    expect(calls).toBe(1);
+    fire!();
+    await delay(25);
+    expect(calls).toBe(1);
+
+    releaseFirst(snap({ capturedAt: "call-1" }));
+    await delay(25);
+    expect(calls).toBe(2);
+    expect(state.snapshot().capturedAt).toBe("call-2");
+    state.dispose();
+  });
+
+  test("watches loaded mission directories as well as top-level harness dirs", async () => {
+    const watched: string[] = [];
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: (target) => {
+        watched.push(target);
+        return { close: () => {} };
+      },
+      loader: async () => snap({
+        missions: [{
+          id: "m-1",
+          name: "Mission 1",
+          workflow: "research-docs",
+          updatedAt: FIXED_NOW,
+          missionDir: "/fake-root/.harness/missions/m-1",
+          state: "valid",
+        }],
+      }),
+      debounceMs: 10,
+    });
+    await delay(10);
+    expect(watched).toContain("/fake-root/.harness/missions/m-1");
+    state.dispose();
+  });
+
   test("refresh() bypasses the debounce", async () => {
     let calls = 0;
     const state = createDashboardState("/fake-root", {

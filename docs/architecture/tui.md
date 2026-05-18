@@ -107,7 +107,7 @@ The takeover is the only modal failure surface, reserved for the one case that's
 
 ## 4. Runtime selection — why Bun
 
-Solid's JSX cannot be emitted by `tsc` (Solid is Babel-only). `dist/cli.js` is plain Node-compatible JavaScript with no `.tsx` artifacts. The `uh tui` subcommand spawns Bun as a child process with `bun --preload @opentui/solid/preload src/tui/index.tsx`, so the Babel transform runs at module load. `src/tui/` ships in the npm tarball via `package.json#files` so the source is available to the installed package, not just the dev checkout.
+Solid's JSX cannot be emitted by `tsc` (Solid is Babel-only). `dist/cli.js` is plain Node-compatible JavaScript with no `.tsx` artifacts. The `uh tui` subcommand spawns Bun as a child process with `bun --preload @opentui/solid/preload src/tui/index.tsx`, so the Babel transform runs at module load. `src/` ships in the npm tarball via `package.json#files` because the TUI source imports shared harness, schema, and adapter modules from sibling source directories.
 
 If Bun is not on PATH, the CLI exits 1 with an install hint. Node-only deployments can keep using every other `uh` subcommand — the TUI is the only Bun-dependent surface.
 

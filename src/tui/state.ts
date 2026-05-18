@@ -135,7 +135,9 @@ export function createDashboardState(
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
   let warnTimer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> | null = null;
+  let loadQueued = false;
   const watchers: WatcherHandle[] = [];
+  const missionWatchers: WatcherHandle[] = [];
   let rootDispose: () => void = () => {};
 
   // Adapter check cache. One entry per adapter id; in-flight promise
@@ -176,6 +178,21 @@ export function createDashboardState(
       }, warnTtlMs);
     };
 
+    const closeMissionWatchers = (): void => {
+      for (const w of missionWatchers) {
+        try { w.close(); } catch { /* already closed */ }
+      }
+      missionWatchers.length = 0;
+    };
+
+    const installMissionWatchers = (next: DashboardSnapshot): void => {
+      closeMissionWatchers();
+      for (const mission of next.missions) {
+        const handle = watcherFactory(mission.missionDir, scheduleLoad, noteWatcherError);
+        if (handle) missionWatchers.push(handle);
+      }
+    };
+
     const performLoad = async (): Promise<void> => {
       if (disposed) return;
       setLoading(true);
@@ -183,6 +200,7 @@ export function createDashboardState(
         const next = await loader(root);
         if (disposed) return;
         setSnapshot(next);
+        installMissionWatchers(next);
         setError(null);
       } catch (err) {
         if (disposed) return;
@@ -194,21 +212,31 @@ export function createDashboardState(
       }
     };
 
+    const runLoad = (): Promise<void> => {
+      inFlight = performLoad().finally(() => {
+        inFlight = null;
+        if (!disposed && loadQueued) {
+          loadQueued = false;
+          return runLoad();
+        }
+      });
+      return inFlight;
+    };
+
     const scheduleLoad = (): void => {
       if (disposed) return;
       if (pendingTimer) clearTimeout(pendingTimer);
       pendingTimer = setTimeout(() => {
         pendingTimer = null;
-        if (inFlight) return;
-        inFlight = performLoad().finally(() => {
-          inFlight = null;
-        });
+        if (inFlight) {
+          loadQueued = true;
+          return;
+        }
+        void runLoad();
       }, debounceMs);
     };
 
-    inFlight = performLoad().finally(() => {
-      inFlight = null;
-    });
+    void runLoad();
 
     for (const target of targets) {
       const handle = watcherFactory(target, scheduleLoad, noteWatcherError);
@@ -223,10 +251,7 @@ export function createDashboardState(
       if (inFlight) {
         await inFlight;
       }
-      inFlight = performLoad().finally(() => {
-        inFlight = null;
-      });
-      await inFlight;
+      await runLoad();
     };
 
     const adapterCheck = (id: string): AdapterCheckResult | null => {
@@ -313,6 +338,10 @@ export function createDashboardState(
       try { w.close(); } catch { /* already closed */ }
     }
     watchers.length = 0;
+    for (const w of missionWatchers) {
+      try { w.close(); } catch { /* already closed */ }
+    }
+    missionWatchers.length = 0;
     checkCache.clear();
     rootDispose();
   };
