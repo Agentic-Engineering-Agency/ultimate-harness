@@ -662,3 +662,32 @@ describe("runHermesProxy (orchestrator)", () => {
     await cleanup();
   });
 });
+
+// ---------- UH-38 promotion assertion ----------
+
+import { readFile as readFileForPromotion } from "node:fs/promises";
+import { parse as parseYamlForPromotion } from "yaml";
+import { validateAdapter as validateAdapterForPromotion } from "../src/schema/adapter.js";
+
+describe("hermes-proxy promotion (UH-38)", () => {
+  test("the local manifest is status: active", async () => {
+    const raw = await readFileForPromotion(".harness/adapters/hermes-proxy.yaml", "utf-8");
+    const parsed = parseYamlForPromotion(raw);
+    const doc = validateAdapterForPromotion(parsed);
+    expect(doc.status).toBe("active");
+    expect(doc.runtime).toBe("hermes-proxy");
+  });
+
+  test("the adapter-add template also ships as status: active", async () => {
+    const { addAdapter } = await import("../src/harness/adapter-add.js");
+    const tmp = "/tmp/uh-test-uh38-tpl";
+    await rm(tmp, { recursive: true, force: true });
+    await mkdir(join(tmp, ".harness", "adapters"), { recursive: true });
+    await addAdapter(tmp, "hermes-proxy");
+    const raw = await readFileForPromotion(join(tmp, ".harness", "adapters", "hermes-proxy.yaml"), "utf-8");
+    const doc = validateAdapterForPromotion(parseYamlForPromotion(raw));
+    expect(doc.status).toBe("active");
+    expect(doc.runtime).toBe("hermes-proxy");
+    await rm(tmp, { recursive: true, force: true });
+  });
+});

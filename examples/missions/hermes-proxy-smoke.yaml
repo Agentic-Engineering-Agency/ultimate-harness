@@ -1,0 +1,25 @@
+schema_version: uh.mission.v0
+id: hermes-proxy-smoke
+title: hermes-proxy E2E smoke
+workflow_profile: research-docs
+priority: medium
+objective: >-
+  Verify the hermes-proxy adapter produces a runtime-result.status: passed
+  against a live `hermes proxy` instance backed by a real subscription.
+context:
+  read_first: []
+  source_links:
+    - https://linear.app/agentic-eng/issue/UH-38
+    - https://linear.app/agentic-eng/issue/UH-32
+expected_outputs:
+  files:
+    - docs/hermes-proxy-smoke.txt
+completion_criteria:
+  - "runtime-result.status equals passed"
+  - "runtime-final.txt contains a one-paragraph summary extracted from the model's uh-runtime-final-message sentinel"
+  - "diff.patch includes the new file docs/hermes-proxy-smoke.txt"
+runtime_config_overrides:
+  model: "nousresearch/hermes-4-405b"
+verification:
+  required_checks: []
+  review_gates: []

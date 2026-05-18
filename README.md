@@ -26,6 +26,7 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and three wir
 | `hermes` | active | Reference adapter. Pinned to Hermes Agent ≥ 0.14.0. |
 | `codex` | active | Drives `codex exec --sandbox workspace-write --json --output-last-message` against `codex-cli ≥ 0.130.0`. Verified end-to-end against the live ChatGPT backend. |
 | `oh-my-pi` | experimental | Drives `omp --print --mode json`. Missions can route to any OMP-supported model (including Anthropic-tier via OMP's stealth surface) by setting `runtime_config_overrides.model:`. **Read [`docs/runbooks/anthropic-via-omp.md`](./docs/runbooks/anthropic-via-omp.md) before routing Claude through OMP** — the ToS posture is documented there. |
+| `hermes-proxy` | active | HTTP client targeting a local `hermes proxy` instance (Hermes Agent ≥ 0.14.0). Officially sanctioned OAuth-backed subscription routing — replaces the OMP stealth path. See [`docs/architecture/adapter-hermes-proxy.md`](./docs/architecture/adapter-hermes-proxy.md) and [`docs/runbooks/hermes-proxy-setup.md`](./docs/runbooks/hermes-proxy-setup.md). |
 
 Cross-cutting protocols every adapter participates in:
 
@@ -50,6 +51,8 @@ Runbooks:
 
 - [Codex E2E smoke](./docs/runbooks/codex-e2e-smoke.md)
 - [Anthropic via oh-my-pi](./docs/runbooks/anthropic-via-omp.md)
+- [Hermes Proxy setup](./docs/runbooks/hermes-proxy-setup.md)
+- [Hermes Proxy E2E smoke (UH-38 promotion record)](./docs/runbooks/hermes-proxy-e2e-smoke.md)
 
 ## Quick start
 
