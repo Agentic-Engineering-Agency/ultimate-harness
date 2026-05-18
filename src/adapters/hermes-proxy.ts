@@ -56,21 +56,140 @@ export type HermesProxyRuntimeConfig = z.infer<typeof HermesProxyRuntimeConfigSc
 registerRuntimeConfigSchema("hermes-proxy", HermesProxyRuntimeConfigSchema);
 
 /**
- * Stub-style runtime checker (UH-35). UH-37 will replace this with a live
- * `GET <endpoint>/models` probe that maps 200/401/404/ECONNREFUSED to the
- * AdapterCheckResult shape. For now we surface the manifest as configured but
- * flag that the live probe is pending.
+ * Live runtime checker (UH-37). Hits `GET <endpoint>/models` against the
+ * configured proxy, with a tight timeout. Maps the response to the
+ * AdapterCheckResult shape:
+ *
+ *  - 200 with JSON `{ data: [...] }`     → found, version: "<n> models available"
+ *  - 401 / 403                            → not found, errors: re-auth hint
+ *  - 404 / path_not_allowed               → not found, errors: proxy version mismatch
+ *  - ECONNREFUSED / network unreachable   → not found, errors: "proxy not running"
+ *  - timeout                              → not found, errors: "adapter check timed out"
+ *  - other 4xx / 5xx                      → not found, errors: verbatim
  */
+export const HERMES_PROXY_CHECK_TIMEOUT_MS = 5_000;
+
 export const hermesProxyRuntimeChecker: AdapterRuntimeChecker = async (manifest): Promise<AdapterCheckResult> => {
   const rc = manifest.config?.runtime_config as Record<string, unknown> | undefined;
-  const endpoint = typeof rc?.endpoint === "string" ? rc.endpoint : "<missing>";
+  const endpoint = typeof rc?.endpoint === "string" ? rc.endpoint : "";
+  if (endpoint.length === 0) {
+    return {
+      runtime: "hermes-proxy",
+      found: false,
+      version: "",
+      errors: ["hermes-proxy: missing endpoint in runtime_config"],
+    };
+  }
+  const provider = typeof rc?.provider === "string" ? rc.provider : "";
+  const providerHint = provider.length > 0 ? ` (run \`hermes auth status ${provider}\` to re-auth)` : " (run `hermes auth status <provider>` to re-auth)";
+  const url = `${endpoint.replace(/\/$/, "")}/models`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HERMES_PROXY_CHECK_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: { authorization: "Bearer hermes-proxy" },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    const message = (err as Error).message ?? String(err);
+    const cause = (err as { cause?: { code?: string } }).cause;
+    const code = cause?.code;
+    if (controller.signal.aborted) {
+      return {
+        runtime: "hermes-proxy",
+        found: false,
+        version: "",
+        errors: [`hermes-proxy: adapter check timed out after ${HERMES_PROXY_CHECK_TIMEOUT_MS} ms`],
+      };
+    }
+    if (code === "ECONNREFUSED" || /ECONNREFUSED|fetch failed/i.test(message)) {
+      return {
+        runtime: "hermes-proxy",
+        found: false,
+        version: "",
+        errors: [`hermes-proxy: endpoint unreachable: ${endpoint} (is \`hermes proxy start\` running?)`],
+      };
+    }
+    return {
+      runtime: "hermes-proxy",
+      found: false,
+      version: "",
+      errors: [`hermes-proxy: network error: ${code ? `${code}: ${message}` : message}`],
+    };
+  }
+  clearTimeout(timer);
+
+  let bodyText: string;
+  try {
+    bodyText = await response.text();
+  } catch {
+    bodyText = "";
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    const envelope = safeJsonEnvelope(bodyText);
+    const detail = envelope ? `: ${envelope.message}` : "";
+    return {
+      runtime: "hermes-proxy",
+      found: false,
+      version: "",
+      errors: [`hermes-proxy: HTTP ${response.status} from proxy${detail}${providerHint}`],
+    };
+  }
+
+  if (response.status === 404) {
+    const envelope = safeJsonEnvelope(bodyText);
+    const detail = envelope ? `: ${envelope.message}` : "";
+    return {
+      runtime: "hermes-proxy",
+      found: false,
+      version: "",
+      errors: [`hermes-proxy: HTTP 404${detail} (proxy version may not forward /models)`],
+    };
+  }
+
+  if (!response.ok) {
+    const envelope = safeJsonEnvelope(bodyText);
+    const detail = envelope ? `: ${envelope.message}` : ` (body: ${bodyText.slice(0, 200)})`;
+    return {
+      runtime: "hermes-proxy",
+      found: false,
+      version: "",
+      errors: [`hermes-proxy: HTTP ${response.status}${detail}`],
+    };
+  }
+
+  // 200 path — surface model count if the body parses.
+  let modelCount = 0;
+  try {
+    const parsed = JSON.parse(bodyText) as { data?: unknown };
+    if (Array.isArray(parsed.data)) modelCount = parsed.data.length;
+  } catch {
+    // tolerate non-JSON bodies — surface the raw text in version.
+  }
   return {
     runtime: "hermes-proxy",
     found: true,
-    version: `manifest-only (endpoint: ${endpoint}; live HTTP probe pending UH-37)`,
+    version: modelCount > 0
+      ? `proxy reachable at ${endpoint} (${modelCount} models available)`
+      : `proxy reachable at ${endpoint}`,
     errors: [],
   };
 };
+
+function safeJsonEnvelope(text: string): { message: string } | null {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const env = extractErrorEnvelope(parsed);
+    return env ? { message: env.message } : null;
+  } catch {
+    return null;
+  }
+}
 runtimeRegistry.register("hermes-proxy", hermesProxyRuntimeChecker);
 
 // ---------- types ----------
