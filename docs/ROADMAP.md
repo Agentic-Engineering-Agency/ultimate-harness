@@ -4,7 +4,7 @@ Last updated: 2026-05-18. Source of truth for issue state is [Linear](https://li
 
 ## Now
 
-Epic 2 (Interactive TUI) is in flight; spike landed, real screens are next. Epic 1 (Hermes proxy adapter) shipped in this session — see "Shipped" below.
+Epic 2 (Interactive TUI) is in flight; UH-46 dashboard shipped and UH-47 mission browser is next. Epic 1 (Hermes proxy adapter) shipped in this session — see "Shipped" below.
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
 
@@ -13,7 +13,7 @@ Build `uh tui` on [OpenTUI](https://opentui.com) — the same engine OpenCode us
 | Step | Issue | Slice | Size | Status |
 |---|---|---|---|---|
 | 1 | [UH-45](https://linear.app/agentic-eng/issue/UH-45) | Spike: install opentui, framework choice (vanilla / React / Solid), hello-world bound to UH state | S | **shipped** — Solid won; see [`docs/research/tui-framework.md`](./research/tui-framework.md) |
-| 2 | [UH-46](https://linear.app/agentic-eng/issue/UH-46) | Dashboard: live adapters + missions + sandboxes (three-pane) | M | |
+| 2 | [UH-46](https://linear.app/agentic-eng/issue/UH-46) | Dashboard: live adapters + missions + sandboxes (three-pane) | M | **shipped** — Mission Control dashboard; see [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) + [`docs/architecture/tui.md`](./architecture/tui.md) |
 | 3 | [UH-47](https://linear.app/agentic-eng/issue/UH-47) | Mission browser: drilldown with `Code` + `Diff` viewers | M | |
 | 4 | [UH-44](https://linear.app/agentic-eng/issue/UH-44) | Mission run flow: trigger from TUI, stream events live | M | |
 | 5 | [UH-43](https://linear.app/agentic-eng/issue/UH-43) | Adapter + sandbox manager: live checks, create/discard from inside | M | |
@@ -38,6 +38,7 @@ Adapter promoted to `status: active` on 2026-05-18 after live E2E smoke against 
 | Issue | Title | PR |
 |---|---|---|
 | [UH-45](https://linear.app/agentic-eng/issue/UH-45) | TUI spike: opentui framework selection + hello-world | [#52](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/52) |
+| [UH-46](https://linear.app/agentic-eng/issue/UH-46) | TUI dashboard: live adapters + missions + sandboxes | [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) |
 
 ## Shipped previous cycle (2026-05-13 → 2026-05-17)
 
