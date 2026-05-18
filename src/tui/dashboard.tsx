@@ -340,6 +340,12 @@ export function Dashboard(props: DashboardProps) {
   const onMissionChange = (_index: number, opt: { value?: unknown } | null) => {
     state.selectMission((opt?.value as MissionRow | null) ?? null);
   };
+  const onMissionSelect = (_index: number, opt: { value?: unknown } | null) => {
+    const row = (opt?.value as MissionRow | null) ?? null;
+    if (!row) return;
+    state.selectMission(row);
+    void state.openSelectedMission();
+  };
   const onSandboxChange = (_index: number, opt: { value?: unknown } | null) => {
     state.selectSandbox((opt?.value as SandboxRow | null) ?? null);
   };
@@ -485,6 +491,7 @@ export function Dashboard(props: DashboardProps) {
               focused={detailFocus() === "artifacts"}
               selectedIndex={state.selectedMissionArtifactIndex()}
               onChange={(idx) => state.selectMissionArtifactIndex(idx)}
+              onSelect={() => setDetailFocus("viewer")}
             />
           </box>
           <box
@@ -586,6 +593,7 @@ export function Dashboard(props: DashboardProps) {
                 focused={focused() === "missions"}
                 selectedIndex={missionIndex()}
                 onChange={onMissionChange}
+                onSelect={onMissionSelect}
               />
             </box>
             <box
