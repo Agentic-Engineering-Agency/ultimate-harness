@@ -1,0 +1,30 @@
+schema_version: uh.adapter.v0
+id: hermes-proxy
+name: Hermes Proxy
+description: >-
+  HTTP client targeting a local `hermes proxy` instance (Hermes Agent
+  >= 0.14.0). Officially sanctioned OAuth-backed subscription routing that
+  replaces the OMP stealth path. v0.14.0 ships only the `nous` upstream
+  provider; future Hermes versions may add `claude` / `chatgpt` /
+  `supergrok`. The adapter stays provider-agnostic — it just speaks
+  OpenAI-compat to `endpoint`.
+  See docs/architecture/hermes-proxy-spike.md.
+runtime: hermes-proxy
+capabilities:
+  - subscription-auth
+  - oai-compat
+  - http-transport
+  - sentinel-protocol
+status: experimental
+config:
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    endpoint: "http://127.0.0.1:8645/v1"
+    model: "hermes-4-405b"
+    provider: nous
+    request_timeout_ms: 120000
+    extra_headers: {}

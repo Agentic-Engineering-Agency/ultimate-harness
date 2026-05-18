@@ -11,6 +11,7 @@ import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
 import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
+import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { parse as parseYaml } from "yaml";
@@ -62,6 +63,7 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
   hermes: { dryRun: dryRunHermes, run: runHermes, surfaceBlocked: false },
   codex: { dryRun: dryRunCodex, run: runCodex, surfaceBlocked: true },
   "oh-my-pi": { dryRun: dryRunOhMyPi, run: runOhMyPi, surfaceBlocked: true },
+  "hermes-proxy": { dryRun: dryRunHermesProxy, run: runHermesProxy, surfaceBlocked: true },
 };
 
 /**
