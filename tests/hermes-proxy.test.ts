@@ -158,37 +158,123 @@ describe("hermes-proxy manifest validation via validateAdapter", () => {
   });
 });
 
-describe("hermes-proxy runtime checker (stub)", () => {
-  test("reports configured + live HTTP probe pending UH-37", async () => {
-    const result = await hermesProxyRuntimeChecker(
-      {
-        schema_version: "uh.adapter.v0",
-        id: "hermes-proxy",
-        name: "Hermes Proxy",
-        description: "",
-        runtime: "hermes-proxy",
-        capabilities: [],
-        status: "experimental",
-        config: {
-          cli_command: "",
-          default_toolsets: [],
-          default_provider: "",
-          default_model: "",
-          worktree_mode: false,
-          pass_session_id: true,
-          runtime_config: {
-            endpoint: "http://127.0.0.1:8645/v1",
-            model: "hermes-4-405b",
-          },
+describe("hermes-proxy runtime checker (live HTTP probe — UH-37)", () => {
+  // Use a dedicated http import here to avoid forward-declaring before the
+  // UH-39 suite below; the second require is a no-op for node.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const http = require("node:http") as typeof import("node:http");
+
+  function makeManifest(endpoint: string, provider?: string) {
+    return {
+      schema_version: "uh.adapter.v0" as const,
+      id: "hermes-proxy",
+      name: "Hermes Proxy",
+      description: "",
+      runtime: "hermes-proxy",
+      capabilities: [],
+      status: "experimental" as const,
+      config: {
+        cli_command: undefined,
+        default_toolsets: [],
+        default_provider: "",
+        default_model: "",
+        worktree_mode: false,
+        pass_session_id: false,
+        runtime_config: {
+          endpoint,
+          model: "hermes-4-405b",
+          ...(provider ? { provider } : {}),
+          request_timeout_ms: 120_000,
+          extra_headers: {},
         },
       },
+    };
+  }
+
+  function startServer(handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void): Promise<{ port: number; close: () => Promise<void> }> {
+    return new Promise((resolve) => {
+      const server = http.createServer(handler);
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") throw new Error("bad addr");
+        resolve({
+          port: addr.port,
+          close: () => new Promise<void>((res) => server.close(() => res())),
+        });
+      });
+    });
+  }
+
+  test("200 with models list → found + count surfaced", async () => {
+    const server = await startServer((req, res) => {
+      expect(req.url).toBe("/v1/models");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "a" }, { id: "b" }, { id: "c" }] }));
+    });
+    const result = await hermesProxyRuntimeChecker(
+      makeManifest(`http://127.0.0.1:${server.port}/v1`),
       process.cwd(),
     );
-    expect(result.runtime).toBe("hermes-proxy");
     expect(result.found).toBe(true);
-    expect(result.version).toMatch(/manifest-only/);
-    expect(result.version).toMatch(/UH-37/);
+    expect(result.version).toMatch(/proxy reachable/);
+    expect(result.version).toMatch(/3 models available/);
     expect(result.errors).toEqual([]);
+    await server.close();
+  });
+
+  test("401 surfaces re-auth hint with provider name", async () => {
+    const server = await startServer((_req, res) => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Failed to refresh credentials", type: "upstream_auth_failed", code: "upstream_auth_failed" } }));
+    });
+    const result = await hermesProxyRuntimeChecker(
+      makeManifest(`http://127.0.0.1:${server.port}/v1`, "nous"),
+      process.cwd(),
+    );
+    expect(result.found).toBe(false);
+    expect(result.errors[0]).toMatch(/HTTP 401/);
+    expect(result.errors[0]).toMatch(/hermes auth status nous/);
+    await server.close();
+  });
+
+  test("404 surfaces proxy-version-mismatch hint", async () => {
+    const server = await startServer((_req, res) => {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Path /v1/models is not forwarded by this proxy", type: "path_not_allowed", code: "path_not_allowed" } }));
+    });
+    const result = await hermesProxyRuntimeChecker(
+      makeManifest(`http://127.0.0.1:${server.port}/v1`),
+      process.cwd(),
+    );
+    expect(result.found).toBe(false);
+    expect(result.errors[0]).toMatch(/HTTP 404/);
+    expect(result.errors[0]).toMatch(/proxy version/);
+    await server.close();
+  });
+
+  test("ECONNREFUSED → endpoint-unreachable hint with `hermes proxy start`", async () => {
+    const closed = await startServer(() => undefined);
+    const port = closed.port;
+    await closed.close();
+    const result = await hermesProxyRuntimeChecker(
+      makeManifest(`http://127.0.0.1:${port}/v1`),
+      process.cwd(),
+    );
+    expect(result.found).toBe(false);
+    expect(result.errors[0]).toMatch(/endpoint unreachable/);
+    expect(result.errors[0]).toMatch(/hermes proxy start/);
+  });
+
+  test("missing endpoint → explicit missing-endpoint error", async () => {
+    const manifest = makeManifest("placeholder");
+    // Override runtime_config to drop endpoint.
+    if (manifest.config && manifest.config.runtime_config) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (manifest.config.runtime_config as any).endpoint = "";
+    }
+    const result = await hermesProxyRuntimeChecker(manifest, process.cwd());
+    expect(result.found).toBe(false);
+    expect(result.errors[0]).toMatch(/missing endpoint/);
   });
 });
 
