@@ -272,3 +272,141 @@ describe("uh verify", () => {
     expect(result.sandbox).toBeUndefined();
   });
 });
+
+describe("acceptance criteria (UH-54)", () => {
+  async function writeMissionWithAcs(id: string, opts: {
+    requiredChecks?: Array<{ name: string; command?: string }>;
+    acceptanceCriteria?: Array<{ id: string; description: string; check_command?: string; severity?: "block" | "warn" }>;
+    completionCriteria?: string[];
+  } = {}) {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", id);
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(join(missionDir, "mission.yaml"), stringify({
+      schema_version: "uh.mission.v0",
+      id,
+      title: `Mission ${id}`,
+      workflow_profile: "research-docs",
+      objective: "AC verify test.",
+      completion_criteria: opts.completionCriteria ?? [],
+      acceptance_criteria: opts.acceptanceCriteria ?? [],
+      verification: {
+        required_checks: opts.requiredChecks ?? [{ name: "noop", command: "true" }],
+        review_gates: [],
+      },
+    }), "utf-8");
+    return missionDir;
+  }
+
+  test("schema rejects duplicate AC ids", async () => {
+    const id = "ac-dup";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "first" },
+        { id: "ac-1", description: "duplicate" },
+      ],
+    });
+    await expect(verifyMission(TEST_ROOT, id)).rejects.toThrow(/duplicate.*ac-1/i);
+  });
+
+  test("runs each AC's check_command and writes per-AC results", async () => {
+    const id = "ac-multi";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "exits 0", check_command: "true", severity: "block" },
+        { id: "ac-2", description: "exits 1", check_command: "false", severity: "warn" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.acceptance_total).toBe(2);
+    expect(result.acceptance_passed).toBe(1);
+    expect(result.acceptance_warn_failed).toBe(1);
+    expect(result.acceptance_failed_block).toBe(0);
+    expect(result.status).toBe("passed");
+    const artifact = await readVerification(id);
+    expect(artifact.acceptance_criteria).toHaveLength(2);
+    expect(artifact.acceptance_criteria[0]).toMatchObject({ id: "ac-1", status: "passed", severity: "block", exit_code: 0 });
+    expect(artifact.acceptance_criteria[1]).toMatchObject({ id: "ac-2", status: "failed", severity: "warn", exit_code: 1 });
+  });
+
+  test("block-severity AC failure forces overall status to failed", async () => {
+    const id = "ac-block-fail";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "must pass", check_command: "false", severity: "block" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("failed");
+    expect(result.acceptance_failed_block).toBe(1);
+  });
+
+  test("ACs without check_command land as blocked informational entries", async () => {
+    const id = "ac-no-cmd";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "manual verify", severity: "warn" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.acceptance_blocked).toBe(1);
+    expect(result.status).toBe("passed"); // required_checks pass; AC is warn-blocked
+  });
+
+  test("block-severity AC without check_command downgrades overall status to blocked", async () => {
+    const id = "ac-block-no-cmd";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "must be verified", severity: "block" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("blocked");
+    expect(result.acceptance_blocked).toBe(1);
+    const artifact = await readVerification(id);
+    expect(artifact.findings.map((f: { severity: string }) => f.severity)).toContain("error");
+    expect(artifact.findings.some((f: { message: string }) => /ac-1.*severity=block but has no check_command/.test(f.message))).toBe(true);
+  });
+
+  test("warn-severity AC failure emits a warning-level finding without blocking", async () => {
+    const id = "ac-warn-finding";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "warn check", check_command: "false", severity: "warn" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+    const artifact = await readVerification(id);
+    expect(artifact.findings).toBeDefined();
+    expect(artifact.findings.some((f: { severity: string; message: string }) => f.severity === "warning" && /ac-1/.test(f.message))).toBe(true);
+  });
+
+  test("completion_criteria auto-promotes to warn ACs when acceptance_criteria is empty", async () => {
+    const id = "ac-legacy";
+    await writeMissionWithAcs(id, {
+      completionCriteria: ["legacy criterion A", "legacy criterion B"],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.acceptance_total).toBe(2);
+    expect(result.acceptance_blocked).toBe(2);
+    const artifact = await readVerification(id);
+    expect(artifact.acceptance_criteria.map((ac: { id: string; severity: string }) => ({ id: ac.id, severity: ac.severity }))).toEqual([
+      { id: "ac-1", severity: "warn" },
+      { id: "ac-2", severity: "warn" },
+    ]);
+  });
+
+  test("emits acceptance.checked events to the mission ndjson", async () => {
+    const id = "ac-events";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "passes", check_command: "true" },
+      ],
+    });
+    await verifyMission(TEST_ROOT, id);
+    const events = await readFile(join(TEST_ROOT, ".harness", "missions", id, "events.ndjson"), "utf-8");
+    const lines = events.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const acEvent = lines.find((event: { type?: string }) => event.type === "acceptance.checked");
+    expect(acEvent).toMatchObject({ ac_id: "ac-1", status: "passed", severity: "block", exit_code: 0 });
+  });
+});
