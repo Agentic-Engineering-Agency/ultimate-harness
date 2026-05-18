@@ -84,6 +84,7 @@ export interface DashboardState {
   missionDetail: Accessor<MissionDetail | null>;
   isMissionDetailLoading: Accessor<boolean>;
   missionDetailError: Accessor<Error | null>;
+  overlayOpen: Accessor<boolean>;
   selectAdapter: (row: AdapterRow | null) => void;
   selectMission: (row: MissionRow | null) => void;
   selectSandbox: (row: SandboxRow | null) => void;
@@ -96,6 +97,9 @@ export interface DashboardState {
   closeMissionDetail: () => void;
   selectMissionArtifactIndex: (index: number) => void;
   moveMissionArtifactSelection: (delta: number) => void;
+  toggleOverlay: () => void;
+  closeOverlay: () => void;
+  openOverlay: () => void;
 
   /** Force a fresh load now (e.g. wired to `r` keybinding). */
   refresh: () => Promise<void>;
@@ -184,6 +188,7 @@ export function createDashboardState(
     const [missionDetail, setMissionDetail] = createSignal<MissionDetail | null>(null);
     const [isMissionDetailLoading, setMissionDetailLoading] = createSignal(false);
     const [missionDetailError, setMissionDetailError] = createSignal<Error | null>(null);
+    const [overlayOpen, setOverlayOpen] = createSignal(false);
     // Tick counter that bumps whenever adapterCheck cache changes, so
     // Solid views reading `adapterCheck(id)` re-evaluate.
     const [checkTick, setCheckTick] = createSignal(0);
@@ -386,6 +391,7 @@ export function createDashboardState(
       missionDetail,
       isMissionDetailLoading,
       missionDetailError,
+      overlayOpen,
       selectAdapter: setSelectedAdapter,
       selectMission: setSelectedMission,
       selectSandbox: setSelectedSandbox,
@@ -395,6 +401,9 @@ export function createDashboardState(
       closeMissionDetail,
       selectMissionArtifactIndex,
       moveMissionArtifactSelection,
+      toggleOverlay: () => setOverlayOpen((v) => !v),
+      closeOverlay: () => setOverlayOpen(false),
+      openOverlay: () => setOverlayOpen(true),
       refresh,
     };
   });

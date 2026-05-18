@@ -438,3 +438,45 @@ describe("tui/state — mission detail navigation", () => {
   });
 });
 
+
+describe("tui/state — overlay", () => {
+  test("toggleOverlay round-trips and closeOverlay forces false", async () => {
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap(),
+      debounceMs: 10,
+    });
+    await delay(5);
+    expect(state.overlayOpen()).toBe(false);
+    state.toggleOverlay();
+    expect(state.overlayOpen()).toBe(true);
+    state.toggleOverlay();
+    expect(state.overlayOpen()).toBe(false);
+    state.openOverlay();
+    expect(state.overlayOpen()).toBe(true);
+    state.closeOverlay();
+    expect(state.overlayOpen()).toBe(false);
+    state.dispose();
+  });
+
+  test("overlay state is independent from mission detail navigation", async () => {
+    const row = mission("m-overlay");
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [row] }),
+      missionDetailLoader: async (m) => detailFor(m),
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.selectMission(row);
+    await state.openSelectedMission();
+    state.openOverlay();
+    expect(state.overlayOpen()).toBe(true);
+    expect(state.activeView()).toBe("missionDetail");
+    state.closeMissionDetail();
+    expect(state.activeView()).toBe("dashboard");
+    expect(state.overlayOpen()).toBe(true);
+    state.dispose();
+  });
+});
+
