@@ -53,9 +53,19 @@ Runbooks:
 - [Anthropic via oh-my-pi](./docs/runbooks/anthropic-via-omp.md)
 - [Hermes Proxy setup](./docs/runbooks/hermes-proxy-setup.md)
 - [Hermes Proxy E2E smoke (UH-38 promotion record)](./docs/runbooks/hermes-proxy-e2e-smoke.md)
+- [Publishing](./docs/runbooks/publishing.md)
+
+## Install
+
+```sh
+bun add -g @agenticengineering/ultimate-harness
+uh --help
+```
+
+The package is published to the npm registry and is installable with Bun's
+package manager. The CLI binary is `uh`.
 
 ## Quick start
-
 ```sh
 bun install
 bun run build
