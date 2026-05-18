@@ -1,0 +1,9 @@
+{
+  "title": "Verification",
+  "pages": [
+    "strategy",
+    "checks",
+    "review-gates",
+    "audit-trail"
+  ]
+}

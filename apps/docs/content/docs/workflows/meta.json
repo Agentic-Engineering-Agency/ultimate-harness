@@ -1,0 +1,12 @@
+{
+  "title": "Workflows",
+  "pages": [
+    "overview",
+    "research-to-spec",
+    "spec-to-plan",
+    "plan-to-mission",
+    "mission-to-sandbox",
+    "verify-review-promote",
+    "bmad-agent-map"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "title": "Architecture",
+  "pages": [
+    "overview",
+    "entities",
+    "runtime-adapter-contract",
+    "mission-packet-schema",
+    "harness-artifacts",
+    "skill-format",
+    "sandboxing",
+    "sandbox-agentfs",
+    "verification-and-promotion",
+    "sdd-tdd-qa",
+    "tui",
+    "adapter-codex",
+    "adapter-hermes-proxy",
+    "hermes-proxy-spike"
+  ]
+}

@@ -31,6 +31,12 @@ const FEATURES = [
     params: { _splat: 'architecture/mission-packet-schema' },
   },
   {
+    title: 'SDD + TDD + cross-runtime QA',
+    desc: 'Three composable discipline layers: structured acceptance_criteria, test-first diff gate, and `uh mission run-all` fan-out comparison.',
+    href: '/docs/$',
+    params: { _splat: 'architecture/sdd-tdd-qa' },
+  },
+  {
     title: 'Sandbox isolation',
     desc: 'git-worktree sandboxes by default; mission-bound, dirty-aware discard, ready for AgentFS swap-in.',
     href: '/docs/$',
