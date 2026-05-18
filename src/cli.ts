@@ -573,6 +573,77 @@ missionCmd
     }
   });
 
+missionCmd
+  .command("run-all")
+  .description("Run a mission across multiple adapter runtimes and produce a side-by-side comparison")
+  .argument("<mission-id>", "Mission id (must exist in .harness/missions/)")
+  .option("--runtimes <list>", "Comma-separated runtime list (default: every active adapter)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--serial", "Run runtimes sequentially instead of in parallel")
+  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const requested = opts.runtimes ? opts.runtimes.split(",").map((s) => s.trim()).filter(Boolean) : await resolveActiveRuntimes(root);
+    if (requested.length === 0) {
+      console.error("[FAIL] no runtimes selected. Pass --runtimes <list> or add active adapters under .harness/adapters/.");
+      process.exit(1);
+      return;
+    }
+    for (const rt of requested) {
+      if (!RUNTIME_WIRINGS[rt]) {
+        console.error(`Unknown runtime: ${rt}`);
+        process.exit(1);
+        return;
+      }
+    }
+    const { runMissionAcrossRuntimes, persistRuntimeComparison } = await import("./harness/run-all.js");
+    const { createSandbox } = await import("./harness/sandbox.js");
+    const canonicalMissionDir = path.join(root, ".harness", "missions", missionId);
+
+    console.log(`Running mission ${missionId} across ${requested.length} runtime(s): ${requested.join(", ")}`);
+    const comparison = await runMissionAcrossRuntimes(root, missionId, {
+      runtimes: requested,
+      runtimeRunner: async (runtime, effectiveRoot, missionPath) => {
+        const wiring = RUNTIME_WIRINGS[runtime];
+        const res = await wiring.run(effectiveRoot, missionPath);
+        return res;
+      },
+      sandboxOps: {
+        create: async (r, { id, missionId: mid }) => {
+          const record = await createSandbox(r, { id, missionId: mid });
+          return { id: record.id, path: path.resolve(r, record.path) };
+        },
+      },
+      serial: opts.serial === true,
+    });
+
+    const reportPath = await persistRuntimeComparison(canonicalMissionDir, comparison);
+    const passing = comparison.outcomes.filter((o) => o.status === "succeeded").length;
+    const failing = comparison.outcomes.length - passing;
+    const label = comparison.agreement ? "AGREEMENT" : "DIVERGENT";
+    console.log(`[${label}] ${missionId}`);
+    console.log(`runtimes: ${passing} succeeded, ${failing} not`);
+    console.log(`report: ${reportPath}`);
+    const anyNonSucceeded = comparison.outcomes.some((o) => o.status !== "succeeded");
+    if (!comparison.agreement) {
+      console.log(`divergent: ${comparison.divergentRuntimes.join(", ")}`);
+      process.exit(1);
+      return;
+    }
+    if (anyNonSucceeded) {
+      const broken = comparison.outcomes.filter((o) => o.status !== "succeeded").map((o) => `${o.runtime}=${o.status}`);
+      console.log(`runtime failures: ${broken.join(", ")}`);
+      process.exit(1);
+      return;
+    }
+  });
+
+async function resolveActiveRuntimes(root: string): Promise<string[]> {
+  const entries = await runtimeRegistry.list(root);
+  return entries
+    .filter((entry) => entry.document.status === "active")
+    .map((entry) => entry.document.runtime);
+}
+
 // uh sandbox
 const sandboxCmd = program
   .command("sandbox")
