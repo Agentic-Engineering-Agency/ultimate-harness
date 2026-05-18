@@ -11,9 +11,13 @@ import { resolveRoot } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
 import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
+import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { parse as parseYaml } from "yaml";
+import { spawn, spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { readFile as readFileAsync } from "node:fs/promises";
 import {
   createSandbox,
@@ -62,6 +66,7 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
   hermes: { dryRun: dryRunHermes, run: runHermes, surfaceBlocked: false },
   codex: { dryRun: dryRunCodex, run: runCodex, surfaceBlocked: true },
   "oh-my-pi": { dryRun: dryRunOhMyPi, run: runOhMyPi, surfaceBlocked: true },
+  "hermes-proxy": { dryRun: dryRunHermesProxy, run: runHermesProxy, surfaceBlocked: true },
 };
 
 /**
@@ -199,6 +204,16 @@ program
       const label = result.status === "passed" ? "PASS" : result.status === "failed" ? "FAIL" : "BLOCKED";
       console.log(`[${label}] ${result.mission_id}`);
       console.log(`checks: ${result.checks_passed} passed, ${result.checks_failed} failed, ${result.checks_blocked} blocked`);
+      if (result.acceptance_total > 0) {
+        const acFailures = result.acceptance_failed_block + result.acceptance_warn_failed;
+        console.log(
+          `acceptance: ${result.acceptance_passed} passed, ${result.acceptance_failed_block} block-failed, ` +
+          `${result.acceptance_warn_failed} warn-failed, ${result.acceptance_blocked} blocked (total ${result.acceptance_total})`,
+        );
+        if (acFailures > 0) {
+          console.log(`  see acceptance_criteria[] in ${result.path} for per-AC stdout/stderr snippets`);
+        }
+      }
       if (result.sandbox) {
         console.log(`sandbox: ${result.sandbox.id} (${result.sandbox.path})`);
       }
@@ -558,6 +573,77 @@ missionCmd
     }
   });
 
+missionCmd
+  .command("run-all")
+  .description("Run a mission across multiple adapter runtimes and produce a side-by-side comparison")
+  .argument("<mission-id>", "Mission id (must exist in .harness/missions/)")
+  .option("--runtimes <list>", "Comma-separated runtime list (default: every active adapter)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--serial", "Run runtimes sequentially instead of in parallel")
+  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const requested = opts.runtimes ? opts.runtimes.split(",").map((s) => s.trim()).filter(Boolean) : await resolveActiveRuntimes(root);
+    if (requested.length === 0) {
+      console.error("[FAIL] no runtimes selected. Pass --runtimes <list> or add active adapters under .harness/adapters/.");
+      process.exit(1);
+      return;
+    }
+    for (const rt of requested) {
+      if (!RUNTIME_WIRINGS[rt]) {
+        console.error(`Unknown runtime: ${rt}`);
+        process.exit(1);
+        return;
+      }
+    }
+    const { runMissionAcrossRuntimes, persistRuntimeComparison } = await import("./harness/run-all.js");
+    const { createSandbox } = await import("./harness/sandbox.js");
+    const canonicalMissionDir = path.join(root, ".harness", "missions", missionId);
+
+    console.log(`Running mission ${missionId} across ${requested.length} runtime(s): ${requested.join(", ")}`);
+    const comparison = await runMissionAcrossRuntimes(root, missionId, {
+      runtimes: requested,
+      runtimeRunner: async (runtime, effectiveRoot, missionPath) => {
+        const wiring = RUNTIME_WIRINGS[runtime];
+        const res = await wiring.run(effectiveRoot, missionPath);
+        return res;
+      },
+      sandboxOps: {
+        create: async (r, { id, missionId: mid }) => {
+          const record = await createSandbox(r, { id, missionId: mid });
+          return { id: record.id, path: path.resolve(r, record.path) };
+        },
+      },
+      serial: opts.serial === true,
+    });
+
+    const reportPath = await persistRuntimeComparison(canonicalMissionDir, comparison);
+    const passing = comparison.outcomes.filter((o) => o.status === "succeeded").length;
+    const failing = comparison.outcomes.length - passing;
+    const label = comparison.agreement ? "AGREEMENT" : "DIVERGENT";
+    console.log(`[${label}] ${missionId}`);
+    console.log(`runtimes: ${passing} succeeded, ${failing} not`);
+    console.log(`report: ${reportPath}`);
+    const anyNonSucceeded = comparison.outcomes.some((o) => o.status !== "succeeded");
+    if (!comparison.agreement) {
+      console.log(`divergent: ${comparison.divergentRuntimes.join(", ")}`);
+      process.exit(1);
+      return;
+    }
+    if (anyNonSucceeded) {
+      const broken = comparison.outcomes.filter((o) => o.status !== "succeeded").map((o) => `${o.runtime}=${o.status}`);
+      console.log(`runtime failures: ${broken.join(", ")}`);
+      process.exit(1);
+      return;
+    }
+  });
+
+async function resolveActiveRuntimes(root: string): Promise<string[]> {
+  const entries = await runtimeRegistry.list(root);
+  return entries
+    .filter((entry) => entry.document.status === "active")
+    .map((entry) => entry.document.runtime);
+}
+
 // uh sandbox
 const sandboxCmd = program
   .command("sandbox")
@@ -761,5 +847,41 @@ function printValidationResult(r: { valid: boolean; path: string; schema_version
     console.log(`  error: ${e}`);
   }
 }
+
+// uh tui
+program
+  .command("tui")
+  .description("Open the interactive terminal UI (Mission Control)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--once", "Render one frame and exit (CI / smoke / docs)")
+  .action(async (opts: { root?: string; once?: boolean }) => {
+    const bunCheck = spawnSync("bun", ["--version"], { stdio: "ignore" });
+    if (bunCheck.status !== 0) {
+      process.stderr.write(
+        "uh tui requires Bun. Install: curl -fsSL https://bun.sh/install | bash\n",
+      );
+      process.exit(1);
+    }
+    const entry = fileURLToPath(new URL("../src/tui/index.tsx", import.meta.url));
+    const cwd = opts.root ? path.resolve(opts.root) : process.cwd();
+    const args = ["--preload", "@opentui/solid/preload", entry];
+    if (opts.once) args.push("--once");
+    const child = spawn("bun", args, {
+      stdio: "inherit",
+      cwd,
+      env: { ...process.env, UH_TUI_ROOT: cwd },
+    });
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        process.exit(1);
+      } else {
+        process.exit(code ?? 0);
+      }
+    });
+    child.on("error", (err) => {
+      process.stderr.write(`uh tui: failed to spawn bun: ${err.message}\n`);
+      process.exit(1);
+    });
+  });
 
 program.parse();

@@ -1,0 +1,8 @@
+# Preload the Solid → OpenTUI Babel transform so .tsx files using the
+# `@opentui/solid` JSX runtime compile at module load. The preload is a no-op
+# unless code imports `@opentui/solid`, so it does not affect vanilla scripts
+# (e.g. the shipped `bin/uh-tui-spike.ts` or the existing `src/cli.ts`).
+#
+# Vitest/Node code paths never see this — `bun run test` invokes `vitest run`
+# which runs under Node, not Bun.
+preload = ["@opentui/solid/preload"]

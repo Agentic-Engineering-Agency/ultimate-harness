@@ -17,10 +17,41 @@ const ExpectedArtifactSchema = z.object({
   type: z.string().optional(),
 });
 
+const AcceptanceCriterionSchema = z.object({
+  id: z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, {
+    message: "AC id must start with [A-Za-z0-9] and use only [A-Za-z0-9._-]",
+  }),
+  description: z.string().min(1),
+  check_command: z.string().optional(),
+  severity: z.enum(["block", "warn"]).optional().default("block"),
+});
+
 const RequiredCheckSchema = z.object({
   name: z.string().min(1),
   command: z.string().optional(),
 });
+
+const DEFAULT_TEST_PATHS = [
+  "tests/**",
+  "test/**",
+  "**/*.test.ts",
+  "**/*.test.tsx",
+  "**/*.test.js",
+  "**/*.test.jsx",
+  "**/*.spec.ts",
+  "**/*.spec.tsx",
+  "**/*.spec.js",
+  "**/*.spec.jsx",
+  "**/__tests__/**",
+];
+
+const DEFAULT_SOURCE_PATHS = ["src/**"];
+
+const TddOptionsSchema = z.object({
+  enforce_tests_first: z.boolean().optional().default(true),
+  test_paths: z.array(z.string().min(1)).optional().default(DEFAULT_TEST_PATHS),
+  source_paths: z.array(z.string().min(1)).optional().default(DEFAULT_SOURCE_PATHS),
+}).strict();
 
 const MissionInputSchema = z.object({
   schema_version: z.literal("uh.mission.v0"),
@@ -46,6 +77,8 @@ const MissionInputSchema = z.object({
     files: z.array(z.string()).optional().default([]),
   }).optional().default({ files: [] }),
   completion_criteria: z.array(z.string()).optional().default([]),
+  acceptance_criteria: z.array(AcceptanceCriterionSchema).optional().default([]),
+  tdd: TddOptionsSchema.optional(),
 
   // Backward-compatible fields.
   name: z.string().min(1).optional(),
@@ -72,6 +105,18 @@ const MissionInputSchema = z.object({
       path: ["name"],
     });
   }
+  const seen = new Set<string>();
+  for (let i = 0; i < mission.acceptance_criteria.length; i += 1) {
+    const ac = mission.acceptance_criteria[i];
+    if (seen.has(ac.id)) {
+      ctx.addIssue({
+        code: "custom",
+        message: `Duplicate acceptance criterion id: ${ac.id}`,
+        path: ["acceptance_criteria", i, "id"],
+      });
+    }
+    seen.add(ac.id);
+  }
 }).transform((mission) => ({
   ...mission,
   name: mission.name ?? mission.title ?? "",
@@ -93,11 +138,27 @@ const MissionInputSchema = z.object({
     required_checks: mission.verification.required_checks,
     review_gates: mission.verification.review_gates,
   },
+  acceptance_criteria: (mission.acceptance_criteria.length > 0
+    ? mission.acceptance_criteria
+    : mission.completion_criteria.map((description, index): {
+        id: string;
+        description: string;
+        check_command?: string;
+        severity: "block" | "warn";
+      } => ({
+        id: `ac-${index + 1}`,
+        description,
+        severity: "warn",
+      }))),
 }));
 
 export const MissionSchema = MissionInputSchema;
 
 export type MissionDocument = z.infer<typeof MissionSchema>;
+export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>;
+export type TddOptions = z.infer<typeof TddOptionsSchema>;
+export const TDD_DEFAULT_TEST_PATHS = DEFAULT_TEST_PATHS;
+export const TDD_DEFAULT_SOURCE_PATHS = DEFAULT_SOURCE_PATHS;
 
 export function validateMission(data: unknown): MissionDocument {
   return MissionSchema.parse(data);

@@ -1,0 +1,71 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+html {
+  scrollbar-gutter: stable;
+}
+
+html > body[data-scroll-locked] {
+  margin-right: 0px !important;
+  --removed-body-scroll-bar-size: 0px !important;
+}
+
+@theme {
+  --color-uh-accent: oklch(0.72 0.18 250);
+  --color-uh-accent-soft: oklch(0.62 0.18 250);
+}
+
+/* Landing-page gradient backdrop */
+.uh-hero-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, color-mix(in oklch, var(--color-uh-accent) 24%, transparent), transparent),
+    radial-gradient(ellipse 60% 40% at 80% 100%, color-mix(in oklch, var(--color-uh-accent-soft) 18%, transparent), transparent);
+  z-index: -1;
+}
+
+.uh-glow {
+  background: linear-gradient(120deg,
+    color-mix(in oklch, var(--color-uh-accent) 30%, transparent),
+    color-mix(in oklch, var(--color-uh-accent-soft) 30%, transparent));
+  filter: blur(60px);
+}
+
+.uh-gradient {
+  background: linear-gradient(90deg, var(--color-uh-accent), var(--color-uh-accent-soft));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.uh-card {
+  background: color-mix(in oklch, var(--color-fd-background) 92%, transparent);
+  border: 1px solid color-mix(in oklch, var(--color-fd-border) 100%, transparent);
+  border-radius: 18px;
+  padding: 20px;
+  transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease;
+}
+
+.uh-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in oklch, var(--color-uh-accent) 50%, transparent);
+  box-shadow: 0 18px 40px -22px color-mix(in oklch, var(--color-uh-accent) 60%, transparent);
+}
+
+.uh-mono {
+  font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+  font-feature-settings: "calt", "ss01";
+}
+
+.uh-pill-active {
+  background: color-mix(in oklch, var(--color-uh-accent) 22%, transparent);
+  color: var(--color-uh-accent);
+}
+
+.uh-pill-muted {
+  background: color-mix(in oklch, var(--color-fd-muted) 60%, transparent);
+  color: var(--color-fd-muted-foreground);
+}

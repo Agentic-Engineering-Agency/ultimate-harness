@@ -75,6 +75,16 @@ completion_criteria:
   - Root README links to docs.
   - Core entities and adapter contract are defined.
   - MVP boundary is explicit.
+
+acceptance_criteria:
+  - id: ac-tree
+    description: Docs tree navigable from docs/README.md.
+    check_command: find docs -type f | sort
+    severity: block
+  - id: ac-links
+    description: All Markdown links resolve.
+    check_command: bun run check:links
+    severity: warn
 ```
 
 ## Field rules
@@ -89,3 +99,11 @@ completion_criteria:
 - `expected_outputs` should include paths and artifact kinds where possible.
 - `sandbox.promotion_policy` must be explicit.
 - `verification.required_checks` should be runnable commands or named manual checks.
+- `acceptance_criteria` (Spec-Driven Development, UH-54) declare each criterion with a stable `id`, a `description`, an optional `check_command` (defaulted from the global `verification.required_checks` when omitted) and a `severity` of `block` (verification fails when this AC fails) or `warn` (recorded for the audit trail, not blocking).
+- When `acceptance_criteria` is absent, every entry under `completion_criteria` is auto-promoted to a `severity: warn` AC. Existing missions continue to validate without edits.
+- `uh verify` writes a per-AC entry into `verification.yaml#acceptance_criteria[]` (id / description / status / severity / exit_code / duration_ms / stdout_snippet / stderr_snippet) and emits an `acceptance.checked` row in `events.ndjson` for live observers (TUI / replay tools).
+- `tdd` (Test-Driven Development, UH-55) opts the mission into a test-first verification gate.
+  - `tdd.enforce_tests_first: true` — when set, `uh verify` reads `diff.patch` and adds a synthetic `acceptance_criteria` entry `ac-tdd-tests-precede-code` (severity `block`).
+  - The synthetic AC **passes** when the diff touches at least one test path; **fails** when the diff touches source paths without any test changes; and **blocks** the run when `diff.patch` is missing.
+  - `tdd.test_paths` / `tdd.source_paths` are glob arrays; defaults are conventional (`tests/**`, `src/**`, plus `*.{test,spec}.{ts,tsx,js,jsx}` patterns and `__tests__/**`).
+  - Missions without a `tdd` block are unaffected — TDD is opt-in.

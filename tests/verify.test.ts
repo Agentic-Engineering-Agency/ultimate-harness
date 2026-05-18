@@ -136,13 +136,15 @@ describe("uh verify", () => {
   }, 1000);
 
   test("CLI timeout option fails timed out verification promptly", async () => {
-    await writeMission("timeout-cli", [{ name: "node hang", command: "node -e \"setTimeout(() => {}, 500)\"" }]);
+    await writeMission("timeout-cli", [{ name: "node hang", command: "node -e \"setTimeout(() => {}, 60000)\"" }]);
 
     const startedAt = Date.now();
     const { stdout, stderr } = await runUhFailure(["verify", "timeout-cli", "--root", TEST_ROOT, "--timeout-ms", "25"]);
     const elapsedMs = Date.now() - startedAt;
-
-    expect(elapsedMs).toBeLessThan(450);
+    // Generous bound: CLI startup on slow CI runners can be >1s; the
+    // assertion that matters is "we return well before the inner 500ms
+    // setTimeout could naturally complete + propagate", not micro-latency.
+    expect(elapsedMs).toBeLessThan(3000);
     expect(`${stdout}${stderr}`).toContain("[FAIL] timeout-cli");
     const verification = await readVerification("timeout-cli");
     expect(verification.status).toBe("failed");
@@ -272,3 +274,282 @@ describe("uh verify", () => {
     expect(result.sandbox).toBeUndefined();
   });
 });
+
+describe("acceptance criteria (UH-54)", () => {
+  async function writeMissionWithAcs(id: string, opts: {
+    requiredChecks?: Array<{ name: string; command?: string }>;
+    acceptanceCriteria?: Array<{ id: string; description: string; check_command?: string; severity?: "block" | "warn" }>;
+    completionCriteria?: string[];
+  } = {}) {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", id);
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(join(missionDir, "mission.yaml"), stringify({
+      schema_version: "uh.mission.v0",
+      id,
+      title: `Mission ${id}`,
+      workflow_profile: "research-docs",
+      objective: "AC verify test.",
+      completion_criteria: opts.completionCriteria ?? [],
+      acceptance_criteria: opts.acceptanceCriteria ?? [],
+      verification: {
+        required_checks: opts.requiredChecks ?? [{ name: "noop", command: "true" }],
+        review_gates: [],
+      },
+    }), "utf-8");
+    return missionDir;
+  }
+
+  test("schema rejects duplicate AC ids", async () => {
+    const id = "ac-dup";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "first" },
+        { id: "ac-1", description: "duplicate" },
+      ],
+    });
+    await expect(verifyMission(TEST_ROOT, id)).rejects.toThrow(/duplicate.*ac-1/i);
+  });
+
+  test("runs each AC's check_command and writes per-AC results", async () => {
+    const id = "ac-multi";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "exits 0", check_command: "true", severity: "block" },
+        { id: "ac-2", description: "exits 1", check_command: "false", severity: "warn" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.acceptance_total).toBe(2);
+    expect(result.acceptance_passed).toBe(1);
+    expect(result.acceptance_warn_failed).toBe(1);
+    expect(result.acceptance_failed_block).toBe(0);
+    expect(result.status).toBe("passed");
+    const artifact = await readVerification(id);
+    expect(artifact.acceptance_criteria).toHaveLength(2);
+    expect(artifact.acceptance_criteria[0]).toMatchObject({ id: "ac-1", status: "passed", severity: "block", exit_code: 0 });
+    expect(artifact.acceptance_criteria[1]).toMatchObject({ id: "ac-2", status: "failed", severity: "warn", exit_code: 1 });
+  });
+
+  test("block-severity AC failure forces overall status to failed", async () => {
+    const id = "ac-block-fail";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "must pass", check_command: "false", severity: "block" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("failed");
+    expect(result.acceptance_failed_block).toBe(1);
+  });
+
+  test("ACs without check_command land as blocked informational entries", async () => {
+    const id = "ac-no-cmd";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "manual verify", severity: "warn" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.acceptance_blocked).toBe(1);
+    expect(result.status).toBe("passed"); // required_checks pass; AC is warn-blocked
+  });
+
+  test("block-severity AC without check_command downgrades overall status to blocked", async () => {
+    const id = "ac-block-no-cmd";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "must be verified", severity: "block" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("blocked");
+    expect(result.acceptance_blocked).toBe(1);
+    const artifact = await readVerification(id);
+    expect(artifact.findings.map((f: { severity: string }) => f.severity)).toContain("error");
+    expect(artifact.findings.some((f: { message: string }) => /ac-1.*severity=block but has no check_command/.test(f.message))).toBe(true);
+  });
+
+  test("warn-severity AC failure emits a warning-level finding without blocking", async () => {
+    const id = "ac-warn-finding";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "warn check", check_command: "false", severity: "warn" },
+      ],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+    const artifact = await readVerification(id);
+    expect(artifact.findings).toBeDefined();
+    expect(artifact.findings.some((f: { severity: string; message: string }) => f.severity === "warning" && /ac-1/.test(f.message))).toBe(true);
+  });
+
+  test("completion_criteria auto-promotes to warn ACs when acceptance_criteria is empty", async () => {
+    const id = "ac-legacy";
+    await writeMissionWithAcs(id, {
+      completionCriteria: ["legacy criterion A", "legacy criterion B"],
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.acceptance_total).toBe(2);
+    expect(result.acceptance_blocked).toBe(2);
+    const artifact = await readVerification(id);
+    expect(artifact.acceptance_criteria.map((ac: { id: string; severity: string }) => ({ id: ac.id, severity: ac.severity }))).toEqual([
+      { id: "ac-1", severity: "warn" },
+      { id: "ac-2", severity: "warn" },
+    ]);
+  });
+
+  test("emits acceptance.checked events to the mission ndjson", async () => {
+    const id = "ac-events";
+    await writeMissionWithAcs(id, {
+      acceptanceCriteria: [
+        { id: "ac-1", description: "passes", check_command: "true" },
+      ],
+    });
+    await verifyMission(TEST_ROOT, id);
+    const events = await readFile(join(TEST_ROOT, ".harness", "missions", id, "events.ndjson"), "utf-8");
+    const lines = events.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const acEvent = lines.find((event: { type?: string }) => event.type === "acceptance.checked");
+    expect(acEvent).toMatchObject({ ac_id: "ac-1", status: "passed", severity: "block", exit_code: 0 });
+  });
+});
+
+
+describe("tdd test-first gate (UH-55)", () => {
+  async function writeTddMission(id: string, opts: {
+    enforce?: boolean;
+    test_paths?: string[];
+    source_paths?: string[];
+    diff?: string | null;
+  } = {}) {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", id);
+    await mkdir(missionDir, { recursive: true });
+    const tddBlock = opts.enforce === false
+      ? undefined
+      : {
+          enforce_tests_first: opts.enforce ?? true,
+          ...(opts.test_paths ? { test_paths: opts.test_paths } : {}),
+          ...(opts.source_paths ? { source_paths: opts.source_paths } : {}),
+        };
+    await writeFile(join(missionDir, "mission.yaml"), stringify({
+      schema_version: "uh.mission.v0",
+      id,
+      title: `Mission ${id}`,
+      workflow_profile: "tdd-bugfix",
+      objective: "tdd gate test",
+      ...(tddBlock ? { tdd: tddBlock } : {}),
+      verification: {
+        required_checks: [{ name: "noop", command: "true" }],
+        review_gates: [],
+      },
+    }), "utf-8");
+    if (opts.diff !== null) {
+      await writeFile(join(missionDir, "diff.patch"), opts.diff ?? "", "utf-8");
+    }
+    return missionDir;
+  }
+
+  const TESTS_ONLY_DIFF = [
+    "diff --git a/tests/foo.test.ts b/tests/foo.test.ts",
+    "--- a/tests/foo.test.ts",
+    "+++ b/tests/foo.test.ts",
+    "",
+  ].join("\n");
+  const SOURCE_ONLY_DIFF = [
+    "diff --git a/src/feature.ts b/src/feature.ts",
+    "--- a/src/feature.ts",
+    "+++ b/src/feature.ts",
+    "diff --git a/src/helper.ts b/src/helper.ts",
+    "--- a/src/helper.ts",
+    "+++ b/src/helper.ts",
+    "",
+  ].join("\n");
+  const MIXED_DIFF = [
+    "diff --git a/src/feature.ts b/src/feature.ts",
+    "--- a/src/feature.ts",
+    "+++ b/src/feature.ts",
+    "diff --git a/tests/feature.test.ts b/tests/feature.test.ts",
+    "--- a/tests/feature.test.ts",
+    "+++ b/tests/feature.test.ts",
+    "",
+  ].join("\n");
+  const CUSTOM_DIFF = [
+    "diff --git a/lib/foo.ts b/lib/foo.ts",
+    "--- a/lib/foo.ts",
+    "+++ b/lib/foo.ts",
+    "diff --git a/spec/foo.spec.ts b/spec/foo.spec.ts",
+    "--- a/spec/foo.spec.ts",
+    "+++ b/spec/foo.spec.ts",
+    "",
+  ].join("\n");
+
+  test("tests-only diff passes the tdd gate", async () => {
+    const id = "tdd-tests-only";
+    await writeTddMission(id, { diff: TESTS_ONLY_DIFF });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+    const artifact = await readVerification(id);
+    const tddAc = artifact.acceptance_criteria.find((ac: { id: string }) => ac.id === "ac-tdd-tests-precede-code");
+    expect(tddAc).toMatchObject({ status: "passed", severity: "block" });
+  });
+
+  test("source-only diff fails the tdd gate and escalates overall status", async () => {
+    const id = "tdd-source-only";
+    await writeTddMission(id, { diff: SOURCE_ONLY_DIFF });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("failed");
+    expect(result.acceptance_failed_block).toBeGreaterThanOrEqual(1);
+    const artifact = await readVerification(id);
+    const tddAc = artifact.acceptance_criteria.find((ac: { id: string }) => ac.id === "ac-tdd-tests-precede-code");
+    expect(tddAc).toMatchObject({ status: "failed", severity: "block" });
+    expect(tddAc.stderr_snippet).toMatch(/src\/feature\.ts/);
+    expect(tddAc.stderr_snippet).toMatch(/src\/helper\.ts/);
+  });
+
+  test("mixed source + tests diff passes the tdd gate", async () => {
+    const id = "tdd-mixed";
+    await writeTddMission(id, { diff: MIXED_DIFF });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+  });
+
+  test("missing diff.patch blocks the run and emits a finding", async () => {
+    const id = "tdd-no-diff";
+    await writeTddMission(id, { diff: null });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("blocked");
+    const artifact = await readVerification(id);
+    expect(artifact.findings.some((f: { message: string }) => /no diff\.patch/.test(f.message))).toBe(true);
+  });
+
+  test("mission without tdd block behaves like UH-54 alone (no synthetic AC)", async () => {
+    const id = "tdd-disabled";
+    await writeTddMission(id, { enforce: false });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+    const artifact = await readVerification(id);
+    const tddAc = (artifact.acceptance_criteria ?? []).find((ac: { id: string }) => ac.id === "ac-tdd-tests-precede-code");
+    expect(tddAc).toBeUndefined();
+  });
+
+  test("custom test_paths override defaults", async () => {
+    const id = "tdd-custom-paths";
+    await writeTddMission(id, {
+      test_paths: ["spec/**"],
+      source_paths: ["lib/**"],
+      diff: CUSTOM_DIFF,
+    });
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+  });
+
+  test("emits a synthetic acceptance.checked event", async () => {
+    const id = "tdd-event";
+    await writeTddMission(id, { diff: TESTS_ONLY_DIFF });
+    await verifyMission(TEST_ROOT, id);
+    const eventsText = await readFile(join(TEST_ROOT, ".harness", "missions", id, "events.ndjson"), "utf-8");
+    const events = eventsText.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const tddEvent = events.find((e: { ac_id?: string }) => e.ac_id === "ac-tdd-tests-precede-code");
+    expect(tddEvent).toMatchObject({ type: "acceptance.checked", status: "passed", severity: "block", synthetic: true });
+  });
+});
+

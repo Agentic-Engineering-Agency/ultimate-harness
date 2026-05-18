@@ -1,0 +1,20 @@
+{
+  "title": "Ultimate Harness",
+  "pages": [
+    "index",
+    "roadmap",
+    "glossary",
+    "---Product---",
+    "product",
+    "---Architecture---",
+    "architecture",
+    "---Runbooks---",
+    "runbooks",
+    "---Workflows---",
+    "workflows",
+    "---Verification---",
+    "verification",
+    "---Research---",
+    "research"
+  ]
+}

@@ -16,7 +16,21 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 6. [Runtime adapter contract](./architecture/runtime-adapter-contract.md) — what every adapter implements (includes the UH-28 runtime-final-message protocol).
 7. [Mission packet schema](./architecture/mission-packet-schema.md) — the portable work-request format.
 8. [Verification and promotion](./architecture/verification-and-promotion.md) — how sandbox work becomes canonical work.
-9. [BMAD agent map](./workflows/bmad-agent-map.md) — how BMAD-style roles map into Ultimate Harness.
+9. [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md) — the three composable discipline layers (UH-54 / UH-55 / UH-56).
+10. [BMAD agent map](./workflows/bmad-agent-map.md) — how BMAD-style roles map into Ultimate Harness.
+
+## Adapters
+
+| Adapter | Status | Doc / Runbook |
+|---|---|---|
+| `hermes` | active | [Runtime adapter contract](./architecture/runtime-adapter-contract.md) defines the shape; `src/adapters/hermes.ts` is the reference implementation. |
+| `codex` | active | [`architecture/adapter-codex.md`](./architecture/adapter-codex.md), [`runbooks/codex-e2e-smoke.md`](./runbooks/codex-e2e-smoke.md) |
+| `oh-my-pi` | experimental | [`runbooks/anthropic-via-omp.md`](./runbooks/anthropic-via-omp.md) — covers the Anthropic-via-OMP routing path and its ToS posture. |
+
+In flight (see [ROADMAP.md](./ROADMAP.md)):
+
+- `hermes-proxy` — clean ToS-positioned path to subscription routing via Hermes v0.14.0's `hermes proxy` local OAI-compat endpoint (epic [UH-32](https://linear.app/agentic-eng/issue/UH-32)).
+- `uh tui` — interactive terminal UI built on OpenTUI (epic [UH-41](https://linear.app/agentic-eng/issue/UH-41)).
 
 ## Adapters
 
@@ -58,6 +72,13 @@ In flight (see [ROADMAP.md](./ROADMAP.md)):
 - [Sandboxing](./architecture/sandboxing.md)
 - [AgentFS sandbox backend (design)](./architecture/sandbox-agentfs.md)
 - [Verification and promotion](./architecture/verification-and-promotion.md)
+- [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md)
+
+### Runbooks
+
+- [Codex E2E smoke](./runbooks/codex-e2e-smoke.md)
+- [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md)
+- [Using `uh tui`](./runbooks/using-the-tui.md)
 
 ### Runbooks
 
