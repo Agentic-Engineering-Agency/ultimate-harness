@@ -1,0 +1,92 @@
+---
+title: "Ultimate Harness Documentation"
+description: "Ultimate Harness is a runtime-agnostic development harness for planning, launching, observing, verifying, and promoting agentic software-development work across multiple coding agents."
+---
+
+Ultimate Harness is a runtime-agnostic development harness for planning, launching, observing, verifying, and promoting agentic software-development work across multiple coding agents.
+
+The core design goal is **portable discipline**: a project should be able to use multiple coding-agent runtimes without losing its specifications, skills, workflow state, audit trail, sandbox boundaries, or human approval checkpoints.
+
+For the active roadmap (epics, in-flight slices, recently shipped), see the [roadmap](./roadmap.md).
+
+## Start here
+
+1. [Glossary](./glossary.md) — shared terms used across the project.
+2. [Product requirements](./product/prd.md) — what the harness is for and who it serves.
+3. [MVP scope](./product/mvp-scope.md) — what must exist before implementation grows.
+4. [Architecture overview](./architecture/overview.md) — major components and boundaries.
+5. [Core entities](./architecture/entities.md) — canonical vocabulary for data and artifacts.
+6. [Runtime adapter contract](./architecture/runtime-adapter-contract.md) — what every adapter implements (includes the UH-28 runtime-final-message protocol).
+7. [Mission packet schema](./architecture/mission-packet-schema.md) — the portable work-request format.
+8. [Verification and promotion](./architecture/verification-and-promotion.md) — how sandbox work becomes canonical work.
+9. [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md) — the three composable discipline layers (UH-54 / UH-55 / UH-56).
+10. [BMAD agent map](./workflows/bmad-agent-map.md) — how BMAD-style roles map into Ultimate Harness.
+
+## Adapters
+
+| Adapter | Status | Doc / Runbook |
+|---|---|---|
+| `hermes` | active | [Runtime adapter contract](./architecture/runtime-adapter-contract.md) defines the shape; `src/adapters/hermes.ts` is the reference implementation. |
+| `codex` | active | [Codex adapter design](./architecture/adapter-codex.md), [Codex E2E smoke runbook](./runbooks/codex-e2e-smoke.md) |
+| `hermes-proxy` | active | [Hermes proxy adapter design](./architecture/adapter-hermes-proxy.md), [setup runbook](./runbooks/hermes-proxy-setup.md), [E2E smoke runbook](./runbooks/hermes-proxy-e2e-smoke.md) |
+| `oh-my-pi` | experimental | [Anthropic-via-OMP runbook](./runbooks/anthropic-via-omp.md) — covers the Anthropic-via-OMP routing path and its ToS posture. |
+
+For the issue-level state, see the [roadmap](./roadmap.md).
+
+## Documentation map
+
+### Research
+
+- [Inspiration systems](./research/inspiration-systems.md)
+- [Comparison matrix](./research/comparison-matrix.md)
+- [Adopt / reject / defer decisions](./research/adopt-reject-defer.md)
+- [TUI framework selection](./research/tui-framework.md)
+
+### Product
+
+- [PRD](./product/prd.md)
+- [MVP scope](./product/mvp-scope.md)
+- [Non-goals](./product/non-goals.md)
+- [Personas](./product/personas.md)
+
+### Architecture
+
+- [Overview](./architecture/overview.md)
+- [Entities](./architecture/entities.md)
+- [Runtime adapter contract](./architecture/runtime-adapter-contract.md)
+- [Codex adapter design](./architecture/adapter-codex.md)
+- [Hermes proxy adapter design](./architecture/adapter-hermes-proxy.md)
+- [Hermes proxy spike notes](./architecture/hermes-proxy-spike.md)
+- [Mission packet schema](./architecture/mission-packet-schema.md)
+- [.harness artifacts](./architecture/harness-artifacts.md)
+- [Skill format](./architecture/skill-format.md)
+- [Sandboxing](./architecture/sandboxing.md)
+- [AgentFS sandbox backend (design)](./architecture/sandbox-agentfs.md)
+- [Verification and promotion](./architecture/verification-and-promotion.md)
+- [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md)
+- [TUI architecture](./architecture/tui.md)
+
+### Runbooks
+
+- [Codex E2E smoke](./runbooks/codex-e2e-smoke.md)
+- [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md)
+- [Hermes proxy setup](./runbooks/hermes-proxy-setup.md)
+- [Hermes proxy E2E smoke](./runbooks/hermes-proxy-e2e-smoke.md)
+- [Using `uh tui`](./runbooks/using-the-tui.md)
+
+### Workflows
+
+- [Workflow overview](./workflows/overview.md)
+- [Research to spec](./workflows/research-to-spec.md)
+- [Spec to plan](./workflows/spec-to-plan.md)
+- [Plan to mission](./workflows/plan-to-mission.md)
+- [Mission to sandbox](./workflows/mission-to-sandbox.md)
+- [Verify, review, promote](./workflows/verify-review-promote.md)
+- [BMAD agent map](./workflows/bmad-agent-map.md)
+
+### Verification
+
+- [Strategy](./verification/strategy.md)
+- [Checks](./verification/checks.md)
+- [Review gates](./verification/review-gates.md)
+- [Audit trail](./verification/audit-trail.md)

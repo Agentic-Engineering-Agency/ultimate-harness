@@ -1,0 +1,65 @@
+---
+title: "Sandboxing"
+description: "Agent-generated work should happen in an isolated environment by default, then be inspected, verified, reviewed, and promoted."
+---
+
+## Goal
+
+Agent-generated work should happen in an isolated environment by default, then be inspected, verified, reviewed, and promoted.
+
+## Sandbox lifecycle
+
+1. **Create** — allocate an isolated workspace linked to a mission.
+2. **Hydrate** — provide required project files, specs, skills, and context.
+3. **Execute** — runtime works inside the sandbox.
+4. **Inspect** — collect file changes, logs, generated artifacts, and diffs.
+5. **Verify** — run checks and review gates.
+6. **Promote** — apply approved outputs to canonical state.
+7. **Discard/archive** — preserve audit metadata and remove workspace if appropriate.
+
+## Git worktree backend
+
+Strengths:
+- Familiar Git workflow.
+- Easy diff/review/branch promotion.
+- Good for code changes and documentation edits.
+- Works without a new filesystem dependency.
+
+Limitations:
+- Does not isolate all filesystem effects outside the repo.
+- Runtime caches/config may still be shared.
+- Cleanup requires care to avoid deleting user work.
+
+## AgentFS backend
+
+Strengths:
+- Copy-on-write filesystem model.
+- Can run commands inside mounted/overlay filesystems.
+- Supports database-backed state, sync, encryption options, and MCP filesystem tooling.
+- Better fit for inspecting and syncing agent filesystem deltas.
+
+Limitations:
+- Platform behavior differs between Linux and macOS.
+- Operational complexity is higher than worktrees.
+- Requires a stable promotion model before deep integration.
+
+## Backend interface
+
+```yaml
+create(mission_id, base_ref, options) -> sandbox_id
+path(sandbox_id) -> filesystem_path
+status(sandbox_id) -> created | running | dirty | verified | promoted | discarded
+collect_diff(sandbox_id) -> diff_ref
+list_changes(sandbox_id) -> changed_files
+run_check(sandbox_id, command) -> check_result
+promote(sandbox_id, selected_changes) -> promotion_result
+discard(sandbox_id) -> discard_result
+```
+
+## Required safety rules
+
+- A mission must know which sandbox it is using.
+- Promotion must record exactly what changed.
+- Discard must not delete unrecorded human work.
+- Sandbox escapes must be recorded as security findings.
+- Writes outside the allowed project/sandbox scope require explicit policy.
