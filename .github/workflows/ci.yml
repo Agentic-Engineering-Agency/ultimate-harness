@@ -17,13 +17,12 @@ permissions:
 jobs:
   test:
     name: Typecheck + tests + build
-    # Currently using GitHub-hosted Ubuntu runners. To upgrade to Depot's
-    # managed runners (up to 3x faster), install the Depot GitHub App
-    # (https://depot.dev/orgs/vb9d1ktqqb/github-actions) on this repo and
-    # change the line below to:
-    #   runs-on: depot-ubuntu-24.04
-    # No other change needed — the rest of the workflow is identical.
-    runs-on: ubuntu-24.04
+    # Depot-managed GitHub Actions runner. Single-tenant ephemeral EC2
+    # per job, up to 3x faster than GitHub-hosted ubuntu-24.04, no
+    # concurrency / cache / network caps. To fall back to GitHub-hosted
+    # for any reason, change `depot-ubuntu-24.04` -> `ubuntu-24.04`.
+    # https://depot.dev/docs/github-actions/overview
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 10
 
     steps:
