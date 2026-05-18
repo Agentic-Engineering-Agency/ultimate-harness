@@ -58,26 +58,26 @@ Reserved single-letter keys: `a m s r q`. UH-43 and UH-44 actions (`c`, `d`, `r`
 
 ### D4 — Hybrid refresh: fs.watch for snapshots, append-only NDJSON tail for live runs
 
-The dashboard data (adapter manifests, mission directories, sandbox index) is watched with `fs.watch` and re-loaded after a 200 ms debounce. Live mission-run events (UH-44) consume a separate, append-only `runtime-session.ndjson` per mission, tailed line-by-line.
+The dashboard data (adapter manifests, mission directories, sandbox index) is watched with `fs.watch` and re-loaded after a 200 ms debounce. Live mission-run events (UH-44) consume the per-mission append-only `events.ndjson` file each adapter already writes during execution, tailed line-by-line.
 
-UH-46 implements only the `fs.watch` half. The NDJSON contract below is the binding direction every adapter inherits when UH-44 lands.
+UH-46 implemented the `fs.watch` half; UH-44 wired up the live tail. The contract below is the actual on-disk shape every adapter (hermes, codex, hermes-proxy, oh-my-pi) already emits.
 
-**`runtime-session.ndjson` contract** (consumed by UH-44):
+**`events.ndjson` contract** (consumed by UH-44):
 
 ```jsonl
-{"ts":"2026-05-18T20:00:00.000Z","kind":"planned","payload":{"mission":"<id>"}}
-{"ts":"2026-05-18T20:00:01.123Z","kind":"running","payload":{"runtime":"codex"}}
-{"ts":"2026-05-18T20:00:02.789Z","kind":"stdout","payload":{"line":"<text>"}}
-{"ts":"2026-05-18T20:00:30.000Z","kind":"succeeded","payload":{"exit":0}}
+{"event":"runtime.started","timestamp":"2026-05-18T20:00:00.000Z","runtime":"codex"}
+{"event":"codex.thread.started","timestamp":"2026-05-18T20:00:01.123Z","thread_id":"…"}
+{"event":"codex.turn.completed","timestamp":"2026-05-18T20:00:30.000Z"}
+{"event":"runtime.finished","timestamp":"2026-05-18T20:00:31.000Z","runtime":"codex","status":"succeeded"}
 ```
 
 Rules:
 - One JSON object per line, terminated by `\n`.
-- `ts` is RFC 3339 / ISO 8601 UTC.
-- `kind` is one of `planned | running | stdout | stderr | progress | warning | succeeded | failed | blocked | cancelled`.
-- `payload` is `kind`-specific; consumers MUST tolerate unknown keys.
+- `timestamp` is RFC 3339 / ISO 8601 UTC. Consumers may also accept `ts`, `time`, or `at` as fallbacks.
+- `event` (preferred) / `kind` / `type` carries the categorical label. Adapters namespace their own events under `<runtime>.<verb>` (e.g. `codex.thread.started`). The shared baseline is `runtime.started` and `runtime.finished`.
+- Schemas above `event` / `timestamp` are open: adapters MUST tolerate unknown keys; consumers MUST treat the parsed object as `Record<string, unknown>`.
 - Append-only — no truncation, no rotation during a run.
-- File path: `.harness/missions/<id>/runtime-session.ndjson`. Coexists with the existing post-run `runtime-session.yaml` summary; both are written.
+- File path: `.harness/missions/<id>/events.ndjson`. Coexists with the post-run `runtime-session.yaml` summary; both are written.
 
 *Alternatives considered:* fs.watch everywhere, named-pipe subscription, polling.
 
@@ -155,7 +155,7 @@ The dashboard wires `<select onChange>` to the setters, and `createEffect` on `s
 | Slice | What it adds | What this doc commits |
 | --- | --- | --- |
 | **UH-47** Mission browser | Drilldown view with `<code>` and `<diff>` | `Enter` on a mission row opens the detail view |
-| **UH-44** Mission run flow | Live `runtime-session.ndjson` consumer | Contract in §3 D4 above; adapters MUST emit the NDJSON |
+| **UH-44** Mission run flow | Live `events.ndjson` consumer + subprocess trigger | Contract in §3 D4 above; adapters already emit the NDJSON |
 | **UH-43** Adapter + sandbox manager | `c` create / `d` discard / re-check | Reserves `c d` (and a keymap discipline TBD in UH-43's grill) |
 | **UH-42** Polish | Keymap overlay (`?`), theming, error UX, state persistence | XDG state path: `~/.config/uh/tui-state.json` |
 

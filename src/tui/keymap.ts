@@ -35,6 +35,7 @@ const DASHBOARD_ENTRIES: KeymapEntry[] = [
   { keys: ["Tab"], action: "Cycle pane focus" },
   { keys: ["Enter"], action: "Open mission detail (on Missions)" },
   { keys: ["r"], action: "Refresh now (bypasses debounce)" },
+  { keys: ["R"], action: "Run mission (opens run dialog)" },
 ];
 
 const MISSION_DETAIL_ENTRIES: KeymapEntry[] = [
@@ -45,6 +46,9 @@ const MISSION_DETAIL_ENTRIES: KeymapEntry[] = [
   { keys: ["Enter"], action: "Focus viewer pane" },
   { keys: ["Tab"], action: "Swap artifact/viewer focus" },
   { keys: ["Esc"], action: "Back to dashboard" },
+  { keys: ["R"], action: "Run this mission" },
+  { keys: ["S"], action: "Stop active run (sends SIGTERM)" },
+  { keys: ["L"], action: "Toggle live-events panel" },
 ];
 
 export function keymapForView(view: ViewId): KeymapSection[] {
@@ -60,7 +64,7 @@ export function keymapForView(view: ViewId): KeymapSection[] {
 /** Compact one-line footer hint for the active view. */
 export function footerHint(view: ViewId): string {
   if (view === "dashboard") {
-    return "a/m/s focus · Tab cycle · Enter detail · r refresh · ? help · q quit";
+    return "a/m/s focus · Tab cycle · Enter detail · R run · r refresh · ? help · q quit";
   }
-  return "j/k or arrows · Enter focus viewer · Tab swap · g/Shift+G top/bottom · Esc back · ? help · q quit";
+  return "j/k or arrows · Enter focus viewer · Tab swap · g/Shift+G top/bottom · R run · S stop · L live · Esc back · ? help · q quit";
 }
