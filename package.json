@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.tests.json --noEmit",
+    "tui-spike": "bun bin/uh-tui-spike.tsx",
     "clean": "rm -rf dist"
   },
   "dependencies": {

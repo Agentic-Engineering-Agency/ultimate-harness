@@ -1,14 +1,20 @@
 #!/usr/bin/env bun
 /**
- * UH-45 spike — SOLID @opentui/solid prototype.
+ * UH-45 spike — winning prototype (Solid).
  *
- * Same screen as `bin/uh-tui-spike-vanilla.ts` but in JSX with fine-grained
- * reactive primitives. Throwaway exploration. Not wired into `src/cli.ts`.
+ * Boots @opentui/core via @opentui/solid, reads
+ * .harness/sandboxes/index.yaml, renders the sandbox list in a Box +
+ * Select with dirty/clean badges, supports `q` to quit and Ctrl+C to
+ * force-quit, and exits with the terminal restored.
  *
- * Run via: `bun bin/uh-tui-spike-solid.tsx` (preload comes from bunfig.toml).
+ * NOT wired into src/cli.ts. Run via `bun run tui-spike`. See
+ * docs/research/tui-framework.md for the framework comparison rationale
+ * and the comparison commit hash (8adf04b) where the rejected vanilla
+ * prototype still lives.
  *
- * See `docs/research/tui-framework.md` for the framework comparison this
- * file participates in.
+ * Throwaway exploration; downstream slices (UH-46/47/44/43/42) consume
+ * the dependency choice and lifecycle invariants captured in the doc,
+ * not this file.
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -71,12 +77,17 @@ function App() {
   const [entries] = createSignal(loadSandboxes());
   let quitting = false;
 
+  // Quit ordering: renderer.destroy() runs cleanupBeforeDestroy() first
+  // (removes SIGINT/SIGTERM/beforeExit/uncaught listeners, drops stdin
+  // raw mode, restores stdout passthrough), then finalizeDestroy() emits
+  // the DESTROY event, walks root.destroyRecursively(), and finally
+  // calls lib.destroyRenderer() so the Zig side restores main-screen +
+  // cursor + kitty kb + mouse before we hand control back to the shell.
+  // process.exit() alone would skip `beforeExit` and strand the terminal
+  // in raw mode. See docs/research/tui-framework.md §6.
   const quit = () => {
     if (quitting) return;
     quitting = true;
-    // See vanilla prototype for cleanup-order rationale; both paths funnel
-    // into renderer.destroy() so the terminal restoration sequence is
-    // identical regardless of framework.
     renderer.destroy();
     process.exit(0);
   };
@@ -87,7 +98,8 @@ function App() {
     }
   });
 
-  // Spike: render-once mode unless UH_TUI_SPIKE_HOLD is set.
+  // Spike: render one frame, exit. Set UH_TUI_SPIKE_HOLD=1 for manual
+  // inspection. A long-lived loop in CI defeats the purpose.
   if (!process.env.UH_TUI_SPIKE_HOLD) {
     const timer = setTimeout(quit, 50);
     onCleanup(() => clearTimeout(timer));
@@ -101,7 +113,7 @@ function App() {
       height="100%"
       border
       borderStyle="rounded"
-      title=" uh tui spike — solid (UH-45) "
+      title=" uh tui spike (UH-45) "
       titleAlignment="left"
     >
       <text>
@@ -126,6 +138,6 @@ render(() => <App />, {
   targetFps: 30,
   consoleMode: "disabled",
 }).catch((err: unknown) => {
-  process.stderr.write(`uh-tui-spike-solid: ${(err as Error).stack ?? err}\n`);
+  process.stderr.write(`uh-tui-spike: ${(err as Error).stack ?? err}\n`);
   process.exit(1);
 });
