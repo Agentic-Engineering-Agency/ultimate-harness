@@ -4,7 +4,7 @@ Last updated: 2026-05-18. Source of truth for issue state is [Linear](https://li
 
 ## Now
 
-Epic 2 (Interactive TUI) is in flight; UH-47 mission browser shipped and UH-44 mission run flow is next. Epic 1 (Hermes proxy adapter) shipped in this session — see "Shipped" below.
+Epic 2 (Interactive TUI) shipped end-to-end. Three follow-up polish slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) plus two UX items (UH-51 screenshot pipeline, UH-52 check-age footer, UH-53 cancellation event) are filed in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
 
@@ -15,9 +15,9 @@ Build `uh tui` on [OpenTUI](https://opentui.com) — the same engine OpenCode us
 | 1 | [UH-45](https://linear.app/agentic-eng/issue/UH-45) | Spike: install opentui, framework choice (vanilla / React / Solid), hello-world bound to UH state | S | **shipped** — Solid won; see [`docs/research/tui-framework.md`](./research/tui-framework.md) |
 | 2 | [UH-46](https://linear.app/agentic-eng/issue/UH-46) | Dashboard: live adapters + missions + sandboxes (three-pane) | M | **shipped** — Mission Control dashboard; see [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) + [`docs/architecture/tui.md`](./architecture/tui.md) |
 | 3 | [UH-47](https://linear.app/agentic-eng/issue/UH-47) | Mission browser: drilldown with `Code` + `Diff` viewers | M | **shipped** — read-only mission artifact drilldown; see [#59](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/59) |
-| 4 | [UH-44](https://linear.app/agentic-eng/issue/UH-44) | Mission run flow: trigger from TUI, stream events live | M | **next** |
-| 5 | [UH-43](https://linear.app/agentic-eng/issue/UH-43) | Adapter + sandbox manager: live checks, create/discard from inside | M | |
-| 6 | [UH-42](https://linear.app/agentic-eng/issue/UH-42) | Polish: keymap overlay, theming, error states, exit handling, Agent Skill install | S | |
+| 4 | [UH-44](https://linear.app/agentic-eng/issue/UH-44) | Mission run flow: trigger from TUI, stream events live | M | **shipped** — `R` opens a run dialog, live tail of `events.ndjson`, `S` stops via SIGTERM; see [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
+| 5 | [UH-43](https://linear.app/agentic-eng/issue/UH-43) | Adapter + sandbox manager: live checks, create/discard from inside | M | **shipped** — `c` re-check, `n` create-sandbox dialog, `d` discard with `F` force toggle; see [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
+| 6 | [UH-42](https://linear.app/agentic-eng/issue/UH-42) | Polish: keymap overlay, theming, error states, exit handling, Agent Skill install | S | **shipped** — `?` overlay, per-project state persistence, operator runbook; see [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65). Theming / `$EDITOR` / Ctrl+Z spun out as UH-48 / UH-49 / UH-50. |
 ## Shipped this cycle (2026-05-17 → 2026-05-18)
 
 ### Epic 1 — Hermes proxy adapter ([UH-32](https://linear.app/agentic-eng/issue/UH-32)) — **DONE**
@@ -40,6 +40,9 @@ Adapter promoted to `status: active` on 2026-05-18 after live E2E smoke against 
 | [UH-45](https://linear.app/agentic-eng/issue/UH-45) | TUI spike: opentui framework selection + hello-world | [#52](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/52) |
 | [UH-46](https://linear.app/agentic-eng/issue/UH-46) | TUI dashboard: live adapters + missions + sandboxes | [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) |
 | [UH-47](https://linear.app/agentic-eng/issue/UH-47) | TUI mission browser: drilldown with Code + Diff viewers | [#59](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/59) |
+| [UH-44](https://linear.app/agentic-eng/issue/UH-44) | TUI mission run flow with live `events.ndjson` tail | [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
+| [UH-43](https://linear.app/agentic-eng/issue/UH-43) | TUI adapter + sandbox manager (create/discard/recheck) | [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
+| [UH-42](https://linear.app/agentic-eng/issue/UH-42) | TUI polish: keymap overlay (`?`) + per-project persistence + runbook | [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65) |
 
 ## Shipped previous cycle (2026-05-13 → 2026-05-17)
 
@@ -76,6 +79,13 @@ These are tracked in narrative form until they earn the priority to be filed:
 - **Sandbox backend abstraction** — `directory` and `container` backends alongside `git-worktree`.
 - **Verify-then-promote auto-trigger** — opt-in workflow-driven auto-promote gate.
 - **Cleanup design-only `claude-code` stub** — redundant after UH-27 + UH-32.
+- **Filed follow-ups (Epic 2 polish):**
+  - [UH-48](https://linear.app/agentic-eng/issue/UH-48) — `UH_TUI_THEME` + palette-driven dark/light.
+  - [UH-49](https://linear.app/agentic-eng/issue/UH-49) — `e` open manifest in `$EDITOR` (requires renderer suspend/resume).
+  - [UH-50](https://linear.app/agentic-eng/issue/UH-50) — Ctrl+Z suspend / `fg` resume.
+  - [UH-51](https://linear.app/agentic-eng/issue/UH-51) — automated TUI screenshot capture pipeline for docs.
+  - [UH-52](https://linear.app/agentic-eng/issue/UH-52) — surface adapter-check age in the footer.
+  - [UH-53](https://linear.app/agentic-eng/issue/UH-53) — adapters emit `runtime.cancelled` on SIGTERM so disk replay matches the TUI status.
 
 ## Strategic (decisions needed)
 
