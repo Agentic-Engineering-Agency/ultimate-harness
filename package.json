@@ -11,10 +11,14 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.tests.json --noEmit",
+    "tui-spike": "bun bin/uh-tui-spike.tsx",
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@opentui/core": "^0.2.13",
+    "@opentui/solid": "^0.2.13",
     "commander": "latest",
+    "solid-js": "^1.9.13",
     "yaml": "latest",
     "zod": "latest"
   },

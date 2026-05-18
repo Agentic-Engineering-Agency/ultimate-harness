@@ -1,0 +1,241 @@
+# UH-45 — OpenTUI framework selection spike
+
+Closes the discovery phase of [UH-41](https://linear.app/agentic-eng/issue/UH-41). Findings feed:
+
+* [UH-46](https://linear.app/agentic-eng/issue/UH-46) — Dashboard: live adapters + missions + sandboxes (three-pane).
+* [UH-47](https://linear.app/agentic-eng/issue/UH-47) — Mission browser: drilldown with `Code` + `Diff` viewers.
+* [UH-44](https://linear.app/agentic-eng/issue/UH-44) — Mission run flow: trigger from TUI, stream events live.
+* [UH-43](https://linear.app/agentic-eng/issue/UH-43) — Adapter + sandbox manager: live checks, create/discard inline.
+* [UH-42](https://linear.app/agentic-eng/issue/UH-42) — Polish: keymap overlay, theming, error states, Agent Skill install.
+
+> **Scope:** exploratory prototype. The shipped prototype at `bin/uh-tui-spike.tsx` is not wired into `src/cli.ts` and is not invoked by the test suite. Downstream slices consume the framework decision + lifecycle invariants, not this file.
+
+## 1. Environment
+
+* Workstation: macOS 25.4.0, Apple M4 Pro (arm64).
+* Bun **1.3.14** (`/opt/homebrew/bin/bun`); Node 24.15.0 available but unused by the spike.
+* TypeScript 6.0.3, `vitest@4.1.6` (unchanged).
+* OpenTUI **0.2.13** — current `latest` (published 2026-05-17, day-of). Native prebuilt `@opentui/core-darwin-arm64@0.2.13` (1.68 MB unpacked) loads via the parent package's `optionalDependencies` block — no source build, no manual `xcode-select`, no Zig toolchain required.
+
+```
+$ bun install
++ @opentui/core@0.2.13
++ @opentui/solid@0.2.13
++ solid-js@1.9.13
+99 packages installed [1.51s]
+```
+
+No native-module load errors on macOS arm64. `node_modules/@opentui/core-darwin-arm64/libopentui.dylib` (the Zig core) loads via `bun-ffi-structs` (also a runtime dep of `@opentui/core`) on first import.
+
+## 2. Frameworks evaluated
+
+| Framework        | Version | Why considered                                                                 |
+| ---------------- | ------- | ------------------------------------------------------------------------------ |
+| `@opentui/core`  | 0.2.13  | The native binding itself; lowest layer, no abstraction tax.                   |
+| `@opentui/solid` | 0.2.13  | Solid's fine-grained reactivity (`createSignal`, `createMemo`) was the lead bet for the streaming `mission run` view (UH-44). |
+| ~~`@opentui/react`~~ | 0.2.13 | **Skipped.** Same JSX ergonomics story as Solid but pays virtual-DOM diff cost on every event. UH-44's event stream is the hot path; trading off Solid's fine-grained model to gain… nothing else UH wants (no Suspense, no concurrent rendering, no ecosystem libraries we plan to consume) was not defensible. Solid is the only contender at this layer. |
+
+Two prototypes were built at commit [`8adf04b`](../../bin/uh-tui-spike-vanilla.ts) (see git history — `git show 8adf04b -- bin/`):
+
+* `bin/uh-tui-spike-vanilla.ts` — raw `@opentui/core`, imperative `BoxRenderable` / `SelectRenderable` / `TextRenderable` construction.
+* `bin/uh-tui-spike-solid.tsx` — `@opentui/solid` JSX with `createSignal`, `useKeyboard`, `useRenderer`.
+
+Both render the **same screen**: a bordered `Box` titled "uh tui spike", a one-line summary of `.harness/sandboxes/index.yaml` ("`sandboxes loaded from … (0)`"), a `Select` listing each sandbox with a `● dirty` / `○ clean` badge (or a `(no sandboxes)` placeholder when the index is empty), and a one-line footer with the keymap.
+
+## 3. Decision
+
+**Recommendation: `@opentui/solid` (with `@opentui/core` as a transitive dep).**
+
+Shipping prototype at `bin/uh-tui-spike.tsx`. Run via `bun run tui-spike`.
+
+The vanilla prototype boots ~55 ms faster on a warm Bun runtime but loses on every other axis that matters past the spike: ergonomics for the four downstream slices, the streaming event view in UH-44, and the dependency tree we will ship into the `uh` CLI subcommand. Both prototypes are well inside the 500 ms budget, so boot time is not a tiebreaker.
+
+## 4. Comparison
+
+### 4.1 Lines of code (same screen, same behaviour)
+
+| Prototype | LOC (header + impl) | Notes                                                                                   |
+| --------- | ------------------- | --------------------------------------------------------------------------------------- |
+| Vanilla   | ~155                | Imperative tree construction — `new BoxRenderable(...)` + `root.add(...)` per node. Quit path wires `renderer.keyInput.on("keypress")` directly. |
+| Solid     | ~130                | Declarative JSX tree. `useKeyboard` hook + `createSignal(loadSandboxes())`. Same lifecycle ordering, fewer manual `add()` calls. |
+
+LOC is similar today because the spike has four renderables. The gap widens with composition: every dashboard pane in UH-46 (three-pane layout) and every collapsible viewer in UH-47 adds ~10 lines of vanilla wiring vs. ~3 lines of Solid JSX.
+
+### 4.2 Reactivity for streaming event lists (UH-44)
+
+UH-44's mission-run view consumes a live event stream from the adapter (`planned` → `running` → individual `stdout` chunks → `succeeded` / `failed` / `blocked`). Rendering this in vanilla requires:
+
+1. Mutating `select.options` (or an equivalent custom-renderable buffer).
+2. Calling `renderer.requestRender()` after each mutation.
+3. Tracking what changed manually to avoid full re-renders of the visible list when only one row updated.
+
+Solid removes all three:
+
+```tsx
+const [events, setEvents] = createSignal<RunEvent[]>([])
+// adapter pushes:
+setEvents(prev => [...prev, ev])
+// JSX:
+<For each={events()}>{(ev) => <text>{ev.line}</text>}</For>
+```
+
+`<For>` reuses the existing renderables for unchanged rows, mounting only the new event's renderable. This is fine-grained reactivity — no virtual DOM diff, no full-tree walk per push.
+
+The same pattern composes into UH-46's "live adapters" pane and UH-43's "live checks" pane. Vanilla is doable; Solid is *trivial*.
+
+### 4.3 Boot time (cold + warm)
+
+Median of 7 consecutive `bun bin/uh-tui-spike-{vanilla.ts|solid.tsx}` runs after Bun has cached its module graph (a `bun run` immediately prior to seed cache):
+
+| Prototype | Median | Range (min–max) | First run (cold)   |
+| --------- | ------ | --------------- | ------------------ |
+| Vanilla   | 295 ms | 292–299 ms      | 586 ms             |
+| Solid     | 350 ms | 345–376 ms      | 583 ms (run 4 outlier in pre-cache batch) |
+
+Both budgets include a 50 ms `setTimeout(quit, 50)` self-quit timer that's part of the spike's render-once-then-exit mode (set `UH_TUI_SPIKE_HOLD=1` to disable and inspect manually). True boot-to-first-frame is ~245 ms (vanilla) vs ~300 ms (Solid).
+
+The 55 ms delta on warm runs is the Solid Babel transform load + the JSX-to-Solid-reconciler hop. Both are far under the 500 ms target. Cold runs (no Bun cache) take ~580–600 ms for *both* prototypes — dominated by the `@opentui/core` native module load, not the framework. Caching is on by default in Bun.
+
+### 4.4 Ctrl+C / SIGINT cleanup
+
+Identical for both prototypes; see §6 below. Both call `renderer.destroy()` explicitly on `q`, and rely on `exitOnCtrlC: true` + the default `exitSignals: ["SIGINT", "SIGTERM"]` for force-quit. Empirically verified: after exit the terminal is restored to main-screen, cursor visible, raw mode off, stdout passthrough, mouse + kitty kb disabled.
+
+### 4.5 Bun + macOS arm64 stability
+
+`bun install` + `bun bin/uh-tui-spike-solid.tsx` + Ctrl+C, ten consecutive runs, no SIGSEGV, no `dyld` errors, no warnings. The prebuilt `@opentui/core-darwin-arm64@0.2.13` dylib loads cleanly under Bun 1.3.14 on M4 Pro.
+
+The Solid preload (`bunfig.toml` → `preload = ["@opentui/solid/preload"]`) registers a Bun plugin that runs Babel against any `.tsx` or `.jsx` import. The plugin's load filter (`/\.(js|ts)x(?:[?#].*)?$/`) means plain `.ts` is untouched — `src/cli.ts`, `src/harness/*.ts`, and every `tests/**/*.ts` are unaffected. Vitest runs under Node (not Bun) so the preload is irrelevant there; `bun run test` confirmed 241/241 still green.
+
+## 5. Files this slice landed
+
+| Path                            | Purpose                                                                                   |
+| ------------------------------- | ----------------------------------------------------------------------------------------- |
+| `bin/uh-tui-spike.tsx`          | Winning prototype (Solid). Throwaway exploration, NOT wired into `src/cli.ts`.            |
+| `bunfig.toml`                   | Bun preload registering `@opentui/solid`'s Babel transform for `.tsx` files only.         |
+| `package.json`                  | Adds `@opentui/core`, `@opentui/solid`, `solid-js` to `dependencies`; adds `tui-spike` script. |
+| `bun.lock`                      | Now tracked. Was previously gitignored; per Lalo's no-drift policy we commit it.          |
+| `tsconfig.tests.json`           | Includes `bin/**/*.ts` + `bin/**/*.tsx`; adds `jsx: "preserve"` + `jsxImportSource: "@opentui/solid"` so `bun run typecheck` covers the spike. The main `tsconfig.json` is unchanged — `bin/` stays out of `dist/`. |
+| `docs/research/tui-framework.md`| This file.                                                                                |
+
+## 6. Renderer lifecycle — cleanup ordering
+
+The renderer's exit path is non-trivial enough that downstream slices need a contract, not folklore. The contract is what the v0.2.13 source guarantees today; if it changes upstream, UH-42 catches it during polish.
+
+### 6.1 The pipeline
+
+`renderer.destroy()` is the **only** entry to terminal restoration. It guards against re-entry via `_isDestroyed`, then either:
+
+1. **In-flight render**: calls `prepareDestroyDuringRender()` → `cleanupBeforeDestroy()` + `lib.suspendRenderer(rendererPtr)`. The actual finalization runs after the in-progress frame completes (`loop()` checks `_destroyPending` and calls `finalizeDestroy()` at the end of the frame).
+2. **Idle**: calls `finalizeDestroy()` directly.
+
+`cleanupBeforeDestroy()` runs **first**, in this exact order:
+
+1. Removes process listeners: `SIGWINCH`, `uncaughtException`, `unhandledRejection`, `warning`, `beforeExit`.
+2. Calls `removeExitListeners()` — detaches `SIGINT` + `SIGTERM` handlers.
+3. Clears every timer (resize, capability, memory snapshot, render).
+4. Sets `_isRunning = false`, `_useMouse = false`.
+5. Removes the stdin `"data"` listener.
+6. **`stdin.setRawMode(false)`** — terminal returns to cooked mode here.
+7. `externalOutputMode = "passthrough"` — stdout/stderr stop being captured by the renderer's queue.
+8. Flushes split-footer cache (no-op for our prototype; we use alternate-screen mode).
+
+`finalizeDestroy()` then runs:
+
+1. Cleans up `_paletteDetector`, `_paletteCache`, `themeModeState`.
+2. **Emits the `"destroy"` event** (`renderer.on("destroy", …)` listeners fire here, *after* terminal is restored to cooked mode — safe to `console.log` from inside).
+3. `root.destroyRecursively()` — walks the renderable tree, each node's `destroy()` fires.
+4. Destroys `stdinParser`, `console`, clears `oscSubscribers`.
+5. Resets split-footer scrollback to the top.
+6. Restores `stdout.write` to the real fn (renderer was intercepting it for capture).
+7. **`lib.destroyRenderer(rendererPtr)`** — the Zig core restores the terminal: switches back to main-screen (`\x1b[?1049l`), shows the cursor, disables kitty keyboard, disables mouse, resets background color (OSC 111).
+8. Calls the user `_onDestroy()` callback last.
+
+The order matters: stdin is cooked **before** the destroy event fires (so user-land cleanup can safely interact with the terminal); the native Zig teardown runs **after** every TS-side cleanup so any final ANSI escapes the framework wants to emit are still ordered correctly relative to the user's stdout.
+
+### 6.2 Entry points
+
+| Trigger                                              | Path                                                                                                                                              |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`q` keypress (our handler)**                        | `useKeyboard((e) => { if (e.name === "q") { renderer.destroy(); process.exit(0) } })` — destroy completes synchronously, then exit.               |
+| **Ctrl+C (`exitOnCtrlC: true`)**                      | The internal keypress listener matches `{ name: "c", ctrl: true }` and schedules `destroy()` via `process.nextTick()` (so the keypress listener returns first). |
+| **SIGINT / SIGTERM (default `exitSignals`)**          | `addExitListeners()` registers `exitHandler = () => this.destroy()` on each signal. `kill -INT $PID` from another shell exits cleanly.            |
+| **Natural process exit** (event loop drains)          | `beforeExit` listener calls `exitHandler` → `destroy()`. Catches `return` from `main` without an explicit `process.exit`.                          |
+| **Uncaught exception / unhandled rejection**          | `handleError` is wired to both `uncaughtException` and `unhandledRejection`. It logs the error, calls `destroy()`, then `process.exit(1)`.        |
+
+### 6.3 Pitfall the spike caught
+
+`process.exit(0)` does **not** fire the `beforeExit` event. If you call it without first calling `renderer.destroy()`, the terminal stays in raw mode and the alt-screen is never exited. The spike's `quit()` helper explicitly orders `renderer.destroy()` first, then `process.exit(0)`. Downstream slices MUST follow the same ordering when they need explicit exit (e.g. `q` to quit, error paths, "save & quit" flows). The `useKeyboard` hook does not auto-destroy on its own.
+
+This is documented in both `bin/uh-tui-spike.tsx` and the rejected `bin/uh-tui-spike-vanilla.ts` (commit `8adf04b`) as comments above the `quit()` function so it survives the deletion of this spike.
+
+### 6.4 Solid's `useTerminalDimensions` + `onCleanup`
+
+* `useTerminalDimensions()` subscribes to `CliRenderEvents.RESIZE` and returns a Solid `Accessor<{ width, height }>` that updates without re-rendering the whole tree. UH-46's three-pane layout uses this to react to terminal resizes without restarting the renderer.
+* Solid's `onCleanup(...)` runs **per-component** when the component unmounts. It does NOT fire on `renderer.destroy()` by itself; the renderer destroys the renderable tree via `root.destroyRecursively()`, and Solid's reconciler's `onCleanup` hooks fire as each renderable's `destroy()` is called. Order is: child → parent (post-order). Downstream slices that need "renderer-wide" cleanup (e.g. closing a websocket the dashboard opened) should listen on `renderer.on("destroy", …)` instead of relying on a top-level `onCleanup`.
+
+## 7. OpenTUI Agent Skill
+
+Installed via:
+
+```
+$ npx skills add anomalyco/opentui --skill opentui -g
+✓ ~/.agents/skills/opentui
+  universal: Amp, Antigravity, Cline, Codex, Cursor +8 more
+  symlinked: Claude Code
+```
+
+The skill is non-interactive and lands in `~/.agents/skills/opentui/` plus a symlink at `~/.claude/skills/opentui/`. Subagents in this repo pick it up automatically — the `find-skills` skill enumerates it and the description matches on "OpenTUI", "Solid", "React", "renderer", "keymap", "components". Confirmed by `ls ~/.claude/skills/`.
+
+The skill ships canonical docs under `~/.agents/skills/opentui/docs/**/*.mdx` keyed by intent (getting-started, core/renderer, audio, keymap, bindings/solid, bindings/react, components, layout, keyboard, plugins, reference/env-vars). Downstream slices SHOULD reach for it before reverse-engineering from `node_modules`.
+
+Installation is global and idempotent. No per-repo state. Not added to the repo's `.gitignore` because nothing in the repo changes.
+
+## 8. Known gotchas
+
+* **Cold-cache boot is dominated by the native dylib load (~580 ms), not the framework.** Bun caches transformed JS aggressively, so warm boots are 2x faster. The 500 ms target is met on warm runs only; first-run-after-`bun install` will spend ~600 ms loading the Zig core. Acceptable for an interactive tool that stays open; flag for UH-42 if we ever want to short-circuit `uh tui --help` to skip the renderer entirely.
+* **The Solid preload is a process-wide Bun plugin.** It registers via `Bun.plugin(...)` inside the `preload` script — once installed for the process, it transforms every `.tsx` / `.jsx` import in that process. Vitest runs under Node, so it never sees the plugin. If a future slice introduces a Bun-run test for the TUI, the preload will be active there too — expected and desired.
+* **Babel transform is opt-in via filename.** Only `.tsx` / `.jsx` files go through Babel. Plain `.ts` files (every existing UH source file) are untouched. This means `bin/uh-tui-spike.tsx` is the only file with JSX in the repo today; if downstream slices add more TUI code they MUST use `.tsx` for it to compile.
+* **`tsc` cannot transform JSX with `jsxImportSource`.** We set `jsx: "preserve"` in `tsconfig.tests.json` — tsc validates the JSX shape (catches type errors) but emits `.tsx` as-is. Bun then runs Babel at module load. This split is deliberate: no separate build step, no two-stage compilation, but typecheck still catches mistakes.
+* **`renderer.destroy()` is NOT idempotent across instances.** It IS idempotent on the same instance (`_isDestroyed` guard). But there is only ever one CliRenderer per process — `createCliRenderer` should not be called twice. UH-46's three-pane layout uses one renderer with three `Box` children, not three renderers.
+* **`solid-js` peerDep mismatch warning at install time.** `@opentui/solid` declares `peerDependencies.solid-js: "1.9.12"` (exact) but resolves to 1.9.13 in our tree. Bun prints `warn: incorrect peer dependency "solid-js@1.9.13"` and proceeds. Empirically works; the API surface we use (`createSignal`, `onCleanup`) is stable across 1.9.x patches. If a future patch breaks the Solid reconciler shape, pin `solid-js@1.9.12` exactly.
+* **`@opentui/core` is at 0.x.** Surface-level breaking changes between 0.2.x releases are possible. Pin to `^0.2.13` (caret) so we get patch fixes but stay on the same minor; upgrade explicitly in a follow-up if the upstream goes 0.3.
+
+## 9. Acceptance for downstream slices
+
+* **UH-46 (dashboard)** consumes the framework decision: build the three-pane layout with `<box flexDirection="row">` + three `<box flexGrow={1}>` children, each with its own list/state. Reuse the `useKeyboard` pattern for global keys (`d` to focus dashboard, `m` for missions, `s` for sandboxes).
+* **UH-47 (mission browser)** uses `<code>` and `<diff>` renderables directly via Solid JSX — both exposed through `@opentui/solid`'s intrinsic elements (`code`, `diff`, `line_number`). Tree-sitter syntax highlighting is wired via `@opentui/core`'s `parser.worker.js` worker; UH-47 needs to verify the worker path is resolvable when packaged.
+* **UH-44 (mission run flow)** consumes the streaming pattern in §4.2. The adapter's existing per-event push (`runtime-session.yaml` line emitter) becomes `setEvents(prev => [...prev, ev])`. The `<For>` element handles incremental rendering.
+* **UH-43 (adapter + sandbox manager)** consumes `useKeyboard` for the `c` (create), `d` (discard), `r` (recheck) commands and `<input>` + `<select>` for the new-sandbox form.
+* **UH-42 (polish)** owns: keymap overlay (the `@opentui/keymap` workspace package referenced in the OpenTUI repo isn't on npm yet — file an upstream issue if still missing by the time UH-42 starts; otherwise build a one-off overlay), theming (palette detection via `renderer.getPalette()` — already wired in `cleanupBeforeDestroy()` so light/dark detection is free), error states (lean on `handleError`'s automatic destroy + log path), exit handling (already complete here), Agent Skill install verification (done — §7).
+
+## 10. Verification receipts
+
+```
+$ bun install
++ @opentui/core@0.2.13
++ @opentui/solid@0.2.13
++ solid-js@1.9.13
+99 packages installed [1.51s]
+
+$ bun run typecheck
+$ tsc -p tsconfig.tests.json --noEmit
+(no errors)
+
+$ bun run build
+$ tsc -p tsconfig.json
+(no errors)
+
+$ bun run test
+ Test Files  17 passed (17)
+      Tests  241 passed (241)
+   Duration  5.04s
+
+$ time bun run tui-spike
+(7 consecutive runs, warm Bun cache)
+run 1: 0.350s    run 5: 0.346s
+run 2: 0.349s    run 6: 0.345s
+run 3: 0.376s    run 7: 0.356s
+run 4: 0.356s    median: 0.350s
+```
+
+All five acceptance gates clean. PR can move to draft.
