@@ -30,11 +30,14 @@
  */
 import { createSignal, createMemo, onCleanup, createEffect, on } from "solid-js";
 import { useKeyboard, useRenderer } from "@opentui/solid";
+import { SyntaxStyle } from "@opentui/core";
+import type { MissionDetail } from "./model.js";
 import { createDashboardState } from "./state.js";
 import type {
   AdapterRow,
   MissionRow,
   SandboxRow,
+  MissionArtifact,
 } from "./model.js";
 
 type PaneId = "adapters" | "missions" | "sandboxes";
@@ -98,6 +101,33 @@ function missionOptions(rows: MissionRow[]) {
   }));
 }
 
+
+function artifactBadge(artifact: MissionArtifact): string {
+  if (!artifact.exists) return "○";
+  switch (artifact.kind) {
+    case "yaml": return "Y";
+    case "diff": return "D";
+    case "events": return "E";
+    case "text": return "T";
+  }
+}
+
+function artifactOptions(rows: MissionArtifact[]) {
+  if (rows.length === 0) {
+    return [{ name: "(loading artifacts)", description: "Reading mission directory.", value: null }];
+  }
+  return rows.map((artifact) => ({
+    name: `${artifactBadge(artifact)} ${artifact.label}`,
+    description: artifact.exists ? artifact.path : "missing",
+    value: artifact,
+  }));
+}
+
+function selectedArtifact(detail: MissionDetail | null, index: number): MissionArtifact | null {
+  if (!detail) return null;
+  return detail.artifacts[index] ?? null;
+}
+
 function sandboxOptions(rows: SandboxRow[]) {
   if (rows.length === 0) {
     return [{ name: "(no sandboxes)", description: "Run `uh sandbox create <id> --mission <id>`.", value: null }];
@@ -112,11 +142,13 @@ function sandboxOptions(rows: SandboxRow[]) {
 export function Dashboard(props: DashboardProps) {
   const renderer = useRenderer();
   const [focused, setFocused] = createSignal<PaneId>("missions");
+  const [detailFocus, setDetailFocus] = createSignal<"artifacts" | "viewer">("artifacts");
   // Create state synchronously so JSX accessors subscribe to its Solid
   // signals from frame zero. Creating it inside onMount assigns a plain
   // closure variable after the first render, which does not trigger a
   // re-render and leaves the dashboard stuck on placeholder rows.
   const state = createDashboardState(props.root);
+  const syntaxStyle = SyntaxStyle.create();
   let quitting = false;
 
   if (props.once) {
@@ -140,6 +172,7 @@ export function Dashboard(props: DashboardProps) {
 
   onCleanup(() => {
     state.dispose();
+    syntaxStyle.destroy();
   });
 
   const quit = () => {
@@ -152,9 +185,51 @@ export function Dashboard(props: DashboardProps) {
 
   useKeyboard((event) => {
     if (event.ctrl || event.meta) return;
+
+    if (state.activeView() === "missionDetail") {
+      switch (event.name) {
+        case "escape":
+          state.closeMissionDetail();
+          setDetailFocus("artifacts");
+          return;
+        case "q":
+          quit();
+          return;
+        case "j":
+        case "down":
+          if (detailFocus() === "artifacts") state.moveMissionArtifactSelection(1);
+          return;
+        case "k":
+        case "up":
+          if (detailFocus() === "artifacts") state.moveMissionArtifactSelection(-1);
+          return;
+        case "enter":
+        case "return":
+          setDetailFocus("viewer");
+          return;
+        case "tab":
+          setDetailFocus(detailFocus() === "artifacts" ? "viewer" : "artifacts");
+          return;
+        case "g":
+          if (event.shift) {
+            state.selectMissionArtifactIndex(Math.max((state.missionDetail()?.artifacts.length ?? 1) - 1, 0));
+          } else {
+            state.selectMissionArtifactIndex(0);
+          }
+          return;
+      }
+      return;
+    }
+
     switch (event.name) {
       case "q":
         quit();
+        return;
+      case "enter":
+      case "return":
+        if (focused() === "missions") {
+          void state.openSelectedMission();
+        }
         return;
       case "a":
         setFocused("adapters");
@@ -251,6 +326,9 @@ export function Dashboard(props: DashboardProps) {
       : ` ${label} [${mnemonic}] `;
 
   // Q5 footer preview line content.
+  const missionDetail = () => state.missionDetail();
+  const activeArtifact = () => selectedArtifact(missionDetail(), state.selectedMissionArtifactIndex());
+
   const previewLine = createMemo<string>(() => {
     const f = focused();
     if (f === "adapters") {
@@ -276,10 +354,109 @@ export function Dashboard(props: DashboardProps) {
     return `${s.id} · mission=${s.missionId} · backend=${s.backend} · status=${s.status}`;
   });
 
+
+  const renderArtifactViewer = () => {
+    const artifact = activeArtifact();
+    if (!artifact) return <text>Select an artifact.</text>;
+    if (!artifact.exists) return <text>{`${artifact.label} is not present for this mission.`}</text>;
+    if (artifact.kind === "diff") {
+      return (
+        <diff
+          diff={artifact.content}
+          view="unified"
+          showLineNumbers
+          wrapMode="none"
+          flexGrow={1}
+          width="100%"
+          height="100%"
+        />
+      );
+    }
+    if (artifact.kind === "yaml") {
+      return (
+        <code
+          content={artifact.content}
+          filetype="yaml"
+          syntaxStyle={syntaxStyle}
+          flexGrow={1}
+          width="100%"
+          height="100%"
+        />
+      );
+    }
+    return (
+      <scrollbox
+        flexGrow={1}
+        width="100%"
+        height="100%"
+        focused={detailFocus() === "viewer"}
+      >
+        <text>{artifact.content || "(empty)"}</text>
+      </scrollbox>
+    );
+  };
+
+  const renderMissionDetail = () => {
+    const detail = missionDetail();
+    const mission = selectedMission();
+    return (
+      <box flexDirection="column" width="100%" height="100%">
+        <box border borderStyle="rounded" title=" Mission detail " titleAlignment="left" padding={1}>
+          <text>
+            {mission
+              ? `${mission.id} · ${mission.name || mission.id} · workflow=${mission.workflow || "—"} · runtime-result=${detail?.runtimeStatus ?? "loading"}`
+              : "No mission selected."}
+          </text>
+        </box>
+        <box flexDirection="row" flexGrow={1} width="100%">
+          <box
+            flexGrow={1}
+            flexDirection="column"
+            border
+            borderStyle="rounded"
+            title={detailFocus() === "artifacts" ? " Artifacts ◀ " : " Artifacts "}
+            titleAlignment="left"
+            padding={1}
+          >
+            <select
+              options={artifactOptions(detail?.artifacts ?? [])}
+              showDescription
+              showScrollIndicator
+              width="100%"
+              flexGrow={1}
+              focused={detailFocus() === "artifacts"}
+              selectedIndex={state.selectedMissionArtifactIndex()}
+              onChange={(idx) => state.selectMissionArtifactIndex(idx)}
+            />
+          </box>
+          <box
+            flexGrow={3}
+            flexDirection="column"
+            border
+            borderStyle="rounded"
+            title={detailFocus() === "viewer" ? ` ${activeArtifact()?.label ?? "Viewer"} ◀ ` : ` ${activeArtifact()?.label ?? "Viewer"} `}
+            titleAlignment="left"
+            padding={1}
+          >
+            {state.isMissionDetailLoading() ? <text>loading mission artifacts…</text> : renderArtifactViewer()}
+          </box>
+        </box>
+        <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+          <text>
+            {state.missionDetailError() ? `error: ${state.missionDetailError()!.message}` : activeArtifact()?.path ?? "—"}
+          </text>
+          <text>
+            j/k or arrows artifacts · Enter focus viewer · Tab switch · g/G top/bottom · Esc back · q quit
+          </text>
+        </box>
+      </box>
+    );
+  };
+
   return (
     <>
       {/* Q6 takeover: no .harness/project.yaml → full-screen hint. */}
-      {hasLoaded() && !harness().initialized ? (
+      {state.activeView() === "missionDetail" ? renderMissionDetail() : hasLoaded() && !harness().initialized ? (
         <box
           flexDirection="column"
           width="100%"
@@ -385,7 +562,7 @@ export function Dashboard(props: DashboardProps) {
             </text>
             {watcherWarning() ? <text>{`⚠ ${watcherWarning()}`}</text> : null}
             <text>
-              a/m/s focus · Tab cycle · r refresh · q quit · ctrl+c force-quit
+              a/m/s focus · Tab cycle · Enter detail · r refresh · q quit · ctrl+c force-quit
             </text>
           </box>
         </box>

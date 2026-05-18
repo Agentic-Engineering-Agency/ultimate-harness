@@ -4,9 +4,9 @@ Runtime-loaded by Bun. Not compiled into `dist/`.
 
 ## Files
 
-- `model.ts` — pure async TypeScript. Reads `.harness/` into typed rows (`AdapterRow`, `MissionRow`, `SandboxRow`, `HarnessInfo`). No Solid, no renderer. Unit-tested in `tests/tui-model.test.ts`.
-- `state.ts` — Solid signals + `fs.watch` (200 ms debounce) + per-pane selection + cached `adapterCheck` (5 s TTL, one-in-flight). Tested in `tests/tui-state.test.ts` via injected `watcherFactory` / `adapterChecker` seams.
-- `dashboard.tsx` — the three-pane view. Mnemonic key focus (`a`/`m`/`s`), soft miller link missions→sandboxes, footer preview line, tiered failure surface (takeover for no-harness; sticky watcher warning).
+- `model.ts` — pure async TypeScript. Reads `.harness/` into typed rows (`AdapterRow`, `MissionRow`, `SandboxRow`, `HarnessInfo`) and mission drilldown artifacts (`mission.yaml`, runtime summaries, final text, prompt, diff, events). No Solid, no renderer. Unit-tested in `tests/tui-model.test.ts`.
+- `state.ts` — Solid signals + `fs.watch` (200 ms debounce) + per-pane selection + cached `adapterCheck` (5 s TTL, one-in-flight) + mission detail navigation state. Tested in `tests/tui-state.test.ts` via injected `watcherFactory` / `adapterChecker` / `missionDetailLoader` seams.
+- `dashboard.tsx` — the three-pane view plus read-only mission drilldown. Mnemonic key focus (`a`/`m`/`s`), `Enter` on a mission for artifact detail, `Esc` back, soft miller link missions→sandboxes, footer preview line, tiered failure surface (takeover for no-harness; sticky watcher warning).
 - `index.tsx` — Bun entry point. Imports adapter modules for `runtimeRegistry` self-registration, then `render(<Dashboard/>)`.
 
 ## How `uh tui` finds this
