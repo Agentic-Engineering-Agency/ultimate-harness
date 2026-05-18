@@ -3,3 +3,8 @@ dist
 .env
 .env.*
 *.log
+
+# docs build artifacts
+apps/docs/.output/
+apps/docs/.source/
+apps/docs/node_modules/
