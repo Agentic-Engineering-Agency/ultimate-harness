@@ -15,7 +15,7 @@ capabilities:
   - oai-compat
   - http-transport
   - sentinel-protocol
-status: experimental
+status: active
 config:
   default_toolsets: []
   default_provider: ""
@@ -24,7 +24,7 @@ config:
   pass_session_id: false
   runtime_config:
     endpoint: "http://127.0.0.1:8645/v1"
-    model: "hermes-4-405b"
+    model: "nousresearch/hermes-4-405b"
     provider: nous
     request_timeout_ms: 120000
     extra_headers: {}

@@ -175,3 +175,7 @@ capabilities:
 - [Runtime adapter contract](./runtime-adapter-contract.md)
 - [Sentinel protocol (UH-28)](../../src/harness/runtime-final-message.ts)
 - [Diff capture helper (UH-34)](../../src/harness/diff-capture.ts)
+
+## Promotion record
+
+Adapter promoted from `experimental` → `active` on **2026-05-18** ([UH-38](https://linear.app/agentic-eng/issue/UH-38)). Smoke evidence + receipts: [`docs/runbooks/hermes-proxy-e2e-smoke.md`](../runbooks/hermes-proxy-e2e-smoke.md).
