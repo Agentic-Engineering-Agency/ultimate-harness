@@ -623,3 +623,136 @@ describe("tui/state — mission run flow", () => {
   });
 });
 
+
+describe("tui/state — sandbox manager actions", () => {
+  test("openCreateSandboxDialog seeds mission id from current selection", async () => {
+    const m = mission("m-seed");
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [m] }),
+      sandboxOps: { create: async () => { throw new Error("unreached"); }, discard: async () => { throw new Error("unreached"); } },
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.selectMission(m);
+    state.openCreateSandboxDialog();
+    expect(state.createSandboxDialogOpen()).toBe(true);
+    expect(state.createSandboxMissionId()).toBe("m-seed");
+    expect(state.createSandboxId()).toBe("");
+    state.dispose();
+  });
+
+  test("submitCreateSandbox validates required fields without calling ops", async () => {
+    let calls = 0;
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap(),
+      sandboxOps: {
+        create: async () => { calls += 1; return { id: "sbx-x", mission_id: "m", path: "/x", branch: "x", base_ref: "HEAD", created_at: "", updated_at: "", backend: "git-worktree", status: "created" } as any; },
+        discard: async () => ({ id: "sbx-x", removed: true, branch_removed: true } as any),
+      },
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.openCreateSandboxDialog();
+    await state.submitCreateSandbox();
+    expect(state.sandboxAction()).toBe("error");
+    expect(state.sandboxActionError()?.message).toMatch(/required/);
+    expect(calls).toBe(0);
+    state.dispose();
+  });
+
+  test("submitCreateSandbox calls ops and refreshes on success", async () => {
+    let createCalled: { root: string; id: string; missionId: string; baseRef?: string } | null = null;
+    let loaderCalls = 0;
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => { loaderCalls += 1; return snap(); },
+      sandboxOps: {
+        create: async (root, opts) => {
+          createCalled = { root, id: opts.id, missionId: opts.missionId, baseRef: opts.baseRef };
+          return { id: opts.id, mission_id: opts.missionId, path: "/x", branch: opts.id, base_ref: opts.baseRef ?? "HEAD", created_at: "", updated_at: "", backend: "git-worktree", status: "created" } as any;
+        },
+        discard: async () => ({} as any),
+      },
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.openCreateSandboxDialog();
+    state.setCreateSandboxId("sbx-feature-a");
+    state.setCreateSandboxMissionId("m-1");
+    state.setCreateSandboxBaseRef("dev");
+    const before = loaderCalls;
+    await state.submitCreateSandbox();
+    expect(state.sandboxAction()).toBe("created");
+    expect(state.createSandboxDialogOpen()).toBe(false);
+    expect(createCalled).toEqual({ root: "/fake-root", id: "sbx-feature-a", missionId: "m-1", baseRef: "dev" });
+    await delay(15);
+    expect(loaderCalls).toBeGreaterThan(before);
+    state.dispose();
+  });
+
+  test("submitDiscardSandbox propagates force flag and clears selection on success", async () => {
+    let discardCalls: { id: string; force?: boolean }[] = [];
+    const sandbox = { id: "sbx-old", missionId: "m", backend: "git-worktree", status: "created", worktreePath: "/x" };
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ sandboxes: [sandbox] }),
+      sandboxOps: {
+        create: async () => ({} as any),
+        discard: async (root, id, opts) => { discardCalls.push({ id, force: opts?.force }); return {} as any; },
+      },
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.selectSandbox(sandbox);
+    state.openDiscardSandboxConfirm();
+    state.toggleDiscardSandboxForce();
+    await state.submitDiscardSandbox();
+    expect(discardCalls).toEqual([{ id: "sbx-old", force: true }]);
+    expect(state.sandboxAction()).toBe("discarded");
+    expect(state.discardSandboxConfirmOpen()).toBe(false);
+    expect(state.selectedSandbox()).toBeNull();
+    state.dispose();
+  });
+
+  test("submitDiscardSandbox surfaces ops errors without crashing", async () => {
+    const sandbox = { id: "sbx-err", missionId: "m", backend: "git-worktree", status: "dirty", worktreePath: "/x" };
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ sandboxes: [sandbox] }),
+      sandboxOps: {
+        create: async () => ({} as any),
+        discard: async () => { throw new Error("sandbox dirty"); },
+      },
+      debounceMs: 10,
+    });
+    await delay(5);
+    state.selectSandbox(sandbox);
+    state.openDiscardSandboxConfirm();
+    await state.submitDiscardSandbox();
+    expect(state.sandboxAction()).toBe("error");
+    expect(state.sandboxActionError()?.message).toBe("sandbox dirty");
+    state.dispose();
+  });
+
+  test("forceCheckAdapter drops cached entry and triggers a new check", async () => {
+    let calls = 0;
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap(),
+      adapterChecker: async () => { calls += 1; return { runtime: "codex", found: true, version: `${calls}`, errors: [] }; },
+      adapterCheckTtlMs: 100_000,
+      debounceMs: 10,
+    });
+    await delay(5);
+    await state.refreshAdapterCheck("codex");
+    expect(calls).toBe(1);
+    await state.refreshAdapterCheck("codex");
+    expect(calls).toBe(1); // cache hit
+    await state.forceCheckAdapter("codex");
+    expect(calls).toBe(2);
+    state.dispose();
+  });
+});
+

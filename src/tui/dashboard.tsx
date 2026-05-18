@@ -146,6 +146,7 @@ export function Dashboard(props: DashboardProps) {
   const [focused, setFocused] = createSignal<PaneId>("missions");
   const [detailFocus, setDetailFocus] = createSignal<"artifacts" | "viewer">("artifacts");
   const [showLive, setShowLive] = createSignal(false);
+  const [createField, setCreateField] = createSignal<"id" | "mission" | "base">("id");
   // Create state synchronously so JSX accessors subscribe to its Solid
   // signals from frame zero. Creating it inside onMount assigns a plain
   // closure variable after the first render, which does not trigger a
@@ -238,6 +239,39 @@ export function Dashboard(props: DashboardProps) {
       return;
     }
 
+    // Discard-confirm modal traps input until resolved.
+    if (state.discardSandboxConfirmOpen()) {
+      switch (event.name) {
+        case "escape":
+          state.closeDiscardSandboxConfirm();
+          return;
+        case "enter":
+        case "linefeed":
+        case "return":
+          void state.submitDiscardSandbox();
+          return;
+        case "f":
+        case "F":
+          state.toggleDiscardSandboxForce();
+          return;
+      }
+      return;
+    }
+
+    // Create-sandbox dialog: Esc closes, Tab cycles fields. Input renderables
+    // handle typing/backspace/arrows internally via `focused`.
+    if (state.createSandboxDialogOpen()) {
+      switch (event.name) {
+        case "escape":
+          state.closeCreateSandboxDialog();
+          return;
+        case "tab":
+          setCreateField((f) => f === "id" ? "mission" : f === "mission" ? "base" : "id");
+          return;
+      }
+      return;
+    }
+
     if (state.activeView() === "missionDetail") {
       switch (event.name) {
         case "escape":
@@ -323,6 +357,21 @@ export function Dashboard(props: DashboardProps) {
           return;
         }
         void state.refresh();
+        return;
+      case "c":
+        if (focused() === "adapters" && state.selectedAdapter()) {
+          void state.forceCheckAdapter(state.selectedAdapter()!.id);
+        }
+        return;
+      case "n":
+        if (focused() === "sandboxes") {
+          state.openCreateSandboxDialog();
+        }
+        return;
+      case "d":
+        if (focused() === "sandboxes" && state.selectedSandbox()) {
+          state.openDiscardSandboxConfirm();
+        }
         return;
     }
   });
@@ -560,6 +609,94 @@ export function Dashboard(props: DashboardProps) {
     </box>
   );
 
+  const renderCreateSandboxDialog = () => {
+    const field = createField();
+    return (
+      <box
+        flexDirection="column"
+        width="100%"
+        height="100%"
+        padding={2}
+        alignItems="center"
+        justifyContent="center"
+      >
+        <box
+          flexDirection="column"
+          border
+          borderStyle="rounded"
+          title=" Create sandbox "
+          titleAlignment="left"
+          padding={2}
+          width={72}
+        >
+          <text>{`Field (Tab cycles): ${field}`}</text>
+          <text marginTop={1}>Sandbox id:</text>
+          <input
+            value={state.createSandboxId()}
+            focused={field === "id"}
+            placeholder="e.g. sbx-feature-x"
+            onInput={(v: string) => state.setCreateSandboxId(v)}
+            onSubmit={((v: string) => { state.setCreateSandboxId(v); void state.submitCreateSandbox(); }) as unknown as any}
+          />
+          <text marginTop={1}>Mission id:</text>
+          <input
+            value={state.createSandboxMissionId()}
+            focused={field === "mission"}
+            placeholder="e.g. codex-e2e-smoke"
+            onInput={(v: string) => state.setCreateSandboxMissionId(v)}
+            onSubmit={((v: string) => { state.setCreateSandboxMissionId(v); void state.submitCreateSandbox(); }) as unknown as any}
+          />
+          <text marginTop={1}>Base ref (optional, defaults to HEAD):</text>
+          <input
+            value={state.createSandboxBaseRef()}
+            focused={field === "base"}
+            placeholder="e.g. dev"
+            onInput={(v: string) => state.setCreateSandboxBaseRef(v)}
+            onSubmit={((v: string) => { state.setCreateSandboxBaseRef(v); void state.submitCreateSandbox(); }) as unknown as any}
+          />
+          {state.sandboxActionError()
+            ? <text marginTop={1}>{`error: ${state.sandboxActionError()!.message}`}</text>
+            : null}
+          <text marginTop={1}>{state.sandboxAction() === "creating" ? "creating sandbox…" : "Enter to submit · Tab to cycle · Esc to cancel"}</text>
+        </box>
+      </box>
+    );
+  };
+
+  const renderDiscardSandboxConfirm = () => {
+    const sandbox = state.selectedSandbox();
+    return (
+      <box
+        flexDirection="column"
+        width="100%"
+        height="100%"
+        padding={2}
+        alignItems="center"
+        justifyContent="center"
+      >
+        <box
+          flexDirection="column"
+          border
+          borderStyle="rounded"
+          title=" Discard sandbox "
+          titleAlignment="left"
+          padding={2}
+          width={72}
+        >
+          <text>{sandbox ? `Sandbox: ${sandbox.id}` : "No sandbox selected."}</text>
+          {sandbox
+            ? <text>{`Mission: ${sandbox.missionId}  ·  Backend: ${sandbox.backend}  ·  Status: ${sandbox.status}`}</text>
+            : null}
+          <text marginTop={1}>{`Force (--force): ${state.discardSandboxForce() ? "ON" : "off"}  (press F to toggle)`}</text>
+          {state.sandboxActionError()
+            ? <text marginTop={1}>{`error: ${state.sandboxActionError()!.message}`}</text>
+            : null}
+          <text marginTop={1}>{state.sandboxAction() === "discarding" ? "discarding…" : "Enter to confirm · Esc to cancel"}</text>
+        </box>
+      </box>
+    );
+  };
+
   const renderLivePane = () => {
     const events = state.runEvents();
     const status = state.runStatus();
@@ -651,7 +788,7 @@ export function Dashboard(props: DashboardProps) {
 
   return (
     <>
-      {state.runDialogOpen() ? renderRunDialog() : state.overlayOpen() ? renderOverlay() : state.activeView() === "missionDetail" ? renderMissionDetail() : hasLoaded() && !harness().initialized ? (
+      {state.discardSandboxConfirmOpen() ? renderDiscardSandboxConfirm() : state.createSandboxDialogOpen() ? renderCreateSandboxDialog() : state.runDialogOpen() ? renderRunDialog() : state.overlayOpen() ? renderOverlay() : state.activeView() === "missionDetail" ? renderMissionDetail() : hasLoaded() && !harness().initialized ? (
         <box
           flexDirection="column"
           width="100%"

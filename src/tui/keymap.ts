@@ -35,6 +35,9 @@ const DASHBOARD_ENTRIES: KeymapEntry[] = [
   { keys: ["Tab"], action: "Cycle pane focus" },
   { keys: ["Enter"], action: "Open mission detail (on Missions)" },
   { keys: ["r"], action: "Refresh now (bypasses debounce)" },
+  { keys: ["c"], action: "Force re-check focused adapter" },
+  { keys: ["n"], action: "New sandbox (Sandboxes pane)" },
+  { keys: ["d"], action: "Discard focused sandbox (with confirm)" },
   { keys: ["R"], action: "Run mission (opens run dialog)" },
 ];
 
@@ -64,7 +67,7 @@ export function keymapForView(view: ViewId): KeymapSection[] {
 /** Compact one-line footer hint for the active view. */
 export function footerHint(view: ViewId): string {
   if (view === "dashboard") {
-    return "a/m/s focus · Tab cycle · Enter detail · R run · r refresh · ? help · q quit";
+    return "a/m/s focus · Tab cycle · Enter detail · R run · c check · n new · d discard · r refresh · ? help · q quit";
   }
   return "j/k or arrows · Enter focus viewer · Tab swap · g/Shift+G top/bottom · R run · S stop · L live · Esc back · ? help · q quit";
 }
