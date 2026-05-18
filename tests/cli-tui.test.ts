@@ -32,11 +32,13 @@ describe("uh tui — CLI registration", () => {
     expect(r.stdout + r.stderr).toMatch(/\btui\b/);
   });
 
-  test("`uh tui --help` documents --root and --once", () => {
+  test("`uh tui --help` documents operator automation flags", () => {
     const r = runCli(["tui", "--help"]);
     const out = r.stdout + r.stderr;
     expect(out).toMatch(/--root/);
     expect(out).toMatch(/--once/);
+    expect(out).toMatch(/--screenshot/);
+    expect(out).toMatch(/--screenshot-size/);
     expect(out).toMatch(/Mission Control|interactive terminal UI/i);
   });
 });

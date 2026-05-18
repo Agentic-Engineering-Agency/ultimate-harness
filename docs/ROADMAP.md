@@ -4,7 +4,7 @@ Last updated: 2026-05-18. Source of truth for issue state is [Linear](https://li
 
 ## Now
 
-Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Three TUI follow-up slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) plus three UX items (UH-51 screenshot pipeline, UH-52 check-age footer, UH-53 cancellation event) are filed in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
+Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Runtime intelligence + operator polish is in review as [UH-57](https://linear.app/agentic-eng/issue/UH-57): deterministic TUI screenshot capture, adapter-check age in the footer, `runtime.cancelled` replay events, and mission capability enforcement. Three TUI follow-up slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) remain in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
 

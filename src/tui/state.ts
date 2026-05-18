@@ -137,6 +137,8 @@ export interface DashboardState {
   /** Trigger a check for `id`. No-op when an in-flight call is pending or the cache is warm. */
   refreshAdapterCheck: (id: string) => Promise<AdapterCheckResult | null>;
   openSelectedMission: () => Promise<MissionDetail | null>;
+  /** Age in milliseconds for the last adapter-check result, or null when none exists. */
+  adapterCheckAgeMs: (id: string) => number | null;
   closeMissionDetail: () => void;
   selectMissionArtifactIndex: (index: number) => void;
   moveMissionArtifactSelection: (delta: number) => void;
@@ -237,6 +239,7 @@ export function createDashboardState(
     result: AdapterCheckResult | null;
     expiresAt: number;
     inFlight: Promise<AdapterCheckResult | null> | null;
+    checkedAt: number;
     generation: number;
   }
   const checkCache = new Map<string, CheckCacheEntry>();
@@ -446,6 +449,13 @@ export function createDashboardState(
       return entry?.result ?? null;
     };
 
+    const adapterCheckAgeMs = (id: string): number | null => {
+      void checkTick();
+      const entry = checkCache.get(id);
+      if (!entry?.result) return null;
+      return Math.max(0, now() - entry.checkedAt);
+    };
+
     const refreshAdapterCheck = async (id: string): Promise<AdapterCheckResult | null> => {
       if (disposed) return null;
       const existing = checkCache.get(id);
@@ -466,6 +476,7 @@ export function createDashboardState(
             result,
             expiresAt: now() + checkTtlMs,
             inFlight: null,
+            checkedAt: now(),
             generation,
           });
           setCheckTick((n) => n + 1);
@@ -484,6 +495,7 @@ export function createDashboardState(
             result: errorResult,
             expiresAt: now() + checkTtlMs,
             inFlight: null,
+            checkedAt: now(),
             generation,
           });
           setCheckTick((n) => n + 1);
@@ -494,6 +506,7 @@ export function createDashboardState(
         result: existing?.result ?? null,
         expiresAt: existing?.expiresAt ?? 0,
         inFlight: promise,
+        checkedAt: existing?.checkedAt ?? 0,
         generation,
       });
       return promise;
@@ -782,6 +795,7 @@ export function createDashboardState(
       selectSandbox: (row: SandboxRow | null) => { setSelectedSandbox(row); schedulePersist(); },
       adapterCheck,
       refreshAdapterCheck,
+      adapterCheckAgeMs,
       openSelectedMission,
       closeMissionDetail,
       selectMissionArtifactIndex,
