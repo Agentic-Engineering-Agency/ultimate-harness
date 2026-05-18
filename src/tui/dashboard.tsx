@@ -32,6 +32,7 @@ import { createSignal, createMemo, onCleanup, createEffect, on } from "solid-js"
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import { SyntaxStyle } from "@opentui/core";
 import type { MissionDetail } from "./model.js";
+import { footerHint, keymapForView, type KeymapSection } from "./keymap.js";
 import { createDashboardState } from "./state.js";
 import type {
   AdapterRow,
@@ -185,6 +186,29 @@ export function Dashboard(props: DashboardProps) {
 
   useKeyboard((event) => {
     if (event.ctrl || event.meta) return;
+
+    // Overlay takes priority over every other handler so `?` always closes
+    // the help and Esc dismisses it without bubbling to view-specific Esc.
+    if (state.overlayOpen()) {
+      if (event.name === "escape" || event.name === "q" || event.name === "?" || (event.shift && event.name === "/")) {
+        if (event.name === "q") {
+          quit();
+        } else {
+          state.closeOverlay();
+        }
+        return;
+      }
+      return;
+    }
+
+    if (event.shift && event.name === "/") {
+      state.toggleOverlay();
+      return;
+    }
+    if (event.name === "?") {
+      state.toggleOverlay();
+      return;
+    }
 
     if (state.activeView() === "missionDetail") {
       switch (event.name) {
@@ -396,6 +420,40 @@ export function Dashboard(props: DashboardProps) {
     );
   };
 
+
+  const renderOverlay = () => {
+    const sections: KeymapSection[] = keymapForView(state.activeView());
+    return (
+      <box
+        flexDirection="column"
+        width="100%"
+        height="100%"
+        padding={2}
+        alignItems="center"
+        justifyContent="center"
+      >
+        <box
+          flexDirection="column"
+          border
+          borderStyle="rounded"
+          title=" Keymap (press ? or Esc to close) "
+          titleAlignment="left"
+          padding={2}
+          width={64}
+        >
+          {sections.map((section) => (
+            <box flexDirection="column" marginBottom={1}>
+              <text>{section.title}</text>
+              {section.entries.map((entry) => (
+                <text>{`  ${entry.keys.join(" / ").padEnd(14, " ")}  ${entry.action}`}</text>
+              ))}
+            </box>
+          ))}
+        </box>
+      </box>
+    );
+  };
+
   const renderMissionDetail = () => {
     const detail = missionDetail();
     const mission = selectedMission();
@@ -446,7 +504,7 @@ export function Dashboard(props: DashboardProps) {
             {state.missionDetailError() ? `error: ${state.missionDetailError()!.message}` : activeArtifact()?.path ?? "—"}
           </text>
           <text>
-            j/k or arrows artifacts · Enter focus viewer · Tab switch · g/G top/bottom · Esc back · q quit
+            {footerHint("missionDetail")}
           </text>
         </box>
       </box>
@@ -455,8 +513,7 @@ export function Dashboard(props: DashboardProps) {
 
   return (
     <>
-      {/* Q6 takeover: no .harness/project.yaml → full-screen hint. */}
-      {state.activeView() === "missionDetail" ? renderMissionDetail() : hasLoaded() && !harness().initialized ? (
+      {state.overlayOpen() ? renderOverlay() : state.activeView() === "missionDetail" ? renderMissionDetail() : hasLoaded() && !harness().initialized ? (
         <box
           flexDirection="column"
           width="100%"
@@ -562,7 +619,7 @@ export function Dashboard(props: DashboardProps) {
             </text>
             {watcherWarning() ? <text>{`⚠ ${watcherWarning()}`}</text> : null}
             <text>
-              a/m/s focus · Tab cycle · Enter detail · r refresh · q quit · ctrl+c force-quit
+              {footerHint("dashboard")}
             </text>
           </box>
         </box>
