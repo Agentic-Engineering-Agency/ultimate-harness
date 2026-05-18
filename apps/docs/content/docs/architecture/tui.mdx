@@ -1,0 +1,170 @@
+---
+title: "UH-41 — Interactive TUI architecture"
+description: "Epic-level architecture document for the `uh tui` Mission Control interface. Captures the load-bearing decisions from the [UH-46 grill](https://linear.app/agentic-eng/issue/UH-46) so downstream slices (UH-47 mission browser, UH-44 mission r"
+---
+
+Epic-level architecture document for the `uh tui` Mission Control interface. Captures the load-bearing decisions from the [UH-46 grill](https://linear.app/agentic-eng/issue/UH-46) so downstream slices (UH-47 mission browser, UH-44 mission run flow, UH-43 adapter/sandbox manager, UH-42 polish) inherit a stable contract.
+
+Last updated: 2026-05-18. UH-46 shipped.
+
+## 1. Position in the system
+
+| Surface | Audience | Stability bar |
+| --- | --- | --- |
+| **CLI** (`uh `subcommand``) | Agents (Claude / Codex / Pi / OMP / OpenCode / Hermes / Hermes-Proxy) and scripts | Frozen — third-party plugins consume it. Breaking changes require a major bump. |
+| **TUI** (`uh tui`) | Humans (Lalo, reviewers) | Opinionated, evolves freely. Mission Control by default. |
+| **Plugin** (planned) | Foreign coding agents driving UH on a user's box | Ships skills + hooks + (optional) MCP server; consumes the CLI. |
+
+The TUI sits *on top* of the CLI: it never invents its own data shapes, never bypasses the CLI's safety properties, and never freezes a contract the CLI doesn't already commit to.
+
+## 2. Layers
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  View   src/tui/{dashboard.tsx,index.tsx}                      │
+│         OpenTUI/Solid renderables, key handlers, layout        │
+├────────────────────────────────────────────────────────────────┤
+│  State  src/tui/state.ts                                       │
+│         Solid signals + fs.watch + selection + adapter-check   │
+├────────────────────────────────────────────────────────────────┤
+│  Model  src/tui/model.ts                                       │
+│         Pure async TS — snapshot reader, no Solid, no renderer │
+├────────────────────────────────────────────────────────────────┤
+│  Harness primitives (existing)                                 │
+│    src/harness/paths.ts, src/harness/registry.ts, ...          │
+└────────────────────────────────────────────────────────────────┘
+```
+
+The split is strict so the model layer is unit-testable with plain Vitest (no renderer mocking) and the state layer is testable through injected `watcherFactory` / `adapterChecker` seams. The view is verified by manual smoke + the `--once` headless render.
+
+## 3. Decisions
+
+### D1 — Primary surface: TUI for humans, CLI for agents
+
+`uh tui` is the default human entry point. The CLI is the stable API every other surface (foreign-agent plugins, CI pipelines, scripts) targets. CLI breaking changes need a major version bump; TUI ergonomics evolve freely.
+
+*Alternatives considered:* CLI-first (TUI as `htop`-style observer only), hybrid split (separate read-only TUI + a modal run TUI).
+
+### D2 — Mission Control by default, `--once` escape hatch
+
+`uh tui` stays open, watches `.harness/` live, never auto-exits. `uh tui --once` renders one frame and exits cleanly — for CI screenshots, docs gifs, and smoke tests. Persistence of UI state (focused pane, last-selected mission) is a UH-42 follow-up — UH-46 ships without persistence; default mode is "Mission Control minus persistence."
+
+*Alternatives considered:* session tool (open per task), both-configurable.
+
+### D3 — Mnemonic pane focus + Tab fallback + soft miller link
+
+Pane focus is `a` (Adapters), `m` (Missions), `s` (Sandboxes). `Tab` cycles forward and `Shift+Tab` backward as a discovery fallback. Selecting a mission additionally scrolls the Sandboxes pane to the bound sandbox via the existing `sandboxes[].mission_id` relationship.
+
+Reserved single-letter keys: `a m s r q`. UH-43 and UH-44 actions (`c`, `d`, `r` for create/discard/run) need a keymap discipline; the chosen shape is deferred to UH-43's grill.
+
+*Alternatives considered:* pure Tab cycle, full miller columns, mnemonics without the miller link.
+
+### D4 — Hybrid refresh: fs.watch for snapshots, append-only NDJSON tail for live runs
+
+The dashboard data (adapter manifests, mission directories, sandbox index) is watched with `fs.watch` and re-loaded after a 200 ms debounce. Live mission-run events (UH-44) consume the per-mission append-only `events.ndjson` file each adapter already writes during execution, tailed line-by-line.
+
+UH-46 implemented the `fs.watch` half; UH-44 wired up the live tail. The contract below is the actual on-disk shape every adapter (hermes, codex, hermes-proxy, oh-my-pi) already emits.
+
+**`events.ndjson` contract** (consumed by UH-44):
+
+```jsonl
+{"event":"runtime.started","timestamp":"2026-05-18T20:00:00.000Z","runtime":"codex"}
+{"event":"codex.thread.started","timestamp":"2026-05-18T20:00:01.123Z","thread_id":"…"}
+{"event":"codex.turn.completed","timestamp":"2026-05-18T20:00:30.000Z"}
+{"event":"runtime.finished","timestamp":"2026-05-18T20:00:31.000Z","runtime":"codex","status":"succeeded"}
+```
+
+Rules:
+- One JSON object per line, terminated by `\n`.
+- `timestamp` is RFC 3339 / ISO 8601 UTC. Consumers may also accept `ts`, `time`, or `at` as fallbacks.
+- `event` (preferred) / `kind` / `type` carries the categorical label. Adapters namespace their own events under ``runtime`.`verb`` (e.g. `codex.thread.started`). The shared baseline is `runtime.started` and `runtime.finished`.
+- Schemas above `event` / `timestamp` are open: adapters MUST tolerate unknown keys; consumers MUST treat the parsed object as `Record<string, unknown>`.
+- Append-only — no truncation, no rotation during a run.
+- File path: `.harness/missions/`id`/events.ndjson`. Coexists with the post-run `runtime-session.yaml` summary; both are written.
+
+*Alternatives considered:* fs.watch everywhere, named-pipe subscription, polling.
+
+### D5 — Selection drives a footer preview line; on-focus-row adapter check
+
+Selecting a row in any pane updates a single ``text`` footer line with that row's context. The Adapters pane additionally fires `runtimeRegistry.check(`id`)` on selection, with a 5 s TTL and one-in-flight cap to prevent arrow-spam from flooding the registry. The result is appended to the same footer line.
+
+This satisfies UH-46's literal acceptance line "Refreshes `adapter check `id`` on focus" without crossing into UH-43 (mutations) or UH-47 (drilldown).
+
+*Alternatives considered:* no-op selection, dedicated preview pane (deferred to UH-47), defer-until-UH-47.
+
+### D6 — Tiered failure surface
+
+Failures get screen real estate proportional to severity:
+
+| Failure | Surface |
+| --- | --- |
+| `.harness/project.yaml` absent | Full-frame takeover with `uh init` hint |
+| Schema-malformed adapter / mission / sandbox file | Per-row badge (`✖`/`?`) from the model layer |
+| `fs.watch` error or dropped-event burst | Sticky footer warning, auto-clears after 5 s |
+| Adapter `check` returns failure | Footer preview line on adapter selection |
+| Transient loader throw | Footer error, last-good snapshot stays on screen |
+
+The takeover is the only modal failure surface, reserved for the one case that's truly unrecoverable without action (no harness to observe). Everything else stays in-place so the user can keep navigating and retry with `r`.
+
+*Alternatives considered:* silent (status quo), banner-everywhere, takeover-on-everything.
+
+## 4. Runtime selection — why Bun
+
+Solid's JSX cannot be emitted by `tsc` (Solid is Babel-only). `dist/cli.js` is plain Node-compatible JavaScript with no `.tsx` artifacts. The `uh tui` subcommand spawns Bun as a child process with `bun --preload @opentui/solid/preload src/tui/index.tsx`, so the Babel transform runs at module load. `src/` ships in the npm tarball via `package.json#files` because the TUI source imports shared harness, schema, and adapter modules from sibling source directories.
+
+If Bun is not on PATH, the CLI exits 1 with an install hint. Node-only deployments can keep using every other `uh` subcommand — the TUI is the only Bun-dependent surface.
+
+## 5. Lifecycle invariants
+
+Carried over from [`docs/research/tui-framework.md §6`](../research/tui-framework.md#6-renderer-lifecycle--cleanup-ordering):
+
+1. `renderer.destroy()` is the only entry to terminal restoration. Never call `process.exit(0)` without `destroy()` first — the terminal stays in raw mode.
+2. `destroy()` is idempotent on a single instance (`_isDestroyed` guard) but never call `createCliRenderer` twice in one process.
+3. Cleanup order is fixed: process listeners removed → SIGINT/SIGTERM handlers detached → timers cleared → stdin cooked → stdout passthrough → `destroy` event fires → renderable tree teardown → Zig core restores screen + cursor + kitty kb + mouse.
+4. `onCleanup()` fires per-component on tree teardown (post-order). "Renderer-wide" cleanup (e.g. closing a websocket) goes on `renderer.on("destroy", …)`.
+
+`createDashboardState` honors this: `dispose()` closes every watcher, clears the debounce + watcher-warning timers, and disposes the Solid root. The Dashboard component calls `dispose()` from `onCleanup`.
+
+## 6. fs.watch contract
+
+`createDashboardState(root)` opens three watchers:
+
+| Target | Triggers reload on |
+| --- | --- |
+| `.harness/adapters/` | Adapter manifest add/remove/edit |
+| `.harness/missions/` | Mission directory add/remove + `mission.yaml` edits |
+| `.harness/sandboxes/` | `index.yaml` edits + per-sandbox subtree changes |
+
+Events from any watcher feed a 200 ms debounce. The debounce window is exposed via `DEBOUNCE_MS` so tests can override. The watcher factory is exposed via `WatcherFactory` so tests inject deterministic event sources without spinning real `fs.watch` handles.
+
+macOS `kqueue` drops events under heavy churn (~50/sec sustained). Mitigation: the `r` keybind triggers an immediate `refresh()` that bypasses the debounce. The watcher-warning footer surfaces watcher errors so users know when to press `r`.
+
+## 7. Selection + cache
+
+`state.ts` exposes:
+
+```ts
+state.selectAdapter(row)   state.selectedAdapter()
+state.selectMission(row)   state.selectedMission()
+state.selectSandbox(row)   state.selectedSandbox()
+state.adapterCheck(id)            // sync read, may return null
+state.refreshAdapterCheck(id)     // async, deduplicated, 5 s TTL
+```
+
+The dashboard wires `<select onChange>` to the setters, and `createEffect` on `selectedAdapter` to fire the check. `createMemo` on `selectedMission` powers the soft miller link to `selectedSandbox`.
+
+## 8. Future-slice hooks
+
+| Slice | What it adds | What this doc commits |
+| --- | --- | --- |
+| **UH-47** Mission browser | Drilldown view with ``code`` and ``diff`` | `Enter` on a mission row opens the detail view |
+| **UH-44** Mission run flow | Live `events.ndjson` consumer + subprocess trigger | Contract in §3 D4 above; adapters already emit the NDJSON |
+| **UH-43** Adapter + sandbox manager | `c` create / `d` discard / re-check | Reserves `c d` (and a keymap discipline TBD in UH-43's grill) |
+| **UH-42** Polish | Keymap overlay (`?`), theming, error UX, state persistence | XDG state path: `~/.config/uh/tui-state.json` |
+
+## 9. Out of scope
+
+- Remote sessions (someone else's harness over SSH / WebSocket) — local only.
+- Editing mission packets from the TUI — `mission.yaml` is read-only here.
+- A web UI / static dashboard — `docs/ROADMAP.md` remains the canonical written index; `uh tui` is the live one.
+- A custom renderer or bundler — runtime Babel via `bun --preload` is the only build path.

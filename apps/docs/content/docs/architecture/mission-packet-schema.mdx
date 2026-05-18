@@ -1,0 +1,94 @@
+---
+title: "Mission Packet Schema"
+description: "A mission packet is the portable work request sent to a runtime adapter. It must be clear enough for a human to execute manually and structured enough for a runtime adapter to launch automatically."
+---
+
+## Purpose
+
+A mission packet is the portable work request sent to a runtime adapter. It must be clear enough for a human to execute manually and structured enough for a runtime adapter to launch automatically.
+
+## Draft schema: `uh.mission.v0`
+
+```yaml
+schema_version: uh.mission.v0
+id: mission-2026-05-13-docs-spine
+title: Create documentation spine for Ultimate Harness
+issue_refs:
+  - provider: github
+    id: "21"
+    url: https://github.com/Agentic-Engineering-Agency/ultimate-harness/issues/21
+  - provider: linear
+    id: UH-1
+workflow_profile: research-docs
+priority: high
+
+objective: >
+  Build the initial documentation foundation before implementation begins.
+
+context:
+  repo_root: /Users/eduardojaviergarcialopez/AgenticEngineering/ultimate-harness
+  read_first:
+    - README.md
+    - docs/architecture/overview.md
+  source_links:
+    - https://github.com/bmad-code-org/BMAD-METHOD
+    - https://github.com/obra/superpowers
+    - https://github.com/gsd-build/get-shit-done
+    - https://github.com/Fission-AI/OpenSpec
+
+constraints:
+  - Do not implement the CLI yet.
+  - Keep claims traceable to source systems.
+  - Treat BMAD as inspiration, not dependency.
+  - Prefer human-readable Markdown artifacts.
+
+skills:
+  required:
+    - writing-plans
+  suggested:
+    - code-review
+
+expected_outputs:
+  files:
+    - docs/README.md
+    - docs/glossary.md
+    - docs/research/comparison-matrix.md
+    - docs/product/prd.md
+    - docs/architecture/runtime-adapter-contract.md
+    - docs/architecture/mission-packet-schema.md
+    - docs/workflows/bmad-agent-map.md
+
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved
+
+verification:
+  required_checks:
+    - name: docs-tree-exists
+      command: find docs -type f | sort
+    - name: git-diff-review
+      command: git diff -- docs README.md
+  review_gates:
+    - spec-compliance
+    - documentation-quality
+    - broken-link-sanity
+
+completion_criteria:
+  - Docs tree is navigable from docs/README.md.
+  - Root README links to docs.
+  - Core entities and adapter contract are defined.
+  - MVP boundary is explicit.
+```
+
+## Field rules
+
+- `schema_version` is required and must be versioned.
+- `id` must be stable and audit-safe.
+- `issue_refs` should include all external trackers when available.
+- `workflow_profile` must match a defined profile.
+- `context.read_first` should be ordered.
+- `constraints` are hard limits for the runtime.
+- `skills.required` must be loaded/applied by capable runtimes.
+- `expected_outputs` should include paths and artifact kinds where possible.
+- `sandbox.promotion_policy` must be explicit.
+- `verification.required_checks` should be runnable commands or named manual checks.

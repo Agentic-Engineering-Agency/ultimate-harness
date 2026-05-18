@@ -1,0 +1,161 @@
+---
+title: "Hermes Proxy — operator setup runbook"
+description: "Zero-to-`runtime-result.status: passed` for the `hermes-proxy` adapter. Architecture context lives in [`docs/architecture/adapter-hermes-proxy.md`](../architecture/adapter-hermes-proxy.md); wire-format discovery is in [`docs/architecture/he"
+---
+
+Zero-to-`runtime-result.status: passed` for the `hermes-proxy` adapter. Architecture context lives in [`docs/architecture/adapter-hermes-proxy.md`](../architecture/adapter-hermes-proxy.md); wire-format discovery is in [`docs/architecture/hermes-proxy-spike.md`](../architecture/hermes-proxy-spike.md).
+
+## Prerequisites
+
+1. **Hermes Agent ≥ 0.14.0** installed locally.
+   ```
+   $ hermes --version
+   Hermes Agent v0.14.0 (2026.5.16)
+   ```
+   If the version is older, upgrade per the [Hermes release notes](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.16). UH's `hermes` adapter rejects pre-0.14.0 installs ([UH-31](https://linear.app/agentic-eng/issue/UH-31)).
+2. **An authenticated provider.** Today only the `nous` provider ships in `hermes proxy`. Check status:
+   ```
+   $ hermes auth status nous
+   nous: ok
+   ```
+   If the response is `logged out (Invalid refresh token)`, re-auth via `hermes auth add nous` and complete the vendor OAuth flow.
+3. **A UH project on `≥ 0.2.x`.** `uh adapter list` must include `hermes-proxy`. If not, run `uh adapter add hermes-proxy` from the project root.
+
+## Start the proxy
+
+```
+$ hermes proxy start --provider nous
+Starting Hermes proxy for Nous Portal
+  Listening on:  http://127.0.0.1:8645/v1
+  Forwarding to: (resolved per-request from your subscription)
+  Use any bearer token in the client — the proxy attaches your real credential.
+
+Press Ctrl+C to stop.
+```
+
+Defaults: `127.0.0.1:8645`. Override with `--host` / `--port` if 8645 is taken. Keep the proxy running in a dedicated terminal (or process supervisor); UH does not start or supervise it.
+
+## Verify reachability
+
+```
+$ uh adapter check hermes-proxy
+[PASS] hermes-proxy adapter
+  runtime: hermes-proxy
+  version: proxy reachable at http://127.0.0.1:8645/v1 (406 models available)
+```
+
+Failure modes from this command:
+
+| Output | Meaning | Remediation |
+|---|---|---|
+| `endpoint unreachable: … (is `hermes proxy start` running?)` | Proxy is not listening on `endpoint` | Start the proxy; check `--port` matches `runtime_config.endpoint` |
+| `HTTP 401 from proxy: … (run `hermes auth status nous` to re-auth)` | Upstream credentials expired | `hermes auth add nous` and complete OAuth |
+| `HTTP 404 (proxy version may not forward /models)` | Hermes binary has changed the proxy route set | Recheck `hermes --version`; file an issue if `0.14.x` no longer forwards `/models` |
+| `adapter check timed out after 5000 ms` | Proxy started but is hanging | Inspect proxy logs; restart |
+| `missing endpoint in runtime_config` | Manifest is malformed | Re-run `uh adapter add hermes-proxy --force` |
+
+## Configure the manifest
+
+The default manifest at `.harness/adapters/hermes-proxy.yaml` is correct for a vanilla local install. Edit only if you've moved the proxy:
+
+```yaml
+schema_version: uh.adapter.v0
+id: hermes-proxy
+name: Hermes Proxy
+runtime: hermes-proxy
+capabilities:
+  - subscription-auth
+  - oai-compat
+  - http-transport
+  - sentinel-protocol
+status: experimental
+config:
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    endpoint: "http://127.0.0.1:8645/v1"     # change if --host/--port differ
+    model: "<a model id from `adapter check` output>"
+    provider: nous                            # informational; drives re-auth hint
+    request_timeout_ms: 120000
+    extra_headers: {}
+```
+
+**Important — model id.** `hermes-4-405b` is the manifest default but is NOT in every upstream's catalog. The current Nous Portal upstream proxies via OpenRouter, whose catalog includes ids like `anthropic/claude-opus-4`, `openai/gpt-5-pro`, etc. Run `curl -sS -H 'authorization: Bearer x' http://127.0.0.1:8645/v1/models | jq '.data[].id'` to enumerate, or override per-mission via `runtime_config_overrides.model`.
+
+## Smoke run
+
+Create a tiny mission:
+
+```bash
+uh mission create hp-smoke \
+  --title "hermes-proxy smoke" \
+  --workflow research-docs \
+  --objective "Confirm hermes-proxy is wired."
+```
+
+Optionally override the model per mission (recommended on a fresh install):
+
+```yaml
+# .harness/missions/hp-smoke/mission.yaml — append:
+runtime_config_overrides:
+  model: "anthropic/claude-opus-4"
+```
+
+Dry-run first to inspect the rendered request:
+
+```
+$ uh mission dry-run .harness/missions/hp-smoke/mission.yaml --runtime hermes-proxy --no-sandbox
+Command: POST http://127.0.0.1:8645/v1/chat/completions {
+  "model": "anthropic/claude-opus-4",
+  "messages": [{"role": "user", "content": "# Mission: hermes-proxy smoke\n…"}],
+  "stream": true
+}
+```
+
+Run for real:
+
+```
+$ uh mission run .harness/missions/hp-smoke/mission.yaml --runtime hermes-proxy --no-sandbox
+```
+
+Expected:
+
+- `.harness/missions/hp-smoke/runtime-result.yaml` → `status: passed`.
+- `.harness/missions/hp-smoke/runtime-final.txt` → one-paragraph summary (extracted from the model's UH-28 sentinel block, when emitted).
+- `.harness/missions/hp-smoke/runtime.stdout.log` → full assistant message.
+
+## Failure modes (during a real run)
+
+| Symptom | Where it shows up | Action |
+|---|---|---|
+| `[BLOCKED]` + `endpoint unreachable` | `runtime-result.yaml errors[]` | Proxy died; restart `hermes proxy start`. |
+| `[BLOCKED]` + `upstream auth failed` | runtime-result errors | Re-auth via `hermes auth add `provider``. The full upstream message is in `runtime.stderr.log`. |
+| `[BLOCKED]` + `model "`id`" not available` | runtime-result errors | Pick a model id that `adapter check` enumerated. Override per-mission via `runtime_config_overrides.model`. |
+| `[FAIL]` + HTTP 4xx other than 401/403/404 | runtime-result errors | Verbatim upstream envelope. Often quota / rate-limit; check the upstream provider's status page. |
+| `[FAIL]` + `request timed out after `ms` ms` | runtime-result errors | Raise `request_timeout_ms` (manifest or per-mission). 405B routing latencies can exceed 90s. |
+| `[FAIL]` + `empty assistant message` | runtime-result errors | Upstream returned 200 but no content. Usually a moderation block on the model side. |
+
+## Cleanup
+
+Stop the proxy with `Ctrl+C` in its terminal. Hermes flushes its own state; UH artifacts stay where they are.
+
+To completely re-baseline:
+
+```bash
+hermes auth logout `provider`      # only if you want to invalidate cached tokens
+rm -rf .harness/missions/hp-smoke   # only if you want to discard the smoke
+```
+
+## Comparison with `anthropic-via-omp`
+
+If you previously used the `anthropic-via-omp` path (see [`anthropic-via-omp.md`](./anthropic-via-omp.md)), `hermes-proxy` is the ToS-positioned replacement. Both routes can coexist in the same UH project — `oh-my-pi` is unaffected. Prefer `hermes-proxy` for new deployments; the OMP stealth surface remains documented but carries the Feb-2026 Anthropic ToS friction.
+
+## References
+
+- [UH-32 epic](https://linear.app/agentic-eng/issue/UH-32)
+- [Architecture doc](../architecture/adapter-hermes-proxy.md)
+- [Wire-format spike](../architecture/hermes-proxy-spike.md)
+- [Hermes Agent 0.14.0 release notes](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.16)

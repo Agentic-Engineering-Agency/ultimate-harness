@@ -1,0 +1,64 @@
+---
+title: "Core Entities"
+description: "A repository or workspace managed by Ultimate Harness. It owns `.harness/` metadata and links to external issue trackers."
+---
+
+## Project
+A repository or workspace managed by Ultimate Harness. It owns `.harness/` metadata and links to external issue trackers.
+
+Key fields:
+- `id`
+- `name`
+- `root_path`
+- `issue_sources`
+- `default_workflow_profiles`
+- `artifact_schema_version`
+
+## Issue reference
+A link to GitHub, Linear, or another tracker item.
+
+Key fields:
+- `provider`
+- `id`
+- `url`
+- `title`
+- `status`
+
+## Spec
+A durable statement of desired behavior, constraints, and acceptance criteria.
+
+## Workflow profile
+A named recipe for turning a request into missions and verification gates.
+
+## Skill
+A reusable procedural capability with metadata, body, prerequisites, and verification hooks.
+
+## Mission
+A bounded executable work unit compiled from a request/spec/plan.
+
+## Mission packet
+The serialized mission passed to a runtime adapter.
+
+## Runtime
+The external agent system that executes work.
+
+## Runtime adapter
+The code/config that maps Ultimate Harness lifecycle calls to a runtime.
+
+## Runtime session
+A single execution attempt inside a runtime, associated with a mission and sandbox.
+
+## Sandbox
+An isolated workspace where the runtime performs changes.
+
+## Artifact
+Any output produced or consumed by the harness: docs, specs, plans, prompts, logs, diffs, verification results, review notes, or promoted files.
+
+## Verification result
+Structured evidence for checks and reviews.
+
+## Promotion record
+A record that approved sandbox artifacts were moved into canonical state.
+
+## Audit event
+Append-only trace event connecting decisions, runtime activity, verification, and promotion.

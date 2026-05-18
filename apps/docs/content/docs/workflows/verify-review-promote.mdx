@@ -1,0 +1,24 @@
+---
+title: "Workflow: Verify, Review, Promote"
+description: "A runtime has produced sandbox output."
+---
+
+## Use when
+
+A runtime has produced sandbox output.
+
+## Steps
+
+1. Collect changed files and diff.
+2. Run required automated checks.
+3. Perform spec compliance review.
+4. Perform quality review.
+5. Perform sandbox/security review.
+6. Record findings and waivers.
+7. Ask for human promotion approval when policy requires it.
+8. Promote selected changes or discard sandbox.
+9. Write promotion/audit records.
+
+## Exit criteria
+
+Every promoted artifact has a verification result, approval decision, and audit event.
