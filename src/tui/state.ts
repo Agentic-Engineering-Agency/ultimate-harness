@@ -17,7 +17,7 @@
  *     `dispose()`; this file does not subscribe to `renderer.on(...)`.
  */
 import { watch, type FSWatcher } from "node:fs";
-import { createRoot, createSignal, type Accessor } from "solid-js";
+import { createRoot, createSignal, createEffect, on, type Accessor } from "solid-js";
 import {
   adaptersDir,
   missionsDir,
@@ -40,6 +40,7 @@ import type { RunEvent } from "./run-events.js";
 import type { RunOutcome, RunRuntime } from "./run-orchestrator.js";
 import { createDefaultRunStarter, type RunSession, type RunStarter } from "./run-session.js";
 import { createSandbox as defaultCreateSandbox, discardSandbox as defaultDiscardSandbox, type CreateSandboxOptions, type DiscardSandboxOptions, type SandboxRecord, type DiscardSandboxResult } from "../harness/sandbox.js";
+import { createFilePersistenceStore, type PersistedProjectState, type PersistenceStore } from "./persistence.js";
 
 export const DEBOUNCE_MS = 200;
 export const ADAPTER_CHECK_TTL_MS = 5_000;
@@ -88,6 +89,10 @@ export interface DashboardStateOptions {
   runEventsHistoryCap?: number;
   /** Test seam for sandbox create/discard ops. Defaults to harness/sandbox.ts. */
   sandboxOps?: SandboxOps;
+  /** Persistence store for per-project TUI state (focus, last selections). */
+  persistenceStore?: PersistenceStore | null;
+  /** Debounce window for save-after-selection writes; 0 disables debouncing in tests. */
+  persistenceDebounceMs?: number;
 }
 
 export interface DashboardState {
@@ -161,7 +166,7 @@ export interface DashboardState {
   /** Force a fresh load now (e.g. wired to `r` keybinding). */
   refresh: () => Promise<void>;
   /** Close watchers, clear timers, dispose Solid root. Idempotent. */
-  dispose: () => void;
+  dispose: () => Promise<void>;
 }
 
 const EMPTY_SNAPSHOT: DashboardSnapshot = {
@@ -211,9 +216,13 @@ export function createDashboardState(
   let runRequestId = 0;
   const sandboxOps: SandboxOps = options.sandboxOps ?? { create: defaultCreateSandbox, discard: defaultDiscardSandbox };
   let sandboxActionRequestId = 0;
+  const persistenceStore: PersistenceStore | null = options.persistenceStore === null ? null : (options.persistenceStore ?? createFilePersistenceStore());
+  const persistenceDebounceMs = options.persistenceDebounceMs ?? 250;
+  let persistenceTimer: ReturnType<typeof setTimeout> | null = null;
 
   let disposed = false;
   let missionDetailRequestId = 0;
+  let persistNow: (() => Promise<void>) | null = null;
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
   let warnTimer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> | null = null;
@@ -308,6 +317,9 @@ export function createDashboardState(
         if (disposed) return;
         setSnapshot(next);
         installMissionWatchers(next);
+        if (!persistenceHydrated) {
+          await hydratePersistence(next);
+        }
         setError(null);
       } catch (err) {
         if (disposed) return;
@@ -344,6 +356,72 @@ export function createDashboardState(
     };
 
     void runLoad();
+    // UH-42 persistence: hydrate selections after first snapshot, debounce-save on changes.
+    let persistenceHydrated = persistenceStore === null;
+    const computeRestorable = (target: PersistedProjectState | null): PersistedProjectState | null => target;
+    const applyPersisted = (state: PersistedProjectState | null, next: DashboardSnapshot): void => {
+      if (!state) return;
+      if (state.activeView && state.activeView !== activeView()) {
+        // Only restore activeView=dashboard automatically; missionDetail requires a loaded detail and is opt-in by Enter.
+        if (state.activeView === "dashboard") setActiveView("dashboard");
+      }
+      if (state.selectedAdapterId) {
+        const row = next.adapters.find((r) => r.id === state.selectedAdapterId);
+        if (row) setSelectedAdapter(row);
+      }
+      if (state.selectedMissionId) {
+        const row = next.missions.find((r) => r.id === state.selectedMissionId);
+        if (row) setSelectedMission(row);
+      }
+      if (state.selectedSandboxId) {
+        const row = next.sandboxes.find((r) => r.id === state.selectedSandboxId);
+        if (row) setSelectedSandbox(row);
+      }
+    };
+    const hydratePersistence = async (next: DashboardSnapshot): Promise<void> => {
+      if (persistenceHydrated || !persistenceStore) return;
+      persistenceHydrated = true;
+      try {
+        const persisted = await persistenceStore.load(root);
+        if (disposed) return;
+        applyPersisted(computeRestorable(persisted), next);
+      } catch {
+        // persistence is advisory; failures are non-fatal.
+      }
+    };
+    createEffect(on(snapshot, (next) => {
+      if (next.capturedAt !== EMPTY_SNAPSHOT.capturedAt) {
+        void hydratePersistence(next);
+      }
+    }));
+    persistNow = async (): Promise<void> => {
+      if (!persistenceStore) return;
+      try {
+        await persistenceStore.save(root, {
+          activeView: activeView(),
+          selectedAdapterId: selectedAdapter()?.id,
+          selectedMissionId: selectedMission()?.id,
+          selectedSandboxId: selectedSandbox()?.id,
+        });
+      } catch {
+        // ignore — advisory save.
+      }
+    };
+    const schedulePersist = (): void => {
+      if (!persistenceStore || disposed) return;
+      if (persistenceDebounceMs <= 0) {
+        if (persistNow) void persistNow();
+        return;
+      }
+      if (persistenceTimer) clearTimeout(persistenceTimer);
+      persistenceTimer = setTimeout(() => {
+        persistenceTimer = null;
+        if (!disposed && persistNow) void persistNow();
+      }, persistenceDebounceMs);
+    };
+    createEffect(on([selectedAdapter, selectedMission, selectedSandbox, activeView], () => {
+      if (persistenceHydrated) schedulePersist();
+    }, { defer: true }));
 
     for (const target of targets) {
       const handle = watcherFactory(target, scheduleLoad, noteWatcherError);
@@ -699,9 +777,9 @@ export function createDashboardState(
       createSandboxBaseRef,
       discardSandboxConfirmOpen,
       discardSandboxForce,
-      selectAdapter: setSelectedAdapter,
-      selectMission: setSelectedMission,
-      selectSandbox: setSelectedSandbox,
+      selectAdapter: (row: AdapterRow | null) => { setSelectedAdapter(row); schedulePersist(); },
+      selectMission: (row: MissionRow | null) => { setSelectedMission(row); schedulePersist(); },
+      selectSandbox: (row: SandboxRow | null) => { setSelectedSandbox(row); schedulePersist(); },
       adapterCheck,
       refreshAdapterCheck,
       openSelectedMission,
@@ -734,7 +812,7 @@ export function createDashboardState(
     };
   });
 
-  const dispose = (): void => {
+  const dispose = async (): Promise<void> => {
     if (disposed) return;
     disposed = true;
     if (pendingTimer) {
@@ -748,6 +826,16 @@ export function createDashboardState(
     if (warnTimer) {
       clearTimeout(warnTimer);
       warnTimer = null;
+    }
+    // Flush a pending persistence save before tearing the store down so a
+    // selection made right before `q` survives the quit path.
+    const hadPendingPersist = persistenceTimer !== null;
+    if (persistenceTimer) {
+      clearTimeout(persistenceTimer);
+      persistenceTimer = null;
+    }
+    if (hadPendingPersist && persistNow) {
+      try { await persistNow(); } catch { /* advisory */ }
     }
     for (const w of watchers) {
       try { w.close(); } catch { /* already closed */ }

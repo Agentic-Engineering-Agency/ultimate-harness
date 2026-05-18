@@ -63,6 +63,7 @@ In flight (see [ROADMAP.md](./ROADMAP.md)):
 
 - [Codex E2E smoke](./runbooks/codex-e2e-smoke.md)
 - [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md)
+- [Using `uh tui`](./runbooks/using-the-tui.md)
 
 ### Workflows
 
