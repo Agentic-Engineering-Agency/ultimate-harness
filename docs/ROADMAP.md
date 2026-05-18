@@ -4,7 +4,7 @@ Last updated: 2026-05-18. Source of truth for issue state is [Linear](https://li
 
 ## Now
 
-Epic 2 (Interactive TUI) shipped end-to-end. Three follow-up polish slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) plus two UX items (UH-51 screenshot pipeline, UH-52 check-age footer, UH-53 cancellation event) are filed in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
+Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Three TUI follow-up slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) plus three UX items (UH-51 screenshot pipeline, UH-52 check-age footer, UH-53 cancellation event) are filed in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
 
@@ -43,6 +43,16 @@ Adapter promoted to `status: active` on 2026-05-18 after live E2E smoke against 
 | [UH-44](https://linear.app/agentic-eng/issue/UH-44) | TUI mission run flow with live `events.ndjson` tail | [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
 | [UH-43](https://linear.app/agentic-eng/issue/UH-43) | TUI adapter + sandbox manager (create/discard/recheck) | [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
 | [UH-42](https://linear.app/agentic-eng/issue/UH-42) | TUI polish: keymap overlay (`?`) + per-project persistence + runbook | [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65) |
+
+### Discipline layers — Spec-Driven, Test-Driven, Cross-runtime QA (shipped)
+
+| Issue | Slice | PR |
+|---|---|---|
+| [UH-54](https://linear.app/agentic-eng/issue/UH-54) | SDD: structured `acceptance_criteria` with per-AC verify | [#68](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/68) |
+| [UH-55](https://linear.app/agentic-eng/issue/UH-55) | TDD: `tdd` workflow profile + test-first verify gate | [#69](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/69) |
+| [UH-56](https://linear.app/agentic-eng/issue/UH-56) | Cross-runtime QA: `uh mission run-all` + side-by-side comparison | [#70](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/70) |
+
+All three layers compose: see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md).
 
 ## Shipped previous cycle (2026-05-13 → 2026-05-17)
 

@@ -16,7 +16,8 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 6. [Runtime adapter contract](./architecture/runtime-adapter-contract.md) — what every adapter implements (includes the UH-28 runtime-final-message protocol).
 7. [Mission packet schema](./architecture/mission-packet-schema.md) — the portable work-request format.
 8. [Verification and promotion](./architecture/verification-and-promotion.md) — how sandbox work becomes canonical work.
-9. [BMAD agent map](./workflows/bmad-agent-map.md) — how BMAD-style roles map into Ultimate Harness.
+9. [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md) — the three composable discipline layers (UH-54 / UH-55 / UH-56).
+10. [BMAD agent map](./workflows/bmad-agent-map.md) — how BMAD-style roles map into Ultimate Harness.
 
 ## Adapters
 
@@ -58,6 +59,7 @@ In flight (see [ROADMAP.md](./ROADMAP.md)):
 - [Sandboxing](./architecture/sandboxing.md)
 - [AgentFS sandbox backend (design)](./architecture/sandbox-agentfs.md)
 - [Verification and promotion](./architecture/verification-and-promotion.md)
+- [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md)
 
 ### Runbooks
 
