@@ -175,14 +175,14 @@ export function Dashboard(props: DashboardProps) {
   }
 
   onCleanup(() => {
-    state.dispose();
+    void state.dispose();
     syntaxStyle.destroy();
   });
 
-  const quit = () => {
+  const quit = async () => {
     if (quitting) return;
     quitting = true;
-    state.dispose();
+    try { await state.dispose(); } catch { /* persistence is advisory */ }
     renderer.destroy();
     process.exit(0);
   };

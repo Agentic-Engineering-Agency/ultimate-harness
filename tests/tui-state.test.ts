@@ -1,6 +1,7 @@
 import { describe, test, expect } from "vitest";
 import { createDashboardState } from "../src/tui/state.js";
 import type { DashboardSnapshot, AdapterRow, MissionDetail, MissionRow } from "../src/tui/model.js";
+import { createMemoryPersistenceStore } from "../src/tui/persistence.js";
 import type { AdapterCheckResult } from "../src/harness/registry.js";
 
 const FIXED_NOW = new Date("2026-05-18T00:00:00.000Z").toISOString();
@@ -752,6 +753,71 @@ describe("tui/state — sandbox manager actions", () => {
     expect(calls).toBe(1); // cache hit
     await state.forceCheckAdapter("codex");
     expect(calls).toBe(2);
+    state.dispose();
+  });
+});
+
+
+describe("tui/state — persistence", () => {
+  test("restores selections from persisted state when matching rows are present", async () => {
+    const codex: AdapterRow = { id: "codex", name: "Codex", status: "active", runtime: "codex", manifestPath: "/c" };
+    const m = mission("m-restore");
+    const store = createMemoryPersistenceStore({ "/fake-root": { selectedAdapterId: "codex", selectedMissionId: "m-restore" } });
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ adapters: [codex], missions: [m] }),
+      persistenceStore: store,
+      persistenceDebounceMs: 0,
+      debounceMs: 10,
+    });
+    await delay(15);
+    expect(state.selectedAdapter()?.id).toBe("codex");
+    expect(state.selectedMission()?.id).toBe("m-restore");
+    state.dispose();
+  });
+
+  test("saves on subsequent selection changes", async () => {
+    const codex: AdapterRow = { id: "codex", name: "Codex", status: "active", runtime: "codex", manifestPath: "/c" };
+    const store = createMemoryPersistenceStore();
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ adapters: [codex] }),
+      persistenceStore: store,
+      persistenceDebounceMs: 0,
+      debounceMs: 10,
+    });
+    await delay(15);
+    state.selectAdapter(codex);
+    await delay(5);
+    const persisted = await store.load("/fake-root");
+    expect(persisted?.selectedAdapterId).toBe("codex");
+    state.dispose();
+  });
+
+  test("does not crash when persistence is disabled", async () => {
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap(),
+      persistenceStore: null,
+      debounceMs: 10,
+    });
+    await delay(10);
+    state.dispose();
+    expect(true).toBe(true);
+  });
+
+  test("ignores persisted ids that no longer match snapshot rows", async () => {
+    const store = createMemoryPersistenceStore({ "/fake-root": { selectedAdapterId: "gone", selectedMissionId: "ghost" } });
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap(),
+      persistenceStore: store,
+      persistenceDebounceMs: 0,
+      debounceMs: 10,
+    });
+    await delay(20);
+    expect(state.selectedAdapter()).toBeNull();
+    expect(state.selectedMission()).toBeNull();
     state.dispose();
   });
 });
