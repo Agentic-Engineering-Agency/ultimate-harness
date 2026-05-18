@@ -75,6 +75,16 @@ completion_criteria:
   - Root README links to docs.
   - Core entities and adapter contract are defined.
   - MVP boundary is explicit.
+
+acceptance_criteria:
+  - id: ac-tree
+    description: Docs tree navigable from docs/README.md.
+    check_command: find docs -type f | sort
+    severity: block
+  - id: ac-links
+    description: All Markdown links resolve.
+    check_command: bun run check:links
+    severity: warn
 ```
 
 ## Field rules
@@ -89,3 +99,6 @@ completion_criteria:
 - `expected_outputs` should include paths and artifact kinds where possible.
 - `sandbox.promotion_policy` must be explicit.
 - `verification.required_checks` should be runnable commands or named manual checks.
+- `acceptance_criteria` (Spec-Driven Development, UH-54) declare each criterion with a stable `id`, a `description`, an optional `check_command` (defaulted from the global `verification.required_checks` when omitted) and a `severity` of `block` (verification fails when this AC fails) or `warn` (recorded for the audit trail, not blocking).
+- When `acceptance_criteria` is absent, every entry under `completion_criteria` is auto-promoted to a `severity: warn` AC. Existing missions continue to validate without edits.
+- `uh verify` writes a per-AC entry into `verification.yaml#acceptance_criteria[]` (id / description / status / severity / exit_code / duration_ms / stdout_snippet / stderr_snippet) and emits an `acceptance.checked` row in `events.ndjson` for live observers (TUI / replay tools).

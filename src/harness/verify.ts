@@ -31,6 +31,11 @@ export type VerifyMissionResult = {
   checks_passed: number;
   checks_failed: number;
   checks_blocked: number;
+  acceptance_total: number;
+  acceptance_passed: number;
+  acceptance_failed_block: number;
+  acceptance_warn_failed: number;
+  acceptance_blocked: number;
   /**
    * Populated when verify auto-routed into a bound sandbox worktree. Undefined
    * when checks ran in the harness root.
@@ -108,15 +113,77 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     }
   }
 
+  const acceptanceResults: NonNullable<VerificationResultDocument["acceptance_criteria"]> = [];
+  for (const ac of mission.acceptance_criteria) {
+    if (!ac.check_command) {
+      acceptanceResults.push({
+        id: ac.id,
+        description: ac.description,
+        status: "blocked",
+        severity: ac.severity,
+      });
+      if (ac.severity === "block") {
+        findings.push({
+          severity: "error",
+          message: `acceptance criterion ${ac.id} is severity=block but has no check_command; cannot verify`,
+        });
+      }
+      await appendMissionEvent(eventsPath, {
+        type: "acceptance.checked",
+        mission_id: missionId,
+        timestamp: new Date().toISOString(),
+        ac_id: ac.id,
+        status: "blocked",
+        severity: ac.severity,
+        reason: "no check_command configured",
+      });
+      continue;
+    }
+    const metrics = await runCommand(effectiveRoot, ac.check_command, commandTimeoutMs);
+    const acStatus: VerificationResultDocument["status"] = metrics.timedOut || metrics.spawnError || metrics.exitCode !== 0 ? "failed" : "passed";
+    acceptanceResults.push({
+      id: ac.id,
+      description: ac.description,
+      status: acStatus,
+      severity: ac.severity,
+      check_command: ac.check_command,
+      exit_code: metrics.exitCode,
+      duration_ms: metrics.durationMs,
+      stdout_snippet: snippet(metrics.stdout),
+      stderr_snippet: snippet(metrics.stderr),
+    });
+    if (acStatus === "failed") {
+      findings.push({
+        severity: ac.severity === "block" ? "error" : "warning",
+        message: `acceptance criterion ${ac.id} failed (${ac.severity}): ${ac.description}`,
+      });
+    }
+    await appendMissionEvent(eventsPath, {
+      type: "acceptance.checked",
+      mission_id: missionId,
+      timestamp: new Date().toISOString(),
+      ac_id: ac.id,
+      status: acStatus,
+      severity: ac.severity,
+      exit_code: metrics.exitCode,
+      duration_ms: metrics.durationMs,
+      timed_out: metrics.timedOut,
+    });
+  }
+
   if (checks.length === 0) {
     findings.push({ severity: "error", message: "no verification checks configured" });
   }
 
-  const status: VerificationResultDocument["status"] = checks.some((check) => check.status === "failed")
+  const anyBlockingAcFailed = acceptanceResults.some((r) => r.severity === "block" && r.status === "failed");
+  const anyBlockingAcUnverified = acceptanceResults.some((r) => r.severity === "block" && r.status === "blocked");
+  const status: VerificationResultDocument["status"] = anyBlockingAcFailed || checks.some((check) => check.status === "failed")
     ? "failed"
-    : checks.length > 0 && checks.every((check) => check.status === "passed") && executableChecks > 0
-      ? "passed"
-      : "blocked";
+    : anyBlockingAcUnverified
+      ? "blocked"
+      : checks.length > 0 && checks.every((check) => check.status === "passed") && executableChecks > 0
+        ? "passed"
+        : "blocked";
 
   const artifact: VerificationResultDocument = validateVerificationResult({
     schema_version: "uh.verification-result.v0",
@@ -124,6 +191,7 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     status,
     checks,
     ...(findings.length > 0 ? { findings } : {}),
+    ...(acceptanceResults.length > 0 ? { acceptance_criteria: acceptanceResults } : {}),
   });
 
   await writeFile(verificationPath, stringify(artifact), "utf-8");
@@ -138,6 +206,8 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     timestamp: new Date().toISOString(),
     status,
     checks_total: checks.length,
+    acceptance_total: acceptanceResults.length,
+    acceptance_failed_block: acceptanceResults.filter((r) => r.severity === "block" && r.status === "failed").length,
     ...(boundSandbox ? { sandbox_id: boundSandbox.id } : {}),
   });
 
@@ -149,6 +219,11 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     checks_passed: checks.filter((check) => check.status === "passed").length,
     checks_failed: checks.filter((check) => check.status === "failed").length,
     checks_blocked: checks.filter((check) => check.status === "blocked").length,
+    acceptance_total: acceptanceResults.length,
+    acceptance_passed: acceptanceResults.filter((r) => r.status === "passed").length,
+    acceptance_failed_block: acceptanceResults.filter((r) => r.severity === "block" && r.status === "failed").length,
+    acceptance_warn_failed: acceptanceResults.filter((r) => r.severity === "warn" && r.status === "failed").length,
+    acceptance_blocked: acceptanceResults.filter((r) => r.status === "blocked").length,
     ...(boundSandbox ? { sandbox: boundSandbox } : {}),
   };
 }
@@ -202,11 +277,18 @@ async function readMissionAtLocation(missionPath: string): Promise<MissionDocume
   return validateMission(parse(await readFile(missionPath, "utf-8")));
 }
 
-async function runCheck(root: string, name: string, command: string, commandTimeoutMs: number): Promise<{
-  check: VerificationResultDocument["checks"][number];
-  finding?: NonNullable<VerificationResultDocument["findings"]>[number];
-}> {
-  return new Promise((resolve) => {
+interface CommandRunMetrics {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  timedOut: boolean;
+  spawnError?: Error;
+}
+
+async function runCommand(root: string, command: string, commandTimeoutMs: number): Promise<CommandRunMetrics> {
+  return new Promise<CommandRunMetrics>((resolve) => {
+    const startedAt = Date.now();
     const child = spawn(command, {
       cwd: root,
       detached: true,
@@ -221,126 +303,41 @@ async function runCheck(root: string, name: string, command: string, commandTime
     let killTimer: NodeJS.Timeout | undefined;
 
     const appendBounded = (current: string, chunk: unknown): string => {
-      if (current.length >= SNIPPET_LIMIT) {
-        return current;
-      }
+      if (current.length >= SNIPPET_LIMIT) return current;
       const next = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf-8") : String(chunk);
       return (current + next).slice(0, SNIPPET_LIMIT);
     };
-
     const clearTimers = () => {
-      if (timeoutTimer) {
-        clearTimeout(timeoutTimer);
-        timeoutTimer = undefined;
-      }
-      if (killTimer) {
-        clearTimeout(killTimer);
-        killTimer = undefined;
-      }
+      if (timeoutTimer) { clearTimeout(timeoutTimer); timeoutTimer = undefined; }
+      if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
     };
-
     const killChild = (signal: NodeJS.Signals) => {
-      if (child.pid === undefined) {
-        return;
-      }
-      try {
-        process.kill(-child.pid, signal);
-      } catch {
-        try {
-          child.kill(signal);
-        } catch {
-          // Best effort only: the promise is resolved by the hard watchdog below.
-        }
+      if (child.pid === undefined) return;
+      try { process.kill(-child.pid, signal); } catch {
+        try { child.kill(signal); } catch { /* best effort */ }
       }
     };
-
-    const resolveTimeout = () => {
-      if (settled) {
-        return;
-      }
+    const finish = (metrics: Omit<CommandRunMetrics, "durationMs"> & { durationMs?: number }) => {
+      if (settled) return;
       settled = true;
       clearTimers();
-      resolve({
-        check: {
-          name,
-          type: "command",
-          status: "failed",
-          command,
-          notes: buildTimeoutNotes(commandTimeoutMs, stdout, stderr),
-        },
-        finding: {
-          severity: "error",
-          message: `verification check timed out: ${name} after ${commandTimeoutMs}ms`,
-        },
-      });
+      resolve({ ...metrics, durationMs: metrics.durationMs ?? (Date.now() - startedAt) });
     };
 
     child.stdout?.setEncoding("utf-8");
     child.stderr?.setEncoding("utf-8");
-    child.stdout?.on("data", (chunk) => {
-      stdout = appendBounded(stdout, chunk);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr = appendBounded(stderr, chunk);
-    });
+    child.stdout?.on("data", (chunk) => { stdout = appendBounded(stdout, chunk); });
+    child.stderr?.on("data", (chunk) => { stderr = appendBounded(stderr, chunk); });
 
     child.on("error", (err) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimers();
-      resolve({
-        check: {
-          name,
-          type: "command",
-          status: "failed",
-          command,
-          notes: buildNotes(1, stdout, stderr || err.message),
-        },
-        finding: {
-          severity: "error",
-          message: `verification check failed: ${name}`,
-        },
-      });
+      finish({ exitCode: 1, stdout, stderr: stderr || err.message, timedOut: false, spawnError: err });
     });
-
     child.on("close", (code) => {
-      if (settled) {
-        return;
-      }
       if (timedOut) {
-        resolveTimeout();
+        finish({ exitCode: code ?? 1, stdout, stderr, timedOut: true });
         return;
       }
-      settled = true;
-      clearTimers();
-      const exitCode = code ?? 1;
-      if (exitCode === 0) {
-        resolve({
-          check: {
-            name,
-            type: "command",
-            status: "passed",
-            command,
-            notes: buildNotes(0, stdout, stderr),
-          },
-        });
-        return;
-      }
-      resolve({
-        check: {
-          name,
-          type: "command",
-          status: "failed",
-          command,
-          notes: buildNotes(exitCode, stdout, stderr),
-        },
-        finding: {
-          severity: "error",
-          message: `verification check failed: ${name}`,
-        },
-      });
+      finish({ exitCode: code ?? 1, stdout, stderr, timedOut: false });
     });
 
     timeoutTimer = setTimeout(() => {
@@ -348,10 +345,38 @@ async function runCheck(root: string, name: string, command: string, commandTime
       killChild("SIGTERM");
       killTimer = setTimeout(() => {
         killChild("SIGKILL");
-        resolveTimeout();
+        finish({ exitCode: 124, stdout, stderr, timedOut: true });
       }, TIMEOUT_KILL_GRACE_MS);
     }, commandTimeoutMs);
   });
+}
+
+async function runCheck(root: string, name: string, command: string, commandTimeoutMs: number): Promise<{
+  check: VerificationResultDocument["checks"][number];
+  finding?: NonNullable<VerificationResultDocument["findings"]>[number];
+}> {
+  const metrics = await runCommand(root, command, commandTimeoutMs);
+  if (metrics.spawnError) {
+    return {
+      check: { name, type: "command", status: "failed", command, notes: buildNotes(1, metrics.stdout, metrics.stderr) },
+      finding: { severity: "error", message: `verification check failed: ${name}` },
+    };
+  }
+  if (metrics.timedOut) {
+    return {
+      check: { name, type: "command", status: "failed", command, notes: buildTimeoutNotes(commandTimeoutMs, metrics.stdout, metrics.stderr) },
+      finding: { severity: "error", message: `verification check timed out: ${name} after ${commandTimeoutMs}ms` },
+    };
+  }
+  if (metrics.exitCode === 0) {
+    return {
+      check: { name, type: "command", status: "passed", command, notes: buildNotes(0, metrics.stdout, metrics.stderr) },
+    };
+  }
+  return {
+    check: { name, type: "command", status: "failed", command, notes: buildNotes(metrics.exitCode, metrics.stdout, metrics.stderr) },
+    finding: { severity: "error", message: `verification check failed: ${name}` },
+  };
 }
 
 function normalizeCommandTimeoutMs(commandTimeoutMs: number | undefined): number {

@@ -74,6 +74,18 @@ export const VerificationApprovalSchema = z.object({
   status: z.string().min(1),
 });
 
+export const AcceptanceCriterionResultSchema = z.object({
+  id: z.string().min(1),
+  description: z.string().min(1),
+  status: VerificationStatusSchema,
+  severity: z.enum(["block", "warn"]),
+  check_command: z.string().optional(),
+  exit_code: z.number().int().optional(),
+  duration_ms: z.number().int().nonnegative().optional(),
+  stdout_snippet: z.string().optional(),
+  stderr_snippet: z.string().optional(),
+});
+
 export const VerificationResultSchema = z.object({
   schema_version: z.literal("uh.verification-result.v0"),
   mission_id: z.string().min(1),
@@ -81,6 +93,7 @@ export const VerificationResultSchema = z.object({
   checks: z.array(VerificationCheckSchema),
   findings: z.array(VerificationFindingSchema).optional(),
   approvals: z.array(VerificationApprovalSchema).optional(),
+  acceptance_criteria: z.array(AcceptanceCriterionResultSchema).optional(),
 });
 
 export const PromotionSchema = z.object({

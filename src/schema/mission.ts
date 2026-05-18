@@ -17,6 +17,15 @@ const ExpectedArtifactSchema = z.object({
   type: z.string().optional(),
 });
 
+const AcceptanceCriterionSchema = z.object({
+  id: z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, {
+    message: "AC id must start with [A-Za-z0-9] and use only [A-Za-z0-9._-]",
+  }),
+  description: z.string().min(1),
+  check_command: z.string().optional(),
+  severity: z.enum(["block", "warn"]).optional().default("block"),
+});
+
 const RequiredCheckSchema = z.object({
   name: z.string().min(1),
   command: z.string().optional(),
@@ -46,6 +55,7 @@ const MissionInputSchema = z.object({
     files: z.array(z.string()).optional().default([]),
   }).optional().default({ files: [] }),
   completion_criteria: z.array(z.string()).optional().default([]),
+  acceptance_criteria: z.array(AcceptanceCriterionSchema).optional().default([]),
 
   // Backward-compatible fields.
   name: z.string().min(1).optional(),
@@ -72,6 +82,18 @@ const MissionInputSchema = z.object({
       path: ["name"],
     });
   }
+  const seen = new Set<string>();
+  for (let i = 0; i < mission.acceptance_criteria.length; i += 1) {
+    const ac = mission.acceptance_criteria[i];
+    if (seen.has(ac.id)) {
+      ctx.addIssue({
+        code: "custom",
+        message: `Duplicate acceptance criterion id: ${ac.id}`,
+        path: ["acceptance_criteria", i, "id"],
+      });
+    }
+    seen.add(ac.id);
+  }
 }).transform((mission) => ({
   ...mission,
   name: mission.name ?? mission.title ?? "",
@@ -93,11 +115,24 @@ const MissionInputSchema = z.object({
     required_checks: mission.verification.required_checks,
     review_gates: mission.verification.review_gates,
   },
+  acceptance_criteria: (mission.acceptance_criteria.length > 0
+    ? mission.acceptance_criteria
+    : mission.completion_criteria.map((description, index): {
+        id: string;
+        description: string;
+        check_command?: string;
+        severity: "block" | "warn";
+      } => ({
+        id: `ac-${index + 1}`,
+        description,
+        severity: "warn",
+      }))),
 }));
 
 export const MissionSchema = MissionInputSchema;
 
 export type MissionDocument = z.infer<typeof MissionSchema>;
+export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>;
 
 export function validateMission(data: unknown): MissionDocument {
   return MissionSchema.parse(data);

@@ -204,6 +204,16 @@ program
       const label = result.status === "passed" ? "PASS" : result.status === "failed" ? "FAIL" : "BLOCKED";
       console.log(`[${label}] ${result.mission_id}`);
       console.log(`checks: ${result.checks_passed} passed, ${result.checks_failed} failed, ${result.checks_blocked} blocked`);
+      if (result.acceptance_total > 0) {
+        const acFailures = result.acceptance_failed_block + result.acceptance_warn_failed;
+        console.log(
+          `acceptance: ${result.acceptance_passed} passed, ${result.acceptance_failed_block} block-failed, ` +
+          `${result.acceptance_warn_failed} warn-failed, ${result.acceptance_blocked} blocked (total ${result.acceptance_total})`,
+        );
+        if (acFailures > 0) {
+          console.log(`  see acceptance_criteria[] in ${result.path} for per-AC stdout/stderr snippets`);
+        }
+      }
       if (result.sandbox) {
         console.log(`sandbox: ${result.sandbox.id} (${result.sandbox.path})`);
       }
