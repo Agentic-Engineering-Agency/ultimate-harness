@@ -7,6 +7,7 @@ import {
   loadMissions,
   loadSandboxes,
   loadDashboardSnapshot,
+  loadMissionDetail,
 } from "../src/tui/model.js";
 
 const TEST_ROOT = "/tmp/uh-test-tui-model";
@@ -239,3 +240,59 @@ describe("tui/model loadDashboardSnapshot", () => {
     expect(snap.sandboxes).toEqual([]);
   });
 });
+
+
+describe("tui/model loadMissionDetail", () => {
+  test("returns fixed artifact list with missing states", async () => {
+    await seedMissionDir("m-detail");
+    const [mission] = await loadMissions(TEST_ROOT);
+    const detail = await loadMissionDetail(mission);
+
+    expect(detail.mission.id).toBe("m-detail");
+    expect(detail.runtimeStatus).toBe("missing");
+    expect(detail.artifacts.map((artifact) => artifact.id)).toEqual([
+      "mission.yaml",
+      "runtime-session.yaml",
+      "runtime-result.yaml",
+      "runtime-final.txt",
+      "prompt.md",
+      "diff.patch",
+      "events.ndjson",
+    ]);
+    expect(detail.artifacts.find((artifact) => artifact.id === "mission.yaml")?.exists).toBe(true);
+    expect(detail.artifacts.find((artifact) => artifact.id === "diff.patch")?.exists).toBe(false);
+  });
+
+  test("loads viewer content, runtime status, and newest-first events", async () => {
+    await seedMissionDir("m-artifacts");
+    const dir = join(HARNESS, "missions", "m-artifacts");
+    await writeFile(join(dir, "runtime-result.yaml"), "status: succeeded\n", "utf-8");
+    await writeFile(join(dir, "diff.patch"), [
+      "diff --git a/old.txt b/old.txt",
+      "--- a/old.txt",
+      "+++ b/old.txt",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    ].join("\n") + "\n", "utf-8");
+    await writeFile(join(dir, "events.ndjson"), [
+      '{"ts":"2026-05-18T00:00:00.000Z","kind":"planned","payload":{}}',
+      '{"ts":"2026-05-18T00:00:01.000Z","kind":"succeeded","payload":{}}',
+    ].join("\n") + "\n", "utf-8");
+
+    const [mission] = await loadMissions(TEST_ROOT);
+    const detail = await loadMissionDetail(mission);
+
+    expect(detail.runtimeStatus).toBe("succeeded");
+    expect(detail.artifacts.find((artifact) => artifact.id === "diff.patch")).toMatchObject({
+      kind: "diff",
+      exists: true,
+    });
+    const events = detail.artifacts.find((artifact) => artifact.id === "events.ndjson")?.content;
+    expect(events?.split("\n").filter(Boolean).map((line) => JSON.parse(line).kind)).toEqual([
+      "succeeded",
+      "planned",
+    ]);
+  });
+});
+

@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";
 import { createDashboardState } from "../src/tui/state.js";
-import type { DashboardSnapshot, AdapterRow } from "../src/tui/model.js";
+import type { DashboardSnapshot, AdapterRow, MissionDetail, MissionRow } from "../src/tui/model.js";
 import type { AdapterCheckResult } from "../src/harness/registry.js";
 
 const FIXED_NOW = new Date("2026-05-18T00:00:00.000Z").toISOString();
@@ -13,6 +13,30 @@ function snap(overrides: Partial<DashboardSnapshot> = {}): DashboardSnapshot {
     sandboxes: [],
     capturedAt: FIXED_NOW,
     ...overrides,
+  };
+}
+
+
+function mission(id = "m-1"): MissionRow {
+  return {
+    id,
+    name: `Mission ${id}`,
+    workflow: "research-docs",
+    updatedAt: FIXED_NOW,
+    missionDir: `/fake-root/.harness/missions/${id}`,
+    state: "valid",
+  };
+}
+
+function detailFor(row: MissionRow): MissionDetail {
+  return {
+    mission: row,
+    runtimeStatus: "succeeded",
+    artifacts: [
+      { id: "mission.yaml", label: "mission.yaml", path: `${row.missionDir}/mission.yaml`, kind: "yaml", exists: true, content: "id: m-1\n" },
+      { id: "diff.patch", label: "diff.patch", path: `${row.missionDir}/diff.patch`, kind: "diff", exists: true, content: "diff --git a/a b/a\n" },
+      { id: "events.ndjson", label: "events.ndjson", path: `${row.missionDir}/events.ndjson`, kind: "events", exists: false, content: "" },
+    ],
   };
 }
 
@@ -310,3 +334,107 @@ describe("tui/state — watcher warnings", () => {
     state.dispose();
   });
 });
+
+
+describe("tui/state — mission detail navigation", () => {
+  test("opens selected mission detail and resets artifact selection", async () => {
+    const row = mission("m-open");
+    let loaded: string[] = [];
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [row] }),
+      missionDetailLoader: async (m) => {
+        loaded.push(m.id);
+        return detailFor(m);
+      },
+      debounceMs: 10,
+    });
+
+    await delay(5);
+    state.selectMission(row);
+    state.selectMissionArtifactIndex(2);
+    const detail = await state.openSelectedMission();
+
+    expect(loaded).toEqual(["m-open"]);
+    expect(detail?.runtimeStatus).toBe("succeeded");
+    expect(state.activeView()).toBe("missionDetail");
+    expect(state.missionDetail()?.mission.id).toBe("m-open");
+    expect(state.selectedMissionArtifactIndex()).toBe(0);
+    expect(state.isMissionDetailLoading()).toBe(false);
+    state.dispose();
+  });
+
+  test("clamps artifact navigation and returns to dashboard", async () => {
+    const row = mission("m-nav");
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [row] }),
+      missionDetailLoader: async (m) => detailFor(m),
+      debounceMs: 10,
+    });
+
+    await delay(5);
+    state.selectMission(row);
+    await state.openSelectedMission();
+    state.moveMissionArtifactSelection(99);
+    expect(state.selectedMissionArtifactIndex()).toBe(2);
+    state.moveMissionArtifactSelection(-99);
+    expect(state.selectedMissionArtifactIndex()).toBe(0);
+
+    state.closeMissionDetail();
+    expect(state.activeView()).toBe("dashboard");
+    expect(state.missionDetail()).toBeNull();
+    expect(state.selectedMissionArtifactIndex()).toBe(0);
+    state.dispose();
+  });
+
+  test("surfaces mission detail loader errors without leaving loading true", async () => {
+    const row = mission("m-error");
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [row] }),
+      missionDetailLoader: async () => {
+        throw new Error("artifact read failed");
+      },
+      debounceMs: 10,
+    });
+
+    await delay(5);
+    state.selectMission(row);
+    const detail = await state.openSelectedMission();
+
+    expect(detail).toBeNull();
+    expect(state.activeView()).toBe("missionDetail");
+    expect(state.missionDetailError()?.message).toBe("artifact read failed");
+    expect(state.isMissionDetailLoading()).toBe(false);
+    state.dispose();
+  });
+
+  test("ignores stale mission detail results after a later open", async () => {
+    const first = mission("m-first");
+    const second = mission("m-second");
+    let releaseFirst!: (value: MissionDetail) => void;
+    const firstLoad = new Promise<MissionDetail>((resolve) => { releaseFirst = resolve; });
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap({ missions: [first, second] }),
+      missionDetailLoader: async (m) => m.id === first.id ? firstLoad : detailFor(m),
+      debounceMs: 10,
+    });
+
+    await delay(5);
+    state.selectMission(first);
+    const stale = state.openSelectedMission();
+    state.selectMission(second);
+    const latest = await state.openSelectedMission();
+    releaseFirst(detailFor(first));
+    const staleResult = await stale;
+
+    expect(latest?.mission.id).toBe("m-second");
+    expect(staleResult).toBeNull();
+    expect(state.missionDetail()?.mission.id).toBe("m-second");
+    expect(state.isMissionDetailLoading()).toBe(false);
+    state.dispose();
+  });
+});
+

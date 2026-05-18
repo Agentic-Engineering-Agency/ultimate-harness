@@ -62,6 +62,33 @@ export type HarnessInfo = {
   projectName: string;
 };
 
+
+export type MissionArtifactKind = "yaml" | "diff" | "text" | "events";
+
+export type MissionArtifactId =
+  | "mission.yaml"
+  | "runtime-session.yaml"
+  | "runtime-result.yaml"
+  | "runtime-final.txt"
+  | "prompt.md"
+  | "diff.patch"
+  | "events.ndjson";
+
+export type MissionArtifact = {
+  id: MissionArtifactId;
+  label: string;
+  path: string;
+  kind: MissionArtifactKind;
+  exists: boolean;
+  content: string;
+};
+
+export type MissionDetail = {
+  mission: MissionRow;
+  runtimeStatus: string;
+  artifacts: MissionArtifact[];
+};
+
 export type DashboardSnapshot = {
   harness: HarnessInfo;
   adapters: AdapterRow[];
@@ -243,3 +270,64 @@ export async function loadSandboxes(root: string): Promise<SandboxRow[]> {
     worktreePath: entry.path ?? "",
   }));
 }
+
+
+const MISSION_ARTIFACTS: readonly { id: MissionArtifactId; kind: MissionArtifactKind; label: string }[] = [
+  { id: "mission.yaml", kind: "yaml", label: "mission.yaml" },
+  { id: "runtime-session.yaml", kind: "yaml", label: "runtime-session.yaml" },
+  { id: "runtime-result.yaml", kind: "yaml", label: "runtime-result.yaml" },
+  { id: "runtime-final.txt", kind: "text", label: "runtime-final.txt" },
+  { id: "prompt.md", kind: "text", label: "prompt.md" },
+  { id: "diff.patch", kind: "diff", label: "diff.patch" },
+  { id: "events.ndjson", kind: "events", label: "events.ndjson" },
+];
+
+function runtimeStatusFromResult(content: string): string {
+  try {
+    const parsed = parse(content) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== "object") return "unknown";
+    const status = parsed.status ?? parsed.state ?? parsed.result;
+    return typeof status === "string" && status.length > 0 ? status : "unknown";
+  } catch {
+    return "invalid";
+  }
+}
+
+function newestFirstNdjson(content: string): string {
+  const lines = content.split(/\r?\n/).filter((line) => line.length > 0);
+  lines.reverse();
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+}
+
+export async function loadMissionDetail(mission: MissionRow): Promise<MissionDetail> {
+  const artifacts: MissionArtifact[] = [];
+  let runtimeStatus = "missing";
+
+  for (const spec of MISSION_ARTIFACTS) {
+    const artifactPath = path.join(mission.missionDir, spec.id);
+    let exists = false;
+    let content = "";
+    try {
+      content = await readFile(artifactPath, "utf-8");
+      exists = true;
+    } catch {
+      exists = false;
+    }
+
+    if (exists && spec.id === "runtime-result.yaml") {
+      runtimeStatus = runtimeStatusFromResult(content);
+    }
+
+    artifacts.push({
+      id: spec.id,
+      label: spec.label,
+      path: artifactPath,
+      kind: spec.kind,
+      exists,
+      content: spec.kind === "events" ? newestFirstNdjson(content) : content,
+    });
+  }
+
+  return { mission, runtimeStatus, artifacts };
+}
+

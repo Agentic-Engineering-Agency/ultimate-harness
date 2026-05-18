@@ -29,6 +29,8 @@ import {
   type AdapterRow,
   type MissionRow,
   type SandboxRow,
+  type MissionDetail,
+  loadMissionDetail,
 } from "./model.js";
 import {
   runtimeRegistry,
@@ -57,6 +59,8 @@ export interface DashboardStateOptions {
   loader?: (root: string) => Promise<DashboardSnapshot>;
   /** Test seam for adapter availability checks. */
   adapterChecker?: AdapterChecker;
+  /** Test seam for mission detail artifact loading. */
+  missionDetailLoader?: (mission: MissionRow) => Promise<MissionDetail>;
   /** Override TTL for cached adapter-check results. */
   adapterCheckTtlMs?: number;
   /** Override TTL for the sticky watcher-warning footer line. */
@@ -75,6 +79,11 @@ export interface DashboardState {
   selectedAdapter: Accessor<AdapterRow | null>;
   selectedMission: Accessor<MissionRow | null>;
   selectedSandbox: Accessor<SandboxRow | null>;
+  activeView: Accessor<"dashboard" | "missionDetail">;
+  selectedMissionArtifactIndex: Accessor<number>;
+  missionDetail: Accessor<MissionDetail | null>;
+  isMissionDetailLoading: Accessor<boolean>;
+  missionDetailError: Accessor<Error | null>;
   selectAdapter: (row: AdapterRow | null) => void;
   selectMission: (row: MissionRow | null) => void;
   selectSandbox: (row: SandboxRow | null) => void;
@@ -83,6 +92,10 @@ export interface DashboardState {
   adapterCheck: (id: string) => AdapterCheckResult | null;
   /** Trigger a check for `id`. No-op when an in-flight call is pending or the cache is warm. */
   refreshAdapterCheck: (id: string) => Promise<AdapterCheckResult | null>;
+  openSelectedMission: () => Promise<MissionDetail | null>;
+  closeMissionDetail: () => void;
+  selectMissionArtifactIndex: (index: number) => void;
+  moveMissionArtifactSelection: (delta: number) => void;
 
   /** Force a fresh load now (e.g. wired to `r` keybinding). */
   refresh: () => Promise<void>;
@@ -127,11 +140,13 @@ export function createDashboardState(
   const loader = options.loader ?? loadDashboardSnapshot;
   const adapterChecker = options.adapterChecker
     ?? ((r: string, id: string) => runtimeRegistry.check(r, id));
+  const missionDetailLoader = options.missionDetailLoader ?? loadMissionDetail;
   const checkTtlMs = options.adapterCheckTtlMs ?? ADAPTER_CHECK_TTL_MS;
   const warnTtlMs = options.watcherWarnTtlMs ?? WATCHER_WARN_TTL_MS;
   const now = options.now ?? (() => Date.now());
 
   let disposed = false;
+  let missionDetailRequestId = 0;
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
   let warnTimer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> | null = null;
@@ -164,6 +179,11 @@ export function createDashboardState(
     const [selectedAdapter, setSelectedAdapter] = createSignal<AdapterRow | null>(null);
     const [selectedMission, setSelectedMission] = createSignal<MissionRow | null>(null);
     const [selectedSandbox, setSelectedSandbox] = createSignal<SandboxRow | null>(null);
+    const [activeView, setActiveView] = createSignal<"dashboard" | "missionDetail">("dashboard");
+    const [selectedMissionArtifactIndex, setSelectedMissionArtifactIndex] = createSignal(0);
+    const [missionDetail, setMissionDetail] = createSignal<MissionDetail | null>(null);
+    const [isMissionDetailLoading, setMissionDetailLoading] = createSignal(false);
+    const [missionDetailError, setMissionDetailError] = createSignal<Error | null>(null);
     // Tick counter that bumps whenever adapterCheck cache changes, so
     // Solid views reading `adapterCheck(id)` re-evaluate.
     const [checkTick, setCheckTick] = createSignal(0);
@@ -306,6 +326,53 @@ export function createDashboardState(
       return promise;
     };
 
+    const clampMissionArtifactIndex = (index: number): number => {
+      const detail = missionDetail();
+      const max = detail ? detail.artifacts.length - 1 : 0;
+      return Math.min(Math.max(index, 0), Math.max(max, 0));
+    };
+
+    const selectMissionArtifactIndex = (index: number): void => {
+      setSelectedMissionArtifactIndex(clampMissionArtifactIndex(index));
+    };
+
+    const moveMissionArtifactSelection = (delta: number): void => {
+      setSelectedMissionArtifactIndex((current) => clampMissionArtifactIndex(current + delta));
+    };
+
+    const openSelectedMission = async (): Promise<MissionDetail | null> => {
+      const mission = selectedMission();
+      if (!mission || disposed) return null;
+      const requestId = ++missionDetailRequestId;
+      setActiveView("missionDetail");
+      setMissionDetailLoading(true);
+      setMissionDetailError(null);
+      setSelectedMissionArtifactIndex(0);
+      try {
+        const detail = await missionDetailLoader(mission);
+        if (disposed || requestId !== missionDetailRequestId) return null;
+        setMissionDetail(detail);
+        return detail;
+      } catch (err) {
+        if (!disposed && requestId === missionDetailRequestId) {
+          setMissionDetail(null);
+          setMissionDetailError(err instanceof Error ? err : new Error(String(err)));
+        }
+        return null;
+      } finally {
+        if (!disposed && requestId === missionDetailRequestId) setMissionDetailLoading(false);
+      }
+    };
+
+    const closeMissionDetail = (): void => {
+      missionDetailRequestId += 1;
+      setActiveView("dashboard");
+      setMissionDetail(null);
+      setMissionDetailError(null);
+      setMissionDetailLoading(false);
+      setSelectedMissionArtifactIndex(0);
+    };
+
     return {
       snapshot,
       isLoading,
@@ -314,11 +381,20 @@ export function createDashboardState(
       selectedAdapter,
       selectedMission,
       selectedSandbox,
+      activeView,
+      selectedMissionArtifactIndex,
+      missionDetail,
+      isMissionDetailLoading,
+      missionDetailError,
       selectAdapter: setSelectedAdapter,
       selectMission: setSelectedMission,
       selectSandbox: setSelectedSandbox,
       adapterCheck,
       refreshAdapterCheck,
+      openSelectedMission,
+      closeMissionDetail,
+      selectMissionArtifactIndex,
+      moveMissionArtifactSelection,
       refresh,
     };
   });
