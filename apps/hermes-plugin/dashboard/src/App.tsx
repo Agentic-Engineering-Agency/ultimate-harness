@@ -1,13 +1,16 @@
 /**
  * Root component for the `uh` Hermes dashboard plugin.
  *
- * As of UH-66 we have overview + drilldown + verification + workflow viewer.
- * The wizard + editor land in UH-67.
+ * Dispatches the hash-based router to the right sub-view. Each view is a
+ * thin shell over a panel component — the panels (overview, drilldown,
+ * workflow, wizard, ...) each own their own loading/empty/error state.
  */
 import { useHashRoute } from "./router";
 import { OverviewTab } from "./OverviewTab";
 import { MissionDrilldown } from "./MissionDrilldown";
 import { WorkflowViewer } from "./WorkflowViewer";
+import { MissionWizard } from "./MissionWizard";
+import { WorkflowEditor } from "./WorkflowEditor";
 import { UI } from "./sdk";
 
 export function App() {
@@ -21,13 +24,17 @@ export function App() {
       return <MissionDrilldown missionId={route.missionId ?? ""} pinnedRunId={route.runId} />;
     case "workflow":
       return <WorkflowViewer name={route.workflowName ?? ""} />;
+    case "workflowEdit":
+      return <WorkflowEditor name={route.workflowName ?? ""} />;
+    case "missionNew":
+      return <MissionWizard />;
   }
   return (
     <UI.Card>
       <UI.CardHeader>
         <UI.CardTitle>Ultimate Harness</UI.CardTitle>
       </UI.CardHeader>
-      <UI.CardContent>This view ships in a later UH-60 slice. Back to <a href="#/">overview</a>.</UI.CardContent>
+      <UI.CardContent>Unknown route.</UI.CardContent>
     </UI.Card>
   );
 }
