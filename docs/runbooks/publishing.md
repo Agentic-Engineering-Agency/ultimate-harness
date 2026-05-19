@@ -1,11 +1,11 @@
 # Publishing Ultimate Harness
 
-Ultimate Harness publishes to the npm registry as `@agenticengineering/ultimate-harness` and exposes the `uh` binary.
+Ultimate Harness publishes to the npm registry as `@agenticengineeringagency/ultimate-harness` and exposes the `uh` binary.
 
 ## Install smoke
 
 ```sh
-bun add -g @agenticengineering/ultimate-harness
+bun add -g @agenticengineeringagency/ultimate-harness
 uh --help
 ```
 
@@ -34,7 +34,7 @@ The publish job requires a repository secret named `NPM_CONFIG_TOKEN`. Bun respe
 
 ## GitHub secret
 
-Create an npm automation token with publish rights for the `@agenticengineering` scope, then set:
+Create an npm automation token with publish rights for the `@agenticengineeringagency` scope, then set:
 
 ```sh
 gh secret set NPM_CONFIG_TOKEN --repo Agentic-Engineering-Agency/ultimate-harness

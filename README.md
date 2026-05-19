@@ -58,7 +58,7 @@ Runbooks:
 ## Install
 
 ```sh
-bun add -g @agenticengineering/ultimate-harness
+bun add -g @agenticengineeringagency/ultimate-harness
 uh --help
 ```
 

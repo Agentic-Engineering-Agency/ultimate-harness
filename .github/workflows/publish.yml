@@ -90,7 +90,7 @@ jobs:
       - name: Require npm token
         run: |
           if [ -z "$NPM_CONFIG_TOKEN" ]; then
-            echo "NPM_CONFIG_TOKEN GitHub secret is required to publish @agenticengineering/ultimate-harness" >&2
+            echo "NPM_CONFIG_TOKEN GitHub secret is required to publish @agenticengineeringagency/ultimate-harness" >&2
             exit 1
           fi
 
