@@ -1,5 +1,7 @@
 # Architecture Overview
 
+> **Source of truth for principles:** [`docs/VISION.md`](../VISION.md). This file describes the components; VISION explains the constraints those components must satisfy and what designs we will not accept.
+
 ## Architectural stance
 
 Ultimate Harness is a **control plane for agentic software work**. It should own durable artifacts and lifecycle semantics while delegating execution to runtime adapters.

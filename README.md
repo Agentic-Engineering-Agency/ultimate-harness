@@ -37,8 +37,9 @@ Cross-cutting protocols every adapter participates in:
 
 ## Documentation
 
-Start with the [documentation home](./docs/README.md) and the [roadmap](./docs/ROADMAP.md). Direct links:
+Start with the [vision](./docs/VISION.md), the [documentation home](./docs/README.md), and the [roadmap](./docs/ROADMAP.md). Direct links:
 
+- [VISION — what UH is, who it's for, and what we won't accept](./docs/VISION.md)
 - [Glossary](./docs/glossary.md)
 - [Product requirements](./docs/product/prd.md)
 - [MVP scope](./docs/product/mvp-scope.md)

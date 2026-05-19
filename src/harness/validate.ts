@@ -1,5 +1,5 @@
 import { access, readFile } from "node:fs/promises";
-import { basename } from "node:path";
+import path, { basename } from "node:path";
 import { parse } from "yaml";
 import { ZodError } from "zod";
 import { validateProject } from "../schema/project.js";
@@ -33,6 +33,12 @@ export type ValidationResult = {
   path: string;
   schema_version: string | null;
   errors: string[];
+  /**
+   * Non-blocking diagnostics emitted alongside the validation result. UH-75
+   * surfaces "mission has acceptance_criteria but no design.md companion"
+   * here. Empty when there is nothing to report.
+   */
+  warnings: string[];
 };
 
 export async function validateFile(filePath: string): Promise<ValidationResult> {
@@ -41,6 +47,7 @@ export async function validateFile(filePath: string): Promise<ValidationResult> 
     path: filePath,
     schema_version: null,
     errors: [],
+    warnings: [],
   };
 
   let content: string;
@@ -90,7 +97,42 @@ export async function validateFile(filePath: string): Promise<ValidationResult> 
     }
   }
 
+  if (result.valid && schemaVersion === "uh.mission.v0") {
+    await collectMissionWarnings(filePath, parsed, result);
+  }
+
   return result;
+}
+
+/**
+ * UH-75: warn (do not error) when a mission declares acceptance criteria but
+ * has no `design.md` companion at `design_path`. The mission is still valid;
+ * the missing design is a discipline signal, not a contract violation.
+ */
+async function collectMissionWarnings(
+  filePath: string,
+  parsed: unknown,
+  result: ValidationResult,
+): Promise<void> {
+  if (!parsed || typeof parsed !== "object") return;
+  const raw = parsed as Record<string, unknown>;
+  const acRaw = raw.acceptance_criteria;
+  const completionRaw = raw.completion_criteria;
+  const acCount = (Array.isArray(acRaw) ? acRaw.length : 0)
+    + (Array.isArray(completionRaw) ? completionRaw.length : 0);
+  if (acCount === 0) return;
+  const designPathRaw = typeof raw.design_path === "string" && raw.design_path.length > 0
+    ? raw.design_path
+    : "design.md";
+  const missionDir = path.dirname(filePath);
+  const target = path.resolve(missionDir, designPathRaw);
+  try {
+    await access(target);
+  } catch {
+    result.warnings.push(
+      `Mission declares acceptance criteria but no design.md exists at ${designPathRaw}`,
+    );
+  }
 }
 
 export async function validateRootProject(root: string): Promise<ValidationResult> {
