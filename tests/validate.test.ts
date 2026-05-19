@@ -451,6 +451,22 @@ completion_criteria:
     expect(mission.verification.checks).toEqual(["find docs -type f | sort"]);
   });
 
+  test("mission capabilities validate and default to an empty list", () => {
+    const base = {
+      schema_version: "uh.mission.v0" as const,
+      id: "capability-mission",
+      title: "Capability mission",
+      workflow_profile: "implementation",
+    };
+    expect(validateMission(base).capabilities).toEqual([]);
+    expect(validateMission({ ...base, capabilities: ["needs_browser", "sandbox-native", "model:json"] }).capabilities).toEqual([
+      "needs_browser",
+      "sandbox-native",
+      "model:json",
+    ]);
+    expect(() => validateMission({ ...base, capabilities: ["bad capability"] })).toThrow(/Capability id/);
+  });
+
   test("unknown schema version fails", async () => {
     await mkdir(TEST_ROOT, { recursive: true });
     await writeFile(

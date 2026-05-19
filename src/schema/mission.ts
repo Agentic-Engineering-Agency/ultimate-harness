@@ -44,6 +44,10 @@ const DEFAULT_TEST_PATHS = [
   "**/*.spec.jsx",
   "**/__tests__/**",
 ];
+const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, {
+  message: "Capability id must start with [A-Za-z0-9] and use only [A-Za-z0-9._:-]",
+});
+
 
 const DEFAULT_SOURCE_PATHS = ["src/**"];
 
@@ -79,6 +83,7 @@ const MissionInputSchema = z.object({
   completion_criteria: z.array(z.string()).optional().default([]),
   acceptance_criteria: z.array(AcceptanceCriterionSchema).optional().default([]),
   tdd: TddOptionsSchema.optional(),
+  capabilities: z.array(CapabilitySchema).optional().default([]),
 
   // Backward-compatible fields.
   name: z.string().min(1).optional(),
