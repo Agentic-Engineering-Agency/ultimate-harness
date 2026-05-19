@@ -1,0 +1,125 @@
+/* Ultimate Harness dashboard plugin styles.
+ *
+ * Reference Hermes design-system CSS vars so this plugin re-skins automatically
+ * with the active theme. Class names are prefixed `uh-` to avoid collisions
+ * with the dashboard's Tailwind utilities.
+ */
+
+.uh-stack { display: flex; flex-direction: column; gap: var(--uh-gap, 12px); }
+.uh-row { display: flex; align-items: center; gap: var(--uh-gap, 12px); }
+.uh-row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.uh-grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+
+.uh-muted { color: var(--color-muted-foreground); font-size: 12px; }
+.uh-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+.uh-clickable { cursor: pointer; }
+.uh-clickable:hover { background: color-mix(in oklab, var(--color-accent) 14%, transparent); }
+
+.uh-list { display: flex; flex-direction: column; gap: 4px; }
+.uh-list-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: calc(var(--radius, 8px) * 0.5);
+  border: 1px solid color-mix(in oklab, var(--color-border) 70%, transparent);
+}
+.uh-list-row .uh-id { font-family: var(--font-mono, monospace); font-size: 12px; }
+
+.uh-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--color-muted-foreground);
+  font-size: 13px;
+  border: 1px dashed color-mix(in oklab, var(--color-border) 80%, transparent);
+  border-radius: var(--radius, 8px);
+}
+
+.uh-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--color-border); margin-bottom: 12px; }
+.uh-tab {
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-muted-foreground);
+  background: transparent;
+}
+.uh-tab.is-active {
+  border-color: var(--color-border);
+  background: var(--color-card);
+  color: var(--color-card-foreground);
+  border-bottom: 1px solid var(--color-card);
+  margin-bottom: -1px;
+}
+
+.uh-event-log {
+  max-height: 360px;
+  overflow: auto;
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius, 8px);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  padding: 8px;
+}
+.uh-event-row { padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
+.uh-event-row.is-error { color: var(--color-destructive, #ff6b6b); }
+
+.uh-modal-backdrop {
+  position: fixed; inset: 0;
+  background: color-mix(in oklab, black 60%, transparent);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50;
+}
+.uh-modal {
+  background: var(--color-card);
+  color: var(--color-card-foreground);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius, 8px);
+  width: min(720px, 90vw);
+  max-height: 88vh;
+  display: flex; flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+  overflow: hidden;
+}
+.uh-modal-body { overflow: auto; flex: 1; }
+
+.uh-textarea {
+  width: 100%;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  background: var(--color-input, var(--color-card));
+  color: inherit;
+  border: 1px solid var(--color-border);
+  border-radius: calc(var(--radius, 8px) * 0.5);
+  padding: 8px;
+  min-height: 120px;
+  resize: vertical;
+}
+
+.uh-error {
+  color: var(--color-destructive, #ff6b6b);
+  font-size: 12px;
+}
+
+.uh-phase {
+  border-left: 2px solid var(--color-border);
+  padding: 6px 12px;
+  margin-left: 8px;
+}
+.uh-phase + .uh-phase { margin-top: 6px; }
+.uh-phase-name { font-weight: 600; }
+.uh-phase-role { font-size: 11px; color: var(--color-muted-foreground); }
+
+.uh-sessions-link {
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius, 8px);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+.uh-sessions-link:hover { background: color-mix(in oklab, var(--color-accent) 14%, transparent); }

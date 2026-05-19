@@ -36,7 +36,11 @@
     "typecheck": "tsc -p tsconfig.tests.json --noEmit",
     "tui-spike": "bun bin/uh-tui-spike.tsx",
     "clean": "rm -rf dist",
-    "publish:dry-run": "bun publish --dry-run"
+    "publish:dry-run": "bun publish --dry-run",
+    "plugin:build": "bun apps/hermes-plugin/esbuild.config.mjs",
+    "plugin:watch": "bun apps/hermes-plugin/esbuild.config.mjs --watch",
+    "plugin:typecheck": "tsc -p apps/hermes-plugin/dashboard/tsconfig.json --noEmit",
+    "plugin:test": "pytest apps/hermes-plugin/dashboard/tests/"
   },
   "dependencies": {
     "@honcho-ai/sdk": "^2.1.1",
