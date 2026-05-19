@@ -36,12 +36,16 @@ export interface HonchoClient {
   session: (key: string) => HonchoSession | Promise<HonchoSession>;
 }
 
+/**
+ * Factory may be synchronous (test stubs) or asynchronous (real SDK loaded
+ * via dynamic import). Callers always `await` the result.
+ */
 export interface HonchoClientFactory {
   (init: {
     apiKey: string;
     baseURL?: string;
     workspaceId: string;
-  }): HonchoClient;
+  }): HonchoClient | Promise<HonchoClient>;
 }
 
 export interface HonchoHandles {
@@ -54,21 +58,30 @@ export interface HonchoHandles {
 }
 
 /**
- * Default factory: dynamically imports `@honcho-ai/sdk` so the package only
- * matters when Honcho is actually enabled. Tests pass a stub factory via
- * `bootstrapHonchoHandles(..., { factory })`.
+ * Operator-actionable configuration error. The public surface throws this
+ * specific class for missing/unusable config so callers can decide whether
+ * to surface or swallow without resorting to error-message string matching.
  */
-const defaultFactory: HonchoClientFactory = (init) => {
-  // Lazy import — kept as `Function` so the top-level type-check does not
-  // require `@honcho-ai/sdk` types at build time.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const mod: { Honcho: new (opts: typeof init) => HonchoClient } = (() => {
-    // node's CJS interop on `require` keeps this synchronous and predictable.
-    // The dynamic import path keeps the SDK out of the static graph so that
-    // `@honcho-ai/sdk` is effectively an optional runtime dep.
-    const r = (Function("return require") as () => NodeRequire)();
-    return r("@honcho-ai/sdk");
-  })();
+export class HonchoConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HonchoConfigError";
+  }
+}
+
+/**
+ * Default factory: dynamically imports `@honcho-ai/sdk` so the package only
+ * matters when Honcho is actually enabled. Real ESM dynamic import — works
+ * under Node ≥20 ESM, Bun, and tsc/NodeNext. Tests pass a stub factory via
+ * `bootstrapHonchoHandles(..., { factory })` and never exercise this path.
+ *
+ * The factory is exported so tests can verify the import path resolves (the
+ * default path is otherwise untouched by the stub-driven unit tests).
+ */
+export const defaultHonchoClientFactory: HonchoClientFactory = async (init) => {
+  const mod = (await import("@honcho-ai/sdk")) as unknown as {
+    Honcho: new (opts: typeof init) => HonchoClient;
+  };
   return new mod.Honcho({
     apiKey: init.apiKey,
     baseURL: init.baseURL,
@@ -98,21 +111,23 @@ export interface BootstrapOptions {
  * runs starting at the same time share the in-flight bootstrap promise so we
  * never spawn two clients or two `session.addPeers` round-trips.
  *
- * Throws when the config is enabled but unusable (missing key). Network
- * failures bubble up to the caller — `enrichMissionPrompt` translates those
- * into a stderr warning and a no-op.
+ * Throws `HonchoConfigError` when the config is enabled but unusable
+ * (missing key). Network failures bubble up as ordinary `Error`s — the
+ * public `enrichMissionPrompt` / `recordMissionExchange` translate those
+ * into a stderr warning and a no-op, while config errors propagate so the
+ * operator sees the misconfiguration immediately.
  */
 export const bootstrapHonchoHandles = async (
   config: HonchoMemoryConfig,
   options: BootstrapOptions,
 ): Promise<HonchoHandles> => {
   if (!config.enabled) {
-    throw new Error(
+    throw new HonchoConfigError(
       "bootstrapHonchoHandles called with disabled config — caller should short-circuit",
     );
   }
   if (!config.apiKey) {
-    throw new Error(
+    throw new HonchoConfigError(
       "HONCHO_ENABLED is true but HONCHO_API_KEY is missing — set the key or unset HONCHO_ENABLED",
     );
   }
@@ -124,9 +139,9 @@ export const bootstrapHonchoHandles = async (
     return inflight;
   }
 
-  const factory = options.factory ?? defaultFactory;
+  const factory = options.factory ?? defaultHonchoClientFactory;
   inflight = (async () => {
-    const client = factory({
+    const client = await factory({
       apiKey: config.apiKey!,
       baseURL: config.baseURL,
       workspaceId: config.workspaceId,

@@ -1,16 +1,25 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtemp, writeFile, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   enrichMissionPrompt,
   recordMissionExchange,
   flushPendingHonchoSaves,
   setHonchoClientFactory,
   resetHonchoExtensionForTests,
+  HonchoConfigError,
 } from "../src/extensions/honcho-memory/index.js";
 import {
   resolveHonchoMemoryConfig,
   normalizePositiveInteger,
   normalizeSessionStrategy,
 } from "../src/extensions/honcho-memory/config.js";
+import { defaultHonchoClientFactory } from "../src/extensions/honcho-memory/client.js";
+import { deriveHonchoSessionKey } from "../src/extensions/honcho-memory/session-key.js";
+import { planOhMyPiRun } from "../src/adapters/oh-my-pi.js";
 import type {
   HonchoClient,
   HonchoPeer,
@@ -18,6 +27,8 @@ import type {
   HonchoSessionContext,
   HonchoMessage,
 } from "../src/extensions/honcho-memory/client.js";
+
+const execFileP = promisify(execFile);
 
 /**
  * Stub Honcho client. Captures every call so the tests can assert exactly
@@ -353,5 +364,116 @@ describe("recordMissionExchange", () => {
 
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe("QA regression fixes", () => {
+  test("fail-fast surfaces HonchoConfigError, not a generic Error", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    delete process.env.HONCHO_API_KEY;
+    await expect(
+      enrichMissionPrompt("p", { cwd: process.cwd() }),
+    ).rejects.toBeInstanceOf(HonchoConfigError);
+  });
+
+  test("HOME override actually isolates ~/.honcho/config.json", async () => {
+    // Write a fake config into the tmp HOME the global beforeEach set up.
+    // resolveHonchoMemoryConfig must read THAT file, not the developer's
+    // real ~/.honcho/config.json. Pre-fix this leaked because CONFIG_PATH
+    // was frozen at module load.
+    const home = process.env.HOME;
+    expect(home).toBeDefined();
+    const cfgDir = join(home as string, ".honcho");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.json"),
+      JSON.stringify({
+        apiKey: "leaked-from-tmp-home",
+        peerName: "tmp-user",
+        hosts: { uh: { workspace: "tmp-ws" } },
+      }),
+      "utf-8",
+    );
+
+    resetHonchoExtensionForTests();
+    const cfg = await resolveHonchoMemoryConfig();
+    expect(cfg.apiKey).toBe("leaked-from-tmp-home");
+    expect(cfg.workspaceId).toBe("tmp-ws");
+    expect(cfg.userPeerId).toBe("tmp-user");
+  });
+
+  test("defaultHonchoClientFactory resolves @honcho-ai/sdk via real dynamic import", async () => {
+    // Pre-fix this was `Function("return require")(...)`, which throws under
+    // Node ESM (where `require` is undefined in module scope). This test
+    // pins the prod code path so a future regression cannot ship green.
+    const client = await defaultHonchoClientFactory({
+      apiKey: "hch-test",
+      workspaceId: "uh",
+    });
+    expect(typeof client.peer).toBe("function");
+    expect(typeof client.session).toBe("function");
+  });
+
+  test("session-key derivation does not collide across plausible remote URLs", async () => {
+    // Two repos whose normalized remotes (`owner/repo` vs `owner_repo`) used
+    // to sanitize to the same `repo_owner_repo` key. Each must now produce a
+    // distinct hash-suffixed key.
+    const makeRepo = async (origin: string): Promise<string> => {
+      const dir = await mkdtemp(join(tmpdir(), "uh-honcho-key-"));
+      await execFileP("git", ["-C", dir, "init", "--quiet"]);
+      await execFileP("git", ["-C", dir, "remote", "add", "origin", origin]);
+      return dir;
+    };
+    const slashRepo = await makeRepo("https://example.com/owner/repo.git");
+    const underscoreRepo = await makeRepo("https://example.com/owner_repo.git");
+    try {
+      const slashKey = await deriveHonchoSessionKey(slashRepo, "repo");
+      const underscoreKey = await deriveHonchoSessionKey(underscoreRepo, "repo");
+      expect(slashKey).not.toBe(underscoreKey);
+      expect(slashKey.startsWith("repo_owner_repo_")).toBe(true);
+      expect(underscoreKey.startsWith("repo_owner_repo_")).toBe(true);
+    } finally {
+      await rm(slashRepo, { recursive: true, force: true });
+      await rm(underscoreRepo, { recursive: true, force: true });
+    }
+  });
+
+  test("planOhMyPiRun returns enriched prompt AND base prompt distinctly", async () => {
+    // Pre-fix the adapter passed the enriched prompt (containing the
+    // injected memory block) back to Honcho as the user message, which
+    // would recursively bloat memory on every subsequent run. The plan
+    // now exposes both `prompt` (enriched, sent to the runtime) and
+    // `basePrompt` (the raw mission prompt, persisted to Honcho).
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    const { factory } = makeStub();
+    setHonchoClientFactory(factory);
+
+    const root = await mkdtemp(join(tmpdir(), "uh-honcho-plan-"));
+    try {
+      const adapterDir = join(root, ".harness", "adapters");
+      await mkdir(adapterDir, { recursive: true });
+      await writeFile(
+        join(adapterDir, "oh-my-pi.yaml"),
+        `schema_version: uh.adapter.v0\nid: oh-my-pi\nname: oh-my-pi\nruntime: oh-my-pi\ncapabilities:\n  - cli-execution\nstatus: experimental\nconfig:\n  cli_command: omp\n  default_toolsets: []\n  default_provider: ""\n  default_model: ""\n  worktree_mode: false\n  pass_session_id: false\n  runtime_config:\n    mode: json\n    thinking: ""\n    allow_extensions: false\n    allow_skills: false\n`,
+        "utf-8",
+      );
+      const missionDir = join(root, ".harness", "missions", "M-plan-test");
+      await mkdir(missionDir, { recursive: true });
+      const missionPath = join(missionDir, "mission.yaml");
+      await writeFile(
+        missionPath,
+        `schema_version: uh.mission.v0\nid: M-plan-test\nname: Plan basePrompt regression\ndescription: Verify base vs enriched prompt are tracked separately.\nworkflow_profile: default\nissues: []\nread_first: []\nexpected_artifacts: []\nverification:\n  checks: []\n`,
+        "utf-8",
+      );
+
+      const plan = await planOhMyPiRun(root, missionPath);
+      expect(plan.basePrompt.length).toBeGreaterThan(0);
+      expect(plan.prompt).toContain(plan.basePrompt);
+      expect(plan.prompt).toContain("[Persistent memory]");
+      expect(plan.basePrompt).not.toContain("[Persistent memory]");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

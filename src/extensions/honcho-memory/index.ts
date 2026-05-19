@@ -17,6 +17,7 @@ import {
   bootstrapHonchoHandles,
   clearHandles,
   getCachedHandles,
+  HonchoConfigError,
   type HonchoClientFactory,
   type HonchoHandles,
 } from "./client.js";
@@ -38,6 +39,7 @@ export {
   clearCachedMemory,
   clearHandles,
   getCachedMemoryBlock,
+  HonchoConfigError,
 };
 
 export type { HonchoMemoryConfig, HonchoClientFactory, HonchoHandles };
@@ -128,8 +130,10 @@ export const enrichMissionPrompt = async (
   try {
     handles = await ensureHandles(options.cwd);
   } catch (err) {
-    // Config errors (missing API key) are operator-actionable — rethrow.
-    if (err instanceof Error && err.message.includes("HONCHO_API_KEY")) {
+    // Operator-actionable config errors (e.g. missing API key) propagate so
+    // the operator sees them immediately. Transient SDK / network errors
+    // are surfaced as warnings and the mission continues without memory.
+    if (err instanceof HonchoConfigError) {
       throw err;
     }
     warn(`bootstrap failed; running ${options.missionId ?? "mission"} without memory`, err);
@@ -180,7 +184,7 @@ export const recordMissionExchange = async (
   try {
     handles = await ensureHandles(options.cwd);
   } catch (err) {
-    if (err instanceof Error && err.message.includes("HONCHO_API_KEY")) {
+    if (err instanceof HonchoConfigError) {
       throw err;
     }
     warn(`bootstrap failed; skipping memory save for ${options.missionId ?? "mission"}`, err);

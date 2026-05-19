@@ -55,7 +55,12 @@ interface ConfigFile {
   };
 }
 
-const CONFIG_PATH = join(homedir(), ".honcho", "config.json");
+/**
+ * Resolve the config file path on every call so changes to `$HOME` (most
+ * commonly in tests that `mkdtemp` an isolated home) actually take effect.
+ * Freezing this at module load would silently bypass test isolation.
+ */
+const getConfigPath = (): string => join(homedir(), ".honcho", "config.json");
 const SESSION_STRATEGIES = ["repo", "git-branch", "directory"] as const;
 
 const isSessionStrategy = (value: string): value is HonchoSessionStrategy =>
@@ -79,7 +84,7 @@ export const normalizePositiveInteger = (
 
 export const readConfigFile = async (): Promise<ConfigFile | null> => {
   try {
-    const raw = await readFile(CONFIG_PATH, "utf-8");
+    const raw = await readFile(getConfigPath(), "utf-8");
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null) {
       return parsed as ConfigFile;
@@ -108,7 +113,7 @@ export const getSessionStrategyLabel = (strategy: HonchoSessionStrategy): string
   return labels[strategy];
 };
 
-export const getHonchoConfigPath = (): string => CONFIG_PATH;
+export const getHonchoConfigPath = (): string => getConfigPath();
 
 /**
  * Resolve effective Honcho memory config.

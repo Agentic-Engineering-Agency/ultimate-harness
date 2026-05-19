@@ -42,7 +42,10 @@ const tryGitRemote = async (cwd: string): Promise<string | null> => {
   if (result?.code === 0 && result.stdout.trim()) {
     const normalized = normalizeGitUrl(result.stdout.trim());
     if (normalized) {
-      return sanitize(`repo_${normalized}`);
+      // Hash the unsanitized normalized path so distinct remotes that would
+      // otherwise collapse to the same sanitized form (e.g. `owner/repo`,
+      // `owner.repo`, `owner_repo`) stay disjoint.
+      return `${sanitize(`repo_${normalized}`)}_${shortHash(normalized)}`;
     }
   }
   return null;
@@ -66,7 +69,9 @@ const tryGitBranch = async (cwd: string): Promise<string | null> => {
 
   const branch = branchResult.stdout.trim();
   if (branch !== "HEAD") {
-    return sanitize(branch);
+    // Same collision concern as remote URLs: hash the unsanitized branch so
+    // `feat/foo` and `feat_foo` produce different keys.
+    return `${sanitize(branch)}_${shortHash(branch)}`;
   }
 
   const commitResult = await execGit(cwd, ["rev-parse", "--short", "HEAD"]);

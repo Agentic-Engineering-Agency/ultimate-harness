@@ -63,7 +63,15 @@ export type DryRunResult = {
 export type OhMyPiRunPlan = {
   command: string;
   args: string[];
+  /** Final prompt handed to the runtime (memory-enriched when honcho-memory is enabled). */
   prompt: string;
+  /**
+   * Pre-enrichment mission prompt — what `buildMissionPrompt` produced before
+   * any extension touched it. Persisted to Honcho as the "user message" so
+   * we never feed the injected `[Persistent memory]` block back into Honcho's
+   * own summarizer on the next run.
+   */
+  basePrompt: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -340,6 +348,7 @@ export async function planOhMyPiRun(root: string, missionPath: string): Promise<
     command: cliCommand,
     args,
     prompt,
+    basePrompt,
     worktree: worktreeMode,
     session_id_passthrough: false,
     errors,
@@ -482,7 +491,7 @@ export async function runOhMyPi(
 
   try {
     if (collection.finalMessage) {
-      await recordMissionExchange(plan.prompt, collection.finalMessage, {
+      await recordMissionExchange(plan.basePrompt, collection.finalMessage, {
         cwd: root,
         missionId: plan.mission.id,
       });
