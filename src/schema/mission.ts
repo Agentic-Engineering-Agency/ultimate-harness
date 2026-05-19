@@ -48,6 +48,31 @@ const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/
   message: "Capability id must start with [A-Za-z0-9] and use only [A-Za-z0-9._:-]",
 });
 
+/**
+ * Adapter ids accepted by the team shape. Hard-coded rather than read from the
+ * runtime registry to keep schema parsing free of import side-effects from the
+ * adapter modules. Keep in sync with `RUNTIME_WIRINGS` in `src/cli.ts` and the
+ * adapter manifests under `.harness/adapters/`.
+ */
+export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy"] as const;
+const AdapterIdSchema = z.enum(TEAM_ADAPTER_IDS);
+
+const TeamWorkerSchema = z.object({
+  adapter: AdapterIdSchema,
+  role: z.string().min(1),
+  count: z.number().int().positive().optional().default(1),
+}).strict();
+
+const TeamLeaderSchema = z.object({
+  adapter: AdapterIdSchema,
+  role: z.string().min(1).optional(),
+}).strict();
+
+const TeamShapeSchema = z.object({
+  workers: z.array(TeamWorkerSchema).min(1, { message: "team.workers must contain at least one worker" }),
+  leader: TeamLeaderSchema,
+}).strict();
+
 
 const DEFAULT_SOURCE_PATHS = ["src/**"];
 
@@ -102,6 +127,12 @@ const MissionInputSchema = z.object({
     review_gates: z.array(z.string()).optional().default([]),
   }).optional().default({ checks: [], required_checks: [], review_gates: [] }),
   runtime_config_overrides: z.record(z.string(), z.unknown()).optional().default({}),
+
+  // UH-71 team shape + UH-75 design companion.
+  shape: z.enum(["single", "team"]).optional().default("single"),
+  team: TeamShapeSchema.optional(),
+  integration_report_path: z.string().min(1).optional(),
+  design_path: z.string().min(1).optional().default("design.md"),
 }).superRefine((mission, ctx) => {
   if (!mission.name && !mission.title) {
     ctx.addIssue({
@@ -121,6 +152,28 @@ const MissionInputSchema = z.object({
       });
     }
     seen.add(ac.id);
+  }
+  if (mission.shape === "team") {
+    if (!mission.team) {
+      ctx.addIssue({
+        code: "custom",
+        message: "shape: team requires team.workers and team.leader",
+        path: ["team"],
+      });
+    } else {
+      const roleSeen = new Set<string>();
+      for (let i = 0; i < mission.team.workers.length; i += 1) {
+        const role = mission.team.workers[i].role;
+        if (roleSeen.has(role)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `Duplicate team.workers[].role: ${role}`,
+            path: ["team", "workers", i, "role"],
+          });
+        }
+        roleSeen.add(role);
+      }
+    }
   }
 }).transform((mission) => ({
   ...mission,
