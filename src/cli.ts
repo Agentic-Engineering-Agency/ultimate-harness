@@ -516,6 +516,86 @@ missionCmd
     }
   });
 
+// uh mission new — UH-75 thin wrapper around `mission create` that also writes
+// a companion `design.md` when --design is set.
+missionCmd
+  .command("new")
+  .description("Scaffold mission.yaml (and optionally a companion design.md)")
+  .argument("<id>", "Mission id")
+  .requiredOption("--title <title>", "Mission title")
+  .requiredOption("--workflow <profile>", "Workflow profile")
+  .requiredOption("--objective <text>", "Mission objective")
+  .option("--design", "Also scaffold a companion design.md (UH-75)")
+  .option("--design-path <path>", "Override the design.md filename relative to the mission directory")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--force", "Overwrite existing mission.yaml and design.md")
+  .action(async (id: string, opts: { title: string; workflow: string; objective: string; design?: boolean; designPath?: string; root?: string; force?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await createMission(root, {
+        id,
+        title: opts.title,
+        workflow: opts.workflow,
+        objective: opts.objective,
+        force: opts.force ?? false,
+        withDesign: opts.design === true,
+        designPath: opts.designPath,
+      });
+      console.log(`${result.created ? "Created" : "Updated"} mission: ${id}`);
+      console.log(`Path: ${result.path}`);
+      if (result.designPath) {
+        console.log(`Design: ${result.designPath}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] mission new error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh mission show — UH-75 print mission metadata + design.md when present.
+missionCmd
+  .command("show")
+  .description("Show a mission's metadata and design.md companion when present")
+  .argument("<mission-id>", "Mission id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (missionId: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    const missionPath = path.join(root, ".harness", "missions", missionId, "mission.yaml");
+    let mission: import("./schema/mission.js").MissionDocument;
+    try {
+      mission = await loadMissionFile(missionPath);
+    } catch (err) {
+      console.error(`[FAIL] mission show error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    console.log(`Mission: ${mission.id}`);
+    console.log(`Title: ${mission.name}`);
+    console.log(`Workflow: ${mission.workflow_profile}`);
+    if (mission.priority) console.log(`Priority: ${mission.priority}`);
+    if (mission.shape) console.log(`Shape: ${mission.shape}`);
+    console.log(`Objective: ${mission.description}`);
+    if (mission.acceptance_criteria.length > 0) {
+      console.log(`Acceptance criteria (${mission.acceptance_criteria.length}):`);
+      for (const ac of mission.acceptance_criteria) {
+        console.log(`  - ${ac.id} [${ac.severity}] ${ac.description}`);
+      }
+    }
+    const designPath = mission.design_path ?? "design.md";
+    const designAbs = path.join(path.dirname(missionPath), designPath);
+    try {
+      const designContent = await readFileAsync(designAbs, "utf-8");
+      console.log("");
+      console.log(`=== ${designPath} ===`);
+      console.log(designContent);
+      console.log(`=== End ${designPath} ===`);
+    } catch {
+      console.log(`(no design.md at ${designPath})`);
+    }
+  });
+
 missionCmd
   .command("dry-run")
   .description("Show what command would be executed without running it")
@@ -911,7 +991,7 @@ skillCmd
     }
   });
 
-function printValidationResult(r: { valid: boolean; path: string; schema_version: string | null; errors: string[] }) {
+function printValidationResult(r: { valid: boolean; path: string; schema_version: string | null; errors: string[]; warnings?: string[] }) {
   const status = r.valid ? "PASS" : "FAIL";
   console.log(`[${status}] ${r.path}`);
   if (r.schema_version) {
@@ -919,6 +999,9 @@ function printValidationResult(r: { valid: boolean; path: string; schema_version
   }
   for (const e of r.errors) {
     console.log(`  error: ${e}`);
+  }
+  for (const w of r.warnings ?? []) {
+    console.log(`  warn: ${w}`);
   }
 }
 
