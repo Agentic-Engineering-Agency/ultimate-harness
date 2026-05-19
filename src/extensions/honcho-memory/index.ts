@@ -126,26 +126,37 @@ export const enrichMissionPrompt = async (
   prompt: string,
   options: EnrichOptions,
 ): Promise<string> => {
+  const block = await loadHonchoMemoryBlock(options);
+  if (!block) return prompt;
+  return `${prompt}${PROMPT_MEMORY_SEPARATOR}${block}`;
+};
+
+/**
+ * UH-80 — read-side helper that returns the `[Persistent memory]` block (or
+ * `null` when memory is disabled / empty / failed). Adapters that build a
+ * {@link DispatchContext} call this and set `ctx.memoryBlock`; the prompt
+ * renderer handles the append. Existing callers that work with raw prompt
+ * strings keep using {@link enrichMissionPrompt} for back-compat.
+ */
+export const loadHonchoMemoryBlock = async (
+  options: EnrichOptions,
+): Promise<string | null> => {
   let handles: HonchoHandles | null;
   try {
     handles = await ensureHandles(options.cwd);
   } catch (err) {
-    // Operator-actionable config errors (e.g. missing API key) propagate so
-    // the operator sees them immediately. Transient SDK / network errors
-    // are surfaced as warnings and the mission continues without memory.
     if (err instanceof HonchoConfigError) {
       throw err;
     }
     warn(`bootstrap failed; running ${options.missionId ?? "mission"} without memory`, err);
-    return prompt;
+    return null;
   }
   if (!handles) {
-    return prompt;
+    return null;
   }
 
-  // Refresh once per process — cache stays warm for subsequent missions.
-  const cachedBlock = getCachedMemoryBlock();
-  if (!cachedBlock) {
+  const cached = getCachedMemoryBlock();
+  if (!cached) {
     try {
       await refreshMemoryCache(handles);
     } catch (err) {
@@ -153,15 +164,12 @@ export const enrichMissionPrompt = async (
         `memory fetch failed; running ${options.missionId ?? "mission"} without memory`,
         err,
       );
-      return prompt;
+      return null;
     }
   }
 
   const block = getCachedMemoryBlock();
-  if (!block) {
-    return prompt;
-  }
-  return `${prompt}${PROMPT_MEMORY_SEPARATOR}${block}`;
+  return block && block.length > 0 ? block : null;
 };
 
 export interface RecordOptions {

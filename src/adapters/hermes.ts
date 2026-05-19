@@ -22,10 +22,9 @@ import {
   type AdapterRuntimeChecker,
 } from "../harness/registry.js";
 import { captureDiffWithUntracked } from "../harness/diff-capture.js";
-import {
-  extractRuntimeFinalMessageSentinel,
-  runtimeFinalMessageInstruction,
-} from "../harness/runtime-final-message.js";
+import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
+import { buildDispatchContext } from "../harness/dispatch-context.js";
+import { renderPrompt } from "../harness/render-prompt.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -359,7 +358,7 @@ export async function planHermesRun(root: string, missionPath: string): Promise<
     ? config.default_toolsets.join(",")
     : "terminal,file,web";
 
-  const prompt = buildMissionPrompt(mission, workflow);
+  const prompt = renderPrompt(buildDispatchContext(mission, workflow));
   const args = [
     "chat",
     "-q",
@@ -857,60 +856,4 @@ async function persistFinalRuntimeSession(
     exit_code: exitCode,
     status: sessionStatus,
   });
-}
-
-function buildMissionPrompt(
-  mission: MissionDocument,
-  workflow: WorkflowDocument | undefined,
-): string {
-  let prompt = `# Mission: ${mission.name}\n\n`;
-  prompt += `${mission.description}\n\n`;
-
-  if (workflow) {
-    prompt += `## Workflow: ${workflow.name}\n\n`;
-    for (const phase of workflow.phases) {
-      prompt += `### ${phase.name} (${phase.agent_role})\n${phase.description}\n\n`;
-    }
-  }
-
-  if (mission.issues.length > 0) {
-    prompt += "## Related Issues\n";
-    for (const issue of mission.issues) {
-      prompt += `- [${issue.source}] ${issue.reference}`;
-      if (issue.url) prompt += ` (${issue.url})`;
-      prompt += "\n";
-    }
-    prompt += "\n";
-  }
-
-  if (mission.read_first.length > 0) {
-    prompt += "## Read First\n";
-    for (const p of mission.read_first) {
-      prompt += `- ${p}\n`;
-    }
-    prompt += "\n";
-  }
-
-  if (mission.expected_artifacts.length > 0) {
-    prompt += "## Expected Artifacts\n";
-    for (const a of mission.expected_artifacts) {
-      prompt += `- ${a.path}`;
-      if (a.type) prompt += ` (${a.type})`;
-      prompt += "\n";
-    }
-    prompt += "\n";
-  }
-
-  if (mission.verification.checks.length > 0) {
-    prompt += "## Verification Checks\n";
-    for (const c of mission.verification.checks) {
-      prompt += `- ${c}\n`;
-    }
-    prompt += "\n";
-  }
-
-  prompt += "Execute this mission and produce the expected artifacts.\n";
-  prompt += runtimeFinalMessageInstruction();
-
-  return prompt;
 }
