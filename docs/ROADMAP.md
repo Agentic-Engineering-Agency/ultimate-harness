@@ -4,7 +4,7 @@ Last updated: 2026-05-19. Source of truth for issue state is [Linear](https://li
 
 ## Now
 
-Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Runtime intelligence + operator polish shipped as [UH-57](https://linear.app/agentic-eng/issue/UH-57). Package renamed `@agenticengineeringagency/ultimate-harness` and CI publish automation shipped as [UH-58](https://linear.app/agentic-eng/issue/UH-58). Honcho persistent-memory extension for the `oh-my-pi` adapter shipped as [UH-59](https://linear.app/agentic-eng/issue/UH-59) ([#83](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/83)) — see [`docs/architecture/extension-honcho-memory.md`](./architecture/extension-honcho-memory.md) and [`docs/runbooks/honcho-memory.md`](./runbooks/honcho-memory.md). **Epic 3 (Hermes Dashboard plugin for UH) is now in flight** — see below.
+Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Runtime intelligence + operator polish shipped as [UH-57](https://linear.app/agentic-eng/issue/UH-57). Package renamed `@agenticengineeringagency/ultimate-harness` and CI publish automation shipped as [UH-58](https://linear.app/agentic-eng/issue/UH-58). Honcho persistent-memory extension for the `oh-my-pi` adapter shipped as [UH-59](https://linear.app/agentic-eng/issue/UH-59) ([#83](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/83)). **Epic 3 (Hermes Dashboard plugin for UH) and Epic 4 (Team mission shape) are now in flight** — see below. Both draw on the new [`oh-my-claudecode` / `oh-my-codex` inspiration deep-dive](./research/inspiration-systems.md) added this cycle.
 
 ### Epic 3 — Hermes Dashboard plugin for UH ([UH-60](https://linear.app/agentic-eng/issue/UH-60))
 
@@ -23,6 +23,25 @@ Ship a [Hermes dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/
 | Optional | [UH-68](https://linear.app/agentic-eng/issue/UH-68) | Plugin packaging, install runbook, and distribution repo | S | backlog |
 
 Build order: UH-61 / UH-62 unblock UH-65, which unblocks UH-64 and UH-63. UH-66 and UH-69 ride on top of UH-62 / UH-61 in parallel. UH-67 and UH-68 are the final polish + distribution gates.
+
+### Epic 4 — Team mission shape ([UH-70](https://linear.app/agentic-eng/issue/UH-70))
+
+Distill the convergent learning from [oh-my-claudecode](https://oh-my-claudecode.dev/) and [oh-my-codex](https://oh-my-codex.dev/) into a UH-native mission shape: a single mission that fans out across **multiple adapters in parallel** as workers, each in its own worktree, with a leader/integrator role that merges their work and runs the existing verification pipeline over the integrated result. Extends [UH-56](https://linear.app/agentic-eng/issue/UH-56) `mission run-all` from comparison to collaboration.
+
+| Phase | Issue | Slice | Size | Status |
+|---|---|---|---|---|
+| Core | [UH-71](https://linear.app/agentic-eng/issue/UH-71) | Mission schema for `team` shape with adapter-bound workers | S | backlog |
+| Core | [UH-72](https://linear.app/agentic-eng/issue/UH-72) | Per-worker worktree auto-isolation + leader merge / `integration-report.md` | M | backlog |
+| Core | [UH-73](https://linear.app/agentic-eng/issue/UH-73) | Staged workflow profile family (`plan → prd → exec → verify → fix`) | M | backlog |
+
+Standalone discipline-layer slices inspired by the same research (not part of Epic 4 but sequenced after it):
+
+| Phase | Issue | Slice | Size | Status |
+|---|---|---|---|---|
+| Later | [UH-74](https://linear.app/agentic-eng/issue/UH-74) | Adversarial QA workflow profile (`adversarial-qa`) — OMX `$ultraqa` analog | M | backlog |
+| Later | [UH-75](https://linear.app/agentic-eng/issue/UH-75) | Companion `design.md` artifact alongside `mission.yaml` — OMX `$design` analog | S | backlog |
+
+Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"oh-my-claudecode (OMC)", §"oh-my-codex (OMX)", §"Combined OMC/OMX takeaways"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer.md); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix.md).
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
 
