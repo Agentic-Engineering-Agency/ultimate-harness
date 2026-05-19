@@ -1,12 +1,13 @@
 /**
  * Root component for the `uh` Hermes dashboard plugin.
  *
- * As of UH-63 we have overview + mission drilldown (incl. verification).
- * Workflow + wizard + editor land in UH-66 / UH-67.
+ * As of UH-66 we have overview + drilldown + verification + workflow viewer.
+ * The wizard + editor land in UH-67.
  */
 import { useHashRoute } from "./router";
 import { OverviewTab } from "./OverviewTab";
 import { MissionDrilldown } from "./MissionDrilldown";
+import { WorkflowViewer } from "./WorkflowViewer";
 import { UI } from "./sdk";
 
 export function App() {
@@ -18,6 +19,8 @@ export function App() {
       return <MissionDrilldown missionId={route.missionId ?? ""} />;
     case "missionRun":
       return <MissionDrilldown missionId={route.missionId ?? ""} pinnedRunId={route.runId} />;
+    case "workflow":
+      return <WorkflowViewer name={route.workflowName ?? ""} />;
   }
   return (
     <UI.Card>

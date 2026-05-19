@@ -11,6 +11,7 @@
  */
 import { pluginFetch, UI, type MissionDetail } from "./sdk";
 import { yamlStringify } from "./yaml-pretty";
+import { VerificationViewer } from "./VerificationViewer";
 import { RunModal } from "./RunModal";
 import { buildHash } from "./router";
 
@@ -23,6 +24,7 @@ const TABS = [
   { key: "diff",     label: "Diff" },
   { key: "result",   label: "Result" },
   { key: "events",   label: "Events" },
+  { key: "verify",   label: "Verification" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
@@ -145,6 +147,7 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
       {tab === "diff"   ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/diff`} /> : null}
       {tab === "result" ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/result`} /> : null}
       {tab === "events" ? <EventsPane missionId={missionId} runId={pinnedRunId} /> : null}
+      {tab === "verify" ? <VerificationViewer missionId={missionId} /> : null}
       {showRunModal ? (
         <RunModal mission={mission} onClose={() => setShowRunModal(false)} />
       ) : null}
