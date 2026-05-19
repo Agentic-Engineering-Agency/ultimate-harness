@@ -880,6 +880,75 @@ missionCmd
     }
   });
 
+missionCmd
+  .command("run-team")
+  .description("Run a team-shape mission: fan out to N workers in their own worktrees, then ask the leader to integrate")
+  .argument("<mission-id>", "Mission id (must exist in .harness/missions/, with team shape)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--base-ref <ref>", "Base git ref for worker / leader worktrees (default: HEAD)")
+  .option("--retain", "Preserve worktrees on success (default: cleanup on PASS, preserve on FAIL)")
+  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const canonicalMissionPath = path.join(root, ".harness", "missions", missionId, "mission.yaml");
+    let raw: string;
+    try {
+      raw = await readFileAsync(canonicalMissionPath, "utf-8");
+    } catch (err) {
+      console.error(`[FAIL] mission file not readable: ${canonicalMissionPath}`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    const parsed = parseYaml(raw) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== "object") {
+      console.error(`[FAIL] mission file has no top-level mapping: ${canonicalMissionPath}`);
+      process.exit(1);
+      return;
+    }
+    if ((parsed as { shape?: unknown }).shape !== "team") {
+      console.error(`[FAIL] mission ${missionId} is not a team-shape mission. Add 'shape: team' and a 'team:' block, or use 'uh mission run'.`);
+      process.exit(1);
+      return;
+    }
+    const team = (parsed as { team?: unknown }).team;
+    if (!team || typeof team !== "object") {
+      console.error(`[FAIL] mission ${missionId} declares shape: team but has no 'team:' block.`);
+      process.exit(1);
+      return;
+    }
+    const teamMission = {
+      id: missionId,
+      team: team as { workers: { role: string; runtime: string; count?: number }[]; leader: { runtime: string; strategy?: "merge" | "cherry-pick" | "rebase" } },
+      integration_report_path: (parsed as { integration_report_path?: string }).integration_report_path,
+    };
+    const { runTeamMission } = await import("./harness/team-run.js");
+    const { verifyMission } = await import("./harness/verify.js");
+    console.log(`Running team mission ${missionId} with ${teamMission.team.workers.length} worker spec(s)`);
+    try {
+      const result = await runTeamMission(teamMission, root, {
+        runnerFor: (runtime) => async (rt, effectiveRoot, missionPath) => {
+          const wiring = RUNTIME_WIRINGS[runtime];
+          if (!wiring) throw new Error(`Unknown runtime: ${runtime}`);
+          void rt;
+          return wiring.run(effectiveRoot, missionPath);
+        },
+        verifier: async (workRoot, mid) => verifyMission(workRoot, mid, { useSandbox: false }),
+        baseRef: opts.baseRef,
+        retainOnSuccess: opts.retain === true,
+      });
+      const label = result.status === "passed" ? "PASS" : result.status === "blocked" ? "BLOCKED" : "FAIL";
+      console.log(`[${label}] ${missionId}`);
+      console.log(`workers: ${result.workers.length}, conflicts: ${result.hadConflicts ? "yes" : "no"}, verification: ${result.verification ? result.verification.status : "not-run"}`);
+      console.log(`integration-report: ${result.integrationReportPath}`);
+      console.log(`retained: ${result.retained ? "yes" : "no"}`);
+      process.exit(result.status === "passed" ? 0 : 1);
+    } catch (err) {
+      console.error(`[FAIL] mission run-team error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
 async function resolveActiveRuntimes(root: string): Promise<string[]> {
   const entries = await runtimeRegistry.list(root);
   return entries

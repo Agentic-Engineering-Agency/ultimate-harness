@@ -125,6 +125,11 @@ const MissionInputSchema = z.object({
     checks: z.array(z.string()).optional(),
     required_checks: z.array(RequiredCheckSchema).optional().default([]),
     review_gates: z.array(z.string()).optional().default([]),
+    /**
+     * UH-73 — upper bound on staged-profile verify→fix loop iterations.
+     * Default applied by the workflow runner is 2 when undefined.
+     */
+    max_iterations: z.number().int().positive().optional(),
   }).optional().default({ checks: [], required_checks: [], review_gates: [] }),
   runtime_config_overrides: z.record(z.string(), z.unknown()).optional().default({}),
 
