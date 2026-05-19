@@ -235,10 +235,23 @@ program
 // uh status
 program
   .command("status")
-  .description("Report the current state of the harness project")
+  .description("Report the current state of the harness project (use --json for the LLM-less query mode)")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (opts: { root?: string }) => {
-    const root = resolveRoot(opts.root);
+  .option("--cwd <path>", "Override the working directory used for resolving the project root")
+  .option("--json", "Emit the UH-78 status JSON document instead of human text")
+  .action(async (opts: { root?: string; cwd?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root ?? opts.cwd);
+    if (opts.json) {
+      try {
+        const { getStatusJson } = await import("./harness/status-json.js");
+        const doc = await getStatusJson(root);
+        console.log(JSON.stringify(doc, null, 2));
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+      return;
+    }
     try {
       const s = await getStatus(root);
       console.log(`Ultimate Harness project: ${s.name}`);
