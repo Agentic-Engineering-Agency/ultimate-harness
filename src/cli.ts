@@ -165,13 +165,51 @@ program
 // uh validate
 program
   .command("validate")
-  .description("Validate a harness YAML artifact")
+  .description("Validate a harness YAML artifact (and optionally drift-detect under --repair / --json)")
   .argument("[file]", "Path to YAML file (default: .harness/project.yaml)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--all-workflows", "Validate all workflow profiles")
   .option("--all-missions", "Validate all mission files")
-  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean }) => {
+  .option("--repair", "Run drift detection with auto-repair (idempotent)")
+  .option("--json", "Emit drift detection output as JSON instead of human text")
+  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; json?: boolean }) => {
     const root = resolveRoot(opts.root);
+    if (opts.json || opts.repair) {
+      const { runDrift, groupByKind, DRIFT_KINDS } = await import("./harness/validate/drift/registry.js");
+      const outcome = await runDrift(root, { repair: opts.repair === true });
+      if (opts.json) {
+        const grouped = groupByKind(outcome.issues);
+        console.log(JSON.stringify({
+          schema_version: "uh.validate-drift.v0",
+          repair: opts.repair === true,
+          cycles: outcome.cycles,
+          cap_reached: outcome.capReached,
+          kinds: DRIFT_KINDS.map((k) => ({
+            kind: k.kind,
+            can_repair: k.canRepair,
+            issues: grouped[k.kind],
+          })),
+          repairs: outcome.repairs.map((r) => ({
+            kind: r.issue.kind,
+            outcome: r.outcome,
+            reason: r.reason,
+            target: r.issue.target,
+          })),
+        }, null, 2));
+      } else {
+        for (const issue of outcome.issues) {
+          console.log(`[${issue.severity.toUpperCase()}] ${issue.kind}: ${issue.message}`);
+        }
+        if (outcome.issues.length === 0) {
+          console.log(`[OK] no drift detected`);
+        }
+        if (outcome.capReached) {
+          console.log(`[WARN] drift remains after ${outcome.cycles} repair cycles`);
+        }
+      }
+      process.exit(outcome.issues.some((i) => i.severity === "error") ? 1 : 0);
+      return;
+    }
     if (opts.allWorkflows) {
       const results = await validateAllWorkflows(root);
       for (const r of results) {
