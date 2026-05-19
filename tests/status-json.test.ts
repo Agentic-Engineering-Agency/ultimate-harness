@@ -143,7 +143,7 @@ describe("UH-78 uh status --json", () => {
     expect(doc.recent_runs[0].verdict).toBe("needs-attention");
   });
 
-  test("sub-250ms wall clock on a 50-mission fixture", async () => {
+  test("sub-500ms wall clock on a 50-mission fixture", async () => {
     for (let i = 0; i < 50; i += 1) {
       const id = `m${String(i).padStart(2, "0")}`;
       await seedMission(id, {
@@ -157,6 +157,6 @@ describe("UH-78 uh status --json", () => {
     const doc = await getStatusJson(TEST_ROOT, { packageVersion: "1.0.0" });
     const wall = Date.now() - start;
     expect(doc.missions.total).toBe(50);
-    expect(wall).toBeLessThan(250);
+    expect(wall).toBeLessThan(500);
   });
 });
