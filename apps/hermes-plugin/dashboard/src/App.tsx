@@ -1,18 +1,24 @@
 /**
  * Root component for the `uh` Hermes dashboard plugin.
  *
- * The router and the panel components are built up across the UH-65/64/63/66/67
- * slices. As of UH-65 we only have the overview panel; anything else falls
- * through to a stub card so the operator sees an honest "not built yet"
- * message instead of a blank screen.
+ * As of UH-63 we have overview + mission drilldown (incl. verification).
+ * Workflow + wizard + editor land in UH-66 / UH-67.
  */
 import { useHashRoute } from "./router";
 import { OverviewTab } from "./OverviewTab";
+import { MissionDrilldown } from "./MissionDrilldown";
 import { UI } from "./sdk";
 
 export function App() {
   const [route] = useHashRoute();
-  if (route.view === "overview") return <OverviewTab />;
+  switch (route.view) {
+    case "overview":
+      return <OverviewTab />;
+    case "mission":
+      return <MissionDrilldown missionId={route.missionId ?? ""} />;
+    case "missionRun":
+      return <MissionDrilldown missionId={route.missionId ?? ""} pinnedRunId={route.runId} />;
+  }
   return (
     <UI.Card>
       <UI.CardHeader>
