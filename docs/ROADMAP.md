@@ -1,10 +1,10 @@
 # Ultimate Harness — Roadmap
 
-Last updated: 2026-05-18. Source of truth for issue state is [Linear](https://linear.app/agentic-eng); this file is a human-readable index.
+Last updated: 2026-05-19. Source of truth for issue state is [Linear](https://linear.app/agentic-eng); this file is a human-readable index.
 
 ## Now
 
-Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Runtime intelligence + operator polish is in review as [UH-57](https://linear.app/agentic-eng/issue/UH-57): deterministic TUI screenshot capture, adapter-check age in the footer, `runtime.cancelled` replay events, and mission capability enforcement. Three TUI follow-up slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) remain in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
+Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Runtime intelligence + operator polish shipped as [UH-57](https://linear.app/agentic-eng/issue/UH-57): deterministic TUI screenshot capture, adapter-check age in the footer, `runtime.cancelled` replay events, and mission capability enforcement ([#77](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/77)). Package renamed `@agenticengineering/ultimate-harness` and CI publish automation shipped as [UH-58](https://linear.app/agentic-eng/issue/UH-58) ([#79](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/79)). Three TUI follow-up slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) remain in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
 
@@ -18,7 +18,7 @@ Build `uh tui` on [OpenTUI](https://opentui.com) — the same engine OpenCode us
 | 4 | [UH-44](https://linear.app/agentic-eng/issue/UH-44) | Mission run flow: trigger from TUI, stream events live | M | **shipped** — `R` opens a run dialog, live tail of `events.ndjson`, `S` stops via SIGTERM; see [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
 | 5 | [UH-43](https://linear.app/agentic-eng/issue/UH-43) | Adapter + sandbox manager: live checks, create/discard from inside | M | **shipped** — `c` re-check, `n` create-sandbox dialog, `d` discard with `F` force toggle; see [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
 | 6 | [UH-42](https://linear.app/agentic-eng/issue/UH-42) | Polish: keymap overlay, theming, error states, exit handling, Agent Skill install | S | **shipped** — `?` overlay, per-project state persistence, operator runbook; see [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65). Theming / `$EDITOR` / Ctrl+Z spun out as UH-48 / UH-49 / UH-50. |
-## Shipped this cycle (2026-05-17 → 2026-05-18)
+## Shipped this cycle (2026-05-17 → 2026-05-19)
 
 ### Epic 1 — Hermes proxy adapter ([UH-32](https://linear.app/agentic-eng/issue/UH-32)) — **DONE**
 
@@ -43,6 +43,13 @@ Adapter promoted to `status: active` on 2026-05-18 after live E2E smoke against 
 | [UH-44](https://linear.app/agentic-eng/issue/UH-44) | TUI mission run flow with live `events.ndjson` tail | [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
 | [UH-43](https://linear.app/agentic-eng/issue/UH-43) | TUI adapter + sandbox manager (create/discard/recheck) | [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
 | [UH-42](https://linear.app/agentic-eng/issue/UH-42) | TUI polish: keymap overlay (`?`) + per-project persistence + runbook | [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65) |
+
+### Runtime intelligence + operator polish + npm publish automation (2026-05-19)
+
+| Issue | Slice | PR |
+|---|---|---|
+| [UH-57](https://linear.app/agentic-eng/issue/UH-57) | Runtime intelligence + operator polish: TUI screenshot capture, adapter-check age footer, `runtime.cancelled` event, mission capability enforcement | [#77](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/77) |
+| [UH-58](https://linear.app/agentic-eng/issue/UH-58) | Package renamed `@agenticengineering/ultimate-harness`, `publishConfig.access=public`, CI dry-run + release publish workflow | [#79](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/79) |
 
 ### Discipline layers — Spec-Driven, Test-Driven, Cross-runtime QA (shipped)
 
