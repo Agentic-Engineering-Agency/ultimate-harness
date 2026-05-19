@@ -54,10 +54,10 @@ function mission(id: string, overrides: Partial<TeamMission["team"]> = {}): Team
     id,
     team: {
       workers: overrides.workers ?? [
-        { role: "backend", runtime: "hermes" },
-        { role: "frontend", runtime: "codex" },
+        { role: "backend", adapter: "hermes" },
+        { role: "frontend", adapter: "codex" },
       ],
-      leader: overrides.leader ?? { runtime: "hermes", strategy: "merge" },
+      leader: overrides.leader ?? { adapter: "hermes" },
     },
   };
 }
@@ -75,7 +75,7 @@ afterEach(async () => {
 describe("planTeamRun", () => {
   test("expands count into N worker plans with stable ids and branches", () => {
     const plan = planTeamRun(
-      mission("m1", { workers: [{ role: "backend", runtime: "hermes", count: 2 }] }),
+      mission("m1", { workers: [{ role: "backend", adapter: "hermes", count: 2 }] }),
       "/tmp/repo",
     );
     expect(plan.workers).toHaveLength(2);
@@ -84,7 +84,10 @@ describe("planTeamRun", () => {
       "uh/team/m1/backend-1",
       "uh/team/m1/backend-2",
     ]);
+    expect(plan.workers.every((w) => w.adapter === "hermes")).toBe(true);
     expect(plan.leader.branch).toBe("uh/team/m1/leader");
+    expect(plan.leader.adapter).toBe("hermes");
+    expect(plan.leader.strategy).toBe("merge");
     expect(plan.integrationReportPath.endsWith(".harness/missions/m1/team/integration-report.md")).toBe(true);
   });
 
@@ -95,21 +98,21 @@ describe("planTeamRun", () => {
 
   test("rejects unsafe role names", () => {
     expect(() => planTeamRun(
-      mission("m1", { workers: [{ role: "../oops", runtime: "hermes" }] }),
+      mission("m1", { workers: [{ role: "../oops", adapter: "hermes" }] }),
       "/tmp/repo",
     )).toThrow(/safe identifier/);
   });
 
   test("rejects zero or negative counts", () => {
     expect(() => planTeamRun(
-      mission("m1", { workers: [{ role: "x", runtime: "hermes", count: 0 }] }),
+      mission("m1", { workers: [{ role: "x", adapter: "hermes", count: 0 }] }),
       "/tmp/repo",
     )).toThrow(/positive integer/);
   });
 
   test("requires at least one worker", () => {
     expect(() => planTeamRun(
-      { id: "m1", team: { workers: [], leader: { runtime: "hermes" } } },
+      { id: "m1", team: { workers: [], leader: { adapter: "hermes" } } },
       "/tmp/repo",
     )).toThrow(/no workers/);
   });
@@ -120,6 +123,29 @@ describe("planTeamRun", () => {
       "/tmp/repo",
     );
     expect(plan.integrationReportPath).toBe("/tmp/repo/custom/place.md");
+  });
+
+  test("rejects unsafe adapter ids", () => {
+    expect(() => planTeamRun(
+      mission("m1", { workers: [{ role: "x", adapter: "../sneaky" }] }),
+      "/tmp/repo",
+    )).toThrow(/safe identifier/);
+  });
+
+  test("non-merge strategy is rejected at plan time, before any worker dispatch", () => {
+    // F5: short-circuit the run before workers are spawned so we don't pay
+    // the worktree-creation tax on a guaranteed-failure invocation.
+    expect(() => planTeamRun(mission("m1"), "/tmp/repo", { strategy: "cherry-pick" }))
+      .toThrow(/not yet implemented/);
+    expect(() => planTeamRun(mission("m1"), "/tmp/repo", { strategy: "rebase" }))
+      .toThrow(/not yet implemented/);
+  });
+
+  test("integration_report_path that escapes root is rejected", () => {
+    expect(() => planTeamRun(
+      { ...mission("m1"), integration_report_path: "../escape.md" },
+      "/tmp/repo",
+    )).toThrow(/outside of root/);
   });
 });
 
@@ -181,8 +207,8 @@ function makeRunner(
   opts: FakeRun,
   repo: FakeRepo | null = null,
   missionId = "team-mission",
-): (runtime: string) => (rt: string, root: string, missionPath: string) => Promise<TeamRuntimeRunResult> {
-  return (_runtime) => async (runtime, root, missionPath) => {
+): (adapter: string) => (a: string, root: string, missionPath: string) => Promise<TeamRuntimeRunResult> {
+  return (_adapter) => async (adapter, root, missionPath) => {
     const id = root.split("/workers/")[1] ?? "unknown";
     const spec = opts.writes[id];
     if (!spec) {
@@ -209,7 +235,7 @@ function makeRunner(
       }
       repo.contents.set(branch, branchContents);
     }
-    void runtime; void missionPath;
+    void adapter; void missionPath;
     return {
       exitCode: spec.exitCode ?? 0,
       stdout: "",
@@ -269,7 +295,11 @@ describe("runTeamMission — fake gitOps", () => {
     expect(report).toMatch(/Summary: wrote src\/b\.ts/);
   });
 
-  test("conflict path: leader merge reports conflict and overall status is failed", async () => {
+  test("conflict path: leader marks conflict and overall status is blocked (no verifier wired)", async () => {
+    // Conflict-verdict refinement: a merge conflict alone is NOT a hard
+    // failure — verification decides. With no verifier wired, the run
+    // settles on `blocked` so the caller knows verification was skipped
+    // and a worker did not land.
     const repo: FakeRepo = {
       branches: new Set(["HEAD"]),
       contents: new Map([["HEAD", new Map()]]),
@@ -291,7 +321,7 @@ describe("runTeamMission — fake gitOps", () => {
       retainOnSuccess: true,
     });
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("blocked");
     expect(result.hadConflicts).toBe(true);
     const frontend = result.workers.find((w) => w.plan.id === "frontend")!;
     expect(frontend.merge?.conflicted).toBe(true);
@@ -304,7 +334,46 @@ describe("runTeamMission — fake gitOps", () => {
     expect(report).toMatch(/conflict: `src\/shared\.ts`/);
   });
 
-  test("single-worker failure: leader skips that worker's merge and status is failed", async () => {
+  test("conflict + verifier passes: status is still blocked (partial integration is not pass)", async () => {
+    // Even when the partial-integration leader worktree passes verification,
+    // a conflicted worker means the overall run cannot be `passed`.
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map([
+        ["uh/team/team-mission/frontend", { branch: "uh/team/team-mission/leader", paths: ["src/shared.ts"] }],
+      ]),
+    };
+    const fs = { write: async (_p: string, _c: string) => { /* no-op */ } };
+    const runner = makeRunner({
+      writes: {
+        backend: { files: { "src/a.ts": "a\n" }, sentinel: "ok" },
+        frontend: { files: { "src/shared.ts": "frontend-write" }, sentinel: "ok" },
+      },
+    }, repo);
+    const verifier = async (): Promise<VerifyMissionLike> => ({
+      status: "passed",
+      path: "/fake/verification.yaml",
+      checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+      acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+    });
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      runnerFor: runner,
+      gitOps: fakeGitOps(repo, fs),
+      verifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.hadConflicts).toBe(true);
+    // Verifier IS called now (was skipped pre-refactor) so reviewers can
+    // see whether the partial integration was at least viable.
+    expect(result.leaderRanVerification).toBe(true);
+    expect(result.verification?.status).toBe("passed");
+  });
+
+  test("single-worker failure: leader skips that worker's merge and overall is blocked", async () => {
     const repo: FakeRepo = {
       branches: new Set(["HEAD"]),
       contents: new Map([["HEAD", new Map()]]),
@@ -331,12 +400,13 @@ describe("runTeamMission — fake gitOps", () => {
       retainOnSuccess: true,
     });
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("blocked");
     expect(result.hadConflicts).toBe(true);
     const frontend = result.workers.find((w) => w.plan.id === "frontend")!;
     expect(frontend.status).toBe("failed");
     expect(frontend.merge?.note).toMatch(/skipped: worker status=failed/);
-    expect(result.leaderRanVerification).toBe(false);
+    // Verifier runs on the partial integration so reviewers can see leader-side health.
+    expect(result.leaderRanVerification).toBe(true);
   });
 
   test("leader-verification failure: integration succeeds but verifier returns failed", async () => {
@@ -373,26 +443,72 @@ describe("runTeamMission — fake gitOps", () => {
     expect(result.retained).toBe(true);
   });
 
-  test("non-merge strategy raises an explicit not-yet-implemented error", async () => {
+  test("non-merge strategy short-circuits in planTeamRun, never reaches workers", async () => {
+    // Strategy validation lives in `planTeamRun` (F5) so a doomed
+    // invocation fails BEFORE any worker worktree is created. Here we
+    // inject a gitOps that fatally throws on addWorktree to confirm no
+    // worker dispatch happens.
+    let addWorktreeCalled = false;
     const repo: FakeRepo = {
       branches: new Set(["HEAD"]),
       contents: new Map([["HEAD", new Map()]]),
       conflictsWith: new Map(),
     };
     const fs = { write: async () => { /* no-op */ } };
-    const m = mission("team-mission");
-    m.team.leader.strategy = "cherry-pick";
+    const baseOps = fakeGitOps(repo, fs);
+    const gitOps: GitOps = {
+      ...baseOps,
+      addWorktree: async () => { addWorktreeCalled = true; throw new Error("should not reach here"); },
+    };
+    const runner = makeRunner({
+      writes: {
+        backend: { files: {}, sentinel: "ok" },
+        frontend: { files: {}, sentinel: "ok" },
+      },
+    }, repo);
+    await expect(runTeamMission(mission("team-mission"), ROOT, {
+      runnerFor: runner,
+      gitOps,
+      retainOnSuccess: true,
+      strategy: "cherry-pick",
+    })).rejects.toThrow(/not yet implemented/);
+    expect(addWorktreeCalled).toBe(false);
+  });
+
+  test("verifier raised exception: status is failed, hadConflicts stays false (F4)", async () => {
+    // F4: verifier exceptions are tracked separately from `hadConflicts`,
+    // so the integration-report conflict accounting remains accurate.
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async () => { /* no-op */ } };
     const runner = makeRunner({
       writes: {
         backend: { files: { "src/a.ts": "a\n" }, sentinel: "ok" },
         frontend: { files: { "src/b.ts": "b\n" }, sentinel: "ok" },
       },
     }, repo);
-    await expect(runTeamMission(m, ROOT, {
+    const verifier = async (): Promise<VerifyMissionLike> => {
+      throw new Error("verifier blew up");
+    };
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
       runnerFor: runner,
       gitOps: fakeGitOps(repo, fs),
+      verifier,
       retainOnSuccess: true,
-    })).rejects.toThrow(/not yet implemented/);
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.hadConflicts).toBe(false);
+    expect(result.leaderRanVerification).toBe(false);
+    expect(result.verification).toBeNull();
+    for (const w of result.workers) {
+      expect(w.integrated).toBe(true);
+      expect(w.merge?.conflicted).toBe(false);
+    }
   });
 
   test("retainOnSuccess=false removes worktrees + branches on PASS", async () => {
@@ -439,7 +555,7 @@ describe("runTeamMission — real git (smoke)", () => {
     await execFileP("git", ["add", "-A"], { cwd: ROOT });
     await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
 
-    const runner = (_runtime: string) => async (_rt: string, root: string, _missionPath: string) => {
+    const runner = (_adapter: string) => async (_a: string, root: string, _missionPath: string) => {
       const id = root.split("/workers/")[1] ?? "unknown";
       const sentinelDir = join(root, ".harness", "missions", "team-mission");
       await mkdir(sentinelDir, { recursive: true });

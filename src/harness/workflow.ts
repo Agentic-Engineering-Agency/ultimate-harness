@@ -25,6 +25,7 @@ import path from "node:path";
 import { missionsDir } from "./paths.js";
 import { assertSafeMissionId, fileExists } from "./mission.js";
 import {
+  cleanupTeamRun,
   runTeamMission,
   type TeamMission,
   type TeamRunResult,
@@ -106,8 +107,18 @@ export interface RunStagedOptions {
    * wire this in production.
    */
   verifier?: (root: string, missionId: string) => Promise<VerifyMissionLike>;
-  /** When shape: team, used to fan Execute across workers. */
-  teamRunner?: (mission: TeamMission, root: string) => Promise<TeamRunResult>;
+  /**
+   * Fans Execute across workers. Receives `retainOnSuccess` so the leader
+   * worktree survives the staged Verify→Fix loop; the staged runner is then
+   * responsible for tearing it down at the end of the run.
+   */
+  teamRunner?: (mission: TeamMission, root: string, options: { retainOnSuccess: boolean }) => Promise<TeamRunResult>;
+  /**
+   * Optional cleanup hook called once per staged run (regardless of outcome)
+   * for shape: team. Defaults to `cleanupTeamRun` from team-run when omitted.
+   * Tests inject a no-op to avoid spawning real `git`.
+   */
+  cleanupTeamRun?: (teamRun: TeamRunResult, root: string) => Promise<void>;
   /** Override mission.verification.max_iterations. */
   maxIterations?: number;
 }
@@ -139,79 +150,121 @@ export async function runStagedWorkflow(
 
   const phases: StagedPhaseOutcome[] = [];
   const artifacts: PriorArtifacts = { fixReports: [] };
-
-  // --- Plan -----------------------------------------------------------------
-  const planOutcome = await runPlanOrPrd("Plan", "plan.md", mission, missionDir, artifacts, shape, options);
-  phases.push(planOutcome);
-  if (planOutcome.status !== "passed") {
-    return finalize(mission.id, shape, phases, 0, null, null, planOutcome.status);
-  }
-
-  // --- PRD ------------------------------------------------------------------
-  const prdOutcome = await runPlanOrPrd("PRD", "prd.md", mission, missionDir, artifacts, shape, options);
-  phases.push(prdOutcome);
-  if (prdOutcome.status !== "passed") {
-    return finalize(mission.id, shape, phases, 0, null, null, prdOutcome.status);
-  }
-
-  // --- Execute --------------------------------------------------------------
   let teamRun: TeamRunResult | null = null;
-  if (shape === "team") {
-    if (!mission.team) throw new Error(`Mission ${mission.id} has shape: team but no team block`);
-    if (!options.teamRunner) throw new Error(`Staged workflow for shape: team requires options.teamRunner`);
-    const teamMission: TeamMission = { id: mission.id, team: mission.team, integration_report_path: mission.integration_report_path };
-    try {
-      teamRun = await options.teamRunner(teamMission, root);
-      phases.push({
-        name: "Execute",
-        iteration: 1,
-        status: teamRun.status === "passed" ? "passed" : teamRun.status === "blocked" ? "blocked" : "failed",
-        artifactPath: teamRun.integrationReportPath,
-        notes: `${teamRun.workers.length} worker(s); conflicts=${teamRun.hadConflicts ? "yes" : "no"}`,
-      });
-      // Stash integration-report content for downstream phases that want it.
-      artifacts.integrationReport = await safeRead(teamRun.integrationReportPath);
-    } catch (err) {
-      phases.push({ name: "Execute", iteration: 1, status: "failed", notes: (err as Error).message });
-      return finalize(mission.id, shape, phases, 0, teamRun, null, "failed");
+  try {
+    // --- Plan ---------------------------------------------------------------
+    const planOutcome = await runPlanOrPrd("Plan", "plan.md", mission, missionDir, artifacts, shape, options);
+    phases.push(planOutcome);
+    if (planOutcome.status !== "passed") {
+      return finalize(mission.id, shape, phases, 0, null, null, planOutcome.status);
     }
-    if (teamRun.status !== "passed") {
-      return finalize(mission.id, shape, phases, 0, teamRun, teamRun.verification, teamRun.status);
-    }
-  } else {
-    const execOutcome = await runSinglePhase("Execute", 1, mission, missionDir, artifacts, options);
-    phases.push(execOutcome);
-    if (execOutcome.status !== "passed") {
-      return finalize(mission.id, shape, phases, 0, null, null, execOutcome.status);
-    }
-  }
 
-  // --- Verify → Fix loop ---------------------------------------------------
-  let verification: VerifyMissionLike | null = null;
-  let fixIterations = 0;
-  for (let attempt = 1; attempt <= 1 + maxIterations; attempt += 1) {
-    const verifyAt = shape === "team" && teamRun ? teamRun.plan.leader.worktreePath : root;
-    const verifyOutcome = await runVerifyPhase(verifyAt, mission.id, missionDir, attempt, options, artifacts);
-    phases.push(verifyOutcome.outcome);
-    verification = verifyOutcome.verification;
-    if (verifyOutcome.verification && verifyOutcome.verification.status === "passed") {
-      return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, "passed");
+    // --- PRD ----------------------------------------------------------------
+    const prdOutcome = await runPlanOrPrd("PRD", "prd.md", mission, missionDir, artifacts, shape, options);
+    phases.push(prdOutcome);
+    if (prdOutcome.status !== "passed") {
+      return finalize(mission.id, shape, phases, 0, null, null, prdOutcome.status);
     }
-    // Verify did not pass. If we've used our retries, stop.
-    if (attempt > maxIterations) {
-      const status = verifyOutcome.verification?.status === "failed" ? "failed" : "blocked";
-      return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, status);
+
+    // --- Execute ------------------------------------------------------------
+    if (shape === "team") {
+      if (!mission.team) throw new Error(`Mission ${mission.id} has shape: team but no team block`);
+      if (!options.teamRunner) throw new Error(`Staged workflow for shape: team requires options.teamRunner`);
+      const teamMission: TeamMission = { id: mission.id, team: mission.team, integration_report_path: mission.integration_report_path };
+      try {
+        // Retain worktrees so the Verify→Fix loop below can keep using the
+        // leader. Final teardown happens in the `finally` block.
+        teamRun = await options.teamRunner(teamMission, root, { retainOnSuccess: true });
+        phases.push({
+          name: "Execute",
+          iteration: 1,
+          status: teamRun.status === "passed" ? "passed" : teamRun.status === "blocked" ? "blocked" : "failed",
+          artifactPath: teamRun.integrationReportPath,
+          notes: `${teamRun.workers.length} worker(s); conflicts=${teamRun.hadConflicts ? "yes" : "no"}`,
+        });
+        artifacts.integrationReport = await safeRead(teamRun.integrationReportPath);
+      } catch (err) {
+        phases.push({ name: "Execute", iteration: 1, status: "failed", notes: (err as Error).message });
+        return finalize(mission.id, shape, phases, 0, teamRun, null, "failed");
+      }
+      if (teamRun.status !== "passed") {
+        return finalize(mission.id, shape, phases, 0, teamRun, teamRun.verification, teamRun.status);
+      }
+    } else {
+      const execOutcome = await runSinglePhase("Execute", 1, mission, missionDir, artifacts, options);
+      phases.push(execOutcome);
+      if (execOutcome.status !== "passed") {
+        return finalize(mission.id, shape, phases, 0, null, null, execOutcome.status);
+      }
     }
-    // Otherwise run Fix and loop back to Verify.
-    fixIterations += 1;
-    const fixOutcome = await runFixPhase(mission, missionDir, fixIterations, artifacts, options, shape);
-    phases.push(fixOutcome);
-    if (fixOutcome.status !== "passed") {
-      return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, fixOutcome.status);
+
+    // --- Verify → Fix loop --------------------------------------------------
+    let verification: VerifyMissionLike | null = null;
+    let fixIterations = 0;
+    for (let attempt = 1; attempt <= 1 + maxIterations; attempt += 1) {
+      let verifyOutcome: { outcome: StagedPhaseOutcome; verification: VerifyMissionLike | null };
+
+      if (shape === "team" && teamRun && attempt === 1 && teamRun.verification) {
+        // First attempt for a team run: reuse the verification team-run
+        // already executed against the leader. Cheaper than re-spawning a
+        // verifier and avoids racing with team-run's cleanup contract.
+        const v = teamRun.verification;
+        const reportPath = path.join(missionDir, "verify-report.md");
+        const report = renderVerifyReport(v, attempt);
+        await writeFile(reportPath, report, "utf-8");
+        artifacts.verifyReport = report;
+        const status: StagedPhaseOutcome["status"] =
+          v.status === "passed" ? "passed" : v.status === "failed" ? "failed" : "blocked";
+        verifyOutcome = {
+          outcome: { name: "Verify", iteration: attempt, status, artifactPath: reportPath, notes: `verifier=${v.status} (from team-run)` },
+          verification: v,
+        };
+      } else {
+        const verifyAt = shape === "team" && teamRun ? teamRun.plan.leader.worktreePath : root;
+        // Retry attempts run Fix on the leader, so the worktree MUST still be
+        // on disk by attempt > 1 to make progress. If something swept it
+        // (e.g. a teamRunner that ignored retainOnSuccess) we surface that
+        // explicitly rather than verifying against a dangling path. We
+        // deliberately skip the existence check on attempt 1 so mocked
+        // verifiers in tests can target placeholder paths.
+        if (attempt > 1 && shape === "team" && teamRun && !(await fileExists(verifyAt))) {
+          verifyOutcome = {
+            outcome: { name: "Verify", iteration: attempt, status: "failed", notes: `leader worktree missing at ${verifyAt}; cannot verify or retry` },
+            verification: null,
+          };
+        } else {
+          verifyOutcome = await runVerifyPhase(verifyAt, mission.id, missionDir, attempt, options, artifacts);
+        }
+      }
+
+      phases.push(verifyOutcome.outcome);
+      verification = verifyOutcome.verification;
+      if (verifyOutcome.verification && verifyOutcome.verification.status === "passed") {
+        return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, "passed");
+      }
+      if (attempt > maxIterations) {
+        const status = verifyOutcome.verification?.status === "failed" ? "failed" : "blocked";
+        return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, status);
+      }
+      // Verify-side hard error (e.g. missing leader worktree): no point retrying.
+      if (verifyOutcome.outcome.status === "failed" && !verifyOutcome.verification) {
+        return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, "failed");
+      }
+      fixIterations += 1;
+      const fixOutcome = await runFixPhase(mission, missionDir, fixIterations, artifacts, options, shape);
+      phases.push(fixOutcome);
+      if (fixOutcome.status !== "passed") {
+        return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, fixOutcome.status);
+      }
+    }
+    // Defensive — loop above always returns.
+    return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, "blocked");
+  } finally {
+    if (teamRun) {
+      const cleanup = options.cleanupTeamRun ?? cleanupTeamRun;
+      try { await cleanup(teamRun, root); } catch { /* tolerated */ }
     }
   }
-  // Defensive — loop above always returns.
-  return finalize(mission.id, shape, phases, fixIterations, teamRun, verification, "blocked");
 }
 
 /* -------------------------------------------------------------------------- */

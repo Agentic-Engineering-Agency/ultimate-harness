@@ -27,7 +27,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { harnessDir, missionsDir } from "./paths.js";
-import { assertSafeMissionId, fileExists } from "./mission.js";
+import { assertSafeMissionId, assertWithinRoot, fileExists } from "./mission.js";
 
 const execFileP = promisify(execFile);
 
@@ -40,17 +40,15 @@ export type LeaderStrategy = "merge" | "cherry-pick" | "rebase";
 export interface TeamWorker {
   /** Stable role name used in worktree paths and branch names. */
   role: string;
-  /** Runtime id the worker dispatches against (hermes, codex, ...). */
-  runtime: string;
+  /** Adapter id the worker dispatches against (hermes, codex, ...). */
+  adapter: string;
   /** Expand to N instances. Default 1. */
   count?: number;
 }
 
 export interface TeamLeader {
-  /** Runtime id the leader dispatches against. Reserved for future use. */
-  runtime: string;
-  /** Integration strategy applied to each worker branch. Default "merge". */
-  strategy?: LeaderStrategy;
+  /** Adapter id the leader dispatches against. */
+  adapter: string;
 }
 
 export interface TeamMission {
@@ -66,7 +64,7 @@ export interface TeamMission {
 
 export interface WorkerPlan {
   role: string;
-  runtime: string;
+  adapter: string;
   index: number;
   /** `${role}` when count===1, else `${role}-${index}`. */
   id: string;
@@ -75,7 +73,7 @@ export interface WorkerPlan {
 }
 
 export interface LeaderPlan {
-  runtime: string;
+  adapter: string;
   strategy: LeaderStrategy;
   worktreePath: string;
   branch: string;
@@ -98,7 +96,7 @@ export interface TeamRuntimeRunResult {
 }
 
 export type TeamRuntimeRunner = (
-  runtime: string,
+  adapter: string,
   root: string,
   missionPath: string,
 ) => Promise<TeamRuntimeRunResult>;
@@ -144,7 +142,7 @@ export interface MergeOutcome {
 }
 
 export interface RunTeamMissionOptions {
-  runnerFor: (runtime: string) => TeamRuntimeRunner;
+  runnerFor: (adapter: string) => TeamRuntimeRunner;
   /** Defaults to git CLI via execFile. Tests inject a fake. */
   gitOps?: GitOps;
   /** Defaults to undefined (skip verify). Wired to `verifyMission` from the CLI. */
@@ -153,6 +151,13 @@ export interface RunTeamMissionOptions {
   baseRef?: string;
   /** When true, do NOT remove worktrees even on success. Useful for tests. */
   retainOnSuccess?: boolean;
+  /**
+   * Leader integration strategy. The mission.yaml surface no longer declares
+   * this; callers (CLI, staged workflow) thread it through. Only `"merge"`
+   * is implemented today; other values throw from `planTeamRun` before any
+   * worker dispatch (UH-72 contract).
+   */
+  strategy?: LeaderStrategy;
 }
 
 export interface WorkerOutcome {
@@ -184,13 +189,25 @@ export interface TeamRunResult {
 /* Plan                                                                       */
 /* -------------------------------------------------------------------------- */
 
-export function planTeamRun(mission: TeamMission, root: string): TeamPlan {
+export function planTeamRun(
+  mission: TeamMission,
+  root: string,
+  options: { strategy?: LeaderStrategy } = {},
+): TeamPlan {
   assertSafeMissionId(mission.id);
   if (!mission.team || !Array.isArray(mission.team.workers) || mission.team.workers.length === 0) {
     throw new Error(`Team mission ${mission.id} has no workers configured`);
   }
-  if (!mission.team.leader || typeof mission.team.leader.runtime !== "string") {
+  if (!mission.team.leader || typeof mission.team.leader.adapter !== "string") {
     throw new Error(`Team mission ${mission.id} has no leader configured`);
+  }
+
+  const strategy: LeaderStrategy = options.strategy ?? "merge";
+  if (strategy !== "merge") {
+    // Strategy stubs — explicit, never silently skipped (UH-72 contract).
+    // Fail BEFORE any worker dispatch happens so callers don't pay the
+    // worktree-creation tax on a doomed run.
+    throw new Error(`Leader strategy "${strategy}" not yet implemented (UH-72 implements "merge" only)`);
   }
 
   const teamRoot = path.resolve(missionsDir(root), mission.id, "team");
@@ -200,8 +217,8 @@ export function planTeamRun(mission: TeamMission, root: string): TeamPlan {
     if (!isSafeSegment(spec.role)) {
       throw new Error(`Team worker role must be a safe identifier, got: ${spec.role}`);
     }
-    if (!isSafeSegment(spec.runtime)) {
-      throw new Error(`Team worker runtime must be a safe identifier, got: ${spec.runtime}`);
+    if (!isSafeSegment(spec.adapter)) {
+      throw new Error(`Team worker adapter must be a safe identifier, got: ${spec.adapter}`);
     }
     const count = spec.count ?? 1;
     if (!Number.isInteger(count) || count <= 0) {
@@ -212,7 +229,7 @@ export function planTeamRun(mission: TeamMission, root: string): TeamPlan {
       const worktreePath = path.join(workersRoot, id);
       workers.push({
         role: spec.role,
-        runtime: spec.runtime,
+        adapter: spec.adapter,
         index: i,
         id,
         worktreePath,
@@ -231,16 +248,15 @@ export function planTeamRun(mission: TeamMission, root: string): TeamPlan {
     seen.add(w.id);
   }
 
-  const strategy: LeaderStrategy = mission.team.leader.strategy ?? "merge";
   const leader: LeaderPlan = {
-    runtime: mission.team.leader.runtime,
+    adapter: mission.team.leader.adapter,
     strategy,
     worktreePath: path.join(teamRoot, "leader"),
     branch: `uh/team/${mission.id}/leader`,
   };
 
   const integrationReportPath = mission.integration_report_path
-    ? path.resolve(root, mission.integration_report_path)
+    ? assertWithinRoot(mission.integration_report_path, root, "integration_report_path")
     : path.join(teamRoot, "integration-report.md");
 
   return {
@@ -339,7 +355,7 @@ export async function runTeamMission(
   root: string,
   options: RunTeamMissionOptions,
 ): Promise<TeamRunResult> {
-  const plan = planTeamRun(mission, root);
+  const plan = planTeamRun(mission, root, { strategy: options.strategy });
   const gitOps = options.gitOps ?? defaultGitOps;
   const baseRef = options.baseRef ?? "HEAD";
 
@@ -380,10 +396,10 @@ export async function runTeamMission(
         integrated: false,
       };
     }
-    const runner = options.runnerFor(slot.plan.runtime);
+    const runner = options.runnerFor(slot.plan.adapter);
     const workerMissionPath = path.join(slot.plan.worktreePath, ".harness", "missions", mission.id, "mission.yaml");
     try {
-      const res = await runner(slot.plan.runtime, slot.plan.worktreePath, workerMissionPath);
+      const res = await runner(slot.plan.adapter, slot.plan.worktreePath, workerMissionPath);
       // Read + strip per-worker session artifacts BEFORE staging the diff so
       // they never reach the worker branch — otherwise every worker would
       // commit `.harness/missions/<id>/runtime-final.txt` and the leader's
@@ -437,15 +453,13 @@ export async function runTeamMission(
     outcome.filesTouched = await gitOps.diffFiles(root, baseRef, outcome.plan.branch);
   }
 
-  // Leader integrates each successful worker.
+  // Leader integrates each successful worker. The strategy guard was
+  // enforced by `planTeamRun` before any worker dispatch, so by here we
+  // know `plan.leader.strategy === "merge"` and can integrate directly.
   let hadConflicts = false;
   if (!leaderReady) {
     hadConflicts = true;
   } else {
-    if (plan.leader.strategy !== "merge") {
-      // Strategy stubs — explicit, never silently skipped (UH-72 contract).
-      throw new Error(`Leader strategy "${plan.leader.strategy}" not yet implemented (UH-72 implements "merge" only)`);
-    }
     for (const outcome of workerOutcomes) {
       if (outcome.status !== "succeeded") {
         outcome.merge = { conflicted: false, conflictPaths: [], note: `skipped: worker status=${outcome.status}` };
@@ -470,28 +484,38 @@ export async function runTeamMission(
   });
 
   // ------------------------------------------------------------- verification
+  // Run verification whenever the leader's worktree is usable, even when
+  // some workers conflicted or failed. A clean-merge subset can still be a
+  // meaningful integration; the verifier — not the merge outcome alone —
+  // decides whether the result is shippable. Verifier exceptions are
+  // captured separately from `hadConflicts` (review finding F4) so the
+  // integration-report's conflict accounting stays accurate.
   let verification: VerifyMissionLike | null = null;
   let leaderRanVerification = false;
-  if (leaderReady && !hadConflicts && options.verifier) {
+  let verificationFailed = false;
+  if (leaderReady && options.verifier) {
     try {
       verification = await options.verifier(plan.leader.worktreePath, mission.id);
       leaderRanVerification = true;
     } catch (err) {
       verification = null;
-      hadConflicts = true;
+      verificationFailed = true;
       await appendReportFailure(reportPath, `verification raised: ${(err as Error).message}`);
     }
   }
 
   // ------------------------------------------------------------------ verdict
+  // Catastrophic leader-setup failure or a verifier exception is hard-failed.
+  // Verifier-reported `failed` is also a failure. Otherwise:
+  //   - clean integration + verifier passed  -> passed
+  //   - any conflict / skipped worker        -> blocked (partial integration)
+  //   - verifier blocked or missing          -> blocked
   const overallStatus: TeamRunResult["status"] = (() => {
-    if (!leaderReady || hadConflicts) return "failed";
+    if (!leaderReady) return "failed";
+    if (verificationFailed) return "failed";
     if (verification && verification.status === "failed") return "failed";
-    if (verification && verification.status === "blocked") return "blocked";
-    if (verification && verification.status === "passed") return "passed";
-    // No verifier was wired: treat a clean integration as blocked rather
-    // than passed so the caller knows verification was skipped.
-    return options.verifier ? "blocked" : "blocked";
+    if (!hadConflicts && verification && verification.status === "passed") return "passed";
+    return "blocked";
   })();
 
   // ----------------------------------------------------------------- cleanup
@@ -593,7 +617,7 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
   lines.push("## Workers");
   lines.push("");
   for (const outcome of args.workers) {
-    lines.push(`### \`${outcome.plan.id}\` (${outcome.plan.runtime})`);
+    lines.push(`### \`${outcome.plan.id}\` (${outcome.plan.adapter})`);
     lines.push("");
     lines.push(`- Branch: \`${outcome.plan.branch}\``);
     lines.push(`- Status: ${outcome.status}${outcome.errorMessage ? ` (${outcome.errorMessage})` : ""}`);
@@ -638,4 +662,24 @@ function oneLineSummary(sentinel: string): string {
 /** Surface from cli.ts so `uh mission run-team` can build a runner mapping. */
 export function teamHarnessTeamRoot(root: string, missionId: string): string {
   return path.join(harnessDir(root), "missions", missionId, "team");
+}
+
+/**
+ * Best-effort removal of every worktree + branch a previous `runTeamMission`
+ * left on disk (typically because `retainOnSuccess: true` was passed so a
+ * staged workflow could keep using the leader for Verify→Fix). Safe to call
+ * multiple times — the underlying `gitOps.removeWorktree` is a no-op when the
+ * path is already gone.
+ */
+export async function cleanupTeamRun(
+  result: TeamRunResult,
+  root: string,
+  gitOps: GitOps = defaultGitOps,
+): Promise<void> {
+  for (const w of result.workers) {
+    await gitOps.removeWorktree(root, w.plan.worktreePath);
+    await gitOps.deleteBranch(root, w.plan.branch);
+  }
+  await gitOps.removeWorktree(root, result.plan.leader.worktreePath);
+  await gitOps.deleteBranch(root, result.plan.leader.branch);
 }

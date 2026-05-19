@@ -467,6 +467,32 @@ completion_criteria:
     expect(() => validateMission({ ...base, capabilities: ["bad capability"] })).toThrow(/Capability id/);
   });
 
+  test("verification.max_iterations survives the mission transform (UH-72 review)", () => {
+    // Regression: the `.transform((mission) => ({ ..., verification: { ... } }))`
+    // block previously dropped `max_iterations` because the explicit object
+    // override omitted the field. The staged-workflow verify→fix loop reads
+    // this value, so silently dropping it would force every run back to the
+    // default `DEFAULT_MAX_ITERATIONS = 2` regardless of mission intent.
+    const mission = validateMission({
+      schema_version: "uh.mission.v0",
+      id: "max-iter-mission",
+      title: "Max iter mission",
+      workflow_profile: "staged",
+      verification: { max_iterations: 5 },
+    });
+    expect(mission.verification.max_iterations).toBe(5);
+
+    // And it's `undefined` (not zero, not a default) when omitted, so the
+    // staged runner's own `DEFAULT_MAX_ITERATIONS` fallback governs.
+    const missionWithoutCap = validateMission({
+      schema_version: "uh.mission.v0",
+      id: "default-iter",
+      title: "Default iter",
+      workflow_profile: "staged",
+    });
+    expect(missionWithoutCap.verification.max_iterations).toBeUndefined();
+  });
+
   test("unknown schema version fails", async () => {
     await mkdir(TEST_ROOT, { recursive: true });
     await writeFile(

@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
-import { createMission } from "./harness/mission.js";
+import { assertSafeMissionId, createMission } from "./harness/mission.js";
 import { parseIssueRef, parseRequiredCheck, proposeMission, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
@@ -887,7 +887,21 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--base-ref <ref>", "Base git ref for worker / leader worktrees (default: HEAD)")
   .option("--retain", "Preserve worktrees on success (default: cleanup on PASS, preserve on FAIL)")
-  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean }) => {
+  .option("--strategy <strategy>", "Leader integration strategy: merge|cherry-pick|rebase (default: merge)", "merge")
+  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean; strategy: string }) => {
+    try {
+      assertSafeMissionId(missionId);
+    } catch (err) {
+      console.error(`[FAIL] ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    const validStrategies = ["merge", "cherry-pick", "rebase"] as const;
+    if (!validStrategies.includes(opts.strategy as (typeof validStrategies)[number])) {
+      console.error(`[FAIL] invalid --strategy: ${opts.strategy}. Valid: ${validStrategies.join("|")}`);
+      process.exit(1);
+      return;
+    }
     const root = resolveRoot(opts.root);
     const canonicalMissionPath = path.join(root, ".harness", "missions", missionId, "mission.yaml");
     let raw: string;
@@ -905,6 +919,17 @@ missionCmd
       process.exit(1);
       return;
     }
+    // UH-71 schema validates the structural mission packet. The team-specific
+    // `shape`/`team` fields ride alongside and are validated separately by
+    // the team-run planner.
+    const { validateMission } = await import("./schema/mission.js");
+    try {
+      validateMission(parsed);
+    } catch (err) {
+      console.error(`[FAIL] mission validation failed: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
     if ((parsed as { shape?: unknown }).shape !== "team") {
       console.error(`[FAIL] mission ${missionId} is not a team-shape mission. Add 'shape: team' and a 'team:' block, or use 'uh mission run'.`);
       process.exit(1);
@@ -918,7 +943,7 @@ missionCmd
     }
     const teamMission = {
       id: missionId,
-      team: team as { workers: { role: string; runtime: string; count?: number }[]; leader: { runtime: string; strategy?: "merge" | "cherry-pick" | "rebase" } },
+      team: team as { workers: { role: string; adapter: string; count?: number }[]; leader: { adapter: string } },
       integration_report_path: (parsed as { integration_report_path?: string }).integration_report_path,
     };
     const { runTeamMission } = await import("./harness/team-run.js");
@@ -926,22 +951,25 @@ missionCmd
     console.log(`Running team mission ${missionId} with ${teamMission.team.workers.length} worker spec(s)`);
     try {
       const result = await runTeamMission(teamMission, root, {
-        runnerFor: (runtime) => async (rt, effectiveRoot, missionPath) => {
-          const wiring = RUNTIME_WIRINGS[runtime];
-          if (!wiring) throw new Error(`Unknown runtime: ${runtime}`);
+        runnerFor: (adapter) => async (rt, effectiveRoot, missionPath) => {
+          const wiring = RUNTIME_WIRINGS[adapter];
+          if (!wiring) throw new Error(`Unknown adapter: ${adapter}`);
           void rt;
           return wiring.run(effectiveRoot, missionPath);
         },
         verifier: async (workRoot, mid) => verifyMission(workRoot, mid, { useSandbox: false }),
         baseRef: opts.baseRef,
         retainOnSuccess: opts.retain === true,
+        strategy: opts.strategy as "merge" | "cherry-pick" | "rebase",
       });
       const label = result.status === "passed" ? "PASS" : result.status === "blocked" ? "BLOCKED" : "FAIL";
       console.log(`[${label}] ${missionId}`);
       console.log(`workers: ${result.workers.length}, conflicts: ${result.hadConflicts ? "yes" : "no"}, verification: ${result.verification ? result.verification.status : "not-run"}`);
       console.log(`integration-report: ${result.integrationReportPath}`);
       console.log(`retained: ${result.retained ? "yes" : "no"}`);
-      process.exit(result.status === "passed" ? 0 : 1);
+      // Exit codes: passed -> 0, blocked -> 2, failed -> 1 (UH-72 review F1).
+      const exit = result.status === "passed" ? 0 : result.status === "blocked" ? 2 : 1;
+      process.exit(exit);
     } catch (err) {
       console.error(`[FAIL] mission run-team error:`);
       console.error(`  error: ${(err as Error).message}`);

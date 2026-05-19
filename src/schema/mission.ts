@@ -200,6 +200,7 @@ const MissionInputSchema = z.object({
     checks: mission.verification.checks ?? mission.verification.required_checks.map((check) => check.command ?? check.name),
     required_checks: mission.verification.required_checks,
     review_gates: mission.verification.review_gates,
+    max_iterations: mission.verification.max_iterations,
   },
   acceptance_criteria: (mission.acceptance_criteria.length > 0
     ? mission.acceptance_criteria

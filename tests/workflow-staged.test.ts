@@ -6,7 +6,7 @@
  * file is purely about the phase sequencing + retry logic.
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -204,10 +204,10 @@ describe("runStagedWorkflow — team shape", () => {
       shape: "team",
       team: {
         workers: [
-          { role: "backend", runtime: "hermes" },
-          { role: "frontend", runtime: "codex" },
+          { role: "backend", adapter: "hermes" },
+          { role: "frontend", adapter: "codex" },
         ],
-        leader: { runtime: "hermes", strategy: "merge" },
+        leader: { adapter: "hermes" },
       },
     };
     let teamRunnerCalled = 0;
@@ -216,14 +216,16 @@ describe("runStagedWorkflow — team shape", () => {
         leaderLog.push(input.phase);
         return { status: "passed", artifact: `[leader/${input.phase}/${input.iteration}]` };
       },
-      teamRunner: async (m, _root): Promise<TeamRunResult> => {
+      teamRunner: async (m, _root, opts): Promise<TeamRunResult> => {
         teamRunnerCalled += 1;
+        // Staged workflow MUST retain so the leader survives Verify→Fix.
+        expect(opts.retainOnSuccess).toBe(true);
         return {
           missionId: m.id,
-          plan: { missionId: m.id, teamRoot: "/fake/team", workers: [], leader: { runtime: "hermes", strategy: "merge", worktreePath: "/fake/team/leader", branch: "uh/team/x/leader" }, integrationReportPath: "/fake/integration-report.md" },
+          plan: { missionId: m.id, teamRoot: "/fake/team", workers: [], leader: { adapter: "hermes", strategy: "merge", worktreePath: "/fake/team/leader", branch: "uh/team/x/leader" }, integrationReportPath: "/fake/integration-report.md" },
           workers: [
-            { plan: { role: "backend", runtime: "hermes", index: 1, id: "backend", worktreePath: "/fake/backend", branch: "uh/team/x/backend" }, exitCode: 0, status: "succeeded", filesTouched: ["src/a.ts"], finalSentinel: "backend done", merge: { conflicted: false, conflictPaths: [], note: "ok" }, integrated: true },
-            { plan: { role: "frontend", runtime: "codex", index: 1, id: "frontend", worktreePath: "/fake/frontend", branch: "uh/team/x/frontend" }, exitCode: 0, status: "succeeded", filesTouched: ["src/b.ts"], finalSentinel: "frontend done", merge: { conflicted: false, conflictPaths: [], note: "ok" }, integrated: true },
+            { plan: { role: "backend", adapter: "hermes", index: 1, id: "backend", worktreePath: "/fake/backend", branch: "uh/team/x/backend" }, exitCode: 0, status: "succeeded", filesTouched: ["src/a.ts"], finalSentinel: "backend done", merge: { conflicted: false, conflictPaths: [], note: "ok" }, integrated: true },
+            { plan: { role: "frontend", adapter: "codex", index: 1, id: "frontend", worktreePath: "/fake/frontend", branch: "uh/team/x/frontend" }, exitCode: 0, status: "succeeded", filesTouched: ["src/b.ts"], finalSentinel: "frontend done", merge: { conflicted: false, conflictPaths: [], note: "ok" }, integrated: true },
           ],
           leaderRanVerification: false,
           verification: null,
@@ -234,6 +236,7 @@ describe("runStagedWorkflow — team shape", () => {
         };
       },
       verifier: constantVerifier("passed"),
+      cleanupTeamRun: async () => { /* tests inject a no-op to avoid real git */ },
     });
 
     expect(teamRunnerCalled).toBe(1);
@@ -256,8 +259,8 @@ describe("runStagedWorkflow — team shape", () => {
       shape: "team",
       verification: { max_iterations: 2 },
       team: {
-        workers: [{ role: "backend", runtime: "hermes" }],
-        leader: { runtime: "hermes", strategy: "merge" },
+        workers: [{ role: "backend", adapter: "hermes" }],
+        leader: { adapter: "hermes" },
       },
     };
     const result = await runStagedWorkflow(mission, ROOT, {
@@ -265,18 +268,30 @@ describe("runStagedWorkflow — team shape", () => {
         leaderLog.push({ phase: input.phase, iteration: input.iteration });
         return { status: "passed", artifact: `[leader/${input.phase}/${input.iteration}]` };
       },
-      teamRunner: async (m, _root): Promise<TeamRunResult> => ({
-        missionId: m.id,
-        plan: { missionId: m.id, teamRoot: "/fake/team", workers: [], leader: { runtime: "hermes", strategy: "merge", worktreePath: "/fake/team/leader", branch: "uh/team/x/leader" }, integrationReportPath: "/fake/integration-report.md" },
-        workers: [{ plan: { role: "backend", runtime: "hermes", index: 1, id: "backend", worktreePath: "/fake/backend", branch: "uh/team/x/backend" }, exitCode: 0, status: "succeeded", filesTouched: ["src/a.ts"], finalSentinel: "ok", merge: { conflicted: false, conflictPaths: [], note: "ok" }, integrated: true }],
-        leaderRanVerification: false,
-        verification: null,
-        integrationReportPath: "/fake/integration-report.md",
-        status: "passed",
-        hadConflicts: false,
-        retained: true,
-      }),
+      teamRunner: async (m, _root, opts): Promise<TeamRunResult> => {
+        expect(opts.retainOnSuccess).toBe(true);
+        // Mimic the team-run contract: when retainOnSuccess is true, the
+        // leader worktree survives on disk so the staged Verify→Fix loop
+        // can keep using it. Without this the workflow's retry-guard would
+        // fail Verify attempt 2 with "leader worktree missing".
+        const leaderPath = join(ROOT, ".harness", "missions", m.id, "team", "leader");
+        await mkdir(leaderPath, { recursive: true });
+        return {
+          missionId: m.id,
+          plan: { missionId: m.id, teamRoot: join(ROOT, ".harness", "missions", m.id, "team"), workers: [], leader: { adapter: "hermes", strategy: "merge", worktreePath: leaderPath, branch: "uh/team/x/leader" }, integrationReportPath: "/fake/integration-report.md" },
+          workers: [{ plan: { role: "backend", adapter: "hermes", index: 1, id: "backend", worktreePath: "/fake/backend", branch: "uh/team/x/backend" }, exitCode: 0, status: "succeeded", filesTouched: ["src/a.ts"], finalSentinel: "ok", merge: { conflicted: false, conflictPaths: [], note: "ok" }, integrated: true }],
+          leaderRanVerification: false,
+          // Fallback path: teamRun reports no verification, so the staged
+          // workflow calls the injected verifier on attempt 1.
+          verification: null,
+          integrationReportPath: "/fake/integration-report.md",
+          status: "passed",
+          hadConflicts: false,
+          retained: true,
+        };
+      },
       verifier: scriptedVerifier(["failed", "passed"]),
+      cleanupTeamRun: async () => { /* no-op */ },
     });
 
     expect(result.status).toBe("passed");
@@ -291,16 +306,16 @@ describe("runStagedWorkflow — team shape", () => {
       id: "team-fail",
       shape: "team",
       team: {
-        workers: [{ role: "backend", runtime: "hermes" }],
-        leader: { runtime: "hermes", strategy: "merge" },
+        workers: [{ role: "backend", adapter: "hermes" }],
+        leader: { adapter: "hermes" },
       },
     };
     let verifierCalled = 0;
     const result = await runStagedWorkflow(mission, ROOT, {
       teamLeaderRunner: async (input) => ({ status: "passed", artifact: input.phase }),
-      teamRunner: async (m, _root): Promise<TeamRunResult> => ({
+      teamRunner: async (m, _root, _opts): Promise<TeamRunResult> => ({
         missionId: m.id,
-        plan: { missionId: m.id, teamRoot: "/fake/team", workers: [], leader: { runtime: "hermes", strategy: "merge", worktreePath: "/fake/team/leader", branch: "uh/team/x/leader" }, integrationReportPath: "/fake/integration-report.md" },
+        plan: { missionId: m.id, teamRoot: "/fake/team", workers: [], leader: { adapter: "hermes", strategy: "merge", worktreePath: "/fake/team/leader", branch: "uh/team/x/leader" }, integrationReportPath: "/fake/integration-report.md" },
         workers: [],
         leaderRanVerification: false,
         verification: null,
@@ -310,6 +325,7 @@ describe("runStagedWorkflow — team shape", () => {
         retained: true,
       }),
       verifier: async () => { verifierCalled += 1; return { status: "passed" } as VerifyMissionLike; },
+      cleanupTeamRun: async () => { /* no-op */ },
     });
     expect(result.status).toBe("failed");
     expect(verifierCalled).toBe(0);
