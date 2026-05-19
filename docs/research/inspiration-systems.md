@@ -23,12 +23,32 @@ superpowers is an agentic skills framework and software development methodology.
 **Copy:** mandatory skill discovery, bite-sized plans, TDD, subagent review loops, worktree awareness.  
 **Avoid:** assuming one skill format or one agent host is universal.
 
-## GSD
+## GSD v1 (Get Shit Done)
 
-GSD is a lightweight meta-prompting, context-engineering, and spec-driven development system for AI coding tools. It emphasizes avoiding context rot by delegating heavy work to fresh contexts and maintaining durable project context through a small command loop.
+The original GSD was a lightweight meta-prompting, context-engineering, and spec-driven development system for AI coding tools, distributed as markdown prompts installed into `~/.claude/commands/`. It emphasized avoiding context rot by delegating heavy work to fresh contexts and maintaining durable project context through a small command loop. Hard limits surfaced quickly: no real context control, "auto mode" was the LLM looping itself, no crash recovery, no observability — but the framing was a forcing function for the v2 successor below.
 
-**Copy:** context hygiene, phase-sized execution, fresh-context delegation, durable project state.  
+**Copy:** context hygiene, phase-sized execution, fresh-context delegation, durable project state.
 **Avoid:** optimizing only for Claude Code-style slash-command UX.
+
+## GSD 2 (`gsd-pi`)
+
+GSD-2 ([gsd-build/gsd-2](https://github.com/gsd-build/gsd-2), ~7.6k stars, MIT) is the v2 rewrite of GSD as a **real coding agent CLI built on the Pi SDK** (`pi-mono`) — same Pi lineage UH already tracks as an adapter target. The README's tagline says it directly: *"It's not a prompt framework anymore — it's a TypeScript application that controls the agent session."* Published as `gsd-pi` on npm; current version is v3.x despite the repo name.
+
+The architecture is the most-developed of any harness UH has inspected:
+
+1. **SQLite-authoritative runtime state.** A project-root `gsd.db` is the single source of truth for milestones, slices, tasks, requirements, summaries, completion status, durable decisions, and project knowledge. Markdown under `.gsd/` (`STATE.md`, `DECISIONS.md`, `KNOWLEDGE.md`, etc.) is a rendered projection, not a runtime fallback. UH today is the inverse — YAML/JSON artifacts are authoritative and there is no DB — but GSD-2's pattern (DB authoritative, markdown as projection) is a direct answer to the kinds of drift bugs UH's `uh validate` will eventually need to catch.
+2. **Three-verdict milestone validation.** GSD-2's `validate-milestone` gate produces one of `pass | needs-attention | needs-remediation`. The `/gsd verdict <pass|needs-attention|needs-remediation> --rationale <…>` command is the manual-override surface for paused validation. UH currently has a binary `passed | failed | blocked` status; the **needs-attention** verdict is a known gap (it maps roughly to `blocked` but with explicit operator-actionable semantics).
+3. **Drift detection registry (ADR-017).** Six named drift kinds (`stale-worker`, `unregistered-milestone`, `roadmap-divergence`, `missing-completion-timestamp`, `merge-state`, `stale-render`), each with a focused detector + idempotent repair handler, registered in a single registry with a cap=2 retry-then-settle contract. This is exactly the subsystem `uh validate` should grow.
+4. **Auto-mode = state-machine over DB, not LLM self-loop.** `/gsd auto` is a state machine reading `gsd.db`. Each unit gets a fresh agent session via Pi SDK, with the dispatch prompt pre-inlining task plans, slice plans, prior summaries, dependency summaries, roadmap excerpts, and decisions. Stuck detection is a sliding-window scan over dispatch patterns; soft/idle/hard timeouts have separate semantics. UH's mission-run pipeline already pre-inlines context (`buildMissionPrompt`); GSD-2 shows what "auto-advance across many missions" would look like.
+5. **Headless mode with JSON query.** `gsd headless query` returns phase, next dispatch preview, and parallel worker costs as a JSON object **without spawning an LLM session** (~50ms). Exit codes are structured (0 complete, 1 error/timeout, 2 blocked). This is a perfect contract for a UH `uh status --json` mode that the Hermes Dashboard plugin (Epic 3, UH-62 backend) can poll instead of shelling out to each subcommand individually.
+6. **Two-terminal coordination via DB.** Terminal 1 runs `/gsd auto`; terminal 2 runs `/gsd discuss` / `/gsd status` / `/gsd queue`. Both coordinate through the SQLite database — decisions in terminal 2 are picked up at the next phase boundary without stopping auto mode. UH has no equivalent today (mission runs are single-process).
+7. **Capability-aware model routing (ADR-004).** A `before_model_select` hook + capability scoring + task metadata extraction route each unit to the right model based on declared capabilities, not hard-coded mappings. UH today routes per-adapter; capability-aware *within* an adapter is a future extension.
+8. **VISION.md as canonical principles doc.** A short repo-root `VISION.md` enumerates principles (*Extension-first*, *Simplicity over abstraction*, *Tests are the contract*, *Ship fast, fix fast*, *Provider-agnostic*) and explicit "what we won't accept" (enterprise patterns, framework swaps, cosmetic refactors, complexity without user value, heavy orchestration layers). UH's principles are scattered across `docs/architecture/` and `docs/product/`; a single `VISION.md` would tighten the contract for contributors.
+9. **Branchless worktree architecture (ADR-001) + external state directory (ADR-002).** Two architectural choices UH explicitly does *not* want to copy — UH-72 commits to branch-per-worker for cross-runtime parity, and UH's `.harness/` lives in-repo so mission artifacts are git-trackable. Worth documenting the trade-off so the decision is durable.
+10. **Extensions framework.** `gsd extensions install / update / uninstall / list / info / validate` + topological load order + `@gsd-extensions/<name>` namespace + per-unit-type skill manifest resolver. UH already targets the Hermes Dashboard plugin path (Epic 3); a UH extensions framework would be additive but not load-bearing in MVP.
+
+**Copy:** three-verdict runtime-result status (`pass | needs-attention | needs-remediation`) + manual `uh mission verdict` override; drift detection + idempotent repair registry under `uh validate`; `uh status --json` LLM-less query mode for the Hermes Dashboard backend; canonical `docs/VISION.md` matching GSD-2's principle list (especially "build on top of agent infrastructure, don't wrap it"); pre-inlined dispatch context formalization (UH's `buildMissionPrompt` already does this — make the contract explicit).
+**Avoid:** SQLite DB as authoritative runtime state for now (UH's YAML/JSON artifact model is intentionally diffable and reviewable; revisit only if drift bugs make the artifact model untenable); branchless worktree architecture (UH-72 stays branch-per-worker); external state directory (UH's `.harness/` is in-repo by design); bundling a VS Code extension or a 10-tab web visualizer in core (Hermes Dashboard plugin Epic 3 + TUI already cover these surfaces); a `$GSD` token / on-chain coupling (out of scope).
 
 ## matt-pocock/skills
 
@@ -119,3 +139,4 @@ The right UH-side translation: introduce a `team` mission **shape** (not a new r
 - AgentFS manual: <https://github.com/tursodatabase/agentfs/blob/main/MANUAL.md>
 - oh-my-claudecode: <https://github.com/Yeachan-Heo/oh-my-claudecode> · landing <https://oh-my-claudecode.dev>
 - oh-my-codex: <https://github.com/Yeachan-Heo/oh-my-codex> · landing <https://oh-my-codex.dev>
+- GSD 2 (`gsd-pi`): <https://github.com/gsd-build/gsd-2> · npm <https://www.npmjs.com/package/gsd-pi> · VISION <https://github.com/gsd-build/gsd-2/blob/main/VISION.md>

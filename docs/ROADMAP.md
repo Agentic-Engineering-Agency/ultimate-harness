@@ -4,7 +4,7 @@ Last updated: 2026-05-19. Source of truth for issue state is [Linear](https://li
 
 ## Now
 
-Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Runtime intelligence + operator polish shipped as [UH-57](https://linear.app/agentic-eng/issue/UH-57). Package renamed `@agenticengineeringagency/ultimate-harness` and CI publish automation shipped as [UH-58](https://linear.app/agentic-eng/issue/UH-58). Honcho persistent-memory extension for the `oh-my-pi` adapter shipped as [UH-59](https://linear.app/agentic-eng/issue/UH-59) ([#83](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/83)). **Epic 3 (Hermes Dashboard plugin for UH) and Epic 4 (Team mission shape) are now in flight** — see below. Both draw on the new [`oh-my-claudecode` / `oh-my-codex` inspiration deep-dive](./research/inspiration-systems.md) added this cycle.
+Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56). Runtime intelligence + operator polish shipped as [UH-57](https://linear.app/agentic-eng/issue/UH-57). Package renamed `@agenticengineeringagency/ultimate-harness` and CI publish automation shipped as [UH-58](https://linear.app/agentic-eng/issue/UH-58). Honcho persistent-memory extension for the `oh-my-pi` adapter shipped as [UH-59](https://linear.app/agentic-eng/issue/UH-59) ([#83](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/83)). **Epic 3 (Hermes Dashboard plugin for UH) and Epic 4 (Team mission shape) are now in flight**, plus five standalone discipline-layer slices (UH-76..UH-80) from the new [GSD-2 / gsd-pi inspiration deep-dive](./research/inspiration-systems.md) — see below.
 
 ### Epic 3 — Hermes Dashboard plugin for UH ([UH-60](https://linear.app/agentic-eng/issue/UH-60))
 
@@ -42,6 +42,20 @@ Standalone discipline-layer slices inspired by the same research (not part of Ep
 | Later | [UH-75](https://linear.app/agentic-eng/issue/UH-75) | Companion `design.md` artifact alongside `mission.yaml` — OMX `$design` analog | S | backlog |
 
 Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"oh-my-claudecode (OMC)", §"oh-my-codex (OMX)", §"Combined OMC/OMX takeaways"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer.md); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix.md).
+
+### Discipline-layer slices from GSD-2 research
+
+Standalone slices distilled from the [GSD-2 / gsd-pi](https://github.com/gsd-build/gsd-2) deep-dive (see [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"GSD 2 (`gsd-pi`)"). They are orthogonal to Epic 3 and Epic 4 — each lands independently.
+
+| Phase | Issue | Slice | Size | Status |
+|---|---|---|---|---|
+| Core | [UH-76](https://linear.app/agentic-eng/issue/UH-76) | Three-verdict runtime-result status (`pass / needs-attention / needs-remediation`) + `uh mission verdict` manual override — GSD-2 `/gsd verdict` analog | S | backlog |
+| Core | [UH-77](https://linear.app/agentic-eng/issue/UH-77) | Drift detection + idempotent repair registry for `uh validate` — GSD-2 ADR-017 analog | M | backlog |
+| Core | [UH-78](https://linear.app/agentic-eng/issue/UH-78) | `uh status --json` LLM-less query mode — GSD-2 `gsd headless query` analog; feeds Hermes Dashboard (UH-62) | S | backlog |
+| Later | [UH-79](https://linear.app/agentic-eng/issue/UH-79) | Canonical `docs/VISION.md` with explicit "what we won't accept" — GSD-2 VISION.md analog | S | backlog |
+| Later | [UH-80](https://linear.app/agentic-eng/issue/UH-80) | Pre-inlined dispatch context contract — formalize the existing `buildMissionPrompt` shape across all four adapters | M | backlog |
+
+Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"GSD 2 (`gsd-pi`)"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer.md); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix.md).
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
 
