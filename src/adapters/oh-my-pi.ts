@@ -26,6 +26,11 @@ import {
   extractRuntimeFinalMessageSentinel,
   runtimeFinalMessageInstruction,
 } from "../harness/runtime-final-message.js";
+import {
+  enrichMissionPrompt,
+  flushPendingHonchoSaves,
+  recordMissionExchange,
+} from "../extensions/honcho-memory/index.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -58,7 +63,15 @@ export type DryRunResult = {
 export type OhMyPiRunPlan = {
   command: string;
   args: string[];
+  /** Final prompt handed to the runtime (memory-enriched when honcho-memory is enabled). */
   prompt: string;
+  /**
+   * Pre-enrichment mission prompt — what `buildMissionPrompt` produced before
+   * any extension touched it. Persisted to Honcho as the "user message" so
+   * we never feed the injected `[Persistent memory]` block back into Honcho's
+   * own summarizer on the next run.
+   */
+  basePrompt: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -131,6 +144,7 @@ export interface OhMyPiCollectOutput {
   exitCode: number;
   stderr: string;
   result?: RuntimeResultDocument;
+  finalMessage: string;
 }
 
 const execFileP = promisify(execFile);
@@ -307,7 +321,11 @@ export async function planOhMyPiRun(root: string, missionPath: string): Promise<
   const allowExtensions = runtimeConfig.allow_extensions;
   const allowSkills = runtimeConfig.allow_skills;
 
-  const prompt = buildMissionPrompt(mission, workflow);
+  const basePrompt = buildMissionPrompt(mission, workflow);
+  const prompt = await enrichMissionPrompt(basePrompt, {
+    cwd: root,
+    missionId: mission.id,
+  });
   const args = [
     "--print",
   ];
@@ -330,6 +348,7 @@ export async function planOhMyPiRun(root: string, missionPath: string): Promise<
     command: cliCommand,
     args,
     prompt,
+    basePrompt,
     worktree: worktreeMode,
     session_id_passthrough: false,
     errors,
@@ -470,6 +489,17 @@ export async function runOhMyPi(
     diff,
   });
 
+  try {
+    if (collection.finalMessage) {
+      await recordMissionExchange(plan.basePrompt, collection.finalMessage, {
+        cwd: root,
+        missionId: plan.mission.id,
+      });
+    }
+  } finally {
+    await flushPendingHonchoSaves();
+  }
+
   return {
     exitCode: collection.exitCode,
     stdout: runnerResult.stdout,
@@ -555,7 +585,7 @@ export async function collectOhMyPiSession(
   }
 
   if (!artifacts) {
-    return { exitCode, stderr };
+    return { exitCode, stderr, finalMessage };
   }
 
   let result: RuntimeResultDocument | undefined;
@@ -602,10 +632,10 @@ export async function collectOhMyPiSession(
     const message = (err as Error).message;
     const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";
     stderr = `${stderr}${separator}Artifact persistence failure: ${message}`;
-    return { exitCode: exitCode === 0 ? 1 : exitCode, stderr };
+    return { exitCode: exitCode === 0 ? 1 : exitCode, stderr, finalMessage };
   }
 
-  return { exitCode, stderr, result };
+  return { exitCode, stderr, result, finalMessage };
 }
 
 export function parseOhMyPiOutput(stdout: string): { events: Array<Record<string, unknown>>; parseErrors: string[]; finalMessage: string } {

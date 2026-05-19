@@ -54,6 +54,7 @@ Runbooks:
 - [Hermes Proxy setup](./docs/runbooks/hermes-proxy-setup.md)
 - [Hermes Proxy E2E smoke (UH-38 promotion record)](./docs/runbooks/hermes-proxy-e2e-smoke.md)
 - [Publishing](./docs/runbooks/publishing.md)
+- [Honcho persistent memory (oh-my-pi)](./docs/runbooks/honcho-memory.md)
 
 ## Install
 
