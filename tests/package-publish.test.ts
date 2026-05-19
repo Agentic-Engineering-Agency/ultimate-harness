@@ -20,7 +20,7 @@ describe("npm/Bun publish package metadata", () => {
   test("is public, scoped, and installs the uh binary from built dist", async () => {
     const pkg = await readPackageJson();
 
-    expect(pkg.name).toBe("@agenticengineering/ultimate-harness");
+    expect(pkg.name).toBe("@agenticengineeringagency/ultimate-harness");
     expect(pkg.private).not.toBe(true);
     expect(pkg.publishConfig?.access).toBe("public");
     expect(pkg.bin).toEqual({ uh: "./dist/cli.js" });
