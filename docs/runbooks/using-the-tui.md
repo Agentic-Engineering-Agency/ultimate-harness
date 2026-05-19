@@ -14,6 +14,8 @@ Last updated: 2026-05-18. Closes UH-41 polish (UH-42 final slice).
 uh tui                # mission control, watches .harness/ live
 uh tui --root /path   # point at a different repo
 uh tui --once         # render one frame and exit (CI / docs / smoke)
+uh tui --screenshot docs/assets/screenshots/tui.txt  # capture deterministic text frame
+uh tui --screenshot /tmp/tui.txt --screenshot-size 100x30
 uh tui --help         # print options
 ```
 
@@ -81,7 +83,9 @@ existing `sandboxes[].mission_id` relationship.
 The footer prints a one-line preview of the currently selected row.
 Selecting an adapter additionally fires `runtimeRegistry.check(<id>)`
 with a 5-second TTL cache and one-in-flight cap, so arrow-spamming the
-list never floods the registry.
+list never floods the registry. Adapter footer previews include the
+check result age (`age=12s`, `age=3m`, etc.) so operators can tell a
+fresh green check from stale cached status.
 
 ### Tiered failure surface
 
@@ -312,9 +316,19 @@ Installs to `~/.agents/skills/opentui/`; downstream subagents pick it up
 automatically. See `docs/research/tui-framework.md §7` for verification
 notes.
 
-## 10. Deferred polish (out of this slice)
+## 10. Screenshot capture
 
-Items from the UH-42 Linear scope that are explicitly deferred:
+`uh tui --screenshot <path>` renders the dashboard through OpenTUI's
+test renderer and writes one deterministic text frame. Use
+`--screenshot-size <cols>x<rows>` to match documentation fixtures or CI
+snapshots. The command does not enter the alternate screen and is safe
+for non-interactive docs pipelines.
+
+---
+
+## 11. Deferred polish (out of this slice)
+
+Items from the UH-42 Linear scope that remain explicitly deferred:
 
 | Item                | Status      | Tracking                                  |
 |---------------------|-------------|-------------------------------------------|

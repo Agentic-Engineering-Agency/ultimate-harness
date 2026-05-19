@@ -141,6 +141,16 @@ function sandboxOptions(rows: SandboxRow[]) {
   }));
 }
 
+function formatAge(ms: number | null): string {
+  if (ms === null) return "age=never";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `age=${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `age=${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `age=${hours}h`;
+}
+
 export function Dashboard(props: DashboardProps) {
   const renderer = useRenderer();
   const [focused, setFocused] = createSignal<PaneId>("missions");
@@ -471,11 +481,12 @@ export function Dashboard(props: DashboardProps) {
       const a = selectedAdapter();
       if (!a) return "";
       const check = state.adapterCheck(a.id);
+      const age = state.adapterCheckAgeMs(a.id);
       const checkStr = !check
         ? "check=pending"
         : check.found
-          ? `check=ok (${check.runtime} ${check.version || "?"})`
-          : `check=fail (${check.errors[0] ?? "unknown"})`;
+          ? `check=ok (${check.runtime} ${check.version || "?"}, ${formatAge(age)})`
+          : `check=fail (${check.errors[0] ?? "unknown"}, ${formatAge(age)})`;
       return `${a.id} · runtime=${a.runtime} · status=${a.status} · ${checkStr}`;
     }
     if (f === "missions") {

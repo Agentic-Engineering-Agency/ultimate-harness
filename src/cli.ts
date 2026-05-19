@@ -13,12 +13,15 @@ import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
 import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { runtimeRegistry } from "./harness/registry.js";
+import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { findBoundSandbox } from "./harness/verify.js";
+import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile as readFileAsync } from "node:fs/promises";
+
 import {
   createSandbox,
   discardSandbox,
@@ -98,6 +101,38 @@ async function resolveMissionRoot(
   const sandbox = await findBoundSandbox(root, missionId);
   if (!sandbox) return { effectiveRoot: root };
   return { effectiveRoot: sandbox.path, sandbox };
+}
+
+async function enforceRuntimeCapabilities(
+  root: string,
+  missionPath: string,
+  runtime: string,
+  force: boolean,
+): Promise<void> {
+  if (force) return;
+  await assertRuntimeCapabilities(root, missionPath, runtime);
+}
+
+async function installRuntimeCancelledEventHandler(
+  root: string,
+  missionPath: string,
+  runtime: string,
+): Promise<() => void> {
+  const mission = await loadMissionFile(missionPath);
+  let handled = false;
+  const onSigterm = (): void => {
+    if (handled) return;
+    handled = true;
+    appendRuntimeCancelledEvent({
+      root,
+      missionId: mission.id,
+      runtime,
+      signal: "SIGTERM",
+    });
+    process.exit(143);
+  };
+  process.once("SIGTERM", onSigterm);
+  return () => process.removeListener("SIGTERM", onSigterm);
 }
 
 const program = new Command();
@@ -488,7 +523,8 @@ missionCmd
   .option("--runtime <runtime>", "Runtime to use (default: hermes)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean }) => {
+  .option("--force", "Bypass mission capability matching for this runtime")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
@@ -496,6 +532,15 @@ missionCmd
     const wiring = RUNTIME_WIRINGS[runtime];
     if (!wiring) {
       console.error(`Unknown runtime: ${runtime}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      await enforceRuntimeCapabilities(root, filePath, runtime, opts.force === true);
+    } catch (err) {
+      console.error(`[BLOCKED] runtime capability mismatch:`);
+      console.error(`  error: ${(err as Error).message}`);
+      console.error(`  pass --force to bypass this safety check`);
       process.exit(1);
       return;
     }
@@ -527,7 +572,8 @@ missionCmd
   .option("--runtime <runtime>", "Runtime to use (default: hermes)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean }) => {
+  .option("--force", "Bypass mission capability matching for this runtime")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
@@ -535,6 +581,15 @@ missionCmd
     const wiring = RUNTIME_WIRINGS[runtime];
     if (!wiring) {
       console.error(`Unknown runtime: ${runtime}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      await enforceRuntimeCapabilities(root, filePath, runtime, opts.force === true);
+    } catch (err) {
+      console.error(`[BLOCKED] runtime capability mismatch:`);
+      console.error(`  error: ${(err as Error).message}`);
+      console.error(`  pass --force to bypass this safety check`);
       process.exit(1);
       return;
     }
@@ -546,13 +601,17 @@ missionCmd
     }
     console.log("");
     let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] } };
+    let uninstallCancelHandler: (() => void) | null = null;
     try {
+      uninstallCancelHandler = await installRuntimeCancelledEventHandler(root, filePath, runtime);
       result = await wiring.run(routing.effectiveRoot, filePath);
     } catch (err) {
       console.log("[FAIL] mission run error:");
       console.log(`  error: ${(err as Error).message}`);
       process.exit(1);
       return;
+    } finally {
+      if (uninstallCancelHandler) uninstallCancelHandler();
     }
     if (result.stdout) {
       console.log(result.stdout);
@@ -580,7 +639,8 @@ missionCmd
   .option("--runtimes <list>", "Comma-separated runtime list (default: every active adapter)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--serial", "Run runtimes sequentially instead of in parallel")
-  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean }) => {
+  .option("--force", "Bypass mission capability matching for selected runtimes")
+  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean }) => {
     const root = resolveRoot(opts.root);
     const requested = opts.runtimes ? opts.runtimes.split(",").map((s) => s.trim()).filter(Boolean) : await resolveActiveRuntimes(root);
     if (requested.length === 0) {
@@ -593,6 +653,20 @@ missionCmd
         console.error(`Unknown runtime: ${rt}`);
         process.exit(1);
         return;
+      }
+    }
+    const canonicalMissionPath = path.join(root, ".harness", "missions", missionId, "mission.yaml");
+    if (opts.force !== true) {
+      for (const rt of requested) {
+        try {
+          await enforceRuntimeCapabilities(root, canonicalMissionPath, rt, false);
+        } catch (err) {
+          console.error(`[BLOCKED] runtime capability mismatch for ${rt}:`);
+          console.error(`  error: ${(err as Error).message}`);
+          console.error(`  pass --force to bypass this safety check`);
+          process.exit(1);
+          return;
+        }
       }
     }
     const { runMissionAcrossRuntimes, persistRuntimeComparison } = await import("./harness/run-all.js");
@@ -848,13 +922,24 @@ function printValidationResult(r: { valid: boolean; path: string; schema_version
   }
 }
 
+function parseScreenshotSize(raw: string | undefined): { width: number; height: number } {
+  if (!raw) return { width: 120, height: 36 };
+  const match = raw.match(/^([1-9]\d*)x([1-9]\d*)$/);
+  if (!match) {
+    throw new Error(`Invalid --screenshot-size \"${raw}\"; expected <cols>x<rows>`);
+  }
+  return { width: Number.parseInt(match[1], 10), height: Number.parseInt(match[2], 10) };
+}
+
 // uh tui
 program
   .command("tui")
   .description("Open the interactive terminal UI (Mission Control)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--once", "Render one frame and exit (CI / smoke / docs)")
-  .action(async (opts: { root?: string; once?: boolean }) => {
+  .option("--screenshot <path>", "Capture one deterministic text frame to PATH (CI / docs)")
+  .option("--screenshot-size <cols>x<rows>", "Screenshot frame size (default: 120x36)")
+  .action(async (opts: { root?: string; once?: boolean; screenshot?: string; screenshotSize?: string }) => {
     const bunCheck = spawnSync("bun", ["--version"], { stdio: "ignore" });
     if (bunCheck.status !== 0) {
       process.stderr.write(
@@ -862,14 +947,23 @@ program
       );
       process.exit(1);
     }
-    const entry = fileURLToPath(new URL("../src/tui/index.tsx", import.meta.url));
+    const dashboardEntry = fileURLToPath(new URL("../src/tui/index.tsx", import.meta.url));
+    const screenshotEntry = fileURLToPath(new URL("../src/tui/screenshot.tsx", import.meta.url));
     const cwd = opts.root ? path.resolve(opts.root) : process.cwd();
-    const args = ["--preload", "@opentui/solid/preload", entry];
+    const args = ["--preload", "@opentui/solid/preload", opts.screenshot ? screenshotEntry : dashboardEntry];
     if (opts.once) args.push("--once");
+    const env: NodeJS.ProcessEnv = { ...process.env, UH_TUI_ROOT: cwd };
+    if (opts.screenshot) {
+      const output = path.resolve(opts.screenshot);
+      const size = parseScreenshotSize(opts.screenshotSize);
+      env.UH_TUI_SCREENSHOT = output;
+      env.UH_TUI_SCREENSHOT_WIDTH = String(size.width);
+      env.UH_TUI_SCREENSHOT_HEIGHT = String(size.height);
+    }
     const child = spawn("bun", args, {
       stdio: "inherit",
       cwd,
-      env: { ...process.env, UH_TUI_ROOT: cwd },
+      env,
     });
     child.on("exit", (code, signal) => {
       if (signal) {

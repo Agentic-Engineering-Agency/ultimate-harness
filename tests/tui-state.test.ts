@@ -312,6 +312,24 @@ describe("tui/state — adapter check cache", () => {
     expect(r?.errors[0]).toBe("codex not on PATH");
     state.dispose();
   });
+
+  test("tracks adapter check age from the injected clock", async () => {
+    let now = 10_000;
+    const state = createDashboardState("/fake-root", {
+      watcherFactory: () => ({ close: () => {} }),
+      loader: async () => snap(),
+      adapterChecker: async () => okResult("2.0.0"),
+      now: () => now,
+      debounceMs: 10,
+    });
+    await delay(5);
+    expect(state.adapterCheckAgeMs("codex")).toBeNull();
+    await state.refreshAdapterCheck("codex");
+    expect(state.adapterCheckAgeMs("codex")).toBe(0);
+    now += 12_345;
+    expect(state.adapterCheckAgeMs("codex")).toBe(12_345);
+    state.dispose();
+  });
 });
 
 describe("tui/state — watcher warnings", () => {

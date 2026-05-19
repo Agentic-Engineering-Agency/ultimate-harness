@@ -96,6 +96,14 @@ Adapters should declare capabilities rather than relying on implicit behavior:
 - `json_output`
 - `diff_output`
 
+
+Mission packets may declare `capabilities: [...]` using the same ids.
+`uh mission dry-run`, `uh mission run`, and `uh mission run-all` now
+enforce the selected runtime adapter's declared capabilities before
+dispatch. A mismatch blocks with a missing-capability error unless the
+operator passes `--force`; missions without `capabilities` preserve the
+legacy no-op behavior.
+
 ## Adapter responsibilities
 
 Adapters must:
