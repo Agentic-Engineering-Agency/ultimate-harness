@@ -140,6 +140,36 @@ export const RuntimeSessionSchema = z.object({
  */
 export const RuntimeResultStatusSchema = z.enum(["passed", "failed", "blocked", "cancelled"]);
 
+/**
+ * UH-76 three-verdict overlay on top of the binary runtime-result status.
+ *
+ * - `pass` — runtime succeeded and human review is comfortable signing off.
+ * - `needs-attention` — runtime succeeded but a reviewer flagged risk worth
+ *   addressing before promotion. Non-blocking; serves as a paper trail.
+ * - `needs-remediation` — work must change before this can move on.
+ *
+ * `recorded_by: "auto"` lets adapters/heuristics seed a default verdict;
+ * `recorded_by: "manual"` is the human override. Non-pass manual verdicts
+ * MUST carry a rationale so the audit trail explains the call.
+ */
+export const VerdictValueSchema = z.enum(["pass", "needs-attention", "needs-remediation"]);
+export const VerdictRecordedBySchema = z.enum(["auto", "manual"]);
+
+export const RuntimeResultVerdictSchema = z.object({
+  value: VerdictValueSchema,
+  rationale: z.string(),
+  recorded_by: VerdictRecordedBySchema,
+  recorded_at: z.string().min(1),
+}).strict().superRefine((verdict, ctx) => {
+  if (verdict.recorded_by === "manual" && verdict.value !== "pass" && verdict.rationale.trim().length === 0) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Manual non-pass verdicts require a non-empty rationale",
+      path: ["rationale"],
+    });
+  }
+});
+
 export const RuntimeResultSchema = z.object({
   schema_version: z.literal("uh.runtime-result.v0"),
   mission_id: z.string().min(1),
@@ -154,6 +184,7 @@ export const RuntimeResultSchema = z.object({
   diff_path: z.string().min(1).optional(),
   errors: z.array(z.string()).default([]),
   notes: z.string().optional(),
+  verdict: RuntimeResultVerdictSchema.optional(),
 }).strict();
 
 export type SkillsIndexDocument = z.infer<typeof SkillsIndexSchema>;
@@ -166,6 +197,9 @@ export type RuntimeSessionDocument = z.infer<typeof RuntimeSessionSchema>;
 export type RuntimeSessionStatus = z.infer<typeof RuntimeSessionStatusSchema>;
 export type RuntimeResultStatus = z.infer<typeof RuntimeResultStatusSchema>;
 export type RuntimeResultDocument = z.infer<typeof RuntimeResultSchema>;
+export type VerdictValue = z.infer<typeof VerdictValueSchema>;
+export type VerdictRecordedBy = z.infer<typeof VerdictRecordedBySchema>;
+export type RuntimeResultVerdict = z.infer<typeof RuntimeResultVerdictSchema>;
 
 export function validateSkillsIndex(data: unknown): SkillsIndexDocument {
   return SkillsIndexSchema.parse(data);

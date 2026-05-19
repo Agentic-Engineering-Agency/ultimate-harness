@@ -30,6 +30,8 @@ import {
 } from "./harness/sandbox.js";
 import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
+import { recordManualVerdict } from "./harness/verdict.js";
+import type { VerdictValue } from "./schema/artifacts.js";
 const VERSION = "0.0.0";
 
 /**
@@ -593,6 +595,42 @@ missionCmd
       console.log(`=== End ${designPath} ===`);
     } catch {
       console.log(`(no design.md at ${designPath})`);
+    }
+  });
+
+// uh mission verdict — UH-76 manual override of the runtime-result verdict.
+missionCmd
+  .command("verdict")
+  .description("Record a manual verdict (pass | needs-attention | needs-remediation) on a mission")
+  .argument("<mission-id>", "Mission id")
+  .argument("<value>", "Verdict value: pass | needs-attention | needs-remediation")
+  .option("--rationale <text>", "Free-text rationale (required for non-pass)")
+  .option("--missiondir <path>", "Override the mission directory (default: .harness/missions/<id>)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (missionId: string, value: string, opts: { rationale?: string; missiondir?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    const allowed: VerdictValue[] = ["pass", "needs-attention", "needs-remediation"];
+    if (!(allowed as string[]).includes(value)) {
+      console.error(`[FAIL] unknown verdict value: ${value}`);
+      console.error(`  allowed: ${allowed.join(" | ")}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const result = await recordManualVerdict({
+        root,
+        missionId,
+        value: value as VerdictValue,
+        rationale: opts.rationale,
+        missionDir: opts.missiondir ? path.resolve(opts.missiondir) : undefined,
+      });
+      console.log(`[OK] verdict recorded: ${value}`);
+      console.log(`  runtime-result: ${result.runtimeResultPath}`);
+      console.log(`  audit: ${result.auditLine}`);
+    } catch (err) {
+      console.error(`[FAIL] mission verdict error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
     }
   });
 
