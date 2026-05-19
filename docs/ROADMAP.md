@@ -4,7 +4,7 @@ Last updated: 2026-05-19. Source of truth for issue state is [Linear](https://li
 
 ## Now
 
-Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Runtime intelligence + operator polish shipped as [UH-57](https://linear.app/agentic-eng/issue/UH-57): deterministic TUI screenshot capture, adapter-check age in the footer, `runtime.cancelled` replay events, and mission capability enforcement ([#77](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/77)). Package renamed `@agenticengineering/ultimate-harness` and CI publish automation shipped as [UH-58](https://linear.app/agentic-eng/issue/UH-58) ([#79](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/79)). Three TUI follow-up slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) remain in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
+Epic 2 (Interactive TUI) shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56) — see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md). Runtime intelligence + operator polish shipped as [UH-57](https://linear.app/agentic-eng/issue/UH-57): deterministic TUI screenshot capture, adapter-check age in the footer, `runtime.cancelled` replay events, and mission capability enforcement ([#77](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/77)). Package renamed `@agenticengineeringagency/ultimate-harness` and CI publish automation shipped as [UH-58](https://linear.app/agentic-eng/issue/UH-58) ([#79](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/79)). Three TUI follow-up slices (UH-48 theming, UH-49 `$EDITOR`, UH-50 Ctrl+Z) remain in the backlog. Epic 1 (Hermes proxy adapter) shipped earlier in this session — see "Shipped" below.
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
 
@@ -49,7 +49,7 @@ Adapter promoted to `status: active` on 2026-05-18 after live E2E smoke against 
 | Issue | Slice | PR |
 |---|---|---|
 | [UH-57](https://linear.app/agentic-eng/issue/UH-57) | Runtime intelligence + operator polish: TUI screenshot capture, adapter-check age footer, `runtime.cancelled` event, mission capability enforcement | [#77](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/77) |
-| [UH-58](https://linear.app/agentic-eng/issue/UH-58) | Package renamed `@agenticengineering/ultimate-harness`, `publishConfig.access=public`, CI dry-run + release publish workflow | [#79](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/79) |
+| [UH-58](https://linear.app/agentic-eng/issue/UH-58) | Package renamed `@agenticengineeringagency/ultimate-harness`, `publishConfig.access=public`, CI dry-run + release publish workflow | [#79](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/79) |
 
 ### Discipline layers — Spec-Driven, Test-Driven, Cross-runtime QA (shipped)
 
