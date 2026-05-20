@@ -106,6 +106,13 @@ export interface MissionSummary {
   last_run?: { runId?: string; status?: string; startedAt?: string; durationMs?: number };
 }
 
+// MissionRunSummary lives in `recent-runs-utils.ts` so the JSX-free
+// helper module (and the vitest test that imports it) has zero
+// dependency on the SDK globals declared in `types.d.ts`. We re-export
+// it here so existing consumers can continue to `import { MissionRunSummary } from "./sdk"`.
+export type { MissionRunSummary } from "./recent-runs-utils";
+import type { MissionRunSummary } from "./recent-runs-utils";
+
 export interface MissionDetail extends MissionSummary {
   description: string;
   read_first: string[];
@@ -113,6 +120,8 @@ export interface MissionDetail extends MissionSummary {
   acceptance_criteria: Array<{ id: string; description: string; severity?: string }>;
   capabilities: string[];
   raw: string;
+  /** UH-82 — append-only run history, newest-first, cap 50. Empty array if no runs/index.json. UH-90 added optional `archived` flag on each row. */
+  runs: MissionRunSummary[];
 }
 
 export interface RunRow {

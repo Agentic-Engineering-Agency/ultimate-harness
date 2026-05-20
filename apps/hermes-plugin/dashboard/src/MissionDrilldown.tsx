@@ -9,10 +9,12 @@
  * Events tab tails the on-disk `events.ndjson` for a pinned `runId` if one was
  * supplied via the route, otherwise the latest run for the mission.
  */
-import { pluginFetch, UI, type MissionDetail } from "./sdk";
+import { pluginFetch, UI, type MissionDetail, fmt } from "./sdk";
 import { yamlStringify } from "./yaml-pretty";
 import { VerificationViewer } from "./VerificationViewer";
 import { RunModal } from "./RunModal";
+import { RecentRunsPane } from "./RecentRunsPane";
+import { runArtifactUrl } from "./recent-runs-utils";
 import { buildHash } from "./router";
 
 type ArtifactPayload = { kind: "text"; content: string } | { kind: "missing"; reason?: string };
@@ -27,6 +29,22 @@ const TABS = [
   { key: "verify",   label: "Verification" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
+
+/**
+ * UH-90 — placeholder shown in artifact tabs when the pinned run was
+ * pruned by the retention policy. The per-run dir is gone, but the
+ * `runs/index.json` entry survives with `archived: true`. Rendered
+ * before any fetch so we don't surface a generic 404.
+ */
+function ArchivedRunPane({ runId }: { runId: string }) {
+  return (
+    <div className="uh-empty">
+      Artifacts for run <span className="uh-mono">{runId}</span> have been
+      archived (UH-90 retention policy). The run still appears in the
+      mission history; the per-run files are no longer on disk.
+    </div>
+  );
+}
 
 function ArtifactPane({ url, language }: { url: string; language?: string }) {
   const [data, setData] = React.useState<ArtifactPayload | null>(null);
@@ -54,9 +72,7 @@ function EventsPane({ missionId, runId }: { missionId: string; runId?: string })
   const [data, setData] = React.useState<ArtifactPayload | null>(null);
   React.useEffect(() => {
     let cancelled = false;
-    const url = runId
-      ? `/missions/${encodeURIComponent(missionId)}/runs/${encodeURIComponent(runId)}/events`
-      : `/missions/${encodeURIComponent(missionId)}/events`;
+    const url = runArtifactUrl(missionId, runId, "events");
     pluginFetch<ArtifactPayload>(url)
       .then((r) => { if (!cancelled) setData(r); })
       .catch((e: any) => { if (!cancelled) setData({ kind: "missing", reason: e?.message ?? String(e) }); });
@@ -126,11 +142,40 @@ function MissionMeta({ mission }: { mission: MissionDetail }) {
   );
 }
 
+
 export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string; pinnedRunId?: string }) {
   const [tab, setTab] = React.useState<TabKey>(pinnedRunId ? "events" : "mission");
   const [mission, setMission] = React.useState<MissionDetail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [showRunModal, setShowRunModal] = React.useState(false);
+  /** UH-87 — when set, the next RunModal opens in replay mode pre-filled
+   * with this run's runtime_config_overrides + replay_of breadcrumb. */
+  const [replaySpec, setReplaySpec] = React.useState<{
+    replay_of: string;
+    pre_filled_overrides: Record<string, unknown>;
+  } | null>(null);
+  const [replayError, setReplayError] = React.useState<string | null>(null);
+
+  const openReplay = React.useCallback(async (runId: string) => {
+    setReplayError(null);
+    try {
+      const resp = await pluginFetch<{ runtime_config_overrides: Record<string, unknown> }>(
+        `/missions/${encodeURIComponent(missionId)}/runs/${encodeURIComponent(runId)}/overrides`,
+      );
+      setReplaySpec({
+        replay_of: runId,
+        pre_filled_overrides: resp.runtime_config_overrides ?? {},
+      });
+      setShowRunModal(true);
+    } catch (e: any) {
+      setReplayError(e?.message || String(e));
+    }
+  }, [missionId]);
+
+  const closeRunModal = React.useCallback(() => {
+    setShowRunModal(false);
+    setReplaySpec(null);
+  }, []);
 
 
   // Codex P2 round 10: when the route flips from `mission` to `missionRun`
@@ -153,26 +198,77 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
   if (error) return <div className="uh-error">Failed to load mission {missionId}: {error}</div>;
   if (!mission) return <div className="uh-muted">Loading mission…</div>;
 
+  // UH-90: short-circuit per-run artifact tabs when the pinned run is
+  // archived. The per-run dir is gone so the fetch would 404 with code
+  // `archived` — we'd rather show a tailored placeholder before any
+  // network round-trip. The Mission/Verification tabs still render
+  // (they're mission-scoped, not per-run).
+  const pinnedRun = pinnedRunId
+    ? mission.runs?.find((r) => r.run_id === pinnedRunId)
+    : undefined;
+  const pinnedRunArchived = pinnedRun?.archived === true;
+  const isPerRunArtifactTab =
+    tab === "prompt" || tab === "final" || tab === "diff" ||
+    tab === "result" || tab === "events";
+  const showArchivedPane = pinnedRunId !== undefined && pinnedRunArchived && isPerRunArtifactTab;
+
   return (
     <div className="uh-stack">
       <div className="uh-row-between">
         <UI.Button variant="ghost" size="sm" onClick={() => { window.location.hash = buildHash({ view: "overview" }); }}>← Back</UI.Button>
-        <UI.Button onClick={() => setShowRunModal(true)}>Run</UI.Button>
+        <div className="uh-row" style={{ gap: 8 }}>
+          {pinnedRunId ? (
+            <UI.Button variant="outline" onClick={() => openReplay(pinnedRunId)}>Replay this run</UI.Button>
+          ) : null}
+          <UI.Button onClick={() => { setReplaySpec(null); setShowRunModal(true); }}>Run</UI.Button>
+        </div>
       </div>
+      {replayError ? <div className="uh-error">Failed to load replay overrides: {replayError}</div> : null}
+      {!pinnedRunId ? (
+        <RecentRunsPane
+          missionId={missionId}
+          runs={mission.runs ?? []}
+          onReplay={openReplay}
+        />
+      ) : null}
+      {pinnedRunId ? (
+        <div className="uh-breadcrumb" style={{ fontSize: 12, marginBottom: 8 }}>
+          <span className="uh-muted">{missionId}</span>
+          <span className="uh-muted"> › </span>
+          <span className="uh-mono">{pinnedRunId.slice(0, 16)}{pinnedRunId.length > 16 ? "…" : ""}</span>
+          <UI.Button
+            variant="ghost"
+            size="sm"
+            style={{ marginLeft: 12 }}
+            onClick={() => { window.location.hash = buildHash({ view: "mission", missionId }); }}
+          >
+            Back to latest
+          </UI.Button>
+        </div>
+      ) : null}
       <div className="uh-tabs">
         {TABS.map((t) => (
           <button key={t.key} className={"uh-tab" + (tab === t.key ? " is-active" : "")} onClick={() => setTab(t.key)}>{t.label}</button>
         ))}
       </div>
       {tab === "mission" ? <MissionMeta mission={mission} /> : null}
-      {tab === "prompt" ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/prompt`} /> : null}
-      {tab === "final"  ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/final-message`} /> : null}
-      {tab === "diff"   ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/diff`} /> : null}
-      {tab === "result" ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/result`} /> : null}
-      {tab === "events" ? <EventsPane missionId={missionId} runId={pinnedRunId} /> : null}
+      {showArchivedPane ? <ArchivedRunPane runId={pinnedRunId!} /> : (
+        <>
+          {tab === "prompt" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "prompt")} /> : null}
+          {tab === "final"  ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "final-message")} /> : null}
+          {tab === "diff"   ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "diff")} /> : null}
+          {tab === "result" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "result")} /> : null}
+          {tab === "events" ? <EventsPane missionId={missionId} runId={pinnedRunId} /> : null}
+        </>
+      )}
       {tab === "verify" ? <VerificationViewer missionId={missionId} /> : null}
       {showRunModal ? (
-        <RunModal mission={mission} onClose={() => setShowRunModal(false)} />
+        <RunModal
+          mission={mission}
+          onClose={closeRunModal}
+          replay_of={replaySpec?.replay_of}
+          pre_filled_overrides={replaySpec?.pre_filled_overrides}
+        />
       ) : null}
     </div>
   );

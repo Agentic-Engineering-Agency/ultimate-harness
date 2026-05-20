@@ -197,20 +197,24 @@ describe("runHermes with injected runner", () => {
     ].join("\n");
 
     const result = await runHermes(TEST_ROOT, missionPath, {
+      runId: "test-captures",
       runner: staticRunner({ stdout: passedBlock, stderr: "boring warnings\n", exitCode: 0 }),
       collectDiff: fakeDiffCollector,
     });
 
     expect(result.exitCode).toBe(0);
+    expect(result.runId).toBe("test-captures");
     expect(result.stdout).toBe(passedBlock);
     expect(result.stderr).toBe("boring warnings\n");
 
-    expect(await readFile(join(missionDir, "runtime.stdout.log"), "utf-8")).toBe(passedBlock);
-    expect(await readFile(join(missionDir, "runtime.stderr.log"), "utf-8")).toBe("boring warnings\n");
-    expect(await readFile(join(missionDir, "diff.patch"), "utf-8")).toBe(
+    const runDir = join(missionDir, "runs", "test-captures");
+    expect(await readFile(join(runDir, "runtime.stdout.log"), "utf-8")).toBe(passedBlock);
+    expect(await readFile(join(runDir, "runtime.stderr.log"), "utf-8")).toBe("boring warnings\n");
+    expect(await readFile(join(runDir, "diff.patch"), "utf-8")).toBe(
       "diff --git a/x b/x\n@@ -0,0 +1 @@\n+canned\n",
     );
 
+    // UH-82: runtime-result.yaml is mirrored from runDir up to missionDir.
     const resultDoc = parse(await readFile(join(missionDir, "runtime-result.yaml"), "utf-8"));
     expect(resultDoc).toMatchObject({
       schema_version: "uh.runtime-result.v0",
@@ -218,17 +222,17 @@ describe("runHermes with injected runner", () => {
       runtime: "hermes",
       status: "passed",
       exit_code: 0,
-      prompt_path: ".harness/missions/captures/prompt.md",
-      stdout_path: ".harness/missions/captures/runtime.stdout.log",
-      stderr_path: ".harness/missions/captures/runtime.stderr.log",
-      diff_path: ".harness/missions/captures/diff.patch",
+      prompt_path: ".harness/missions/captures/runs/test-captures/prompt.md",
+      stdout_path: ".harness/missions/captures/runs/test-captures/runtime.stdout.log",
+      stderr_path: ".harness/missions/captures/runs/test-captures/runtime.stderr.log",
+      diff_path: ".harness/missions/captures/runs/test-captures/diff.patch",
       errors: [],
     });
     expect(resultDoc.started_at).toBeTypeOf("string");
     expect(resultDoc.finished_at).toBeTypeOf("string");
 
-    // Result file validates against the schema dispatcher.
-    expect(await validateFile(join(missionDir, "runtime-result.yaml"))).toMatchObject({
+    // Result file (per-run copy) validates against the schema dispatcher.
+    expect(await validateFile(join(runDir, "runtime-result.yaml"))).toMatchObject({
       valid: true,
       schema_version: "uh.runtime-result.v0",
     });
@@ -240,6 +244,7 @@ describe("runHermes with injected runner", () => {
     const { missionDir, missionPath } = await writeHarnessMission("nonzero-exit");
 
     const result = await runHermes(TEST_ROOT, missionPath, {
+      runId: "test-nonzero",
       runner: staticRunner({ stdout: "", stderr: "boom\n", exitCode: 42 }),
       collectDiff: fakeDiffCollector,
     });
@@ -261,6 +266,7 @@ describe("runHermes with injected runner", () => {
     const { missionDir, missionPath } = await writeHarnessMission("spawn-error");
 
     const result = await runHermes(TEST_ROOT, missionPath, {
+      runId: "test-spawn-error",
       runner: staticRunner({
         stdout: "",
         stderr: "",
@@ -277,7 +283,8 @@ describe("runHermes with injected runner", () => {
     expect(resultDoc.status).toBe("failed");
     expect(resultDoc.errors).toEqual(["Spawn error: spawn hermes ENOENT"]);
     // The captured stderr.log carries the same error message so reviewers see it on disk.
-    expect(await readFile(join(missionDir, "runtime.stderr.log"), "utf-8")).toContain(
+    const runDir = join(missionDir, "runs", "test-spawn-error");
+    expect(await readFile(join(runDir, "runtime.stderr.log"), "utf-8")).toContain(
       "Spawn error: spawn hermes ENOENT",
     );
   });
@@ -407,6 +414,7 @@ describe("collectHermesSession", () => {
     // Now with real artifacts — the doc must validate.
     const fakeArtifacts = {
       missionDir,
+      runDir: missionDir,
       promptPath: join(missionDir, "prompt.md"),
       runtimeSessionPath: join(missionDir, "runtime-session.yaml"),
       eventsPath: join(missionDir, "events.ndjson"),
@@ -443,6 +451,7 @@ describe("collectHermesSession", () => {
     await mkdir(missionDir, { recursive: true });
     const fakeArtifacts = {
       missionDir,
+      runDir: missionDir,
       promptPath: join(missionDir, "prompt.md"),
       runtimeSessionPath: join(missionDir, "runtime-session.yaml"),
       eventsPath: join(missionDir, "events.ndjson"),
@@ -497,6 +506,7 @@ describe("collectHermesSession", () => {
     await mkdir(missionDir, { recursive: true });
     const fakeArtifacts = {
       missionDir,
+      runDir: missionDir,
       promptPath: join(missionDir, "prompt.md"),
       runtimeSessionPath: join(missionDir, "runtime-session.yaml"),
       eventsPath: join(missionDir, "events.ndjson"),

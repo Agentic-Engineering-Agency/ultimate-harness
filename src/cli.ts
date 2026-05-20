@@ -16,6 +16,8 @@ import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
+import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
+import { assertValidRunId } from "./harness/run-id.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -53,6 +55,7 @@ type RuntimeRunResult = {
   stdout: string;
   stderr: string;
   result?: { status?: string; errors?: string[] };
+  runId?: string;
 };
 type RuntimeDryRunResult = {
   command: string;
@@ -62,16 +65,22 @@ type RuntimeDryRunResult = {
   session_id_passthrough: boolean;
   errors: string[];
 };
+interface RuntimeRunOptions {
+  /** UH-81 — CLI-time runtime_config overrides spread on top of the mission's own overrides. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+  /** UH-82 — explicit per-run id; generated when absent. */
+  runId?: string;
+}
 interface RuntimeWiring {
   dryRun(root: string, missionPath: string): Promise<RuntimeDryRunResult>;
-  run(root: string, missionPath: string): Promise<RuntimeRunResult>;
+  run(root: string, missionPath: string, options?: RuntimeRunOptions): Promise<RuntimeRunResult>;
   surfaceBlocked: boolean;
 }
 const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
-  hermes: { dryRun: dryRunHermes, run: runHermes, surfaceBlocked: false },
-  codex: { dryRun: dryRunCodex, run: runCodex, surfaceBlocked: true },
-  "oh-my-pi": { dryRun: dryRunOhMyPi, run: runOhMyPi, surfaceBlocked: true },
-  "hermes-proxy": { dryRun: dryRunHermesProxy, run: runHermesProxy, surfaceBlocked: true },
+  hermes: { dryRun: dryRunHermes, run: (root, missionPath, opts) => runHermes(root, missionPath, opts), surfaceBlocked: false },
+  codex: { dryRun: dryRunCodex, run: (root, missionPath, opts) => runCodex(root, missionPath, opts), surfaceBlocked: true },
+  "oh-my-pi": { dryRun: dryRunOhMyPi, run: (root, missionPath, opts) => runOhMyPi(root, missionPath, opts), surfaceBlocked: true },
+  "hermes-proxy": { dryRun: dryRunHermesProxy, run: (root, missionPath, opts) => runHermesProxy(root, missionPath, opts), surfaceBlocked: true },
 };
 
 /**
@@ -742,10 +751,25 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
   .option("--force", "Bypass mission capability matching for this runtime")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean }) => {
+  .option(
+    "--runtime-config-overrides <json>",
+    "JSON object of runtime_config overrides applied on top of the mission file (e.g. '{\"model\":\"gpt-5\"}')",
+  )
+  .option("--run-id <id>", "Explicit run id; auto-generated if omitted")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
+
+    if (opts.runId !== undefined) {
+      try {
+        assertValidRunId(opts.runId);
+      } catch (err) {
+        console.error(`[FAIL] ${(err as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
 
     const wiring = RUNTIME_WIRINGS[runtime];
     if (!wiring) {
@@ -763,17 +787,34 @@ missionCmd
       return;
     }
     const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    let extraRuntimeConfigOverrides: Record<string, unknown> | undefined;
+    if (opts.runtimeConfigOverrides !== undefined) {
+      try {
+        extraRuntimeConfigOverrides = parseRuntimeConfigOverridesJson(opts.runtimeConfigOverrides);
+      } catch (e) {
+        console.error(`[BLOCKED] ${(e as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
     console.log(`Running mission: ${filePath}`);
     console.log(`Runtime: ${runtime}`);
+    if (opts.runId) {
+      console.log(`Run id: ${opts.runId}`);
+    }
     if (routing.sandbox) {
       console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
     }
+    if (extraRuntimeConfigOverrides) {
+      const keys = Object.keys(extraRuntimeConfigOverrides);
+      console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
+    }
     console.log("");
-    let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] } };
+    let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] }; runId?: string };
     let uninstallCancelHandler: (() => void) | null = null;
     try {
       uninstallCancelHandler = await installRuntimeCancelledEventHandler(root, filePath, runtime);
-      result = await wiring.run(routing.effectiveRoot, filePath);
+      result = await wiring.run(routing.effectiveRoot, filePath, { extraRuntimeConfigOverrides, runId: opts.runId });
     } catch (err) {
       console.log("[FAIL] mission run error:");
       console.log(`  error: ${(err as Error).message}`);
@@ -781,6 +822,9 @@ missionCmd
       return;
     } finally {
       if (uninstallCancelHandler) uninstallCancelHandler();
+    }
+    if (!opts.runId && result.runId) {
+      console.log(`Run id: ${result.runId}`);
     }
     if (result.stdout) {
       console.log(result.stdout);
@@ -1217,7 +1261,7 @@ function parseScreenshotSize(raw: string | undefined): { width: number; height: 
 }
 
 // uh tui
-program
+const tuiCmd = program
   .command("tui")
   .description("Open the interactive terminal UI (Mission Control)")
   .option("--root <path>", "Root directory (default: cwd)")
@@ -1259,6 +1303,60 @@ program
     });
     child.on("error", (err) => {
       process.stderr.write(`uh tui: failed to spawn bun: ${err.message}\n`);
+      process.exit(1);
+    });
+  });
+
+// uh tui screenshot — UH-51 automated capture pipeline. Boots
+// src/tui/screenshot.tsx with --view / --out / --width / --height flags
+// so docs and CI can grab deterministic per-view frames without needing
+// a real terminal.
+tuiCmd
+  .command("screenshot")
+  .description("Render a single TUI view to ANSI text (CI / docs)")
+  .requiredOption(
+    "--view <name>",
+    "View to capture: overview | missions | sandboxes | workflows",
+  )
+  .option("--out <path>", "Output file path; use `-` or omit for stdout")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--size <cols>x<rows>", "Frame size (default: 120x36)")
+  .action(async (opts: { view: string; out?: string; root?: string; size?: string }) => {
+    const bunCheck = spawnSync("bun", ["--version"], { stdio: "ignore" });
+    if (bunCheck.status !== 0) {
+      process.stderr.write(
+        "uh tui screenshot requires Bun. Install: curl -fsSL https://bun.sh/install | bash\n",
+      );
+      process.exit(1);
+    }
+    const screenshotEntry = fileURLToPath(new URL("../src/tui/screenshot.tsx", import.meta.url));
+    const cwd = opts.root ? path.resolve(opts.root) : process.cwd();
+    const size = parseScreenshotSize(opts.size);
+    const args = [
+      "--preload",
+      "@opentui/solid/preload",
+      screenshotEntry,
+      "--view",
+      opts.view,
+      "--width",
+      String(size.width),
+      "--height",
+      String(size.height),
+    ];
+    if (opts.out) {
+      args.push("--out", opts.out === "-" ? "-" : path.resolve(opts.out));
+    }
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      UH_TUI_ROOT: cwd,
+      UH_TUI_HEADLESS: "1",
+    };
+    const child = spawn("bun", args, { stdio: "inherit", cwd, env });
+    child.on("exit", (code, signal) => {
+      process.exit(signal ? 1 : code ?? 0);
+    });
+    child.on("error", (err) => {
+      process.stderr.write(`uh tui screenshot: failed to spawn bun: ${err.message}\n`);
       process.exit(1);
     });
   });

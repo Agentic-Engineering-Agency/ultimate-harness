@@ -146,65 +146,149 @@ async def test_create_and_run_mission_invokes_uh(client: httpx.AsyncClient, isol
     # dashboard-triggered run into a bound sandbox worktree where artifact
     # persistence would skip the canonical mission directory.
     assert "--no-sandbox" in args
+    # UH-82: the plugin must hand the CLI the same run id it tracked in
+    # _active_runs so both sides write into runs/<run_id>/.
+    assert "--run-id" in args, args
+    assert args[args.index("--run-id") + 1] == body["runId"], args
 
 
 @pytest.mark.asyncio
-async def test_non_empty_overrides_rejected_until_cli_supports_them(
-    client: httpx.AsyncClient, isolated_project: Path,
+async def test_non_empty_overrides_threaded_to_cli(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
 ) -> None:
-    """Codex P1 round 4: silently persisting overrides while running with
-    defaults invalidates experiments. Reject non-empty overrides up-front
-    until the CLI actually consumes them."""
+    """UH-81: the CLI now consumes ``--runtime-config-overrides <json>``, so
+    the plugin must forward the operator-supplied overrides verbatim instead
+    of 400-rejecting them. We assert the JSON-encoded payload lands as a
+    single argv element next to the flag (no shell splitting)."""
+    overrides = {"model": "claude-opus-4.6", "temperature": 0.2}
     resp = await client.post(
         "/api/plugins/uh/missions/demo/run",
-        json={"runtime_config_overrides": {"model": "claude-opus-4.6"}},
-    )
-    assert resp.status_code == 400, resp.text
-    body = resp.json()
-    assert body["code"] == "overrides_not_yet_supported"
-    assert "runtime_config_overrides" in body.get("fields", {})
-
-
-@pytest.mark.asyncio
-async def test_per_run_artifact_marks_response_as_not_run_scoped(
-    client: httpx.AsyncClient, isolated_project: Path,
-) -> None:
-    """Codex P1 round 4: until adapters write per-run subdirectories, the
-    per-run artifact route serves mission-latest. The response must say so
-    explicitly so callers don't misattribute evidence."""
-    final_path = isolated_project / ".harness" / "missions" / "demo" / "runtime-final.txt"
-    final_path.write_text("demo final message\n", encoding="utf-8")
-    resp = await client.get(
-        "/api/plugins/uh/missions/demo/runs/some-run-id/final-message"
+        json={"runtime_config_overrides": overrides},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["is_run_scoped"] is False
-    assert body["requested_run_id"] == "some-run-id"
-    assert body["served_run_id"] == "mission-latest"
-    assert "note" in body
+    assert "runId" in body
+    spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
+    assert spawn_calls, "expected spawn() to be called"
+    args = spawn_calls[0]["args"]
+    assert "--runtime-config-overrides" in args, args
+    idx = args.index("--runtime-config-overrides")
+    assert idx + 1 < len(args), "overrides JSON must follow the flag"
+    payload = args[idx + 1]
+    # Compact JSON encoding — exact byte equality keeps the size cap honest.
+    assert payload == json.dumps(overrides, separators=(",", ":"))
+    # Round-trip parses back to the original dict.
+    assert json.loads(payload) == overrides
+
+
+@pytest.mark.asyncio
+async def test_oversize_overrides_rejected(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """UH-81: the dashboard caps override JSON at 8 KiB (default) so an
+    operator can't shove a megabyte of config into a CLI argv element. The
+    cap is enforced before spawn so the CLI is never invoked on rejection."""
+    # Build a payload whose compact JSON encoding exceeds the 8192-byte cap.
+    # `len(json.dumps({"k0": "x"*N, ...}))` ~= sum of key+value sizes + JSON
+    # overhead; we pad a single value past 8192 bytes for clarity.
+    big_value = "x" * 9000
+    resp = await client.post(
+        "/api/plugins/uh/missions/demo/run",
+        json={"runtime_config_overrides": {"blob": big_value}},
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == "overrides_too_large"
+    spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
+    assert spawn_calls == [], "spawn must not be called on oversize rejection"
+
+
+@pytest.mark.asyncio
+async def test_non_finite_overrides_rejected_before_spawn(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """Codex P2 (PR #95): the dashboard MUST reject NaN/Infinity values in
+    runtime_config_overrides up-front. Python's json.dumps emits them as
+    bare ``NaN`` / ``Infinity`` tokens which Node's JSON.parse — used by the
+    CLI's ``parseRuntimeConfigOverridesJson`` — rejects. Without strict
+    serialization the dashboard would spawn a run that exits 1 immediately,
+    turning a validation problem into a failed run."""
+    # httpx (and most JSON libs) refuse to serialize NaN client-side, but a
+    # caller using requests with allow_nan=True or hand-crafted JSON CAN send
+    # `NaN` as a bare token. FastAPI's request.json() (orjson under the hood,
+    # via _json_body in plugin_api) accepts it as a Python float('nan'). We
+    # simulate that by posting a raw body with the bare token.
+    resp = await client.post(
+        "/api/plugins/uh/missions/demo/run",
+        content=b'{"runtime_config_overrides": {"temperature": NaN}}',
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == "invalid_overrides"
+    assert "non-finite" in body["error"].lower(), body["error"]
+    spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
+    assert spawn_calls == [], "spawn must not be called on non-finite rejection"
+
+
+@pytest.mark.asyncio
+async def test_per_run_artifact_route_honors_run_id(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """UH-82: per-run dirs land under runs/<run_id>/. The route must serve
+    the requested run's file with is_run_scoped: true and the served
+    run_id equal to the requested run_id."""
+    runs_dir = isolated_project / ".harness" / "missions" / "demo" / "runs"
+    (runs_dir / "run-A").mkdir(parents=True, exist_ok=True)
+    (runs_dir / "run-B").mkdir(parents=True, exist_ok=True)
+    (runs_dir / "run-A" / "prompt.md").write_text("A", encoding="utf-8")
+    (runs_dir / "run-B" / "prompt.md").write_text("B", encoding="utf-8")
+
+    resp_a = await client.get("/api/plugins/uh/missions/demo/runs/run-A/prompt")
+    assert resp_a.status_code == 200, resp_a.text
+    body_a = resp_a.json()
+    assert body_a["kind"] == "text"
+    assert body_a["content"] == "A"
+    assert body_a["is_run_scoped"] is True
+    assert body_a["requested_run_id"] == "run-A"
+    assert body_a["served_run_id"] == "run-A"
+
+    resp_b = await client.get("/api/plugins/uh/missions/demo/runs/run-B/prompt")
+    assert resp_b.status_code == 200, resp_b.text
+    body_b = resp_b.json()
+    assert body_b["content"] == "B"
+    assert body_b["served_run_id"] == "run-B"
+
+
+@pytest.mark.asyncio
+async def test_per_run_artifact_route_404_when_run_dir_missing(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """UH-82: an unknown run_id returns 404 not_found, not a stale mirror."""
+    resp = await client.get("/api/plugins/uh/missions/demo/runs/ghost-run/prompt")
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["code"] == "not_found"
 
 
 @pytest.mark.asyncio
 async def test_sse_starts_after_historical_events(
     client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
 ) -> None:
-    """Codex P1 round 5: pre-existing events from a previous run must NOT
-    be replayed on the new run's SSE stream."""
-    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-    # Pre-seed historical events from an earlier run.
-    events_path.write_text(
-        '{"type":"runtime.started","run_id":"old-run"}\n'
-        '{"type":"runtime.finished","run_id":"old-run"}\n',
-        encoding="utf-8",
-    )
-    fake_cli.popen_events_path = events_path
+    """UH-82: per-run dirs put each run's events in its own file, so
+    'historical events from another run' physically can't appear on a
+    fresh run's stream. Still verify the new-run event surfaces."""
     fake_cli.popen_events = ['{"type":"runtime.started","run_id":"new-run"}']
 
     start = await client.post("/api/plugins/uh/missions/demo/run", json={})
     run_id = start.json()["runId"]
     assert fake_cli.last_popen is not None
+    # Wire the FakePopen to the per-run events file the plugin watches.
+    fake_cli.last_popen.events_path = (
+        isolated_project / ".harness" / "missions" / "demo" / "runs" / run_id / "events.ndjson"
+    )
+    # Pre-seed a sibling mission-level events.ndjson; it MUST NOT leak.
+    legacy = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
+    legacy.write_text('{"type":"runtime.started","run_id":"old-run"}\n', encoding="utf-8")
     fake_cli.last_popen.schedule_exit()
 
     async with client.stream("GET", f"/api/plugins/uh/runs/{run_id}/events") as resp:
@@ -212,8 +296,8 @@ async def test_sse_starts_after_historical_events(
         async for chunk in resp.aiter_text():
             chunks.append(chunk)
     body = "".join(chunks)
-    # Old run's events MUST NOT appear in the new run's stream.
-    assert "old-run" not in body, f"historical events replayed: {body!r}"
+    # Legacy mission-level events MUST NOT appear in the new run's stream.
+    assert "old-run" not in body, f"mission-level events leaked: {body!r}"
     # The new run's event MUST appear (the staged one appended on first poll).
     assert "new-run" in body, f"new run event missing: {body!r}"
 
@@ -331,20 +415,21 @@ async def test_byte_offset_captured_before_spawn(
 ) -> None:
     """Codex P1 round 8: the events.ndjson offset MUST be captured BEFORE
     spawn() so events appended by the freshly-spawned child are still
-    visible to the SSE tail (not skipped past)."""
+    visible to the SSE tail (not skipped past). UH-82 widened the path
+    to runs/<run_id>/events.ndjson; the offset is computed there."""
     import plugin_api as _api  # type: ignore[import-not-found]
-    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
+    # Force a deterministic run id so we can target the per-run dir.
+    monkeypatch.setattr(_api, "_make_run_id", lambda: "test-offset-run")
+    events_path = isolated_project / ".harness" / "missions" / "demo" / "runs" / "test-offset-run" / "events.ndjson"
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    # Pre-seed historical events to confirm the offset still skips them.
+    # Pre-seed bytes in the per-run dir to simulate a fast CLI that wrote
+    # the file between stat() and spawn().
     events_path.write_text(
         '{"type":"hist","run_id":"old"}\n',
         encoding="utf-8",
     )
     historical_size = events_path.stat().st_size
 
-    # Hook fake_cli.spawn so it writes one event BEFORE returning the
-    # FakePopen — simulating a fast CLI that appends runtime.started
-    # between stat() and spawn() in start_run.
     real_spawn = fake_cli.spawn
 
     def hooked_spawn(args: list[str], cwd: Path) -> Any:
@@ -413,6 +498,65 @@ async def test_mission_detail_last_run_includes_runId(
 
 
 @pytest.mark.asyncio
+async def test_get_mission_surfaces_runs_index(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """UH-82: GET /missions/{id} surfaces the per-run history from
+    runs/index.json (newest-first, capped at 50) so the frontend can
+    render a run picker without scanning the filesystem itself."""
+    runs_dir = isolated_project / ".harness" / "missions" / "demo" / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    (runs_dir / "index.json").write_text(
+        json.dumps({
+            "schema_version": "uh.runs-index.v0",
+            "runs": [
+                {
+                    "run_id": "run-1",
+                    "started_at": "2026-05-20T12:00:00Z",
+                    "finished_at": "2026-05-20T12:00:30Z",
+                    "status": "passed",
+                    "runtime": "hermes",
+                },
+                {
+                    "run_id": "run-2",
+                    "started_at": "2026-05-20T12:05:00Z",
+                    "finished_at": "2026-05-20T12:05:30Z",
+                    "status": "failed",
+                    "runtime": "codex",
+                },
+                {
+                    "run_id": "run-3",
+                    "started_at": "2026-05-20T12:10:00Z",
+                    "status": "running",
+                    "runtime": "hermes",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    # Also seed a latest.json pointer so last_run_id is surfaced.
+    (isolated_project / ".harness" / "missions" / "demo" / "latest.json").write_text(
+        json.dumps({
+            "schema_version": "uh.latest-run.v0",
+            "run_id": "run-3",
+            "started_at": "2026-05-20T12:10:00Z",
+            "status": "running",
+        }),
+        encoding="utf-8",
+    )
+    resp = await client.get("/api/plugins/uh/missions/demo")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["last_run_id"] == "run-3"
+    runs = body["runs"]
+    assert [r["run_id"] for r in runs] == ["run-3", "run-2", "run-1"]
+    assert runs[0]["status"] == "running"
+    assert runs[0]["runtime"] == "hermes"
+    assert runs[1]["status"] == "failed"
+    assert runs[2]["finished_at"] == "2026-05-20T12:00:30Z"
+
+
+@pytest.mark.asyncio
 async def test_workflows_list_to_detail_roundtrip_via_slug(
     client: httpx.AsyncClient, isolated_project: Path,
 ) -> None:
@@ -430,19 +574,18 @@ async def test_workflows_list_to_detail_roundtrip_via_slug(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_runs_for_same_mission_rejected(
+async def test_concurrent_runs_for_same_mission_accepted(
     client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
 ) -> None:
-    """Codex P1 round 12: starting a second run for a mission that already
-    has a 'running' entry in _active_runs must 409, not silently overwrite
-    the shared mission-scoped artifacts."""
+    """UH-82: per-run artifact directories eliminate the interleave hazard
+    that motivated the previous 409 `run_already_active` guard. Two
+    concurrent runs for the same mission now both succeed with distinct
+    run ids."""
     first = await client.post("/api/plugins/uh/missions/demo/run", json={})
-    assert first.status_code == 200
+    assert first.status_code == 200, first.text
     second = await client.post("/api/plugins/uh/missions/demo/run", json={})
-    assert second.status_code == 409, second.text
-    body = second.json()
-    assert body["code"] == "run_already_active"
-    assert body.get("fields", {}).get("activeRunId") == first.json()["runId"]
+    assert second.status_code == 200, second.text
+    assert first.json()["runId"] != second.json()["runId"]
 
 
 @pytest.mark.asyncio
@@ -637,8 +780,8 @@ async def test_artifact_too_large_returns_413(client: httpx.AsyncClient, isolate
 @pytest.mark.asyncio
 async def test_sse_emits_events_appended_mid_stream(client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any) -> None:
     """Start a run, then have the fake CLI append two events; SSE must surface both."""
-    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
-    fake_cli.popen_events_path = events_path
+    # UH-82: FakePopen now derives the per-run events path from --run-id
+    # in spawn argv (see conftest._derive_per_run_events_path).
     fake_cli.popen_events = [
         json.dumps({"type": "runtime.started"}),
         json.dumps({"type": "runtime.finished", "status": "passed"}),
@@ -699,8 +842,6 @@ async def test_run_timeout_terminates_and_emits_timeout_event(
     (PR #89 finding #2).
     """
     monkeypatch.setattr("plugin_api._RUN_TIMEOUT_S", 0.5)
-    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
-    fake_cli.popen_events_path = events_path
     # Stage one event so the SSE generator's initial "wait for the file"
     # loop returns quickly. We deliberately do NOT call ``schedule_exit``
     # — the FakePopen stays in the running state so the timeout branch
@@ -739,8 +880,6 @@ async def test_start_run_timeout_terminates_even_without_sse(
     ``start_run`` and is independent of any reader (PR #89 finding #1).
     """
     monkeypatch.setattr("plugin_api._RUN_TIMEOUT_S", 0.4)
-    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
-    fake_cli.popen_events_path = events_path
     fake_cli.popen_events = []  # nothing staged — proc just hangs
 
     start = await client.post("/api/plugins/uh/missions/demo/run", json={})
@@ -754,8 +893,11 @@ async def test_start_run_timeout_terminates_even_without_sse(
     assert fake_cli.last_popen.terminated is True
     import plugin_api as _api
     assert _api._active_runs[run_id]["status"] == "timeout"
-    # The watchdog also persists the timeout to events.ndjson so a fresh
-    # SSE reader catching up sees it.
+    # UH-82: the watchdog persists the timeout event to the per-run
+    # events.ndjson so a fresh SSE reader catching up sees it.
+    events_path = (
+        isolated_project / ".harness" / "missions" / "demo" / "runs" / run_id / "events.ndjson"
+    )
     on_disk = events_path.read_text(encoding="utf-8")
     assert "runtime.timeout" in on_disk, on_disk
 

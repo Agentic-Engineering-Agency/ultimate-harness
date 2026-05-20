@@ -16,6 +16,7 @@
  * still drains continuously so we never block the backend.
  */
 import { pluginEventSource, pluginFetch, UI, type MissionSummary, type RunStartResponse } from "./sdk";
+import { replayBannerText, runModalTitle } from "./mission-compare-helpers";
 
 const MAX_EVENTS = 500;
 
@@ -61,12 +62,26 @@ export function RunModal({
   mission,
   onClose,
   initialRunId,
+  pre_filled_overrides,
+  replay_of,
 }: {
   mission: MissionSummary;
   onClose: () => void;
   initialRunId?: string;
+  /** UH-87 — JSON object to pre-load into the overrides textarea. */
+  pre_filled_overrides?: Record<string, unknown>;
+  /** UH-87 — source run id; flips the modal to replay mode (title + banner)
+   * and threads the value into the POST body. */
+  replay_of?: string;
 }) {
-  const [overrides, setOverrides] = React.useState<string>("{}");
+  const [overrides, setOverrides] = React.useState<string>(() => {
+    // UH-87 — pre-seed the textarea from the source run's runtime_config
+    // when launched in replay mode. Indent so operators can read it.
+    if (pre_filled_overrides && Object.keys(pre_filled_overrides).length > 0) {
+      try { return JSON.stringify(pre_filled_overrides, null, 2); } catch { return "{}"; }
+    }
+    return "{}";
+  });
   const [runId, setRunId] = React.useState<string | null>(initialRunId ?? null);
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
@@ -92,7 +107,13 @@ export function RunModal({
       const resp = await pluginFetch<RunStartResponse>(`/missions/${encodeURIComponent(mission.id)}/run`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ runtime_config_overrides: parsed }),
+        body: JSON.stringify({
+          runtime_config_overrides: parsed,
+          // UH-87 — only include `replay_of` when this modal was opened
+          // in replay mode; omitting it keeps fresh runs free of the
+          // lineage breadcrumb and matches the backend's optional schema.
+          ...(replay_of ? { replay_of } : {}),
+        }),
       });
       setRunId(resp.runId);
     } catch (e: any) {
@@ -100,7 +121,7 @@ export function RunModal({
     } finally {
       setSubmitting(false);
     }
-  }, [overrides, mission.id]);
+  }, [overrides, mission.id, replay_of]);
 
   const stop = React.useCallback(async () => {
     if (!runId) return;
@@ -112,10 +133,13 @@ export function RunModal({
     <div className="uh-modal-backdrop" onClick={onClose}>
       <div className="uh-modal" onClick={(e: any) => e.stopPropagation()}>
         <div className="uh-row-between">
-          <strong>Run {mission.id}</strong>
+          <strong>{runModalTitle(mission.id, replay_of)}</strong>
           <UI.Button variant="ghost" size="sm" onClick={onClose}>Close</UI.Button>
         </div>
         <div className="uh-muted">{mission.name} · workflow: {mission.workflow_profile}</div>
+        {replay_of ? (
+          <div className="uh-replay-banner">{replayBannerText(replay_of)}</div>
+        ) : null}
         {!runId ? (
           <div className="uh-stack">
             <UI.Label>runtime_config_overrides (JSON)</UI.Label>
@@ -124,13 +148,8 @@ export function RunModal({
               value={overrides}
               onChange={(e: any) => setOverrides(e.target.value)}
               spellCheck={false}
-              placeholder='{} — overrides are not yet applied by the CLI; leave empty.'
+              placeholder='{}'
             />
-            <div className="uh-muted" style={{ fontSize: 11 }}>
-              ⚠ Non-empty overrides are rejected by the backend until the
-              CLI grows real <code>--runtime-config-overrides</code> support
-              (UH-64 follow-up).
-            </div>
             {error ? <div className="uh-error">{error}</div> : null}
             <div className="uh-row" style={{ justifyContent: "flex-end" }}>
               <UI.Button variant="outline" onClick={onClose} disabled={submitting}>Cancel</UI.Button>

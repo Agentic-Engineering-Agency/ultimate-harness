@@ -11,6 +11,14 @@ import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
 import { auditLog, workflowsDir } from "../harness/paths.js";
 import {
+  appendRunsIndexEntry,
+  ensureRunDir,
+  generateRunId,
+  mirrorRuntimeResultToLatest,
+  writeLatestPointer,
+} from "../harness/run-id.js";
+import type { RunStatus } from "../schema/runs.js";
+import {
   RuntimeSessionDocument,
   RuntimeResultDocument,
   RuntimeResultStatus,
@@ -25,9 +33,11 @@ import { captureDiffWithUntracked } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
 import { buildDispatchContext } from "../harness/dispatch-context.js";
 import { renderPrompt } from "../harness/render-prompt.js";
+import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides.js";
 
 type MissionArtifactContext = {
   missionDir: string;
+  runDir: string;
   promptPath: string;
   runtimeSessionPath: string;
   eventsPath: string;
@@ -103,10 +113,21 @@ export interface DiffCaptureResult {
 
 export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
 
+export interface PlanCodexOptions {
+  /** UH-81 — CLI-time overrides spread on top of mission.runtime_config_overrides. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+  /** UH-82 — explicit per-run id; generated when absent. */
+  runId?: string;
+}
+
 export interface RunCodexOptions {
   runner?: CodexRunner;
   timeoutMs?: number;
   collectDiff?: DiffCollector;
+  /** UH-81 — forwarded into the planner so the merge happens before strict-parse. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+  /** Explicit per-run id; generated when absent. UH-82. */
+  runId?: string;
 }
 
 export interface RunCodexResult {
@@ -114,6 +135,8 @@ export interface RunCodexResult {
   stdout: string;
   stderr: string;
   result?: RuntimeResultDocument;
+  /** UH-82 — id of the per-run artifact directory written. */
+  runId: string;
 }
 
 export interface CodexCollectInput {
@@ -212,8 +235,9 @@ export async function checkCodex(root?: string): Promise<CheckResult> {
 
 export async function dryRunCodex(root: string, missionPath: string): Promise<DryRunResult> {
   try {
-    const plan = await planCodexRun(root, missionPath);
-    const artifacts = await getMissionArtifactContext(root, missionPath);
+    const runId = generateRunId();
+    const plan = await planCodexRun(root, missionPath, { runId });
+    const artifacts = await getMissionArtifactContext(root, missionPath, runId);
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
         schema_version: "uh.runtime-session.v0",
@@ -250,8 +274,9 @@ export async function dryRunCodex(root: string, missionPath: string): Promise<Dr
  * recoverable issues (missing workflow profile) are returned in `errors[]`
  * so the caller decides whether to proceed.
  */
-export async function planCodexRun(root: string, missionPath: string): Promise<CodexRunPlan> {
+export async function planCodexRun(root: string, missionPath: string, options: PlanCodexOptions = {}): Promise<CodexRunPlan> {
   const errors: string[] = [];
+  const runId = options.runId ?? generateRunId();
   const adapter = await loadAdapterConfig(root, "codex");
 
   let mission: MissionDocument;
@@ -266,9 +291,12 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
   // UH-33: merge mission-level runtime_config_overrides on top of the
   // adapter manifest defaults, then strict-parse via the per-runtime
   // schema so UH-26 typo safety extends to mission overrides.
+  // UH-81: `options.extraRuntimeConfigOverrides` is the CLI-time
+  // `--runtime-config-overrides <json>` payload; it wins over the
+  // mission file (later spread = higher precedence).
   const mergedRuntimeConfig = {
     ...(adapter.config?.runtime_config ?? {}),
-    ...mission.runtime_config_overrides,
+    ...mergeRuntimeConfigOverrides(mission, options.extraRuntimeConfigOverrides),
   };
   let runtimeConfig;
   try {
@@ -302,7 +330,7 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
   // without an explicit flag (verified against codex-cli 0.130.0, UH-30).
   void runtimeConfig.approval_policy;
   // runtimeConfig.full_auto_compat is validated by schema; not yet consumed (reserved for legacy Codex builds).
-  const finalMessagePath = await resolveFinalMessagePath(root, missionPath);
+  const finalMessagePath = await resolveFinalMessagePath(root, missionPath, runId);
 
   const prompt = renderPrompt(buildDispatchContext(mission, workflow));
   const args = [
@@ -398,15 +426,31 @@ export async function runCodex(
   missionPath: string,
   options: RunCodexOptions = {},
 ): Promise<RunCodexResult> {
-  const plan = await planCodexRun(root, missionPath);
+  const runId = options.runId ?? generateRunId();
+  const plan = await planCodexRun(root, missionPath, {
+    extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides,
+    runId,
+  });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
 
-  const artifacts = await getMissionArtifactContext(root, missionPath);
   const startedAt = new Date().toISOString();
+  const artifacts = await getMissionArtifactContext(root, missionPath, runId);
 
   if (artifacts) {
+    await writeLatestPointer(root, plan.mission.id, {
+      schema_version: "uh.latest-run.v0",
+      run_id: runId,
+      started_at: startedAt,
+      status: "running",
+    });
+    await appendRunsIndexEntry(root, plan.mission.id, {
+      run_id: runId,
+      started_at: startedAt,
+      status: "running",
+      runtime: "codex",
+    });
     await persistPromptAndSession(artifacts, plan.prompt, {
       schema_version: "uh.runtime-session.v0",
       mission_id: plan.mission.id,
@@ -423,6 +467,7 @@ export async function runCodex(
       mission_id: plan.mission.id,
       command: plan.command,
       args: plan.args,
+      run_id: runId,
     });
   }
 
@@ -436,6 +481,7 @@ export async function runCodex(
       mission_id: plan.mission.id,
       mission_name: plan.mission.name,
       workflow: plan.mission.workflow_profile,
+      run_id: runId,
     });
     await appendFile(logPath, `${auditEntry}\n`, "utf-8");
   } catch {
@@ -443,33 +489,73 @@ export async function runCodex(
   }
 
   const runner = options.runner ?? defaultCodexRunner;
-  const runnerResult = await runner({
-    command: plan.command,
-    args: plan.args,
-    cwd: root,
-    timeoutMs: options.timeoutMs,
-  });
+  let runnerResult: CodexRunnerOutput;
+  let collection: CodexCollectOutput;
+  try {
+    runnerResult = await runner({
+      command: plan.command,
+      args: plan.args,
+      cwd: root,
+      timeoutMs: options.timeoutMs,
+    });
 
-  const collectDiff = options.collectDiff ?? defaultDiffCollector;
-  const diff = await collectDiff(root);
-  const finishedAt = new Date().toISOString();
+    const collectDiff = options.collectDiff ?? defaultDiffCollector;
+    const diff = await collectDiff(root);
+    const finishedAt = new Date().toISOString();
 
-  const collection = await collectCodexSession({
-    root,
-    artifacts,
-    plan,
-    startedAt,
-    finishedAt,
-    runnerResult,
-    diff,
-  });
+    collection = await collectCodexSession({
+      root,
+      artifacts,
+      plan,
+      startedAt,
+      finishedAt,
+      runnerResult,
+      diff,
+    });
+  } finally {
+    if (artifacts) {
+      try {
+        await mirrorRuntimeResultToLatest(root, plan.mission.id, runId);
+      } catch {
+        // best-effort mirror.
+      }
+    }
+  }
+
+  if (artifacts) {
+    const finishedAt = new Date().toISOString();
+    const terminalStatus = deriveCodexRunStatus(collection.result, collection.exitCode);
+    await writeLatestPointer(root, plan.mission.id, {
+      schema_version: "uh.latest-run.v0",
+      run_id: runId,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      status: terminalStatus,
+    });
+    await appendRunsIndexEntry(root, plan.mission.id, {
+      run_id: runId,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      status: terminalStatus,
+      runtime: "codex",
+    });
+  }
 
   return {
     exitCode: collection.exitCode,
     stdout: runnerResult.stdout,
     stderr: collection.stderr,
     result: collection.result,
+    runId,
   };
+}
+
+function deriveCodexRunStatus(
+  result: RuntimeResultDocument | undefined,
+  exitCode: number,
+): RunStatus {
+  if (result?.status) return result.status;
+  return exitCode === 0 ? "blocked" : "failed";
 }
 
 /**
@@ -643,8 +729,8 @@ export function detectCodexQuotaError(stdout: string, stderr: string): string | 
   return `Codex usage quota exhausted${detail}`;
 }
 
-async function resolveFinalMessagePath(root: string, missionPath: string): Promise<string> {
-  const artifacts = await getMissionArtifactContext(root, missionPath);
+async function resolveFinalMessagePath(root: string, missionPath: string, runId: string): Promise<string> {
+  const artifacts = await getMissionArtifactContext(root, missionPath, runId);
   if (artifacts) return artifacts.finalMessagePath;
   return path.join(path.resolve(root), ".harness", "runtime-final.txt");
 }
@@ -674,7 +760,7 @@ async function persistFinalMessage(
   );
 }
 
-async function getMissionArtifactContext(root: string, missionPath: string): Promise<MissionArtifactContext | null> {
+async function getMissionArtifactContext(root: string, missionPath: string, runId: string): Promise<MissionArtifactContext | null> {
   const rootResolved = path.resolve(root);
   const missionsRoot = path.join(rootResolved, ".harness", "missions");
   const resolvedMissionPath = path.isAbsolute(missionPath)
@@ -713,16 +799,19 @@ async function getMissionArtifactContext(root: string, missionPath: string): Pro
     throw new Error(`Refusing to persist artifacts into non-directory mission path: ${missionDir}`);
   }
 
+  const runDir = await ensureRunDir(rootResolved, parts[0], runId);
+
   const context: MissionArtifactContext = {
     missionDir,
-    promptPath: path.join(missionDir, "prompt.md"),
-    runtimeSessionPath: path.join(missionDir, "runtime-session.yaml"),
-    eventsPath: path.join(missionDir, "events.ndjson"),
-    stdoutPath: path.join(missionDir, "runtime.stdout.log"),
-    stderrPath: path.join(missionDir, "runtime.stderr.log"),
-    diffPath: path.join(missionDir, "diff.patch"),
-    runtimeResultPath: path.join(missionDir, "runtime-result.yaml"),
-    finalMessagePath: path.join(missionDir, "runtime-final.txt"),
+    runDir,
+    promptPath: path.join(runDir, "prompt.md"),
+    runtimeSessionPath: path.join(runDir, "runtime-session.yaml"),
+    eventsPath: path.join(runDir, "events.ndjson"),
+    stdoutPath: path.join(runDir, "runtime.stdout.log"),
+    stderrPath: path.join(runDir, "runtime.stderr.log"),
+    diffPath: path.join(runDir, "diff.patch"),
+    runtimeResultPath: path.join(runDir, "runtime-result.yaml"),
+    finalMessagePath: path.join(runDir, "runtime-final.txt"),
   };
 
   for (const artifactPath of [

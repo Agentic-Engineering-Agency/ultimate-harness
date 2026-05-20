@@ -26,6 +26,7 @@ const GLOBAL_ENTRIES: KeymapEntry[] = [
   { keys: ["?"], action: "Toggle this overlay" },
   { keys: ["q"], action: "Quit (restores terminal)" },
   { keys: ["Ctrl+C"], action: "Force-quit" },
+  { keys: ["Ctrl+Z"], action: "Suspend to shell (resume with `fg`)" },
 ];
 
 const DASHBOARD_ENTRIES: KeymapEntry[] = [
@@ -52,6 +53,7 @@ const MISSION_DETAIL_ENTRIES: KeymapEntry[] = [
   { keys: ["R"], action: "Run this mission" },
   { keys: ["S"], action: "Stop active run (sends SIGTERM)" },
   { keys: ["L"], action: "Toggle live-events panel" },
+  { keys: ["e"], action: "Open current manifest in $EDITOR" },
 ];
 
 export function keymapForView(view: ViewId): KeymapSection[] {
@@ -69,5 +71,5 @@ export function footerHint(view: ViewId): string {
   if (view === "dashboard") {
     return "a/m/s focus · Tab cycle · Enter detail · R run · c check · n new · d discard · r refresh · ? help · q quit";
   }
-  return "j/k or arrows · Enter focus viewer · Tab swap · g/Shift+G top/bottom · R run · S stop · L live · Esc back · ? help · q quit";
+  return "j/k or arrows · Enter focus viewer · Tab swap · g/Shift+G top/bottom · R run · S stop · L live · e edit · Esc back · ? help · q quit";
 }

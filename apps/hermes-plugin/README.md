@@ -1,6 +1,6 @@
 # Hermes Dashboard Plugin for Ultimate Harness
 
-Drop-in extension for the [Hermes Agent dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) that exposes UH end-to-end from the web UI: adapter health, mission list, mission run trigger + live event tail, artifact drilldown (prompt / final message / diff / runtime-result / events / verification), workflow viewer + editor, mission wizard, and a `sessions:bottom` slot that deep-links Hermes sessions back to their UH missions.
+Drop-in extension for the [Hermes Agent dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) that exposes UH end-to-end from the web UI: adapter health, mission list, mission run trigger + live event tail, artifact drilldown (prompt / final message / diff / runtime-result / events / verification), a sortable Recent runs pane with status-chip + run_id prefix filters that deep-links into per-run artifacts, workflow viewer + editor, mission wizard, and a `sessions:bottom` slot that deep-links Hermes sessions back to their UH missions.
 
 ## Install (one-liner)
 
@@ -65,3 +65,12 @@ apps/hermes-plugin/
 | `UH_READ_TIMEOUT_S` | `30` | Timeout (seconds) for read commands (`uh adapter check`, etc.). |
 | `UH_RUN_TIMEOUT_S` | `3600` | Timeout for `uh mission run`. |
 | `UH_MAX_ARTIFACT_BYTES` | `5242880` (5 MB) | Cap on artifact bodies served to the UI. Larger files return HTTP 413. |
+| `UH_MAX_OVERRIDES_JSON_BYTES` | `8192` | Cap on the `runtime_config_overrides` JSON forwarded to `uh mission run`. |
+
+### Manifest `config` block
+
+`apps/hermes-plugin/dashboard/manifest.json` exposes a `config` object the dashboard reads at plugin-load:
+
+| Key | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `max_runs_per_mission` | `int \| null` | `null` (unlimited) | Retention cap (UH-90). Before each new run the plugin prunes oldest per-run dirs back to this many; the `runs/index.json` entries persist with `archived: true` so the audit trail survives. `0` is treated as `null` (unlimited) with a load-time warning. JSON has no comments, so the cap is documented here. |

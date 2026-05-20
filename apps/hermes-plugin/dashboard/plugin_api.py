@@ -32,7 +32,9 @@ import asyncio
 import json
 import os
 import re
+import logging
 import shutil
+import tempfile
 import subprocess
 import time
 import uuid
@@ -55,6 +57,40 @@ _UH_PROJECT_ROOT_ENV = "UH_PROJECT_ROOT"
 _READ_TIMEOUT_S = float(os.environ.get("UH_READ_TIMEOUT_S", "30"))
 _RUN_TIMEOUT_S = float(os.environ.get("UH_RUN_TIMEOUT_S", "3600"))
 _MAX_ARTIFACT_BYTES = int(os.environ.get("UH_MAX_ARTIFACT_BYTES", str(5 * 1024 * 1024)))
+_MAX_OVERRIDES_JSON_BYTES = int(os.environ.get("UH_MAX_OVERRIDES_JSON_BYTES", "8192"))
+
+# UH-90 — retention. Cap is read once at module import from the plugin's
+# `manifest.json` ("config.max_runs_per_mission"). `None` = unlimited (no
+# prune). Non-positive values fall back to None with a logged warning so a
+# misconfigured manifest doesn't accidentally wipe history. Tests rebind
+# this at module scope, mirroring the `_RUN_TIMEOUT_S` pattern.
+_logger = logging.getLogger(__name__)
+
+
+def _load_max_runs_per_mission() -> Optional[int]:
+    manifest_path = Path(__file__).resolve().parent / "manifest.json"
+    try:
+        with manifest_path.open("r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    config = manifest.get("config") if isinstance(manifest, dict) else None
+    if not isinstance(config, dict):
+        return None
+    raw = config.get("max_runs_per_mission")
+    if raw is None:
+        return None
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0:
+        _logger.warning(
+            "UH-90: ignoring manifest max_runs_per_mission=%r (must be a "
+            "positive integer); treating as unlimited.",
+            raw,
+        )
+        return None
+    return raw
+
+
+_MAX_RUNS_PER_MISSION: Optional[int] = _load_max_runs_per_mission()
 
 _ERROR_JSON_SHAPE = {"error", "code", "stderr"}
 
@@ -489,6 +525,44 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
         except yaml.YAMLError:
             pass
     summary.setdefault("status", "draft")
+    # UH-82: surface the per-run history from runs/index.json so the
+    # frontend can render a run picker / timeline without scanning the
+    # filesystem itself. Cap at 50 newest-first to keep the response
+    # bounded; consumers needing more can paginate via a future endpoint.
+    runs_list: list[dict[str, Any]] = []
+    runs_index_path = mission_dir / "runs" / "index.json"
+    if runs_index_path.is_file():
+        try:
+            idx = json.loads(runs_index_path.read_text(encoding="utf-8"))
+            if isinstance(idx, dict) and isinstance(idx.get("runs"), list):
+                for entry in idx["runs"]:
+                    if not isinstance(entry, dict):
+                        continue
+                    runs_list.append({
+                        "run_id": str(entry.get("run_id") or ""),
+                        "started_at": str(entry.get("started_at") or ""),
+                        "finished_at": entry.get("finished_at"),
+                        "status": str(entry.get("status") or ""),
+                        "runtime": entry.get("runtime"),
+                        # UH-90: surface the retention flag so the frontend
+                        # can render an "archived" badge and short-circuit
+                        # artifact fetches for pruned runs.
+                        "archived": entry.get("archived") is True,
+                    })
+        except (OSError, ValueError):
+            # Corrupt index: omit; caller still gets summary + last_run.
+            pass
+    # Newest first; cap at 50.
+    runs_list = list(reversed(runs_list))[:50]
+    # UH-82: if latest.json exists, surface its run_id alongside last_run.
+    latest_pointer_path = mission_dir / "latest.json"
+    if latest_pointer_path.is_file():
+        try:
+            pointer = json.loads(latest_pointer_path.read_text(encoding="utf-8"))
+            if isinstance(pointer, dict) and pointer.get("run_id"):
+                summary.setdefault("last_run_id", str(pointer["run_id"]))
+        except (OSError, ValueError):
+            pass
     return {
         **summary,
         "id": mission_id,
@@ -506,6 +580,7 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
         ],
         "capabilities": [str(c) for c in (doc.get("capabilities") or [])],
         "raw": raw,
+        "runs": runs_list,
     }
 
 
@@ -515,6 +590,80 @@ async def list_runs(limit: int = 20) -> dict[str, list[dict[str, Any]]]:
     return {"runs": _scan_runs(_project_root(), limit=limit)}
 
 
+# ---------------------------------------------------------------------------
+# UH-90 — retention. Python mirror of src/harness/run-id.ts:pruneOldRuns.
+# Both sides exist on purpose: the TS pruner is for `uh validate --repair`
+# (future CLI knob, currently dormant), the Python one is for the plugin's
+# start_run path so we don't shell out to the CLI just to drop directories.
+# ---------------------------------------------------------------------------
+
+
+def _prune_old_runs(root: Path, mission_id: str, max_runs: int) -> int:
+    """Mark the N oldest non-archived entries as archived and rm -rf their
+    per-run dirs. Returns the count actually pruned (0 if cap not exceeded
+    or there is no index yet). Idempotent on repeated invocation.
+
+    Mirrors the TS pruner exactly:
+      * `max_runs` must be a positive integer; non-positive throws.
+      * Already-archived entries don't count against the cap.
+      * Sort by started_at ASC, tie-break on run_id, slice oldest.
+      * Atomic index rewrite via tempfile + os.replace.
+    """
+    if not isinstance(max_runs, int) or isinstance(max_runs, bool) or max_runs <= 0:
+        raise ValueError("max_runs_per_mission must be a positive integer or null")
+    index_path = _harness(root) / "missions" / mission_id / "runs" / "index.json"
+    try:
+        with index_path.open("r", encoding="utf-8") as fh:
+            current = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(current, dict) or not isinstance(current.get("runs"), list):
+        return 0
+    runs: list[dict[str, Any]] = [r for r in current["runs"] if isinstance(r, dict)]
+    non_archived = [r for r in runs if r.get("archived") is not True]
+    if len(non_archived) <= max_runs:
+        return 0
+    oldest_first = sorted(
+        non_archived,
+        key=lambda r: (str(r.get("started_at") or ""), str(r.get("run_id") or "")),
+    )
+    prune_count = len(non_archived) - max_runs
+    to_prune = oldest_first[:prune_count]
+    archived_ids = {str(r.get("run_id") or "") for r in to_prune}
+    for entry in runs:
+        if str(entry.get("run_id") or "") in archived_ids:
+            entry["archived"] = True
+    current["runs"] = runs
+    # Best-effort per-run dir removal. shutil.rmtree with ignore_errors=True
+    # converges on a partial-prior-failure state.
+    runs_dir = _harness(root) / "missions" / mission_id / "runs"
+    for entry in to_prune:
+        run_id = str(entry.get("run_id") or "")
+        if not run_id:
+            continue
+        shutil.rmtree(runs_dir / run_id, ignore_errors=True)
+    # Atomic write via tempfile + os.replace. Unique tmp name avoids the
+    # same writer-collision class the TS appendRunsIndexEntry fixed in
+    # PR #96.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix="index.", suffix=".tmp", dir=str(index_path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_fh:
+            json.dump(current, tmp_fh, indent=2)
+        os.replace(tmp_name, index_path)
+    except Exception:
+        # If anything below mkstemp failed, clean up the staging file so
+        # we don't leak it; os.replace already removes its source on
+        # success.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    return prune_count
+
+
 @router.post("/missions/{mission_id}/run")
 async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     _safe_id(mission_id, "mission_id")
@@ -522,49 +671,100 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     overrides = body.get("runtime_config_overrides") or {}
     if not isinstance(overrides, dict):
         raise _err(400, "invalid_overrides", "runtime_config_overrides must be an object")
-    # Codex P1 round 4: a previous attempt persisted overrides to a sidecar
-    # file but the CLI never consumed them, so operators could start runs
-    # with overrides that were silently dropped — invalidating experiments.
-    # The honest move until the CLI grows real support is to reject
-    # non-empty overrides up-front so the operator sees the gap, not a
-    # silent miscompare.
+    # UH-87: optional `replay_of` records the source run id whose
+    # overrides + prompt the operator lifted. The new run executes
+    # identically to a fresh run — `replay_of` is pure lineage metadata
+    # surfaced in runs/index.json. Validated through _safe_id so a
+    # forged run_id can't escape into the index payload.
+    replay_of_raw = body.get("replay_of")
+    replay_of: Optional[str] = None
+    if replay_of_raw is not None:
+        if not isinstance(replay_of_raw, str):
+            raise _err(400, "invalid_replay_of", "replay_of must be a string")
+        _safe_id(replay_of_raw, "replay_of")
+        replay_of = replay_of_raw
+    # UH-81 (shipped): the CLI now consumes `--runtime-config-overrides <json>`
+    # and threads the parsed object through all four adapter planners on top
+    # of `mission.runtime_config_overrides`. We forward the JSON-encoded
+    # overrides as a single argv element; Popen is invoked with a list (no
+    # shell), so embedded quotes/spaces are safe.
+    overrides_arg: str | None = None
     if overrides:
-        raise _err(
-            400,
-            "overrides_not_yet_supported",
-            "runtime_config_overrides are not yet applied by the CLI; remove the overrides block and re-run.",
-            fields={"runtime_config_overrides": "Not yet supported. Tracked in UH-64 follow-up."},
-        )
+        # Codex P2 (PR #95): strict-finite JSON only. Python's json.dumps
+        # accepts NaN/Infinity by default and emits them as bare tokens
+        # (e.g. `{"temperature":NaN}`), which Node's JSON.parse — used by
+        # parseRuntimeConfigOverridesJson on the CLI side — rejects. Without
+        # allow_nan=False the dashboard would happily spawn the run and the
+        # CLI would then exit 1 with [BLOCKED] invalid JSON. Reject up-front
+        # with a 400 so the operator sees the validation error in the UI.
+        try:
+            overrides_arg = json.dumps(overrides, separators=(",", ":"), allow_nan=False)
+        except ValueError as exc:
+            raise _err(
+                400,
+                "invalid_overrides",
+                f"runtime_config_overrides contains non-finite numeric values: {exc}",
+                fields={"runtime_config_overrides": "NaN / Infinity not allowed"},
+            ) from exc
+        if len(overrides_arg.encode("utf-8")) > _MAX_OVERRIDES_JSON_BYTES:
+            raise _err(
+                400,
+                "overrides_too_large",
+                f"runtime_config_overrides JSON exceeds {_MAX_OVERRIDES_JSON_BYTES} bytes; "
+                "trim the override block or raise UH_MAX_OVERRIDES_JSON_BYTES.",
+                fields={"runtime_config_overrides": "too large"},
+            )
 
     root = _project_root()
     mission_yaml = _harness(root) / "missions" / mission_id / "mission.yaml"
     if not mission_yaml.is_file():
         raise _err(404, "not_found", f"mission {mission_id} not found")
-
-    # Codex P1 round 12: artifacts (events.ndjson, runtime-result.yaml) are
-    # mission-scoped, not per-run. Two concurrent runs for the same mission
-    # would interleave writes and corrupt evidence. Reject up-front with
-    # 409 Conflict until per-run artifact directories land (UH-63 follow-up).
-    for existing_run_id, existing in _active_runs.items():
-        if existing.get("missionId") == mission_id and existing.get("status") == "running":
-            raise _err(
-                409,
-                "run_already_active",
-                f"mission {mission_id} already has an active run ({existing_run_id}); "
-                "cancel it or wait for completion before starting another.",
-                fields={"activeRunId": existing_run_id},
-            )
-
+    # UH-90 — retention prune. Run before generating the new run_id so the
+    # pruner sees only previously-recorded runs; dynamic read mirrors the
+    # `_RUN_TIMEOUT_S` pattern so tests can monkeypatch the cap after import.
+    import sys as _sys_uh90
+    cap = getattr(_sys_uh90.modules[__name__], "_MAX_RUNS_PER_MISSION", None)
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+        try:
+            _prune_old_runs(root, mission_id, cap)
+        except (OSError, ValueError) as exc:  # pragma: no cover — fail-soft
+            _logger.warning("UH-90: prune failed for mission %s: %s", mission_id, exc)
     run_id = _make_run_id()
+    # UH-82: per-run artifact directories eliminate the interleave hazard
+    # that motivated the previous 409 `run_already_active` guard. The
+    # plugin now passes `--run-id <id>` to the CLI so both sides agree on
+    # a single `runs/<run_id>/` directory per run.
     # Codex P1 round 3: the CLI takes a mission file PATH, not the id slug.
     # Codex P1 round 13: pass --no-sandbox so the run doesn't get rerouted
     # into a sandbox worktree. The dashboard's spawn semantic is "run THIS
     # mission against THIS root"; sandbox routing would skip artifact
     # persistence in the canonical mission dir, leaving the plugin with no
     # events / runtime-result to surface.
-    args = ["mission", "run", str(mission_yaml), "--root", str(root), "--no-sandbox"]
+    args = [
+        "mission", "run", str(mission_yaml),
+        "--root", str(root),
+        "--no-sandbox",
+        "--run-id", run_id,
+    ]
+    if overrides_arg is not None:
+        args.extend(["--runtime-config-overrides", overrides_arg])
     started_iso = datetime.now(tz=timezone.utc).isoformat()
-    events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
+    if replay_of is not None:
+        # Pre-populate the runs/index.json row with the replay_of
+        # breadcrumb BEFORE the adapter writes its own running row. The
+        # adapter's `appendRunsIndexEntry` preserves replay_of when it
+        # replaces an existing row by run_id (see run-id.ts).
+        _append_runs_index_row(
+            root,
+            mission_id,
+            {
+                "run_id": run_id,
+                "started_at": started_iso,
+                "status": "running",
+                "replay_of": replay_of,
+            },
+        )
+    events_path = _harness(root) / "missions" / mission_id / "runs" / run_id / "events.ndjson"
     # Codex P1 round 8: capture the events.ndjson byte offset BEFORE spawning
     # the child process. If we snapshot after spawn, a fast CLI can append
     # the first events (runtime.started) between spawn() and stat(), and the
@@ -713,7 +913,7 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
     if info is None:
         raise _err(404, "not_found", f"run {run_id} not tracked")
     mission_id = info["missionId"]
-    events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
+    events_path = _harness(root) / "missions" / mission_id / "runs" / run_id / "events.ndjson"
 
     async def gen() -> AsyncIterator[bytes]:
         # Stream the existing tail first, then poll for additions until the
@@ -804,24 +1004,33 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
 # ---- artifact endpoints (UH-63) --------------------------------------------
 
 
-def _artifact_response(mission_id: str, filename: str) -> dict[str, Any]:
-    _safe_id(mission_id, "mission_id")
-    mission_dir = _harness(_project_root()) / "missions" / mission_id
-    candidate = mission_dir / filename
-    # Codex P2 round 13: artifact paths must stay inside the mission
+def _artifact_response_at(base: Path, filename: str) -> dict[str, Any]:
+    """Bounded reader for an artifact at `<base>/<filename>`.
+
+    Refuses to follow symlinks or paths that resolve outside `base`. Used
+    by both the mission-level `/missions/{id}/<kind>` routes (UH-63) and
+    the per-run `/missions/{id}/runs/{run_id}/<kind>` routes (UH-82).
+    """
+    candidate = base / filename
+    # Codex P2 round 13: artifact paths must stay inside the bound base
     # directory. A symlinked artifact (e.g. prompt.md -> /etc/passwd) would
     # otherwise be followed by _read_text and disclosed via the dashboard.
-    # Reject symlinks AND resolve-and-bound-check the final path.
     if candidate.exists() and candidate.is_symlink():
         raise _err(400, "symlink_artifact", f"artifact {filename} is a symlink; refusing to read")
     try:
         resolved = candidate.resolve(strict=False)
-        mission_resolved = mission_dir.resolve(strict=False)
+        base_resolved = base.resolve(strict=False)
     except OSError as exc:
         raise _err(500, "io_error", f"cannot resolve artifact path: {exc}") from exc
-    if mission_resolved not in resolved.parents and resolved != mission_resolved:
-        raise _err(400, "path_escape", f"artifact {filename} resolves outside mission directory")
+    if base_resolved not in resolved.parents and resolved != base_resolved:
+        raise _err(400, "path_escape", f"artifact {filename} resolves outside base directory")
     return _read_text(candidate)
+
+
+def _artifact_response(mission_id: str, filename: str) -> dict[str, Any]:
+    _safe_id(mission_id, "mission_id")
+    mission_dir = _harness(_project_root()) / "missions" / mission_id
+    return _artifact_response_at(mission_dir, filename)
 
 
 @router.get("/missions/{mission_id}/prompt")
@@ -849,6 +1058,194 @@ async def get_mission_events(mission_id: str) -> dict[str, Any]:
     return _artifact_response(mission_id, "events.ndjson")
 
 
+def _run_is_archived(root: Path, mission_id: str, run_id: str) -> bool:
+    """Look up `run_id` in `runs/index.json` and return True iff the entry
+    is marked `archived: true`. Used by the per-run artifact route to
+    distinguish UH-90 retention pruning from a genuinely missing run."""
+    index_path = _harness(root) / "missions" / mission_id / "runs" / "index.json"
+    try:
+        with index_path.open("r", encoding="utf-8") as fh:
+            idx = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(idx, dict) or not isinstance(idx.get("runs"), list):
+        return False
+    for entry in idx["runs"]:
+        if isinstance(entry, dict) and entry.get("run_id") == run_id:
+            return entry.get("archived") is True
+    return False
+# ---- compare + replay (UH-87 / UH-89) --------------------------------------
+
+
+_COMPARE_EVENTS_CAP = 500
+
+
+def _read_text_or_none(base: Path, filename: str) -> Optional[str]:
+    """Bounded reader that returns text content or None when missing.
+
+    Mirrors `_artifact_response_at`'s safety posture (symlink + escape
+    refusal -> None instead of raising) so the compare endpoint can
+    surface "missing artifact" as `null` per-side without aborting the
+    whole comparison."""
+    candidate = base / filename
+    if candidate.exists() and candidate.is_symlink():
+        return None
+    try:
+        resolved = candidate.resolve(strict=False)
+        base_resolved = base.resolve(strict=False)
+    except OSError:
+        return None
+    if base_resolved not in resolved.parents and resolved != base_resolved:
+        return None
+    try:
+        if not candidate.is_file():
+            return None
+        size = candidate.stat().st_size
+    except OSError:
+        return None
+    import sys as _sys
+    limit = getattr(_sys.modules[__name__], "_MAX_ARTIFACT_BYTES", 5 * 1024 * 1024)
+    if size > limit:
+        return None
+    with candidate.open("r", encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def _compare_side(mission_dir: Path, run_id: str) -> dict[str, Any]:
+    run_dir = mission_dir / "runs" / run_id
+    prompt = _read_text_or_none(run_dir, "prompt.md")
+    final_message = _read_text_or_none(run_dir, "runtime-final.txt")
+    diff = _read_text_or_none(run_dir, "diff.patch")
+    runtime_result: Optional[dict[str, Any]] = None
+    rr_text = _read_text_or_none(run_dir, "runtime-result.yaml")
+    if rr_text is not None:
+        try:
+            parsed = yaml.safe_load(rr_text)
+        except yaml.YAMLError:
+            parsed = None
+        if isinstance(parsed, dict):
+            runtime_result = parsed
+    events: list[dict[str, Any]] = []
+    truncated_to: Optional[int] = None
+    events_text = _read_text_or_none(run_dir, "events.ndjson")
+    if events_text is not None:
+        lines = [ln for ln in events_text.splitlines() if ln.strip()]
+        if len(lines) > _COMPARE_EVENTS_CAP:
+            # Keep the most recent N — terminal events are what an
+            # operator usually wants when comparing two runs.
+            lines = lines[-_COMPARE_EVENTS_CAP:]
+            truncated_to = _COMPARE_EVENTS_CAP
+        for ln in lines:
+            try:
+                obj = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                events.append(obj)
+    side: dict[str, Any] = {
+        "run_id": run_id,
+        "prompt": prompt,
+        "final_message": final_message,
+        "diff": diff,
+        "runtime_result": runtime_result,
+        "events": events,
+    }
+    if truncated_to is not None:
+        side["truncated_to"] = truncated_to
+    return side
+
+
+@router.get("/missions/{mission_id}/compare")
+async def compare_runs(mission_id: str, a: str, b: str) -> dict[str, Any]:
+    """UH-89 — side-by-side comparison of two runs of the same mission.
+
+    Returns prompt, final message, diff, parsed runtime-result, and the
+    most recent 500 events for each side. 400 when the caller asks to
+    compare a run against itself; 404 when either run directory is
+    missing.
+    """
+    _safe_id(mission_id, "mission_id")
+    _safe_id(a, "a")
+    _safe_id(b, "b")
+    if a == b:
+        raise _err(400, "same_run", "compare requires two distinct run ids")
+    root = _project_root()
+    mission_dir = _harness(root) / "missions" / mission_id
+    for rid in (a, b):
+        if not (mission_dir / "runs" / rid).is_dir():
+            raise _err(404, "not_found", f"run {rid} not found for mission {mission_id}")
+    return {
+        "mission_id": mission_id,
+        "a": _compare_side(mission_dir, a),
+        "b": _compare_side(mission_dir, b),
+    }
+
+
+@router.get("/missions/{mission_id}/runs/{run_id}/overrides")
+async def get_run_overrides(mission_id: str, run_id: str) -> dict[str, Any]:
+    """UH-87 — surface the prior run's `runtime_config` so the Run modal
+    can pre-fill the JSON textarea for a replay.
+
+    Reads `runs/<run_id>/runtime-session.yaml`. When the file is absent
+    or the block is empty, returns `{ runtime_config_overrides: {} }`
+    rather than 404 — operators can still replay from a clean slate.
+    """
+    _safe_id(mission_id, "mission_id")
+    _safe_id(run_id, "run_id")
+    session_path = (
+        _harness(_project_root()) / "missions" / mission_id / "runs" / run_id / "runtime-session.yaml"
+    )
+    empty = {"runtime_config_overrides": {}}
+    if not session_path.is_file():
+        return empty
+    try:
+        with session_path.open("r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+    except yaml.YAMLError:
+        return empty
+    if not isinstance(doc, dict):
+        return empty
+    block = doc.get("runtime_config")
+    if not isinstance(block, dict):
+        return empty
+    return {"runtime_config_overrides": block}
+
+
+def _append_runs_index_row(root: Path, mission_id: str, entry: dict[str, Any]) -> None:
+    """Python-side mirror of `appendRunsIndexEntry` in `src/harness/run-id.ts`.
+
+    Used by `start_run` to pre-write a `replay_of` breadcrumb so the
+    runs/index.json row carries the lineage even before the adapter's
+    first write. The TS adapter preserves `replay_of` on row replacement
+    so the breadcrumb survives the running -> terminal transition.
+    """
+    runs_dir = _harness(root) / "missions" / mission_id / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    index_path = runs_dir / "index.json"
+    current: dict[str, Any]
+    try:
+        current = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(current, dict) or not isinstance(current.get("runs"), list):
+            current = {"schema_version": "uh.runs-index.v0", "runs": []}
+    except (OSError, ValueError):
+        current = {"schema_version": "uh.runs-index.v0", "runs": []}
+    runs = current["runs"]
+    idx = next(
+        (i for i, r in enumerate(runs) if isinstance(r, dict) and r.get("run_id") == entry["run_id"]),
+        -1,
+    )
+    if idx >= 0:
+        merged = {**runs[idx], **entry}
+        runs[idx] = merged
+    else:
+        runs.append(entry)
+    # Suffix the tmp path with a random nibble: matches the
+    # concurrent-writer protection in run-id.ts (Codex P1 PR #96).
+    tmp = index_path.with_name(f"index.json.{uuid.uuid4().hex[:6]}.tmp")
+    tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    tmp.replace(index_path)
+
+
 @router.get("/missions/{mission_id}/runs/{run_id}/{kind}")
 async def get_run_artifact(mission_id: str, run_id: str, kind: str) -> dict[str, Any]:
     _safe_id(mission_id, "mission_id")
@@ -856,21 +1253,28 @@ async def get_run_artifact(mission_id: str, run_id: str, kind: str) -> dict[str,
     filename = _ARTIFACT_KIND_TO_FILE.get(kind)
     if filename is None:
         raise _err(400, "unknown_kind", f"unknown artifact kind {kind}")
-    # Codex P1 round 4: adapters currently write one set of artifacts per
-    # mission directory, so per-run isolation is not yet possible. Returning
-    # the mission-level file while keeping the per-run URL silently
-    # misattributes evidence during triage (older runs show newest-run
-    # artifacts). Surface that gap in the response payload so the frontend
-    # can render a "viewing mission-latest" banner instead of pretending
-    # the served content matches the requested run_id.
-    payload = _artifact_response(mission_id, filename)
+    # UH-82: adapters now write per-run artifact directories under
+    # `runs/<run_id>/`. Serve the requested run's file directly with the
+    # same symlink/bounds guard as `_artifact_response`.
+    root = _project_root()
+    run_dir = _harness(root) / "missions" / mission_id / "runs" / run_id
+    if not run_dir.is_dir():
+        # UH-90: distinguish "pruned by retention policy" (we still have an
+        # archived entry in runs/index.json) from "never existed" so the
+        # frontend can render a tailored placeholder instead of a generic
+        # 404. Both still surface as HTTP 404 — the discriminator is the
+        # error `code`.
+        if _run_is_archived(root, mission_id, run_id):
+            raise _err(
+                404,
+                "archived",
+                f"run {run_id} artifacts were pruned by the retention policy",
+            )
+        raise _err(404, "not_found", f"run {run_id} not found for mission {mission_id}")
+    payload = _artifact_response_at(run_dir, filename)
     payload["requested_run_id"] = run_id
-    payload["served_run_id"] = "mission-latest"
-    payload["is_run_scoped"] = False
-    payload["note"] = (
-        "Per-run artifact directories are not yet emitted by adapters; "
-        "this response serves the mission-level file. Tracked in UH-63 follow-up."
-    )
+    payload["served_run_id"] = run_id
+    payload["is_run_scoped"] = True
     return payload
 
 

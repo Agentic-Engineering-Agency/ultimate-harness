@@ -4,7 +4,7 @@ Operator runbook for the interactive Mission Control terminal UI. Covers
 the keymap, every screen, the run flow, the sandbox manager, and where
 state lives on disk.
 
-Last updated: 2026-05-18. Closes UH-41 polish (UH-42 final slice).
+Last updated: 2026-05-20. Closes UH-48 / UH-49 / UH-50 / UH-51.
 
 ---
 
@@ -28,6 +28,20 @@ Requirements:
 
 Every other `uh` subcommand runs under Node — Bun is only required for
 the TUI surface.
+
+### Environment variables
+
+| Variable                  | Values                       | Effect                                                                                                                  |
+|---------------------------|------------------------------|-------------------------------------------------------------------------------------------------------------------------|
+| `UH_TUI_ROOT`             | absolute path                | Override the project root the TUI watches (same as `--root`).                                                           |
+| `UH_TUI_ONCE`             | `1`                          | Render one frame then exit (same as `--once`).                                                                          |
+| `UH_TUI_THEME`            | `dark` (default), `light`, `system` | Pick the palette. `system` infers from `COLORFGBG`; unknown values fall back to `dark`. See `src/tui/theme.ts`. |
+| `UH_TUI_HEADLESS`         | `1`                          | Skip signal wiring (Ctrl+Z / SIGCONT); set automatically by `uh tui screenshot`.                                        |
+| `UH_TUI_SCREENSHOT`       | path                         | Write a deterministic text frame to this path (mirrors `--screenshot`).                                                 |
+| `UH_TUI_SCREENSHOT_WIDTH` | positive integer (default 120) | Override the screenshot frame width.                                                                                  |
+| `UH_TUI_SCREENSHOT_HEIGHT`| positive integer (default 36)  | Override the screenshot frame height.                                                                                 |
+| `UH_TUI_SCREENSHOT_VIEW`  | view name                    | Pre-seed `--view` for the screenshot subcommand.                                                                        |
+
 
 ---
 
@@ -64,6 +78,7 @@ existing `sandboxes[].mission_id` relationship.
 | `?`            | Toggle keymap overlay                             |
 | `q`            | Quit (restores terminal)                          |
 | `Ctrl+C`       | Force-quit                                        |
+| `Ctrl+Z`       | Suspend to shell — type `fg` to resume (UH-50)    |
 
 ### Status badges
 
@@ -146,6 +161,7 @@ so empty states stay distinguishable from load errors.
 | `R` (Shift+r)   | Open the Run mission dialog                    |
 | `S` (Shift+s)   | Stop the active run (SIGTERM)                  |
 | `L` (Shift+l)   | Toggle the Live events panel                   |
+| `e`             | Open the focused artifact (or `mission.yaml`) in `$EDITOR` (UH-49) |
 | `Esc`           | Back to dashboard                              |
 | `?`             | Keymap overlay                                 |
 | `q`             | Quit                                           |
@@ -249,11 +265,13 @@ The Adapters pane is read-only with one live action:
   TTL and calls `runtimeRegistry.check(root, <id>)` again. The result
   appears on the footer preview line.
 
-Editing a manifest in `$EDITOR` (the original UH-42 scope item `e`) is
-intentionally deferred — suspending and restoring the OpenTUI renderer
-around a child editor process is non-trivial and lives in a follow-up
-slice. In the meantime, edit the file in another terminal and press `r`
-to refresh.
+Editing a manifest is available on the **mission detail** view: select
+the `mission.yaml` artifact and press `e`. The TUI calls
+`renderer.suspend()`, spawns `$EDITOR` (defaulting to `vi` via
+`VISUAL → EDITOR → vi`), waits for the child to exit, then
+`renderer.resume()`s and reloads the mission from disk (UH-49). The
+same renderer-suspend lifecycle backs Ctrl+Z (UH-50) — see `src/tui/suspend.ts`
+for the SIGTSTP / SIGCONT plumbing.
 
 ---
 
@@ -324,21 +342,51 @@ test renderer and writes one deterministic text frame. Use
 snapshots. The command does not enter the alternate screen and is safe
 for non-interactive docs pipelines.
 
+### Automated screenshots (UH-51)
+
+`uh tui screenshot --view <name> --out <path>` is the structured
+successor. It boots the TUI in headless mode (`UH_TUI_HEADLESS=1`),
+navigates to the requested view via the mock-input adapter, captures
+one frame, and exits.
+
+```bash
+uh tui screenshot --view overview   --out docs/assets/screenshots/overview.txt
+uh tui screenshot --view missions   --out docs/assets/screenshots/missions.txt
+uh tui screenshot --view sandboxes  --out docs/assets/screenshots/sandboxes.txt
+uh tui screenshot --view workflows  --out docs/assets/screenshots/keymap.txt
+uh tui screenshot --view overview                       # write to stdout
+uh tui screenshot --view overview --out - --size 80x24  # explicit stdout + size
+```
+
+Views:
+
+| Name        | What it shows                                          |
+|-------------|--------------------------------------------------------|
+| `overview`  | Default three-pane dashboard.                          |
+| `missions`  | Dashboard with focus on the Missions pane.             |
+| `sandboxes` | Dashboard with focus on the Sandboxes pane.            |
+| `workflows` | The full keymap overlay (which lists every binding).   |
+
+Exit codes: `0` on success, `1` on unknown view / render failure /
+write failure. The orchestration lives in
+`src/tui/screenshot-pipeline.ts`; the render side stays in
+`src/tui/screenshot.tsx`.
+
 ---
 
-## 11. Deferred polish (out of this slice)
+## 11. Polish history
 
-Items from the UH-42 Linear scope that remain explicitly deferred:
+| Item                              | Status   | Tracking                                                         |
+|-----------------------------------|----------|------------------------------------------------------------------|
+| `?` keymap overlay                | shipped  | UH-42 ([#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61)) |
+| State persistence                 | shipped  | UH-42                                                            |
+| `UH_TUI_THEME` env var + palette  | shipped  | [UH-48](https://linear.app/agentic-eng/issue/UH-48)              |
+| `$EDITOR` open (`e`)              | shipped  | [UH-49](https://linear.app/agentic-eng/issue/UH-49)              |
+| Ctrl+Z / `fg` suspend             | shipped  | [UH-50](https://linear.app/agentic-eng/issue/UH-50)              |
+| `uh tui screenshot` pipeline      | shipped  | [UH-51](https://linear.app/agentic-eng/issue/UH-51)              |
 
-| Item                | Status      | Tracking                                  |
-|---------------------|-------------|-------------------------------------------|
-| `?` keymap overlay  | shipped     | UH-42 (this issue), PR #61                |
-| State persistence   | shipped     | UH-42, this PR                            |
-| `UH_TUI_THEME` env  | coming soon | file a follow-up issue under UH-42        |
-| `$EDITOR` open      | coming soon | requires renderer suspend/resume; same    |
-| Ctrl+Z suspend      | coming soon | same — needs renderer.pause/resume        |
-
-OpenTUI exposes `renderer.getPalette()` and an event for resize but no
-suspend/resume primitive at the time of writing. When that lands
-upstream we can ship the deferred items as a single follow-up polish
-slice.
+OpenTUI 0.2.13 exposes the full suspend/resume API surface
+(`renderer.suspend()`, `renderer.resume()`, plus terminal-mode helpers
+such as `resetTerminalBgColor()`), so UH-49 and UH-50 ship the lifecycle
+directly instead of approximating it with `setRawMode` and ANSI escape
+bytes.

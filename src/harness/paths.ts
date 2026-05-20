@@ -36,6 +36,26 @@ export function missionsDir(root: string): string {
   return path.join(harnessDir(root), "missions");
 }
 
+export function missionDir(root: string, missionId: string): string {
+  return path.join(missionsDir(root), missionId);
+}
+
+export function missionRunsDir(root: string, missionId: string): string {
+  return path.join(missionDir(root, missionId), "runs");
+}
+
+export function missionRunDir(root: string, missionId: string, runId: string): string {
+  return path.join(missionRunsDir(root, missionId), runId);
+}
+
+export function missionLatestPointer(root: string, missionId: string): string {
+  return path.join(missionDir(root, missionId), "latest.json");
+}
+
+export function missionRunsIndex(root: string, missionId: string): string {
+  return path.join(missionRunsDir(root, missionId), "index.json");
+}
+
 export function sandboxesDir(root: string): string {
   return path.join(harnessDir(root), "sandboxes");
 }

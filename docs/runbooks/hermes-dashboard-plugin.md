@@ -86,6 +86,17 @@ bun run plugin:typecheck  # editor parity; the bundle ships without this
 
 The dashboard reloads the bundle on its own when the file mtime changes, but a hard refresh (`Cmd+R`) is the most reliable signal. After editing `plugin_api.py`, restart `hermes dashboard` so the FastAPI router re-mounts.
 
+## Browsing run history
+
+UH-85 / UH-86 / UH-88 — the Mission detail tab renders a **Recent runs** pane above the artifact tabs whenever you are on the mission-latest view (no `pinnedRunId`). The pane reads `mission.runs[]` (the backend cap is 50 newest-first; older runs paginate in a follow-up).
+
+- **Sort.** Click any column header — `Run ID`, `Started`, `Duration`, `Status`, `Runtime` — to toggle the sort key. Time-ish columns default to descending on first click; textual columns default to ascending. Running rows float to the top when you sort by duration.
+- **Filter by status.** The chip strip above the table lists the seven run statuses (`passed`, `needs-attention`, `needs-remediation`, `failed`, `cancelled`, `timeout`, `running`). Click chips to multi-select; OR semantics within the chip set. The `Showing N of M runs` counter and the `Clear filters` button surface only when a filter is active.
+- **Filter by run id.** The free-text input next to the chips does a case-insensitive prefix match on `run_id` as you type.
+- **Drill into a run.** Click any row to navigate to `#/missions/<id>/runs/<run_id>`. The drilldown hides the Recent runs pane, shows a breadcrumb with the truncated run id, and routes the Prompt / Final message / Diff / Result / Events tabs through `/missions/<id>/runs/<run_id>/<kind>` so every artifact reflects that specific run. Use the **Back to latest** button to return to the mission-latest view.
+
+Filter and sort state is component-local — refreshing the page or navigating away resets it.
+
 ## Configuration knobs (backend)
 
 | Env var | Default | Purpose |
@@ -105,15 +116,15 @@ All endpoints are mounted under `/api/plugins/uh/`.
 | `/status` | GET | Project summary + adapter check (`uh adapter check` shelled out). |
 | `/missions` | GET | List from `.harness/missions/*/mission.yaml`. |
 | `/missions/{id}` | GET | Single mission + raw YAML. |
-| `/missions/{id}/run` | POST | Spawn `uh mission run {id}`. Body: `{"runtime_config_overrides"?: {...}}`. Returns `{runId, startedAt}`. |
+| `/missions/{id}/run` | POST | Spawn `uh mission run {id}`. Body: `{"runtime_config_overrides"?: {...}}` — now forwarded to the CLI as `--runtime-config-overrides <json>` (UH-81); empty/absent block runs with mission defaults. Hard cap: 8192 bytes of compact JSON (`UH_MAX_OVERRIDES_JSON_BYTES`) → 400 `overrides_too_large`. Returns `{runId, startedAt}`. |
 | `/missions/{id}/{prompt|final-message|diff|result|events}` | GET | Per-artifact payload `{kind: "text", content}` or `{kind: "missing"}`. |
-| `/missions/{id}/runs/{runId}/{prompt|final-message|diff|result|events}` | GET | Same shape; current backend serves the latest per-mission file for any runId (one runtime-result per mission today). |
+| `/missions/{id}/runs/{runId}/{prompt|final-message|diff|result|events}` | GET | Per-run artifact under `runs/<run_id>/`. UH-82: response carries `is_run_scoped: true` and `served_run_id == requested_run_id`. 404 when the run dir is missing. |
 | `/missions/{id}/verification` | GET | `verification.yaml` parsed. 404 until `uh verify` runs. |
 | `/missions` | POST | Mission wizard. Validates `id` slug + required fields. |
 | `/workflows` | GET | List `.harness/workflows/*.yaml`. |
 | `/workflows/{name}` | GET / PUT | Read / overwrite workflow YAML (validated before write). |
 | `/runs` | GET | Recent runs (`?limit=20`). |
-| `/runs/{runId}/events` | GET | SSE tail of `events.ndjson`. Emits `event: done` when the spawn exits. |
+| `/runs/{runId}/events` | GET | SSE tail of `runs/<run_id>/events.ndjson`. Emits `event: done` when the spawn exits. |
 | `/runs/{runId}/cancel` | POST | SIGTERM the spawned `uh` process for that run. |
 
 Error shape: `{"error": "...", "code": "<slug>", "stderr"?: "...", "fields"?: {...}}`. Wizard / editor field-level errors land in `fields`.

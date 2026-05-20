@@ -6,6 +6,21 @@ Last updated: 2026-05-20. Source of truth for issue state is [Linear](https://li
 
 Epic 2 (Interactive TUI), Epic 3 (Hermes Dashboard plugin for UH — [UH-60](https://linear.app/agentic-eng/issue/UH-60)), and Epic 4 (Team mission shape — [UH-70](https://linear.app/agentic-eng/issue/UH-70)) all shipped end-to-end. Spec-Driven and Test-Driven Development discipline layers shipped (UH-54 / UH-55) plus a cross-runtime QA harness (UH-56). Runtime intelligence + operator polish shipped as [UH-57](https://linear.app/agentic-eng/issue/UH-57). Package renamed `@agenticengineeringagency/ultimate-harness` and CI publish automation shipped as [UH-58](https://linear.app/agentic-eng/issue/UH-58). Honcho persistent-memory extension for `oh-my-pi` shipped as [UH-59](https://linear.app/agentic-eng/issue/UH-59) ([#83](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/83)). All seven discipline-layer slices from the GSD-2 research deep-dive (UH-76..UH-80) and the three OMC/OMX team-shape follow-ups (UH-73..UH-75) shipped alongside the two epics. **Next**: three small follow-ups filed against the Hermes plugin (per-run artifact dirs [UH-82](https://linear.app/agentic-eng/issue/UH-82), real `--runtime-config-overrides` [UH-81](https://linear.app/agentic-eng/issue/UH-81), activate release CI [UH-83](https://linear.app/agentic-eng/issue/UH-83)).
 
+### Epic 5 — Hermes Dashboard plugin v2: multi-run history + replay + observability ([UH-84](https://linear.app/agentic-eng/issue/UH-84))
+
+Surface the per-run artifact backend ([UH-82](https://linear.app/agentic-eng/issue/UH-82), shipped in v0.4.0-prep) in the dashboard UI. Today's plugin shows one mission ↔ one "latest result"; v2 turns the dashboard into a triage surface for missions with dozens of runs.
+
+| Phase | Issue | Slice | Size | Status |
+|---|---|---|---|---|
+| Core | [UH-85](https://linear.app/agentic-eng/issue/UH-85) | Recent runs pane on Mission detail | S | filed |
+| Core | [UH-86](https://linear.app/agentic-eng/issue/UH-86) | Per-run drilldown (`?run_id=` param) | M | filed |
+| Core | [UH-88](https://linear.app/agentic-eng/issue/UH-88) | Filter + search runs in the pane | S | filed |
+| Later | [UH-89](https://linear.app/agentic-eng/issue/UH-89) | Compare two runs side-by-side | M | filed |
+| Later | [UH-87](https://linear.app/agentic-eng/issue/UH-87) | Replay a run with same/modified overrides | M | filed |
+| Optional | [UH-90](https://linear.app/agentic-eng/issue/UH-90) | Run history retention policy | S | filed |
+
+Backend foundation shipped in PR #96 (UH-82): `runs/<run_id>/` per-run dirs, `runs/index.json` history, `latest.json` pointer, per-run artifact route honoring `run_id`, `get_mission` returns `runs[]`.
+
 ### Epic 3 — Hermes Dashboard plugin for UH ([UH-60](https://linear.app/agentic-eng/issue/UH-60))
 
 Ship a [Hermes dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) plugin that exposes UH end-to-end from the Hermes web UI — adapter health, mission list, mission run trigger, artifact drilldown, and theme integration. The plugin is a drop-in at `~/.hermes/plugins/uh/dashboard/`: `manifest.json` + IIFE JS bundle (using `window.__HERMES_PLUGIN_SDK__`) + Python FastAPI router that shells out to the `uh` CLI. No daemon, no FFI, no Hermes fork.

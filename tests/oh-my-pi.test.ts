@@ -105,7 +105,11 @@ describe("uh mission dry-run --runtime oh-my-pi", () => {
     const result = await dryRunOhMyPi(TEST_ROOT, missionPath);
 
     expect(result.errors).toEqual([]);
-    expect(await readFile(join(missionDir, "prompt.md"), "utf-8")).toBe(result.prompt);
+    const runsDir = join(missionDir, "runs");
+    const runDirs = await (await import("node:fs/promises")).readdir(runsDir);
+    expect(runDirs).toHaveLength(1);
+    const runDir = join(runsDir, runDirs[0]);
+    expect(await readFile(join(runDir, "prompt.md"), "utf-8")).toBe(result.prompt);
     expect(result.command).toBe("omp");
     expect(result.args).toEqual([
       "--print",
@@ -117,7 +121,7 @@ describe("uh mission dry-run --runtime oh-my-pi", () => {
       "--no-title",
       result.prompt,
     ]);
-    const sessionPath = join(missionDir, "runtime-session.yaml");
+    const sessionPath = join(runDir, "runtime-session.yaml");
     const sessionValidation = await validateFile(sessionPath);
     expect(sessionValidation).toMatchObject({ valid: true, schema_version: "uh.runtime-session.v0" });
     const session = parse(await readFile(sessionPath, "utf-8"));
@@ -211,11 +215,12 @@ runtime_config_overrides:
     });
     const collectDiff: DiffCollector = async () => ({ patch: "" });
 
-    const result = await runOhMyPi(TEST_ROOT, missionPath, { runner, collectDiff });
+    const runId = "test-sentinel-omp";
+    const result = await runOhMyPi(TEST_ROOT, missionPath, { runner, collectDiff, runId });
 
     expect(result.exitCode).toBe(0);
     expect(result.result?.status).toBe("passed");
-    expect(await readFile(join(missionDir, "runtime-final.txt"), "utf-8")).toBe("Bounded oh-my-pi summary.");
+    expect(await readFile(join(missionDir, "runs", runId, "runtime-final.txt"), "utf-8")).toBe("Bounded oh-my-pi summary.");
   });
 });
 
@@ -280,12 +285,14 @@ describe("uh mission run --runtime oh-my-pi", () => {
     });
     const collectDiff: DiffCollector = async () => ({ patch: "diff --git a/x b/x\n" });
 
-    const result = await runOhMyPi(TEST_ROOT, missionPath, { runner, collectDiff });
+    const runId = "test-omp-run-success";
+    const result = await runOhMyPi(TEST_ROOT, missionPath, { runner, collectDiff, runId });
 
     expect(result.exitCode).toBe(0);
     expect(result.result?.status).toBe("passed");
-    expect(await readFile(join(missionDir, "runtime-final.txt"), "utf-8")).toBe("oh-my-pi completed the mission.");
-    const events = (await readFile(join(missionDir, "events.ndjson"), "utf-8"))
+    const runDir = join(missionDir, "runs", runId);
+    expect(await readFile(join(runDir, "runtime-final.txt"), "utf-8")).toBe("oh-my-pi completed the mission.");
+    const events = (await readFile(join(runDir, "events.ndjson"), "utf-8"))
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
@@ -300,9 +307,9 @@ describe("uh mission run --runtime oh-my-pi", () => {
     expect(runtimeResult).toMatchObject({
       status: "passed",
       runtime: "oh-my-pi",
-      diff_path: ".harness/missions/run-success/diff.patch",
-      stdout_path: ".harness/missions/run-success/runtime.stdout.log",
-      stderr_path: ".harness/missions/run-success/runtime.stderr.log",
+      diff_path: `.harness/missions/run-success/runs/${runId}/diff.patch`,
+      stdout_path: `.harness/missions/run-success/runs/${runId}/runtime.stdout.log`,
+      stderr_path: `.harness/missions/run-success/runs/${runId}/runtime.stderr.log`,
     });
   });
 
@@ -332,11 +339,12 @@ describe("uh mission run --runtime oh-my-pi", () => {
     });
     const collectDiff: DiffCollector = async () => ({ patch: "" });
 
-    const result = await runOhMyPi(TEST_ROOT, missionPath, { runner, collectDiff });
+    const runId = "test-omp-missing-final";
+    const result = await runOhMyPi(TEST_ROOT, missionPath, { runner, collectDiff, runId });
 
     expect(result.exitCode).toBe(0);
     expect(result.result?.status).toBe("blocked");
     expect(result.result?.errors).toContain("oh-my-pi did not emit a final assistant message");
-    expect(await readFile(join(missionDir, "runtime-final.txt"), "utf-8")).toBe("");
+    expect(await readFile(join(missionDir, "runs", runId, "runtime-final.txt"), "utf-8")).toBe("");
   });
 });
