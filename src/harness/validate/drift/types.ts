@@ -1,3 +1,5 @@
+import type { DriftDetectOptions } from "./detect-options.js";
+
 /**
  * UH-77 drift detection and idempotent repair types.
  *
@@ -13,7 +15,8 @@ export type DriftKind =
   | "roadmap-linear-divergence"
   | "missing-completion-timestamp"
   | "truncated-events-ndjson"
-  | "stale-render";
+  | "stale-render"
+  | "spec-stale";
 
 export type DriftSeverity = "warn" | "error";
 
@@ -41,6 +44,6 @@ export interface DriftKindModule {
   kind: DriftKind;
   /** Whether `repair` can ever mutate the filesystem (false → warn-only). */
   canRepair: boolean;
-  detect(root: string): Promise<DriftIssue[]>;
+  detect(root: string, options?: DriftDetectOptions): Promise<DriftIssue[]>;
   repair(issue: DriftIssue, root: string): Promise<RepairResult>;
 }
