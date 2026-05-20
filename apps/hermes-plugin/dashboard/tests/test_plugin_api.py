@@ -137,8 +137,17 @@ async def test_create_and_run_mission_invokes_uh(client: httpx.AsyncClient, isol
     assert "runId" in body
     spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
     assert spawn_calls, "expected spawn() to be called"
-    assert spawn_calls[0]["args"][:3] == ["mission", "run", "demo"]
-    assert "--runtime-config-overrides" in spawn_calls[0]["args"]
+    # Codex P1: CLI takes a file PATH, not an id slug.
+    args = spawn_calls[0]["args"]
+    assert args[:2] == ["mission", "run"]
+    assert args[2].endswith("/missions/demo/mission.yaml"), f"expected mission file path, got {args[2]}"
+    # Codex P1: --runtime-config-overrides is NOT a real CLI flag; the
+    # backend now persists overrides to a sidecar file instead.
+    assert "--runtime-config-overrides" not in args
+    overrides_path = isolated_project / ".harness" / "missions" / "demo" / "runtime-config-overrides.json"
+    assert overrides_path.is_file(), "overrides should be persisted next to mission.yaml"
+    persisted = json.loads(overrides_path.read_text(encoding="utf-8"))
+    assert persisted == {"foo": 1}
 
 
 @pytest.mark.asyncio

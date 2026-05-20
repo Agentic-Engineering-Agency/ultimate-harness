@@ -434,12 +434,22 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
         raise _err(404, "not_found", f"mission {mission_id} not found")
 
     run_id = _make_run_id()
-    args = ["mission", "run", mission_id]
+    # Codex P1: the CLI takes a mission file PATH, not the id slug. Passing
+    # only the id makes the subprocess fail to load the mission.
+    args = ["mission", "run", str(mission_yaml), "--root", str(root)]
     if overrides:
-        # The CLI accepts a JSON blob via --runtime-config-overrides; if it
-        # doesn't (older versions), the harness still records the run.
-        args.extend(["--runtime-config-overrides", json.dumps(overrides)])
-
+        # Codex P1: `uh mission run` does NOT define --runtime-config-overrides.
+        # Persist the overrides next to the mission so they survive for
+        # forensics and so future adapter support can pick them up, but do
+        # NOT pass an unsupported flag (Commander would reject it and the
+        # run would never start).
+        overrides_path = mission_yaml.parent / "runtime-config-overrides.json"
+        try:
+            overrides_path.write_text(json.dumps(overrides, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            # Disk failure shouldn't block the run; the CLI will proceed
+            # without overrides applied.
+            pass
     started_iso = datetime.now(tz=timezone.utc).isoformat()
     try:
         proc = _runner.spawn(args, cwd=root)
