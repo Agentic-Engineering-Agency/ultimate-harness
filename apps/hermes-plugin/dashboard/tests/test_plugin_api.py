@@ -385,6 +385,47 @@ async def test_watchdog_evicts_natural_exit_without_sse(
     )
 
 @pytest.mark.asyncio
+async def test_mission_detail_last_run_includes_runId(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P2 round 11: GET /missions/{id}.last_run MUST include
+    runId (not just runtime) so consumers can deep-link to the run."""
+    rr_path = isolated_project / ".harness" / "missions" / "demo" / "runtime-result.yaml"
+    rr_path.parent.mkdir(parents=True, exist_ok=True)
+    rr_path.write_text(
+        "schema_version: uh.runtime-result.v0\n"
+        "mission_id: demo\n"
+        "run_id: 20260519T120000Z-deadbeef\n"
+        "runtime: hermes\n"
+        "status: passed\n"
+        "started_at: '2026-05-19T12:00:00Z'\n",
+        encoding="utf-8",
+    )
+    resp = await client.get("/api/plugins/uh/missions/demo")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["last_run"]["runId"] == "20260519T120000Z-deadbeef"
+    assert body["last_run"]["runtime"] == "hermes"
+
+
+@pytest.mark.asyncio
+async def test_workflows_list_to_detail_roundtrip_via_slug(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P2 round 11: every workflow returned by /workflows MUST be
+    fetchable by its returned `name` field via /workflows/{name}. Previously
+    `name` was the YAML display string (e.g. 'Research & Documentation')
+    which could not round-trip."""
+    listing = (await client.get("/api/plugins/uh/workflows")).json()
+    for w in listing["workflows"]:
+        detail = await client.get(f"/api/plugins/uh/workflows/{w['name']}")
+        assert detail.status_code == 200, (
+            f"workflow name {w['name']!r} from /workflows did not resolve via /workflows/{{name}}: "
+            f"{detail.status_code} {detail.text}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_cancel_does_not_misreport_natural_exit_as_cancelled(
     client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -421,7 +462,10 @@ async def test_run_unknown_mission_returns_404(client: httpx.AsyncClient, isolat
 @pytest.mark.asyncio
 async def test_workflows_list_and_detail(client: httpx.AsyncClient, isolated_project: Path) -> None:
     listing = (await client.get("/api/plugins/uh/workflows")).json()
-    assert [w["name"] for w in listing["workflows"]] == ["Research & Documentation"]
+    # Codex P2 round 11: `name` is the file slug (used by /workflows/{name})
+    # and `displayName` is the YAML display name. Locking both in.
+    assert [w["name"] for w in listing["workflows"]] == ["research-docs"]
+    assert [w["displayName"] for w in listing["workflows"]] == ["Research & Documentation"]
     detail = (await client.get("/api/plugins/uh/workflows/research-docs")).json()
     assert detail["phases"] == 1
     assert detail["phases_list"][0]["name"] == "research"

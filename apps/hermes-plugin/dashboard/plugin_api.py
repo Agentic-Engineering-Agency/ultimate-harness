@@ -471,6 +471,10 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
                         pass
                 summary["status"] = _summarize_mission_status(rr, ver, prom)
                 summary["last_run"] = {
+                    # Codex P2 round 11: last_run must carry runId, not just
+                    # runtime — the /missions list rows and the TS
+                    # MissionSummary type both expect runId for deep-links.
+                    "runId": rr.get("run_id"),
                     "runtime": rr.get("runtime"),
                     "status": rr.get("status"),
                     "startedAt": rr.get("started_at"),
@@ -855,7 +859,13 @@ async def list_workflows() -> dict[str, list[dict[str, Any]]]:
     for path in sorted(workflows_dir.glob("*.yaml")):
         doc = _read_yaml(path) or {}
         items.append({
-            "name": str(doc.get("name") or path.stem),
+            # Codex P2 round 11: list must return the file slug as `name`
+            # because /workflows/{name} resolves <name>.yaml. Returning
+            # doc.get('name') (the display name) broke list->detail
+            # round-trips for display names with spaces/`&`. Expose the
+            # display name as `displayName` so the UI can still render it.
+            "name": path.stem,
+            "displayName": str(doc.get("name") or path.stem),
             "description": str(doc.get("description") or ""),
             "phases": len(doc.get("phases") or []),
         })
