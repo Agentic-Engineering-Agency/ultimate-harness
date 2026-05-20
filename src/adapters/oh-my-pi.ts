@@ -22,10 +22,14 @@ import {
   type AdapterRuntimeChecker,
 } from "../harness/registry.js";
 import { captureDiffWithUntracked } from "../harness/diff-capture.js";
+import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
+import { buildDispatchContext } from "../harness/dispatch-context.js";
+import { renderPrompt } from "../harness/render-prompt.js";
 import {
-  extractRuntimeFinalMessageSentinel,
-  runtimeFinalMessageInstruction,
-} from "../harness/runtime-final-message.js";
+  flushPendingHonchoSaves,
+  loadHonchoMemoryBlock,
+  recordMissionExchange,
+} from "../extensions/honcho-memory/index.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -58,7 +62,15 @@ export type DryRunResult = {
 export type OhMyPiRunPlan = {
   command: string;
   args: string[];
+  /** Final prompt handed to the runtime (memory-enriched when honcho-memory is enabled). */
   prompt: string;
+  /**
+   * Pre-enrichment mission prompt — what `buildMissionPrompt` produced before
+   * any extension touched it. Persisted to Honcho as the "user message" so
+   * we never feed the injected `[Persistent memory]` block back into Honcho's
+   * own summarizer on the next run.
+   */
+  basePrompt: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -131,6 +143,7 @@ export interface OhMyPiCollectOutput {
   exitCode: number;
   stderr: string;
   result?: RuntimeResultDocument;
+  finalMessage: string;
 }
 
 const execFileP = promisify(execFile);
@@ -307,7 +320,16 @@ export async function planOhMyPiRun(root: string, missionPath: string): Promise<
   const allowExtensions = runtimeConfig.allow_extensions;
   const allowSkills = runtimeConfig.allow_skills;
 
-  const prompt = buildMissionPrompt(mission, workflow);
+  // UH-80: build the dispatch context first, then enrich via the Honcho
+  // memory hook by setting `ctx.memoryBlock`. `basePrompt` is the rendered
+  // prompt WITHOUT the memory block so it remains the right "user message"
+  // to record back into Honcho (otherwise the next run would feed Honcho's
+  // own summarized memory back into its own summarizer).
+  const ctx = buildDispatchContext(mission, workflow);
+  const basePrompt = renderPrompt(ctx);
+  const memoryBlock = await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id });
+  ctx.memoryBlock = memoryBlock ?? undefined;
+  const prompt = renderPrompt(ctx);
   const args = [
     "--print",
   ];
@@ -330,6 +352,7 @@ export async function planOhMyPiRun(root: string, missionPath: string): Promise<
     command: cliCommand,
     args,
     prompt,
+    basePrompt,
     worktree: worktreeMode,
     session_id_passthrough: false,
     errors,
@@ -470,6 +493,17 @@ export async function runOhMyPi(
     diff,
   });
 
+  try {
+    if (collection.finalMessage) {
+      await recordMissionExchange(plan.basePrompt, collection.finalMessage, {
+        cwd: root,
+        missionId: plan.mission.id,
+      });
+    }
+  } finally {
+    await flushPendingHonchoSaves();
+  }
+
   return {
     exitCode: collection.exitCode,
     stdout: runnerResult.stdout,
@@ -555,7 +589,7 @@ export async function collectOhMyPiSession(
   }
 
   if (!artifacts) {
-    return { exitCode, stderr };
+    return { exitCode, stderr, finalMessage };
   }
 
   let result: RuntimeResultDocument | undefined;
@@ -602,10 +636,10 @@ export async function collectOhMyPiSession(
     const message = (err as Error).message;
     const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";
     stderr = `${stderr}${separator}Artifact persistence failure: ${message}`;
-    return { exitCode: exitCode === 0 ? 1 : exitCode, stderr };
+    return { exitCode: exitCode === 0 ? 1 : exitCode, stderr, finalMessage };
   }
 
-  return { exitCode, stderr, result };
+  return { exitCode, stderr, result, finalMessage };
 }
 
 export function parseOhMyPiOutput(stdout: string): { events: Array<Record<string, unknown>>; parseErrors: string[]; finalMessage: string } {
@@ -866,60 +900,4 @@ async function persistFinalRuntimeSession(
     exit_code: exitCode,
     status: sessionStatus,
   });
-}
-
-function buildMissionPrompt(
-  mission: MissionDocument,
-  workflow: WorkflowDocument | undefined,
-): string {
-  let prompt = `# Mission: ${mission.name}\n\n`;
-  prompt += `${mission.description}\n\n`;
-
-  if (workflow) {
-    prompt += `## Workflow: ${workflow.name}\n\n`;
-    for (const phase of workflow.phases) {
-      prompt += `### ${phase.name} (${phase.agent_role})\n${phase.description}\n\n`;
-    }
-  }
-
-  if (mission.issues.length > 0) {
-    prompt += "## Related Issues\n";
-    for (const issue of mission.issues) {
-      prompt += `- [${issue.source}] ${issue.reference}`;
-      if (issue.url) prompt += ` (${issue.url})`;
-      prompt += "\n";
-    }
-    prompt += "\n";
-  }
-
-  if (mission.read_first.length > 0) {
-    prompt += "## Read First\n";
-    for (const p of mission.read_first) {
-      prompt += `- ${p}\n`;
-    }
-    prompt += "\n";
-  }
-
-  if (mission.expected_artifacts.length > 0) {
-    prompt += "## Expected Artifacts\n";
-    for (const a of mission.expected_artifacts) {
-      prompt += `- ${a.path}`;
-      if (a.type) prompt += ` (${a.type})`;
-      prompt += "\n";
-    }
-    prompt += "\n";
-  }
-
-  if (mission.verification.checks.length > 0) {
-    prompt += "## Verification Checks\n";
-    for (const c of mission.verification.checks) {
-      prompt += `- ${c}\n`;
-    }
-    prompt += "\n";
-  }
-
-  prompt += "Execute this mission and produce the expected artifacts.\n";
-  prompt += runtimeFinalMessageInstruction();
-
-  return prompt;
 }

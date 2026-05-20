@@ -11,11 +11,22 @@ export type CreateMissionOptions = {
   workflow: string;
   objective: string;
   force?: boolean;
+  /**
+   * Write a companion `design.md` next to `mission.yaml` (UH-75). Path is
+   * resolved against the mission directory; default is `design.md`.
+   */
+  withDesign?: boolean;
+  /**
+   * Override the default `design.md` filename used when `withDesign` is set.
+   * Stored on the mission as `design_path`.
+   */
+  designPath?: string;
 };
 
 export type CreateMissionResult = {
   path: string;
   created: boolean;
+  designPath?: string;
 };
 
 export async function createMission(root: string, opts: CreateMissionOptions): Promise<CreateMissionResult> {
@@ -37,7 +48,9 @@ export async function createMission(root: string, opts: CreateMissionOptions): P
     throw new Error(`Mission already exists: ${missionPath}. Use --force to overwrite.`);
   }
 
-  const mission = {
+  const designPath = opts.withDesign ? (opts.designPath ?? "design.md") : undefined;
+
+  const mission: Record<string, unknown> = {
     schema_version: "uh.mission.v0",
     id: opts.id,
     title: opts.title,
@@ -67,6 +80,9 @@ export async function createMission(root: string, opts: CreateMissionOptions): P
     },
     completion_criteria: [],
   };
+  if (designPath !== undefined) {
+    mission.design_path = designPath;
+  }
 
   validateMission(mission);
 
@@ -78,10 +94,59 @@ export async function createMission(root: string, opts: CreateMissionOptions): P
     throw new Error(`Generated mission failed validation: ${validation.errors.join("; ")}`);
   }
 
+  let resolvedDesignPath: string | undefined;
+  if (designPath !== undefined) {
+    const target = path.resolve(path.dirname(missionPath), designPath);
+    if (!isPathWithin(target, path.resolve(missionRoot, opts.id))) {
+      throw new Error(`Unsafe design path for mission ${opts.id}: ${designPath}`);
+    }
+    await rejectSymlinkIfExists(target, "Design file");
+    if (!(await fileExists(target)) || opts.force) {
+      await writeFile(target, renderDesignTemplate(opts), "utf-8");
+    }
+    resolvedDesignPath = target;
+  }
+
   return {
     path: missionPath,
     created: !exists,
+    designPath: resolvedDesignPath,
   };
+}
+
+/**
+ * Default `design.md` template (UH-75). Intentionally short and OMX-shaped:
+ * problem, decisions, alternatives, open questions. Hand-edit after scaffold.
+ */
+function renderDesignTemplate(opts: CreateMissionOptions): string {
+  return [
+    `# Design: ${opts.title}`,
+    "",
+    `> Mission: \`${opts.id}\` · Workflow: \`${opts.workflow}\``,
+    "",
+    "## Problem",
+    "",
+    opts.objective,
+    "",
+    "## Decisions",
+    "",
+    "- Decision 1 — TODO",
+    "- Decision 2 — TODO",
+    "",
+    "## Alternatives considered",
+    "",
+    "- Alternative A — TODO why rejected",
+    "- Alternative B — TODO why rejected",
+    "",
+    "## Open questions",
+    "",
+    "- TODO",
+    "",
+    "## References",
+    "",
+    "- TODO",
+    "",
+  ].join("\n");
 }
 
 export function assertSafeMissionId(id: string): void {
@@ -143,6 +208,20 @@ export async function rejectSymlinkIfExists(filePath: string, label: string): Pr
 export function isPathWithin(candidate: string, parent: string): boolean {
   const relative = path.relative(parent, candidate);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/**
+ * Resolves `candidate` against `root` and asserts the result is contained
+ * within `root`. Throws with a `label`-prefixed message when the path
+ * escapes (`..` traversal, absolute paths to elsewhere, etc.).
+ */
+export function assertWithinRoot(candidate: string, root: string, label: string): string {
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(resolvedRoot, candidate);
+  if (!isPathWithin(resolved, resolvedRoot)) {
+    throw new Error(`${label} resolves outside of root: ${candidate}`);
+  }
+  return resolved;
 }
 
 export async function fileExists(filePath: string): Promise<boolean> {

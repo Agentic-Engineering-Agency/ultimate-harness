@@ -1,0 +1,15 @@
+{
+  "name": "uh",
+  "label": "Ultimate Harness",
+  "description": "Drive Ultimate Harness from the Hermes dashboard: adapters, missions, runs, drilldown, workflows.",
+  "icon": "Wrench",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/uh",
+    "position": "after:sessions"
+  },
+  "slots": ["sessions:bottom"],
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

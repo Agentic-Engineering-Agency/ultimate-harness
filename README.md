@@ -37,8 +37,9 @@ Cross-cutting protocols every adapter participates in:
 
 ## Documentation
 
-Start with the [documentation home](./docs/README.md) and the [roadmap](./docs/ROADMAP.md). Direct links:
+Start with the [vision](./docs/VISION.md), the [documentation home](./docs/README.md), and the [roadmap](./docs/ROADMAP.md). Direct links:
 
+- [VISION — what UH is, who it's for, and what we won't accept](./docs/VISION.md)
 - [Glossary](./docs/glossary.md)
 - [Product requirements](./docs/product/prd.md)
 - [MVP scope](./docs/product/mvp-scope.md)
@@ -54,6 +55,7 @@ Runbooks:
 - [Hermes Proxy setup](./docs/runbooks/hermes-proxy-setup.md)
 - [Hermes Proxy E2E smoke (UH-38 promotion record)](./docs/runbooks/hermes-proxy-e2e-smoke.md)
 - [Publishing](./docs/runbooks/publishing.md)
+- [Honcho persistent memory (oh-my-pi)](./docs/runbooks/honcho-memory.md)
 
 ## Install
 

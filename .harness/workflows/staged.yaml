@@ -1,0 +1,59 @@
+schema_version: uh.workflow.v0
+id: staged
+name: Staged (Plan → PRD → Execute → Verify → Fix)
+description: >-
+  Five-phase staged workflow used by the runStagedWorkflow runtime. Plan
+  and PRD establish the contract before any code lands; Execute dispatches
+  to the mission's adapter(s); Verify runs the structured verification
+  pipeline; Fix is bounded by mission.verification.max_iterations and
+  loops back into Verify on a failed result. For shape=team missions the
+  leader runs Plan/PRD/Verify/Fix and workers fan out for Execute via
+  UH-72.
+bmad:
+  inspiration: BMAD-METHOD
+  dependency: false
+  roles:
+    - Analyst
+    - Product Manager
+    - Architect
+    - Scrum Master / Workflow Designer
+    - Developer
+    - QA / Test Architect
+    - Technical Writer
+  guardrails:
+    - BMAD is inspiration only, not a runtime dependency.
+    - Roles are hats; a single agent may play multiple roles.
+    - Outputs should be traceable and reviewable.
+    - Do not import BMAD-METHOD as a dependency.
+phases:
+  - name: plan
+    agent_role: architect
+    bmad_role: Architect
+    description: Produce a plan.md outlining the approach before any code lands.
+    outputs:
+      - plan.md
+  - name: prd
+    agent_role: product-manager
+    bmad_role: Product Manager
+    description: Capture the contract / scope / acceptance in prd.md.
+    outputs:
+      - prd.md
+  - name: execute
+    agent_role: developer
+    bmad_role: Developer
+    description: Implement the change. For team missions, workers fan out in parallel.
+    outputs:
+      - runtime-final.txt
+      - integration-report.md
+  - name: verify
+    agent_role: reviewer
+    bmad_role: QA / Test Architect
+    description: Run mission verification against the executed result.
+    outputs:
+      - verify-report.md
+  - name: fix
+    agent_role: developer
+    bmad_role: Developer
+    description: Address verification findings. Loops back into verify up to mission.verification.max_iterations times.
+    outputs:
+      - fix-report.md

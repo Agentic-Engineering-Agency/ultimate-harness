@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
-import { createMission } from "./harness/mission.js";
+import { assertSafeMissionId, createMission } from "./harness/mission.js";
 import { parseIssueRef, parseRequiredCheck, proposeMission, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
@@ -30,6 +30,8 @@ import {
 } from "./harness/sandbox.js";
 import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
+import { recordManualVerdict } from "./harness/verdict.js";
+import type { VerdictValue } from "./schema/artifacts.js";
 const VERSION = "0.0.0";
 
 /**
@@ -163,13 +165,51 @@ program
 // uh validate
 program
   .command("validate")
-  .description("Validate a harness YAML artifact")
+  .description("Validate a harness YAML artifact (and optionally drift-detect under --repair / --json)")
   .argument("[file]", "Path to YAML file (default: .harness/project.yaml)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--all-workflows", "Validate all workflow profiles")
   .option("--all-missions", "Validate all mission files")
-  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean }) => {
+  .option("--repair", "Run drift detection with auto-repair (idempotent)")
+  .option("--json", "Emit drift detection output as JSON instead of human text")
+  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; json?: boolean }) => {
     const root = resolveRoot(opts.root);
+    if (opts.json || opts.repair) {
+      const { runDrift, groupByKind, DRIFT_KINDS } = await import("./harness/validate/drift/registry.js");
+      const outcome = await runDrift(root, { repair: opts.repair === true });
+      if (opts.json) {
+        const grouped = groupByKind(outcome.issues);
+        console.log(JSON.stringify({
+          schema_version: "uh.validate-drift.v0",
+          repair: opts.repair === true,
+          cycles: outcome.cycles,
+          cap_reached: outcome.capReached,
+          kinds: DRIFT_KINDS.map((k) => ({
+            kind: k.kind,
+            can_repair: k.canRepair,
+            issues: grouped[k.kind],
+          })),
+          repairs: outcome.repairs.map((r) => ({
+            kind: r.issue.kind,
+            outcome: r.outcome,
+            reason: r.reason,
+            target: r.issue.target,
+          })),
+        }, null, 2));
+      } else {
+        for (const issue of outcome.issues) {
+          console.log(`[${issue.severity.toUpperCase()}] ${issue.kind}: ${issue.message}`);
+        }
+        if (outcome.issues.length === 0) {
+          console.log(`[OK] no drift detected`);
+        }
+        if (outcome.capReached) {
+          console.log(`[WARN] drift remains after ${outcome.cycles} repair cycles`);
+        }
+      }
+      process.exit(outcome.issues.some((i) => i.severity === "error") ? 1 : 0);
+      return;
+    }
     if (opts.allWorkflows) {
       const results = await validateAllWorkflows(root);
       for (const r of results) {
@@ -195,10 +235,23 @@ program
 // uh status
 program
   .command("status")
-  .description("Report the current state of the harness project")
+  .description("Report the current state of the harness project (use --json for the LLM-less query mode)")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (opts: { root?: string }) => {
-    const root = resolveRoot(opts.root);
+  .option("--cwd <path>", "Override the working directory used for resolving the project root")
+  .option("--json", "Emit the UH-78 status JSON document instead of human text")
+  .action(async (opts: { root?: string; cwd?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root ?? opts.cwd);
+    if (opts.json) {
+      try {
+        const { getStatusJson } = await import("./harness/status-json.js");
+        const doc = await getStatusJson(root);
+        console.log(JSON.stringify(doc, null, 2));
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+      return;
+    }
     try {
       const s = await getStatus(root);
       console.log(`Ultimate Harness project: ${s.name}`);
@@ -516,6 +569,122 @@ missionCmd
     }
   });
 
+// uh mission new — UH-75 thin wrapper around `mission create` that also writes
+// a companion `design.md` when --design is set.
+missionCmd
+  .command("new")
+  .description("Scaffold mission.yaml (and optionally a companion design.md)")
+  .argument("<id>", "Mission id")
+  .requiredOption("--title <title>", "Mission title")
+  .requiredOption("--workflow <profile>", "Workflow profile")
+  .requiredOption("--objective <text>", "Mission objective")
+  .option("--design", "Also scaffold a companion design.md (UH-75)")
+  .option("--design-path <path>", "Override the design.md filename relative to the mission directory")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--force", "Overwrite existing mission.yaml and design.md")
+  .action(async (id: string, opts: { title: string; workflow: string; objective: string; design?: boolean; designPath?: string; root?: string; force?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const result = await createMission(root, {
+        id,
+        title: opts.title,
+        workflow: opts.workflow,
+        objective: opts.objective,
+        force: opts.force ?? false,
+        withDesign: opts.design === true,
+        designPath: opts.designPath,
+      });
+      console.log(`${result.created ? "Created" : "Updated"} mission: ${id}`);
+      console.log(`Path: ${result.path}`);
+      if (result.designPath) {
+        console.log(`Design: ${result.designPath}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] mission new error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh mission show — UH-75 print mission metadata + design.md when present.
+missionCmd
+  .command("show")
+  .description("Show a mission's metadata and design.md companion when present")
+  .argument("<mission-id>", "Mission id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (missionId: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    const missionPath = path.join(root, ".harness", "missions", missionId, "mission.yaml");
+    let mission: import("./schema/mission.js").MissionDocument;
+    try {
+      mission = await loadMissionFile(missionPath);
+    } catch (err) {
+      console.error(`[FAIL] mission show error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    console.log(`Mission: ${mission.id}`);
+    console.log(`Title: ${mission.name}`);
+    console.log(`Workflow: ${mission.workflow_profile}`);
+    if (mission.priority) console.log(`Priority: ${mission.priority}`);
+    if (mission.shape) console.log(`Shape: ${mission.shape}`);
+    console.log(`Objective: ${mission.description}`);
+    if (mission.acceptance_criteria.length > 0) {
+      console.log(`Acceptance criteria (${mission.acceptance_criteria.length}):`);
+      for (const ac of mission.acceptance_criteria) {
+        console.log(`  - ${ac.id} [${ac.severity}] ${ac.description}`);
+      }
+    }
+    const designPath = mission.design_path ?? "design.md";
+    const designAbs = path.join(path.dirname(missionPath), designPath);
+    try {
+      const designContent = await readFileAsync(designAbs, "utf-8");
+      console.log("");
+      console.log(`=== ${designPath} ===`);
+      console.log(designContent);
+      console.log(`=== End ${designPath} ===`);
+    } catch {
+      console.log(`(no design.md at ${designPath})`);
+    }
+  });
+
+// uh mission verdict — UH-76 manual override of the runtime-result verdict.
+missionCmd
+  .command("verdict")
+  .description("Record a manual verdict (pass | needs-attention | needs-remediation) on a mission")
+  .argument("<mission-id>", "Mission id")
+  .argument("<value>", "Verdict value: pass | needs-attention | needs-remediation")
+  .option("--rationale <text>", "Free-text rationale (required for non-pass)")
+  .option("--missiondir <path>", "Override the mission directory (default: .harness/missions/<id>)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (missionId: string, value: string, opts: { rationale?: string; missiondir?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    const allowed: VerdictValue[] = ["pass", "needs-attention", "needs-remediation"];
+    if (!(allowed as string[]).includes(value)) {
+      console.error(`[FAIL] unknown verdict value: ${value}`);
+      console.error(`  allowed: ${allowed.join(" | ")}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const result = await recordManualVerdict({
+        root,
+        missionId,
+        value: value as VerdictValue,
+        rationale: opts.rationale,
+        missionDir: opts.missiondir ? path.resolve(opts.missiondir) : undefined,
+      });
+      console.log(`[OK] verdict recorded: ${value}`);
+      console.log(`  runtime-result: ${result.runtimeResultPath}`);
+      console.log(`  audit: ${result.auditLine}`);
+    } catch (err) {
+      console.error(`[FAIL] mission verdict error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
 missionCmd
   .command("dry-run")
   .description("Show what command would be executed without running it")
@@ -708,6 +877,119 @@ missionCmd
       console.log(`runtime failures: ${broken.join(", ")}`);
       process.exit(1);
       return;
+    }
+  });
+
+missionCmd
+  .command("run-team")
+  .description("Run a team-shape mission: fan out to N workers in their own worktrees, then ask the leader to integrate")
+  .argument("<mission-id>", "Mission id (must exist in .harness/missions/, with team shape)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--base-ref <ref>", "Base git ref for worker / leader worktrees (default: HEAD)")
+  .option("--retain", "Preserve worktrees on success (default: cleanup on PASS, preserve on FAIL)")
+  .option("--strategy <strategy>", "Leader integration strategy: merge|cherry-pick|rebase (default: merge)", "merge")
+  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean; strategy: string }) => {
+    try {
+      assertSafeMissionId(missionId);
+    } catch (err) {
+      console.error(`[FAIL] ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    const validStrategies = ["merge", "cherry-pick", "rebase"] as const;
+    if (!validStrategies.includes(opts.strategy as (typeof validStrategies)[number])) {
+      console.error(`[FAIL] invalid --strategy: ${opts.strategy}. Valid: ${validStrategies.join("|")}`);
+      process.exit(1);
+      return;
+    }
+    const root = resolveRoot(opts.root);
+    const canonicalMissionPath = path.join(root, ".harness", "missions", missionId, "mission.yaml");
+    let raw: string;
+    try {
+      raw = await readFileAsync(canonicalMissionPath, "utf-8");
+    } catch (err) {
+      console.error(`[FAIL] mission file not readable: ${canonicalMissionPath}`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    const parsed = parseYaml(raw) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== "object") {
+      console.error(`[FAIL] mission file has no top-level mapping: ${canonicalMissionPath}`);
+      process.exit(1);
+      return;
+    }
+    // UH-71 schema validates the structural mission packet. The team-specific
+    // `shape`/`team` fields ride alongside and are validated separately by
+    // the team-run planner.
+    const { validateMission } = await import("./schema/mission.js");
+    try {
+      validateMission(parsed);
+    } catch (err) {
+      console.error(`[FAIL] mission validation failed: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if ((parsed as { shape?: unknown }).shape !== "team") {
+      console.error(`[FAIL] mission ${missionId} is not a team-shape mission. Add 'shape: team' and a 'team:' block, or use 'uh mission run'.`);
+      process.exit(1);
+      return;
+    }
+    const team = (parsed as { team?: unknown }).team;
+    if (!team || typeof team !== "object") {
+      console.error(`[FAIL] mission ${missionId} declares shape: team but has no 'team:' block.`);
+      process.exit(1);
+      return;
+    }
+    // Codex P2: validate workers is an array before dereferencing .length.
+    // A malformed mission (shape:team with no workers, or workers not an
+    // array) used to throw a raw TypeError on the log line below; now it
+    // surfaces as a normal CLI error.
+    const workersRaw = (team as { workers?: unknown }).workers;
+    if (!Array.isArray(workersRaw) || workersRaw.length === 0) {
+      console.error(`[FAIL] mission ${missionId} has shape: team but team.workers is missing, empty, or not an array.`);
+      process.exit(1);
+      return;
+    }
+    const leaderRaw = (team as { leader?: unknown }).leader;
+    if (!leaderRaw || typeof leaderRaw !== "object") {
+      console.error(`[FAIL] mission ${missionId} has shape: team but team.leader is missing.`);
+      process.exit(1);
+      return;
+    }
+    const teamMission = {
+      id: missionId,
+      team: team as { workers: { role: string; adapter: string; count?: number }[]; leader: { adapter: string } },
+      integration_report_path: (parsed as { integration_report_path?: string }).integration_report_path,
+    };
+    const { runTeamMission } = await import("./harness/team-run.js");
+    const { verifyMission } = await import("./harness/verify.js");
+    console.log(`Running team mission ${missionId} with ${teamMission.team.workers.length} worker spec(s)`);
+    try {
+      const result = await runTeamMission(teamMission, root, {
+        runnerFor: (adapter) => async (rt, effectiveRoot, missionPath) => {
+          const wiring = RUNTIME_WIRINGS[adapter];
+          if (!wiring) throw new Error(`Unknown adapter: ${adapter}`);
+          void rt;
+          return wiring.run(effectiveRoot, missionPath);
+        },
+        verifier: async (workRoot, mid) => verifyMission(workRoot, mid, { useSandbox: false }),
+        baseRef: opts.baseRef,
+        retainOnSuccess: opts.retain === true,
+        strategy: opts.strategy as "merge" | "cherry-pick" | "rebase",
+      });
+      const label = result.status === "passed" ? "PASS" : result.status === "blocked" ? "BLOCKED" : "FAIL";
+      console.log(`[${label}] ${missionId}`);
+      console.log(`workers: ${result.workers.length}, conflicts: ${result.hadConflicts ? "yes" : "no"}, verification: ${result.verification ? result.verification.status : "not-run"}`);
+      console.log(`integration-report: ${result.integrationReportPath}`);
+      console.log(`retained: ${result.retained ? "yes" : "no"}`);
+      // Exit codes: passed -> 0, blocked -> 2, failed -> 1 (UH-72 review F1).
+      const exit = result.status === "passed" ? 0 : result.status === "blocked" ? 2 : 1;
+      process.exit(exit);
+    } catch (err) {
+      console.error(`[FAIL] mission run-team error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
     }
   });
 
@@ -911,7 +1193,7 @@ skillCmd
     }
   });
 
-function printValidationResult(r: { valid: boolean; path: string; schema_version: string | null; errors: string[] }) {
+function printValidationResult(r: { valid: boolean; path: string; schema_version: string | null; errors: string[]; warnings?: string[] }) {
   const status = r.valid ? "PASS" : "FAIL";
   console.log(`[${status}] ${r.path}`);
   if (r.schema_version) {
@@ -919,6 +1201,9 @@ function printValidationResult(r: { valid: boolean; path: string; schema_version
   }
   for (const e of r.errors) {
     console.log(`  error: ${e}`);
+  }
+  for (const w of r.warnings ?? []) {
+    console.log(`  warn: ${w}`);
   }
 }
 

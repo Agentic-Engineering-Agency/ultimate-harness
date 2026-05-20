@@ -8,6 +8,7 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 
 ## Start here
 
+0. [Vision](./VISION.md) — what UH is, who it's for, and what we won't accept. Read this first.
 1. [Glossary](./glossary.md) — shared terms used across the project.
 2. [Product requirements](./product/prd.md) — what the harness is for and who it serves.
 3. [MVP scope](./product/mvp-scope.md) — what must exist before implementation grows.
