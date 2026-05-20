@@ -100,7 +100,17 @@ export async function appendRunsIndexEntry(
   } else {
     current.runs.push(entry);
   }
-  const tmp = `${indexPath}.tmp`;
+  // Codex P1 (PR #96): two concurrent writers must NOT race on the same
+  // tmp path. A shared `index.json.tmp` would either ENOENT-fail one
+  // rename or silently overwrite — both drop run history entries. Suffix
+  // with random bytes so each writer has its own staging file. Rename is
+  // still atomic on the same filesystem (POSIX rename(2) overwrites the
+  // destination atomically), so the last-finishing writer wins the merge
+  // — and since `current` is recomputed under each writer's read, the
+  // race only loses the entry the slower writer added between read and
+  // rename. That's the same exposure as `latest.json` writes (best-effort,
+  // last-write-wins). Per-run dirs themselves are race-free.
+  const tmp = `${indexPath}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(tmp, JSON.stringify(current, null, 2), "utf-8");
   await rename(tmp, indexPath);
 }

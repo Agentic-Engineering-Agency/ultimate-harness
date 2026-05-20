@@ -629,6 +629,7 @@ async function stripWorkerSessionArtifacts(worktreePath: string, missionId: stri
   for (const name of [
     "runtime-result.yaml",
     "latest.json",
+    "runs/index.json",
     "runtime-final.txt",
     "events.ndjson",
     "runtime-session.yaml",
