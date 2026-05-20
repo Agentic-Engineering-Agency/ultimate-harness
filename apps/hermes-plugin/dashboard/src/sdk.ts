@@ -120,7 +120,7 @@ export interface MissionDetail extends MissionSummary {
   acceptance_criteria: Array<{ id: string; description: string; severity?: string }>;
   capabilities: string[];
   raw: string;
-  /** UH-82 — append-only run history, newest-first, cap 50. Empty array if no runs/index.json. */
+  /** UH-82 — append-only run history, newest-first, cap 50. Empty array if no runs/index.json. UH-90 added optional `archived` flag on each row. */
   runs: MissionRunSummary[];
 }
 

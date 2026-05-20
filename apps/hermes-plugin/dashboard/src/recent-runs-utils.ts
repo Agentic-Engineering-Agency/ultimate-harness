@@ -27,6 +27,8 @@ export interface MissionRunSummary {
     | "needs-attention"
     | "needs-remediation";
   runtime?: string | null;
+  /** UH-90 — true when this run's per-run dir has been pruned by the retention policy. The index entry persists for audit; artifacts are gone. */
+  archived?: boolean;
 }
 
 /** Sort keys for the runs table. `duration` is computed at sort time. */
