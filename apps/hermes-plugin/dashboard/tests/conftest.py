@@ -179,6 +179,29 @@ def fake_cli() -> Iterator[FakeUhCli]:
         plugin_api.set_runner(previous)
 
 
+@pytest.fixture(autouse=True)
+def _reset_active_runs() -> Iterator[None]:
+    """Codex P1 round 12 follow-up: _active_runs is module-level singleton
+    state. Each test's start_run leaves entries with status='running'; the
+    new concurrent-run guard would then block subsequent tests. Snapshot
+    the registry before each test and restore it after, and cancel any
+    background asyncio tasks (watchdog / eviction) the test spawned."""
+    prev = dict(plugin_api._active_runs)
+    plugin_api._active_runs.clear()
+    try:
+        yield
+    finally:
+        # Cancel any background tasks (watchdog, eviction) the test created
+        # so they don't fire after the test exits.
+        for info in plugin_api._active_runs.values():
+            for key in ("watchdog", "eviction"):
+                task = info.get(key)
+                if task is not None and not task.done():
+                    task.cancel()
+        plugin_api._active_runs.clear()
+        plugin_api._active_runs.update(prev)
+
+
 @pytest.fixture()
 def app(fake_cli: FakeUhCli) -> FastAPI:
     application = FastAPI()

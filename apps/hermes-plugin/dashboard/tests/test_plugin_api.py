@@ -426,6 +426,48 @@ async def test_workflows_list_to_detail_roundtrip_via_slug(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_runs_for_same_mission_rejected(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """Codex P1 round 12: starting a second run for a mission that already
+    has a 'running' entry in _active_runs must 409, not silently overwrite
+    the shared mission-scoped artifacts."""
+    first = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    assert first.status_code == 200
+    second = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    assert second.status_code == 409, second.text
+    body = second.json()
+    assert body["code"] == "run_already_active"
+    assert body.get("fields", {}).get("activeRunId") == first.json()["runId"]
+
+
+@pytest.mark.asyncio
+async def test_runid_fallback_strips_all_unsafe_chars(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P2 round 12: ISO timestamps with `+00:00` offsets must
+    produce a runId that round-trips through _SAFE_ID_RE. The previous
+    fallback only replaced `:`, leaving `+` chars that broke deep-links."""
+    from plugin_api import _SAFE_ID_RE  # type: ignore[import-not-found]
+    rr_path = isolated_project / ".harness" / "missions" / "demo" / "runtime-result.yaml"
+    rr_path.parent.mkdir(parents=True, exist_ok=True)
+    rr_path.write_text(
+        "schema_version: uh.runtime-result.v0\n"
+        "mission_id: demo\n"
+        "started_at: '2026-05-19T12:00:00+00:00'\n"
+        "status: passed\n",
+        encoding="utf-8",
+    )
+    resp = await client.get("/api/plugins/uh/runs?limit=5")
+    runs = resp.json()["runs"]
+    assert runs, "expected at least one run row"
+    for row in runs:
+        assert _SAFE_ID_RE.match(row["runId"]), (
+            f"runId {row['runId']!r} does not match _SAFE_ID_RE — would 400 on deep-link"
+        )
+
+
+@pytest.mark.asyncio
 async def test_cancel_does_not_misreport_natural_exit_as_cancelled(
     client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

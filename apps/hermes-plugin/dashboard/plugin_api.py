@@ -355,8 +355,14 @@ def _scan_runs(root: Path, limit: int = 20) -> list[dict[str, Any]]:
         if explicit_run_id:
             safe_run_id = str(explicit_run_id)
         else:
+            # Codex P2 round 12: ISO timestamps contain `:` and may include
+            # `+00:00` offsets. The round-6 fix only replaced `:`, leaving
+            # `+` chars that still fail _SAFE_ID_RE. Normalize any character
+            # outside [A-Za-z0-9._-] to `-` so the resulting slug always
+            # round-trips through the safe-id regex. Lstrip `-` so the slug
+            # starts with [A-Za-z0-9] as the regex requires.
             fallback = str(rr.get("started_at") or entry.name)
-            safe_run_id = fallback.replace(":", "-")
+            safe_run_id = re.sub(r"[^A-Za-z0-9._-]", "-", fallback).lstrip("-") or entry.name
         rows.append({
             "runId": safe_run_id,
             "missionId": str(rr.get("mission_id") or entry.name),
@@ -534,6 +540,20 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     mission_yaml = _harness(root) / "missions" / mission_id / "mission.yaml"
     if not mission_yaml.is_file():
         raise _err(404, "not_found", f"mission {mission_id} not found")
+
+    # Codex P1 round 12: artifacts (events.ndjson, runtime-result.yaml) are
+    # mission-scoped, not per-run. Two concurrent runs for the same mission
+    # would interleave writes and corrupt evidence. Reject up-front with
+    # 409 Conflict until per-run artifact directories land (UH-63 follow-up).
+    for existing_run_id, existing in _active_runs.items():
+        if existing.get("missionId") == mission_id and existing.get("status") == "running":
+            raise _err(
+                409,
+                "run_already_active",
+                f"mission {mission_id} already has an active run ({existing_run_id}); "
+                "cancel it or wait for completion before starting another.",
+                fields={"activeRunId": existing_run_id},
+            )
 
     run_id = _make_run_id()
     # Codex P1 round 3: the CLI takes a mission file PATH, not the id slug.
