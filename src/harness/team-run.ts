@@ -626,6 +626,12 @@ async function readSentinel(worktreePath: string, missionId: string): Promise<st
  */
 async function stripWorkerSessionArtifacts(worktreePath: string, missionId: string): Promise<void> {
   const dir = path.join(worktreePath, ".harness", "missions", missionId);
+  // Codex P1 (PR #96 round 1): `runs/index.json` MUST be stripped —
+  // every worker run writes it, so two workers would otherwise hit a
+  // deterministic add/add or modify/modify merge conflict on a
+  // bookkeeping file unrelated to their code changes. Per-run subdirs
+  // (`runs/<run_id>/`) are NOT stripped because each worker has its own
+  // run_id so the subdirs cannot collide.
   for (const name of [
     "runtime-result.yaml",
     "latest.json",
