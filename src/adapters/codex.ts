@@ -25,6 +25,7 @@ import { captureDiffWithUntracked } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
 import { buildDispatchContext } from "../harness/dispatch-context.js";
 import { renderPrompt } from "../harness/render-prompt.js";
+import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -103,10 +104,17 @@ export interface DiffCaptureResult {
 
 export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
 
+export interface PlanCodexOptions {
+  /** UH-81 — CLI-time overrides spread on top of mission.runtime_config_overrides. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+}
+
 export interface RunCodexOptions {
   runner?: CodexRunner;
   timeoutMs?: number;
   collectDiff?: DiffCollector;
+  /** UH-81 — forwarded into the planner so the merge happens before strict-parse. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
 }
 
 export interface RunCodexResult {
@@ -250,7 +258,7 @@ export async function dryRunCodex(root: string, missionPath: string): Promise<Dr
  * recoverable issues (missing workflow profile) are returned in `errors[]`
  * so the caller decides whether to proceed.
  */
-export async function planCodexRun(root: string, missionPath: string): Promise<CodexRunPlan> {
+export async function planCodexRun(root: string, missionPath: string, options: PlanCodexOptions = {}): Promise<CodexRunPlan> {
   const errors: string[] = [];
   const adapter = await loadAdapterConfig(root, "codex");
 
@@ -266,9 +274,12 @@ export async function planCodexRun(root: string, missionPath: string): Promise<C
   // UH-33: merge mission-level runtime_config_overrides on top of the
   // adapter manifest defaults, then strict-parse via the per-runtime
   // schema so UH-26 typo safety extends to mission overrides.
+  // UH-81: `options.extraRuntimeConfigOverrides` is the CLI-time
+  // `--runtime-config-overrides <json>` payload; it wins over the
+  // mission file (later spread = higher precedence).
   const mergedRuntimeConfig = {
     ...(adapter.config?.runtime_config ?? {}),
-    ...mission.runtime_config_overrides,
+    ...mergeRuntimeConfigOverrides(mission, options.extraRuntimeConfigOverrides),
   };
   let runtimeConfig;
   try {
@@ -398,7 +409,7 @@ export async function runCodex(
   missionPath: string,
   options: RunCodexOptions = {},
 ): Promise<RunCodexResult> {
-  const plan = await planCodexRun(root, missionPath);
+  const plan = await planCodexRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }

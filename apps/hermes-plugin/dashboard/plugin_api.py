@@ -55,6 +55,7 @@ _UH_PROJECT_ROOT_ENV = "UH_PROJECT_ROOT"
 _READ_TIMEOUT_S = float(os.environ.get("UH_READ_TIMEOUT_S", "30"))
 _RUN_TIMEOUT_S = float(os.environ.get("UH_RUN_TIMEOUT_S", "3600"))
 _MAX_ARTIFACT_BYTES = int(os.environ.get("UH_MAX_ARTIFACT_BYTES", str(5 * 1024 * 1024)))
+_MAX_OVERRIDES_JSON_BYTES = int(os.environ.get("UH_MAX_OVERRIDES_JSON_BYTES", "8192"))
 
 _ERROR_JSON_SHAPE = {"error", "code", "stderr"}
 
@@ -522,19 +523,37 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     overrides = body.get("runtime_config_overrides") or {}
     if not isinstance(overrides, dict):
         raise _err(400, "invalid_overrides", "runtime_config_overrides must be an object")
-    # Codex P1 round 4: a previous attempt persisted overrides to a sidecar
-    # file but the CLI never consumed them, so operators could start runs
-    # with overrides that were silently dropped — invalidating experiments.
-    # The honest move until the CLI grows real support is to reject
-    # non-empty overrides up-front so the operator sees the gap, not a
-    # silent miscompare.
+    # UH-81 (shipped): the CLI now consumes `--runtime-config-overrides <json>`
+    # and threads the parsed object through all four adapter planners on top
+    # of `mission.runtime_config_overrides`. We forward the JSON-encoded
+    # overrides as a single argv element; Popen is invoked with a list (no
+    # shell), so embedded quotes/spaces are safe.
+    overrides_arg: str | None = None
     if overrides:
-        raise _err(
-            400,
-            "overrides_not_yet_supported",
-            "runtime_config_overrides are not yet applied by the CLI; remove the overrides block and re-run.",
-            fields={"runtime_config_overrides": "Not yet supported. Tracked in UH-64 follow-up."},
-        )
+        # Codex P2 (PR #95): strict-finite JSON only. Python's json.dumps
+        # accepts NaN/Infinity by default and emits them as bare tokens
+        # (e.g. `{"temperature":NaN}`), which Node's JSON.parse — used by
+        # parseRuntimeConfigOverridesJson on the CLI side — rejects. Without
+        # allow_nan=False the dashboard would happily spawn the run and the
+        # CLI would then exit 1 with [BLOCKED] invalid JSON. Reject up-front
+        # with a 400 so the operator sees the validation error in the UI.
+        try:
+            overrides_arg = json.dumps(overrides, separators=(",", ":"), allow_nan=False)
+        except ValueError as exc:
+            raise _err(
+                400,
+                "invalid_overrides",
+                f"runtime_config_overrides contains non-finite numeric values: {exc}",
+                fields={"runtime_config_overrides": "NaN / Infinity not allowed"},
+            ) from exc
+        if len(overrides_arg.encode("utf-8")) > _MAX_OVERRIDES_JSON_BYTES:
+            raise _err(
+                400,
+                "overrides_too_large",
+                f"runtime_config_overrides JSON exceeds {_MAX_OVERRIDES_JSON_BYTES} bytes; "
+                "trim the override block or raise UH_MAX_OVERRIDES_JSON_BYTES.",
+                fields={"runtime_config_overrides": "too large"},
+            )
 
     root = _project_root()
     mission_yaml = _harness(root) / "missions" / mission_id / "mission.yaml"
@@ -563,6 +582,8 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     # persistence in the canonical mission dir, leaving the plugin with no
     # events / runtime-result to surface.
     args = ["mission", "run", str(mission_yaml), "--root", str(root), "--no-sandbox"]
+    if overrides_arg is not None:
+        args.extend(["--runtime-config-overrides", overrides_arg])
     started_iso = datetime.now(tz=timezone.utc).isoformat()
     events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
     # Codex P1 round 8: capture the events.ndjson byte offset BEFORE spawning

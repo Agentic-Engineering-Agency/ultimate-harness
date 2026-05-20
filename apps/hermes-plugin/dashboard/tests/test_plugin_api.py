@@ -149,20 +149,82 @@ async def test_create_and_run_mission_invokes_uh(client: httpx.AsyncClient, isol
 
 
 @pytest.mark.asyncio
-async def test_non_empty_overrides_rejected_until_cli_supports_them(
-    client: httpx.AsyncClient, isolated_project: Path,
+async def test_non_empty_overrides_threaded_to_cli(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
 ) -> None:
-    """Codex P1 round 4: silently persisting overrides while running with
-    defaults invalidates experiments. Reject non-empty overrides up-front
-    until the CLI actually consumes them."""
+    """UH-81: the CLI now consumes ``--runtime-config-overrides <json>``, so
+    the plugin must forward the operator-supplied overrides verbatim instead
+    of 400-rejecting them. We assert the JSON-encoded payload lands as a
+    single argv element next to the flag (no shell splitting)."""
+    overrides = {"model": "claude-opus-4.6", "temperature": 0.2}
     resp = await client.post(
         "/api/plugins/uh/missions/demo/run",
-        json={"runtime_config_overrides": {"model": "claude-opus-4.6"}},
+        json={"runtime_config_overrides": overrides},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "runId" in body
+    spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
+    assert spawn_calls, "expected spawn() to be called"
+    args = spawn_calls[0]["args"]
+    assert "--runtime-config-overrides" in args, args
+    idx = args.index("--runtime-config-overrides")
+    assert idx + 1 < len(args), "overrides JSON must follow the flag"
+    payload = args[idx + 1]
+    # Compact JSON encoding — exact byte equality keeps the size cap honest.
+    assert payload == json.dumps(overrides, separators=(",", ":"))
+    # Round-trip parses back to the original dict.
+    assert json.loads(payload) == overrides
+
+
+@pytest.mark.asyncio
+async def test_oversize_overrides_rejected(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """UH-81: the dashboard caps override JSON at 8 KiB (default) so an
+    operator can't shove a megabyte of config into a CLI argv element. The
+    cap is enforced before spawn so the CLI is never invoked on rejection."""
+    # Build a payload whose compact JSON encoding exceeds the 8192-byte cap.
+    # `len(json.dumps({"k0": "x"*N, ...}))` ~= sum of key+value sizes + JSON
+    # overhead; we pad a single value past 8192 bytes for clarity.
+    big_value = "x" * 9000
+    resp = await client.post(
+        "/api/plugins/uh/missions/demo/run",
+        json={"runtime_config_overrides": {"blob": big_value}},
     )
     assert resp.status_code == 400, resp.text
     body = resp.json()
-    assert body["code"] == "overrides_not_yet_supported"
-    assert "runtime_config_overrides" in body.get("fields", {})
+    assert body["code"] == "overrides_too_large"
+    spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
+    assert spawn_calls == [], "spawn must not be called on oversize rejection"
+
+
+@pytest.mark.asyncio
+async def test_non_finite_overrides_rejected_before_spawn(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """Codex P2 (PR #95): the dashboard MUST reject NaN/Infinity values in
+    runtime_config_overrides up-front. Python's json.dumps emits them as
+    bare ``NaN`` / ``Infinity`` tokens which Node's JSON.parse — used by the
+    CLI's ``parseRuntimeConfigOverridesJson`` — rejects. Without strict
+    serialization the dashboard would spawn a run that exits 1 immediately,
+    turning a validation problem into a failed run."""
+    # httpx (and most JSON libs) refuse to serialize NaN client-side, but a
+    # caller using requests with allow_nan=True or hand-crafted JSON CAN send
+    # `NaN` as a bare token. FastAPI's request.json() (orjson under the hood,
+    # via _json_body in plugin_api) accepts it as a Python float('nan'). We
+    # simulate that by posting a raw body with the bare token.
+    resp = await client.post(
+        "/api/plugins/uh/missions/demo/run",
+        content=b'{"runtime_config_overrides": {"temperature": NaN}}',
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == "invalid_overrides"
+    assert "non-finite" in body["error"].lower(), body["error"]
+    spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
+    assert spawn_calls == [], "spawn must not be called on non-finite rejection"
 
 
 @pytest.mark.asyncio

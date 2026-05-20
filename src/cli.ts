@@ -16,6 +16,7 @@ import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
+import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -62,9 +63,13 @@ type RuntimeDryRunResult = {
   session_id_passthrough: boolean;
   errors: string[];
 };
+interface RuntimeRunOptions {
+  /** UH-81 — CLI-time runtime_config overrides spread on top of the mission's own overrides. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+}
 interface RuntimeWiring {
   dryRun(root: string, missionPath: string): Promise<RuntimeDryRunResult>;
-  run(root: string, missionPath: string): Promise<RuntimeRunResult>;
+  run(root: string, missionPath: string, options?: RuntimeRunOptions): Promise<RuntimeRunResult>;
   surfaceBlocked: boolean;
 }
 const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
@@ -742,7 +747,11 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
   .option("--force", "Bypass mission capability matching for this runtime")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean }) => {
+  .option(
+    "--runtime-config-overrides <json>",
+    "JSON object of runtime_config overrides applied on top of the mission file (e.g. '{\"model\":\"gpt-5\"}')",
+  )
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
@@ -763,17 +772,31 @@ missionCmd
       return;
     }
     const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    let extraRuntimeConfigOverrides: Record<string, unknown> | undefined;
+    if (opts.runtimeConfigOverrides !== undefined) {
+      try {
+        extraRuntimeConfigOverrides = parseRuntimeConfigOverridesJson(opts.runtimeConfigOverrides);
+      } catch (e) {
+        console.error(`[BLOCKED] ${(e as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
     console.log(`Running mission: ${filePath}`);
     console.log(`Runtime: ${runtime}`);
     if (routing.sandbox) {
       console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
+    }
+    if (extraRuntimeConfigOverrides) {
+      const keys = Object.keys(extraRuntimeConfigOverrides);
+      console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
     }
     console.log("");
     let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] } };
     let uninstallCancelHandler: (() => void) | null = null;
     try {
       uninstallCancelHandler = await installRuntimeCancelledEventHandler(root, filePath, runtime);
-      result = await wiring.run(routing.effectiveRoot, filePath);
+      result = await wiring.run(routing.effectiveRoot, filePath, { extraRuntimeConfigOverrides });
     } catch (err) {
       console.log("[FAIL] mission run error:");
       console.log(`  error: ${(err as Error).message}`);

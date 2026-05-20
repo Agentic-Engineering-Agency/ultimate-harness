@@ -105,7 +105,7 @@ All endpoints are mounted under `/api/plugins/uh/`.
 | `/status` | GET | Project summary + adapter check (`uh adapter check` shelled out). |
 | `/missions` | GET | List from `.harness/missions/*/mission.yaml`. |
 | `/missions/{id}` | GET | Single mission + raw YAML. |
-| `/missions/{id}/run` | POST | Spawn `uh mission run {id}`. Body: `{"runtime_config_overrides"?: {...}}`. Returns `{runId, startedAt}`. |
+| `/missions/{id}/run` | POST | Spawn `uh mission run {id}`. Body: `{"runtime_config_overrides"?: {...}}` — now forwarded to the CLI as `--runtime-config-overrides <json>` (UH-81); empty/absent block runs with mission defaults. Hard cap: 8192 bytes of compact JSON (`UH_MAX_OVERRIDES_JSON_BYTES`) → 400 `overrides_too_large`. Returns `{runId, startedAt}`. |
 | `/missions/{id}/{prompt|final-message|diff|result|events}` | GET | Per-artifact payload `{kind: "text", content}` or `{kind: "missing"}`. |
 | `/missions/{id}/runs/{runId}/{prompt|final-message|diff|result|events}` | GET | Same shape; current backend serves the latest per-mission file for any runId (one runtime-result per mission today). |
 | `/missions/{id}/verification` | GET | `verification.yaml` parsed. 404 until `uh verify` runs. |

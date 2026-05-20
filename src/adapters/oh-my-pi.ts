@@ -25,6 +25,7 @@ import { captureDiffWithUntracked } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
 import { buildDispatchContext } from "../harness/dispatch-context.js";
 import { renderPrompt } from "../harness/render-prompt.js";
+import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides.js";
 import {
   flushPendingHonchoSaves,
   loadHonchoMemoryBlock,
@@ -116,10 +117,17 @@ export interface DiffCaptureResult {
 
 export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
 
+export interface PlanOhMyPiOptions {
+  /** UH-81 — CLI-time overrides spread on top of mission.runtime_config_overrides. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+}
+
 export interface RunOhMyPiOptions {
   runner?: OhMyPiRunner;
   timeoutMs?: number;
   collectDiff?: DiffCollector;
+  /** UH-81 — forwarded into the planner so the merge happens before strict-parse. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
 }
 
 export interface RunOhMyPiResult {
@@ -268,7 +276,7 @@ export async function dryRunOhMyPi(root: string, missionPath: string): Promise<D
  * recoverable issues (missing workflow profile) are returned in `errors[]`
  * so the caller decides whether to proceed.
  */
-export async function planOhMyPiRun(root: string, missionPath: string): Promise<OhMyPiRunPlan> {
+export async function planOhMyPiRun(root: string, missionPath: string, options: PlanOhMyPiOptions = {}): Promise<OhMyPiRunPlan> {
   const errors: string[] = [];
   const adapter = await loadAdapterConfig(root, "oh-my-pi");
 
@@ -283,9 +291,12 @@ export async function planOhMyPiRun(root: string, missionPath: string): Promise<
 
   // Merge mission-level overrides on top of adapter defaults, then strict-parse.
   // The strict schema catches typos in either source (adapter manifest or mission override).
+  // UH-81: `options.extraRuntimeConfigOverrides` is the CLI-time
+  // `--runtime-config-overrides <json>` payload; it wins over the
+  // mission file (later spread = higher precedence).
   const mergedRuntimeConfig = {
     ...(adapter.config?.runtime_config ?? {}),
-    ...mission.runtime_config_overrides,
+    ...mergeRuntimeConfigOverrides(mission, options.extraRuntimeConfigOverrides),
   };
   let runtimeConfig;
   try {
@@ -427,7 +438,7 @@ export async function runOhMyPi(
   missionPath: string,
   options: RunOhMyPiOptions = {},
 ): Promise<RunOhMyPiResult> {
-  const plan = await planOhMyPiRun(root, missionPath);
+  const plan = await planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
