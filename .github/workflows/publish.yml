@@ -95,4 +95,4 @@ jobs:
           fi
 
       - name: Publish package
-        run: bun publish --access public --tolerate-republish
+        run: bun publish --access public
