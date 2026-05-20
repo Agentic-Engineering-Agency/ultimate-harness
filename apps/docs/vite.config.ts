@@ -5,6 +5,7 @@ import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import { defineConfig } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
 import mdx from 'fumadocs-mdx/vite';
+import alchemy from "alchemy/cloudflare/tanstack-start";
 
 // Walk content/docs/**/*.mdx and turn each one into a static page path.
 // Doing this explicitly (rather than crawlLinks) avoids the crawler chasing
@@ -45,6 +46,7 @@ export default defineConfig({
   plugins: [
     mdx(),
     tailwindcss(),
+    alchemy(),
     tanstackStart({
       spa: {
         enabled: true,

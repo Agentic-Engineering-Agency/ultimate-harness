@@ -17,3 +17,6 @@ dist
 .tanstack
 
 .source
+# alchemy / cloudflare local
+.alchemy
+.wrangler

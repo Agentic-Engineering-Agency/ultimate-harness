@@ -1,5 +1,5 @@
-# Deploy the public docs site (https://uh.agenticengineering.lat) to Cloudflare Pages.
-# Runs on pushes to main when docs or root package metadata change.
+# Deploy the public docs site (https://uh.agenticengineering.lat) via Alchemy.
+# https://alchemy.run/concepts/cli/
 name: Deploy docs
 
 on:
@@ -19,9 +19,9 @@ permissions:
 
 jobs:
   deploy:
-    name: Build and deploy uh-docs
+    name: Alchemy deploy uh-docs (prod)
     runs-on: depot-ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: apps/docs
@@ -40,25 +40,22 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Require Cloudflare credentials
+      - name: Require deploy credentials
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ALCHEMY_PASSWORD: ${{ secrets.ALCHEMY_PASSWORD }}
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "CLOUDFLARE_API_TOKEN repository secret is required for Pages deploy." >&2
-            exit 1
-          fi
-          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "CLOUDFLARE_ACCOUNT_ID repository secret is required for Pages deploy." >&2
-            exit 1
-          fi
+          for secret in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID ALCHEMY_PASSWORD; do
+            if [ -z "${!secret}" ]; then
+              echo "$secret repository secret is required for Alchemy deploy." >&2
+              exit 1
+            fi
+          done
 
-      - name: Build site
-        run: bun run build
-
-      - name: Deploy to Cloudflare Pages
+      - name: Deploy with Alchemy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: bunx wrangler pages deploy dist/client --project-name uh-docs --branch=main
+          ALCHEMY_PASSWORD: ${{ secrets.ALCHEMY_PASSWORD }}
+        run: bunx tsx alchemy.run.ts --stage prod

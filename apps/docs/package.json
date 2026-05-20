@@ -8,7 +8,9 @@
     "build": "vite build && cp dist/client/_shell.html dist/client/index.html && printf '/* /index.html 200\\n' > dist/client/_redirects",
     "preview": "vite preview",
     "types:check": "fumadocs-mdx && tsc --noEmit",
-    "deploy": "bun run build && bunx wrangler pages deploy dist/client --project-name uh-docs --branch=main"
+    "deploy": "alchemy deploy --stage prod",
+    "destroy": "alchemy destroy --stage prod",
+    "alchemy:dev": "alchemy dev"
   },
   "dependencies": {
     "@orama/orama": "^3.1.18",
@@ -26,15 +28,18 @@
     "vite": "^8.0.0"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.11.6",
+    "@cloudflare/workers-types": "^4.20250805.0",
     "@tailwindcss/vite": "^4.0.0",
     "@types/mdx": "^2.0.13",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "alchemy": "0.93.9",
     "nitro": "3.0.260429-beta",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5.7.0",
-    "wrangler": "4.56.0"
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
   }
 }
