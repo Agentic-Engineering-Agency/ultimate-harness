@@ -941,6 +941,22 @@ missionCmd
       process.exit(1);
       return;
     }
+    // Codex P2: validate workers is an array before dereferencing .length.
+    // A malformed mission (shape:team with no workers, or workers not an
+    // array) used to throw a raw TypeError on the log line below; now it
+    // surfaces as a normal CLI error.
+    const workersRaw = (team as { workers?: unknown }).workers;
+    if (!Array.isArray(workersRaw) || workersRaw.length === 0) {
+      console.error(`[FAIL] mission ${missionId} has shape: team but team.workers is missing, empty, or not an array.`);
+      process.exit(1);
+      return;
+    }
+    const leaderRaw = (team as { leader?: unknown }).leader;
+    if (!leaderRaw || typeof leaderRaw !== "object") {
+      console.error(`[FAIL] mission ${missionId} has shape: team but team.leader is missing.`);
+      process.exit(1);
+      return;
+    }
     const teamMission = {
       id: missionId,
       team: team as { workers: { role: string; adapter: string; count?: number }[]; leader: { adapter: string } },

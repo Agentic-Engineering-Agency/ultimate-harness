@@ -7,7 +7,7 @@
  * and decides PASS vs NEEDS-ATTENTION.
  *
  * The acceptance contract is intentionally strict: PASS requires every
- * one of the five gates below to hold. A missing gate blocks PASS even
+ * one of the gates below to hold. A missing gate blocks PASS even
  * if every individual probe succeeded — "no evidence" is treated as
  * "needs attention", never as "fine".
  *
@@ -19,6 +19,10 @@
  *                                          worktrees left on disk
  *   gate-5  redaction_guardrail_intact    Honcho (or equivalent) redaction
  *                                          guardrail not bypassed
+ *   gate-6  no_leaked_artifacts           cleanup.leakedArtifacts must be
+ *                                          empty (matches the workflow YAML
+ *                                          contract: "no leaked secrets in
+ *                                          artifacts"). Codex P1.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -141,6 +145,22 @@ export function evaluateAdversarialQa(input: AdversarialQaInput): AdversarialQaR
     description: "Honcho redaction guardrail not bypassed",
     satisfied: input.cleanup.redactionGuardrailIntact === true,
     detail: input.cleanup.redactionGuardrailIntact ? "redaction guardrail intact" : "redaction guardrail bypassed",
+  });
+
+  // gate-6 ---------------------------------------------------------------- gate
+  // Codex P1: leaked artifacts (secrets, dangling branches, etc) MUST block
+  // PASS. The workflow YAML's cleanup-evidence phase requires "no leaked
+  // secrets" — without this gate, a run with leaks present but
+  // `redactionGuardrailIntact === true` would still verdict PASS, producing
+  // a false-green security signal.
+  const leakedArtifacts = input.cleanup.leakedArtifacts ?? [];
+  gates.push({
+    id: "gate-6-no-leaked-artifacts",
+    description: "no leaked artifacts detected during cleanup",
+    satisfied: leakedArtifacts.length === 0,
+    detail: leakedArtifacts.length === 0
+      ? "no leaked artifacts detected"
+      : `${leakedArtifacts.length} leaked artifact(s) detected`,
   });
 
   const verdict: AdversarialQaVerdict = gates.every((g) => g.satisfied) ? "PASS" : "NEEDS-ATTENTION";
