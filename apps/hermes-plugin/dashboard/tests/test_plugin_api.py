@@ -820,6 +820,35 @@ async def test_cancel_unknown_run_404(client: httpx.AsyncClient, isolated_projec
 
 
 @pytest.mark.asyncio
+async def test_cancel_finished_run_returns_409(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    run_id = "20260520T120000Z-deadbe"
+    run_dir = isolated_project / ".harness" / "missions" / "demo" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "events.ndjson").write_text(
+        json.dumps({"event": "runtime.finished", "run_id": run_id}) + "\n",
+        encoding="utf-8",
+    )
+    resp = await client.post(f"/api/plugins/uh/runs/{run_id}/cancel")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "already_finished"
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_run_appends_cancelled_event(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    cancel = await client.post(f"/api/plugins/uh/runs/{run_id}/cancel")
+    assert cancel.status_code == 200
+    events_path = isolated_project / ".harness" / "missions" / "demo" / "runs" / run_id / "events.ndjson"
+    assert "runtime.cancelled" in events_path.read_text(encoding="utf-8")
+    assert fake_cli.last_popen is not None and fake_cli.last_popen.terminated is True
+
+
+@pytest.mark.asyncio
 async def test_error_handler_returns_uniform_shape(client: httpx.AsyncClient, isolated_project: Path) -> None:
     # Trigger a 400 via an invalid wizard payload.
     resp = await client.post("/api/plugins/uh/missions", json={"id": "", "name": "x", "workflow_profile": "y"})

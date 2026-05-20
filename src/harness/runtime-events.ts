@@ -8,6 +8,9 @@ export interface RuntimeCancelledEventInput {
   missionId: string;
   runtime: string;
   signal: string;
+  /** When set, append to this run's events.ndjson instead of reading latest.json. */
+  runId?: string;
+  source?: string;
   timestamp?: string;
 }
 
@@ -20,33 +23,38 @@ export interface RuntimeCancelledEventInput {
  * `UH_QUIET_CANCEL=1` to suppress (used in tests).
  */
 export function appendRuntimeCancelledEvent(input: RuntimeCancelledEventInput): string | null {
-  const pointerPath = missionLatestPointer(input.root, input.missionId);
   let runId: string;
-  try {
-    const raw = readFileSync(pointerPath, "utf-8");
-    const pointer = LatestRunPointerSchema.parse(JSON.parse(raw));
-    runId = pointer.run_id;
-  } catch {
-    // UH-82 follow-up (P4 #5): emit a single-line warning so operators
-    // tracing a missing runtime.cancelled event can find the cause
-    // without grep-spelunking the harness. Quiet via UH_QUIET_CANCEL=1.
-    if (process.env.UH_QUIET_CANCEL !== "1") {
-      process.stderr.write(
-        `[uh] runtime.cancelled skipped: no latest.json for mission ${input.missionId} (no run has started)\n`,
-      );
+  if (input.runId !== undefined) {
+    runId = input.runId;
+  } else {
+    const pointerPath = missionLatestPointer(input.root, input.missionId);
+    try {
+      const raw = readFileSync(pointerPath, "utf-8");
+      const pointer = LatestRunPointerSchema.parse(JSON.parse(raw));
+      runId = pointer.run_id;
+    } catch {
+      if (process.env.UH_QUIET_CANCEL !== "1") {
+        process.stderr.write(
+          `[uh] runtime.cancelled skipped: no latest.json for mission ${input.missionId} (no run has started)\n`,
+        );
+      }
+      return null;
     }
-    return null;
   }
   const runDir = missionRunDir(input.root, input.missionId, runId);
   const eventsPath = path.join(runDir, "events.ndjson");
   mkdirSync(runDir, { recursive: true });
-  appendFileSync(eventsPath, JSON.stringify({
+  const payload: Record<string, string> = {
     event: "runtime.cancelled",
     timestamp: input.timestamp ?? new Date().toISOString(),
     runtime: input.runtime,
     mission_id: input.missionId,
     run_id: runId,
     signal: input.signal,
-  }) + "\n", "utf-8");
+  };
+  if (input.source !== undefined) {
+    payload.source = input.source;
+  }
+  appendFileSync(eventsPath, JSON.stringify(payload) + "\n", "utf-8");
   return eventsPath;
 }

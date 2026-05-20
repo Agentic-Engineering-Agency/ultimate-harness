@@ -1104,13 +1104,65 @@ async def _enforce_run_timeout(
     # any SSE consumer doesn't linger in _active_runs forever.
     _schedule_run_eviction(run_id)
 
+def _events_show_terminal(events_path: Path) -> bool:
+    if not events_path.is_file():
+        return False
+    try:
+        text = events_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for ln in text.splitlines():
+        stripped = ln.strip()
+        if stripped and _line_is_terminal(stripped.encode("utf-8")):
+            return True
+    return False
+
+
+def _append_runtime_cancelled_event(
+    events_path: Path,
+    *,
+    mission_id: str,
+    run_id: str,
+    source: str = "plugin-api",
+) -> None:
+    try:
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "event": "runtime.cancelled",
+                        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                        "mission_id": mission_id,
+                        "run_id": run_id,
+                        "signal": "SIGTERM",
+                        "source": source,
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str) -> dict[str, Any]:
     _safe_id(run_id, "run_id")
+    root = _project_root()
     info = _active_runs.get(run_id)
     if info is None:
+        try:
+            _, events_path = _locate_run_events(root, run_id)
+        except HTTPException:
+            raise
+        if _events_show_terminal(events_path):
+            raise _err(409, "already_finished", f"run {run_id} already finished")
         raise _err(404, "not_found", f"run {run_id} not tracked (server may have restarted)")
+    mission_id = str(info["missionId"])
+    events_path = _run_events_path(root, mission_id, run_id)
     proc: subprocess.Popen[str] = info["process"]
+    wrote_cancel_event = False
     if proc.poll() is None:
         # Codex P2 round 10: there is a race between the poll() above and
         # terminate(). The child may exit naturally in that window. On
@@ -1131,9 +1183,19 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
                 info["status"] = "finished"
         else:
             info["status"] = "cancelled"
+            wrote_cancel_event = True
+    elif _events_show_terminal(events_path) or info.get("status") not in (None, "running"):
+        raise _err(409, "already_finished", f"run {run_id} already finished")
     watchdog = info.get("watchdog")
     if watchdog is not None and not watchdog.done():
         watchdog.cancel()
+    if wrote_cancel_event:
+        _append_runtime_cancelled_event(
+            events_path,
+            mission_id=mission_id,
+            run_id=run_id,
+            source="plugin-ui",
+        )
     # Codex P2 round 5: terminal state — schedule registry eviction.
     _schedule_run_eviction(run_id)
     return {"ok": True, "status": info["status"]}

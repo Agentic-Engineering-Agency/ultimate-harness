@@ -3,7 +3,10 @@
  *
  * Mounted from MissionDrilldown when the pinned or latest run is `running`.
  * Historical finished runs continue to use the static EventsPane fetch.
+ *
+ * UH-95 — Stop button with confirm modal; POST `/runs/{runId}/cancel`.
  */
+import { pluginFetch, UI } from "./sdk";
 import { useMissionEventTail } from "./live-events-hooks";
 import {
   severityRowClass,
@@ -26,6 +29,9 @@ export function LiveEventsPane({
 }) {
   const { events, closed, status } = useMissionEventTail(missionId, runId);
   const [showUsage, setShowUsage] = React.useState(false);
+  const [showConfirm, setShowConfirm] = React.useState(false);
+  const [cancelling, setCancelling] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
   const logRef = React.useRef<HTMLDivElement | null>(null);
   const scrollLockedRef = React.useRef(false);
 
@@ -48,11 +54,32 @@ export function LiveEventsPane({
     scrollLockedRef.current = !shouldAutoScrollTop(el);
   }, []);
 
+  const requestCancel = React.useCallback(async () => {
+    setCancelling(true);
+    setError(null);
+    try {
+      await pluginFetch(`/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+      setShowConfirm(false);
+    } catch (e: any) {
+      const code = e?.payload?.code;
+      if (code === "already_finished") {
+        setError("Run already finished.");
+        setShowConfirm(false);
+      } else {
+        setError(e?.message || String(e));
+      }
+    } finally {
+      setCancelling(false);
+    }
+  }, [runId]);
+
   const statusLabel =
     status === "connecting" ? "connecting…"
       : status === "open" && !closed ? "live"
         : closed ? "closed"
           : status;
+
+  const stopDisabled = closed || cancelling;
 
   return (
     <div className="uh-stack">
@@ -68,8 +95,17 @@ export function LiveEventsPane({
             show usage
           </label>
           <span className="uh-muted">{statusLabel}</span>
+          <UI.Button
+            variant="destructive"
+            size="sm"
+            disabled={stopDisabled}
+            onClick={() => setShowConfirm(true)}
+          >
+            Stop
+          </UI.Button>
         </div>
       </div>
+      {error ? <div className="uh-error">{error}</div> : null}
       <div
         ref={logRef}
         className="uh-event-log"
@@ -89,6 +125,25 @@ export function LiveEventsPane({
           </div>
         ))}
       </div>
+      {showConfirm ? (
+        <div className="uh-modal-backdrop" onClick={() => { if (!cancelling) setShowConfirm(false); }}>
+          <div className="uh-modal" style={{ maxWidth: 420 }} onClick={(e: any) => e.stopPropagation()}>
+            <strong>Stop this run?</strong>
+            <p className="uh-muted" style={{ margin: "8px 0" }}>
+              Sends SIGTERM to the running process for{" "}
+              <span className="uh-mono">{runId}</span>. This cannot be undone.
+            </p>
+            <div className="uh-row" style={{ justifyContent: "flex-end", gap: 8 }}>
+              <UI.Button variant="outline" disabled={cancelling} onClick={() => setShowConfirm(false)}>
+                Keep running
+              </UI.Button>
+              <UI.Button variant="destructive" disabled={cancelling} onClick={requestCancel}>
+                {cancelling ? "Stopping…" : "Stop run"}
+              </UI.Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

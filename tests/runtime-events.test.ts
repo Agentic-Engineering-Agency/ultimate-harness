@@ -75,6 +75,31 @@ describe("runtime cancellation events", () => {
     }
   });
 
+  test("uses explicit runId without reading latest.json", async () => {
+    const root = await mkdtemp(join(tmpdir(), "uh-test-runtime-events-explicit-"));
+    try {
+      const path = appendRuntimeCancelledEvent({
+        root,
+        missionId: "m-explicit",
+        runId: "20260520T120000Z-cafe00",
+        runtime: "codex",
+        signal: "SIGTERM",
+        source: "cli",
+        timestamp: "2026-05-20T12:00:00.000Z",
+      });
+      expect(path).not.toBeNull();
+      const rows = (await readFile(path!, "utf-8")).trim().split("\n").map((line) => JSON.parse(line));
+      expect(rows[0]).toMatchObject({
+        event: "runtime.cancelled",
+        mission_id: "m-explicit",
+        run_id: "20260520T120000Z-cafe00",
+        source: "cli",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("UH_QUIET_CANCEL=1 suppresses the missing-pointer warning", async () => {
     const root = await mkdtemp(join(tmpdir(), "uh-test-runtime-events-quiet-"));
     const prev = process.env.UH_QUIET_CANCEL;
