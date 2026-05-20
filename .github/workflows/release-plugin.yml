@@ -1,9 +1,4 @@
-# Drop this file into `.github/workflows/release-plugin.yml` to enable.
-# Kept under `docs/ci/` so the initial branch can be pushed without
-# requiring the `workflow` OAuth scope; promoting it to a live workflow is
-# a one-line move once an admin token is available.
-#
-# UH-68 — release the Hermes dashboard plugin as a GitHub Releases tarball.
+# UH-68 / UH-83 — release the Hermes dashboard plugin as a GitHub Releases tarball.
 #
 # Trigger: pushed tag `plugin-v*` OR a tagged release event. We piggy-back on
 # the existing `dev`/`main` CI for typecheck + bundle size; this workflow only
