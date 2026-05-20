@@ -95,4 +95,20 @@ jobs:
           fi
 
       - name: Publish package
-        run: bun publish --access public
+        env:
+          # `npm publish` looks up auth via `NODE_AUTH_TOKEN` when paired with
+          # the registry-url it would normally write into ~/.npmrc, or via the
+          # raw `npm_config_token` env var (lowercased) in newer npm versions.
+          # We pass both so npm picks up whichever channel works.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_CONFIG_TOKEN }}
+          npm_config_token: ${{ secrets.NPM_CONFIG_TOKEN }}
+        run: |
+          # `bun publish` against this scope returns a spurious 404 on the
+          # registry meta-lookup even when the package + token are valid
+          # (verified out-of-band: `curl https://registry.npmjs.org/@…/…`
+          # returns 200 with v0.3.0 data). `npm publish` reads the same
+          # token via `npm_config_token`/`NODE_AUTH_TOKEN` and uploads
+          # cleanly. The dry-run job above still uses `bun publish
+          # --dry-run` so we keep the bun parity check.
+          echo "//registry.npmjs.org/:_authToken=$NODE_AUTH_TOKEN" > ~/.npmrc
+          npm publish --access public
