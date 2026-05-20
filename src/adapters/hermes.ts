@@ -25,6 +25,7 @@ import { captureDiffWithUntracked } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
 import { buildDispatchContext } from "../harness/dispatch-context.js";
 import { renderPrompt } from "../harness/render-prompt.js";
+import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides.js";
 
 type MissionArtifactContext = {
   missionDir: string;
@@ -103,10 +104,17 @@ export interface DiffCaptureResult {
 
 export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
 
+export interface PlanHermesOptions {
+  /** UH-81 — CLI-time overrides spread on top of mission.runtime_config_overrides. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+}
+
 export interface RunHermesOptions {
   runner?: HermesRunner;
   timeoutMs?: number;
   collectDiff?: DiffCollector;
+  /** UH-81 — forwarded into the planner so the merge happens before strict-parse. */
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
 }
 
 export interface RunHermesResult {
@@ -306,7 +314,7 @@ export async function dryRunHermes(root: string, missionPath: string): Promise<D
  * recoverable issues (missing workflow profile) are returned in `errors[]`
  * so the caller decides whether to proceed.
  */
-export async function planHermesRun(root: string, missionPath: string): Promise<HermesRunPlan> {
+export async function planHermesRun(root: string, missionPath: string, options: PlanHermesOptions = {}): Promise<HermesRunPlan> {
   const errors: string[] = [];
   const adapter = await loadAdapterConfig(root, "hermes");
 
@@ -334,9 +342,12 @@ export async function planHermesRun(root: string, missionPath: string): Promise<
   // schema. HermesRuntimeConfigSchema is currently empty-strict, so any
   // override key will fail load — but the wiring is in place for the day
   // hermes gains runtime-specific config (e.g. hermes-proxy endpoint).
+  // UH-81: `options.extraRuntimeConfigOverrides` is the CLI-time
+  // `--runtime-config-overrides <json>` payload; it wins over the
+  // mission file (later spread = higher precedence).
   const mergedRuntimeConfig = {
     ...(adapter.config?.runtime_config ?? {}),
-    ...mission.runtime_config_overrides,
+    ...mergeRuntimeConfigOverrides(mission, options.extraRuntimeConfigOverrides),
   };
   try {
     HermesRuntimeConfigSchema.parse(mergedRuntimeConfig);
@@ -452,7 +463,7 @@ export async function runHermes(
   missionPath: string,
   options: RunHermesOptions = {},
 ): Promise<RunHermesResult> {
-  const plan = await planHermesRun(root, missionPath);
+  const plan = await planHermesRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
