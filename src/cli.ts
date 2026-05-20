@@ -1261,7 +1261,7 @@ function parseScreenshotSize(raw: string | undefined): { width: number; height: 
 }
 
 // uh tui
-program
+const tuiCmd = program
   .command("tui")
   .description("Open the interactive terminal UI (Mission Control)")
   .option("--root <path>", "Root directory (default: cwd)")
@@ -1303,6 +1303,60 @@ program
     });
     child.on("error", (err) => {
       process.stderr.write(`uh tui: failed to spawn bun: ${err.message}\n`);
+      process.exit(1);
+    });
+  });
+
+// uh tui screenshot — UH-51 automated capture pipeline. Boots
+// src/tui/screenshot.tsx with --view / --out / --width / --height flags
+// so docs and CI can grab deterministic per-view frames without needing
+// a real terminal.
+tuiCmd
+  .command("screenshot")
+  .description("Render a single TUI view to ANSI text (CI / docs)")
+  .requiredOption(
+    "--view <name>",
+    "View to capture: overview | missions | sandboxes | workflows",
+  )
+  .option("--out <path>", "Output file path; use `-` or omit for stdout")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--size <cols>x<rows>", "Frame size (default: 120x36)")
+  .action(async (opts: { view: string; out?: string; root?: string; size?: string }) => {
+    const bunCheck = spawnSync("bun", ["--version"], { stdio: "ignore" });
+    if (bunCheck.status !== 0) {
+      process.stderr.write(
+        "uh tui screenshot requires Bun. Install: curl -fsSL https://bun.sh/install | bash\n",
+      );
+      process.exit(1);
+    }
+    const screenshotEntry = fileURLToPath(new URL("../src/tui/screenshot.tsx", import.meta.url));
+    const cwd = opts.root ? path.resolve(opts.root) : process.cwd();
+    const size = parseScreenshotSize(opts.size);
+    const args = [
+      "--preload",
+      "@opentui/solid/preload",
+      screenshotEntry,
+      "--view",
+      opts.view,
+      "--width",
+      String(size.width),
+      "--height",
+      String(size.height),
+    ];
+    if (opts.out) {
+      args.push("--out", opts.out === "-" ? "-" : path.resolve(opts.out));
+    }
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      UH_TUI_ROOT: cwd,
+      UH_TUI_HEADLESS: "1",
+    };
+    const child = spawn("bun", args, { stdio: "inherit", cwd, env });
+    child.on("exit", (code, signal) => {
+      process.exit(signal ? 1 : code ?? 0);
+    });
+    child.on("error", (err) => {
+      process.stderr.write(`uh tui screenshot: failed to spawn bun: ${err.message}\n`);
       process.exit(1);
     });
   });

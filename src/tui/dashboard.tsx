@@ -28,7 +28,7 @@
  *   - fs.watch error           → sticky footer warning, 5 s TTL.
  *   - Failed adapter check     → footer preview line on the selected row.
  */
-import { createSignal, createMemo, onCleanup, createEffect, on } from "solid-js";
+import { createSignal, createMemo, onCleanup, createEffect, on, onMount } from "solid-js";
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import { SyntaxStyle } from "@opentui/core";
 import type { MissionDetail } from "./model.js";
@@ -41,6 +41,9 @@ import type {
   SandboxRow,
   MissionArtifact,
 } from "./model.js";
+import { PALETTES, type Palette } from "./theme.js";
+import { installSuspendHandlers, type SuspendHandle } from "./suspend.js";
+import { openInEditor } from "./editor.js";
 
 type PaneId = "adapters" | "missions" | "sandboxes";
 const PANES: PaneId[] = ["adapters", "missions", "sandboxes"];
@@ -49,6 +52,13 @@ interface DashboardProps {
   root: string;
   /** Render once, then exit cleanly. Used by `uh tui --once` for CI/docs/smoke. */
   once?: boolean;
+  /** Active palette. Defaults to PALETTES.dark — caller passes the resolved value. */
+  palette?: Palette;
+  /**
+   * Skip OS-level signal wiring. Set automatically by the screenshot
+   * pipeline and any other non-interactive entry. Tests set this too.
+   */
+  headless?: boolean;
 }
 
 function adapterStatusBadge(status: string): string {
@@ -153,6 +163,7 @@ function formatAge(ms: number | null): string {
 
 export function Dashboard(props: DashboardProps) {
   const renderer = useRenderer();
+  const palette: Palette = props.palette ?? PALETTES.dark;
   const [focused, setFocused] = createSignal<PaneId>("missions");
   const [detailFocus, setDetailFocus] = createSignal<"artifacts" | "viewer">("artifacts");
   const [showLive, setShowLive] = createSignal(false);
@@ -164,6 +175,32 @@ export function Dashboard(props: DashboardProps) {
   const state = createDashboardState(props.root);
   const syntaxStyle = SyntaxStyle.create();
   let quitting = false;
+
+  // UH-50 — install Ctrl+Z/SIGCONT lifecycle wiring. Skip in headless
+  // mode (screenshot pipeline, test renderer) so we don't attach signal
+  // listeners that would outlive the test run.
+  let suspendHandle: SuspendHandle | null = null;
+  if (!props.headless && !props.once) {
+    onMount(() => {
+      suspendHandle = installSuspendHandlers({
+        renderer,
+        lifecycle: {
+          captureSnapshot: () => ({
+            view: state.activeView(),
+            adapterId: state.selectedAdapter()?.id ?? null,
+            missionId: state.selectedMission()?.id ?? null,
+            sandboxId: state.selectedSandbox()?.id ?? null,
+          }),
+          // Solid signals survive SIGSTOP intact — the snapshot is kept
+          // for symmetry and so future debugging / forensics can reason
+          // about which selections were live across a suspend.
+          restoreSnapshot: () => {
+            void state.refresh();
+          },
+        },
+      });
+    });
+  }
 
   if (props.once) {
     // --once: quit as soon as the first snapshot resolves, or after a
@@ -187,6 +224,8 @@ export function Dashboard(props: DashboardProps) {
   onCleanup(() => {
     void state.dispose();
     syntaxStyle.destroy();
+    suspendHandle?.uninstall();
+    suspendHandle = null;
   });
 
   const quit = async () => {
@@ -195,6 +234,33 @@ export function Dashboard(props: DashboardProps) {
     try { await state.dispose(); } catch { /* persistence is advisory */ }
     renderer.destroy();
     process.exit(0);
+  };
+
+  // UH-49 — open the currently focused artifact (or mission.yaml) in
+  // $EDITOR. Suspends the renderer via OpenTUI's native suspend() so the
+  // editor inherits a clean TTY, then resumes + refreshes state on exit.
+  const openCurrentInEditor = async (): Promise<void> => {
+    const detail = state.missionDetail();
+    const artifact = detail
+      ? detail.artifacts[state.selectedMissionArtifactIndex()] ?? null
+      : null;
+    // Prefer the focused artifact when it has an on-disk path; otherwise
+    // fall back to the mission's mission.yaml so `e` still does the
+    // obvious thing from the artifact picker.
+    const filePath = artifact?.exists
+      ? artifact.path
+      : detail?.artifacts.find((a) => a.id === "mission.yaml" && a.exists)?.path
+        ?? null;
+    if (!filePath) return;
+    try {
+      await openInEditor({
+        filePath,
+        renderer,
+        reload: () => state.refresh(),
+      });
+    } catch (err) {
+      process.stderr.write(`uh tui: editor failed: ${(err as Error).message}\n`);
+    }
   };
 
   useKeyboard((event) => {
@@ -330,6 +396,9 @@ export function Dashboard(props: DashboardProps) {
             setShowLive((v) => !v);
             return;
           }
+          return;
+        case "e":
+          void openCurrentInEditor();
           return;
       }
       return;
@@ -559,6 +628,8 @@ export function Dashboard(props: DashboardProps) {
           flexDirection="column"
           border
           borderStyle="rounded"
+          borderColor={palette.accent}
+          backgroundColor={palette.cardBg}
           title=" Keymap (press ? or Esc to close) "
           titleAlignment="left"
           padding={2}
@@ -566,9 +637,9 @@ export function Dashboard(props: DashboardProps) {
         >
           {sections.map((section) => (
             <box flexDirection="column" marginBottom={1}>
-              <text>{section.title}</text>
+              <text fg={palette.accent}>{section.title}</text>
               {section.entries.map((entry) => (
-                <text>{`  ${entry.keys.join(" / ").padEnd(14, " ")}  ${entry.action}`}</text>
+                <text fg={palette.fg}>{`  ${entry.keys.join(" / ").padEnd(14, " ")}  ${entry.action}`}</text>
               ))}
             </box>
           ))}
@@ -606,16 +677,18 @@ export function Dashboard(props: DashboardProps) {
         flexDirection="column"
         border
         borderStyle="rounded"
+        borderColor={palette.accent}
+        backgroundColor={palette.cardBg}
         title=" Run mission "
         titleAlignment="left"
         padding={2}
         width={68}
       >
-        <text>{`Mission: ${selectedMission()?.id ?? "—"}`}</text>
-        <text marginTop={1}>Runtime (←/→ to change):</text>
-        <text>{`  ${RUN_RUNTIMES.map((r) => r === state.runDialogRuntime() ? `[${r}]` : ` ${r} `).join(" ")}`}</text>
-        <text marginTop={1}>{`Sandbox: ${state.runDialogNoSandbox() ? "[no-sandbox] (Tab to toggle)" : "[auto-route] (Tab to toggle)"}`}</text>
-        <text marginTop={1}>Enter to start · Esc to cancel</text>
+        <text fg={palette.fg}>{`Mission: ${selectedMission()?.id ?? "—"}`}</text>
+        <text fg={palette.mutedFg} marginTop={1}>Runtime (←/→ to change):</text>
+        <text fg={palette.fg}>{`  ${RUN_RUNTIMES.map((r) => r === state.runDialogRuntime() ? `[${r}]` : ` ${r} `).join(" ")}`}</text>
+        <text fg={palette.fg} marginTop={1}>{`Sandbox: ${state.runDialogNoSandbox() ? "[no-sandbox] (Tab to toggle)" : "[auto-route] (Tab to toggle)"}`}</text>
+        <text fg={palette.mutedFg} marginTop={1}>Enter to start · Esc to cancel</text>
       </box>
     </box>
   );
@@ -635,13 +708,15 @@ export function Dashboard(props: DashboardProps) {
           flexDirection="column"
           border
           borderStyle="rounded"
+          borderColor={palette.accent}
+          backgroundColor={palette.cardBg}
           title=" Create sandbox "
           titleAlignment="left"
           padding={2}
           width={72}
         >
-          <text>{`Field (Tab cycles): ${field}`}</text>
-          <text marginTop={1}>Sandbox id:</text>
+          <text fg={palette.fg}>{`Field (Tab cycles): ${field}`}</text>
+          <text fg={palette.mutedFg} marginTop={1}>Sandbox id:</text>
           <input
             value={state.createSandboxId()}
             focused={field === "id"}
@@ -649,7 +724,7 @@ export function Dashboard(props: DashboardProps) {
             onInput={(v: string) => state.setCreateSandboxId(v)}
             onSubmit={((v: string) => { state.setCreateSandboxId(v); void state.submitCreateSandbox(); }) as unknown as any}
           />
-          <text marginTop={1}>Mission id:</text>
+          <text fg={palette.mutedFg} marginTop={1}>Mission id:</text>
           <input
             value={state.createSandboxMissionId()}
             focused={field === "mission"}
@@ -657,7 +732,7 @@ export function Dashboard(props: DashboardProps) {
             onInput={(v: string) => state.setCreateSandboxMissionId(v)}
             onSubmit={((v: string) => { state.setCreateSandboxMissionId(v); void state.submitCreateSandbox(); }) as unknown as any}
           />
-          <text marginTop={1}>Base ref (optional, defaults to HEAD):</text>
+          <text fg={palette.mutedFg} marginTop={1}>Base ref (optional, defaults to HEAD):</text>
           <input
             value={state.createSandboxBaseRef()}
             focused={field === "base"}
@@ -666,9 +741,9 @@ export function Dashboard(props: DashboardProps) {
             onSubmit={((v: string) => { state.setCreateSandboxBaseRef(v); void state.submitCreateSandbox(); }) as unknown as any}
           />
           {state.sandboxActionError()
-            ? <text marginTop={1}>{`error: ${state.sandboxActionError()!.message}`}</text>
+            ? <text fg={palette.error} marginTop={1}>{`error: ${state.sandboxActionError()!.message}`}</text>
             : null}
-          <text marginTop={1}>{state.sandboxAction() === "creating" ? "creating sandbox…" : "Enter to submit · Tab to cycle · Esc to cancel"}</text>
+          <text fg={palette.mutedFg} marginTop={1}>{state.sandboxAction() === "creating" ? "creating sandbox…" : "Enter to submit · Tab to cycle · Esc to cancel"}</text>
         </box>
       </box>
     );
@@ -689,20 +764,22 @@ export function Dashboard(props: DashboardProps) {
           flexDirection="column"
           border
           borderStyle="rounded"
+          borderColor={palette.error}
+          backgroundColor={palette.cardBg}
           title=" Discard sandbox "
           titleAlignment="left"
           padding={2}
           width={72}
         >
-          <text>{sandbox ? `Sandbox: ${sandbox.id}` : "No sandbox selected."}</text>
+          <text fg={palette.fg}>{sandbox ? `Sandbox: ${sandbox.id}` : "No sandbox selected."}</text>
           {sandbox
-            ? <text>{`Mission: ${sandbox.missionId}  ·  Backend: ${sandbox.backend}  ·  Status: ${sandbox.status}`}</text>
+            ? <text fg={palette.mutedFg}>{`Mission: ${sandbox.missionId}  ·  Backend: ${sandbox.backend}  ·  Status: ${sandbox.status}`}</text>
             : null}
-          <text marginTop={1}>{`Force (--force): ${state.discardSandboxForce() ? "ON" : "off"}  (press F to toggle)`}</text>
+          <text fg={palette.fg} marginTop={1}>{`Force (--force): ${state.discardSandboxForce() ? "ON" : "off"}  (press F to toggle)`}</text>
           {state.sandboxActionError()
-            ? <text marginTop={1}>{`error: ${state.sandboxActionError()!.message}`}</text>
+            ? <text fg={palette.error} marginTop={1}>{`error: ${state.sandboxActionError()!.message}`}</text>
             : null}
-          <text marginTop={1}>{state.sandboxAction() === "discarding" ? "discarding…" : "Enter to confirm · Esc to cancel"}</text>
+          <text fg={palette.mutedFg} marginTop={1}>{state.sandboxAction() === "discarding" ? "discarding…" : "Enter to confirm · Esc to cancel"}</text>
         </box>
       </box>
     );
@@ -720,18 +797,19 @@ export function Dashboard(props: DashboardProps) {
         flexDirection="column"
         border
         borderStyle="rounded"
+        borderColor={status === "error" ? palette.error : status === "running" ? palette.accent : palette.border}
         title={` Live events · ${runStatusBadge()} · ${mission} `}
         titleAlignment="left"
         padding={1}
       >
-        <text>{`started=${startedAt ?? "—"}  finished=${finishedAt ?? "—"}  events=${events.length}`}</text>
+        <text fg={palette.mutedFg}>{`started=${startedAt ?? "—"}  finished=${finishedAt ?? "—"}  events=${events.length}`}</text>
         <scrollbox flexGrow={1} width="100%" height="100%" stickyScroll stickyStart="bottom">
           {events.length === 0
-            ? <text>(no events yet — adapter has not written events.ndjson)</text>
-            : events.map((event) => <text>{formatEventRow(event)}</text>)}
+            ? <text fg={palette.mutedFg}>(no events yet — adapter has not written events.ndjson)</text>
+            : events.map((event) => <text fg={palette.fg}>{formatEventRow(event)}</text>)}
         </scrollbox>
         {status === "error" && state.runError()
-          ? <text>{`error: ${state.runError()!.message}`}</text>
+          ? <text fg={palette.error}>{`error: ${state.runError()!.message}`}</text>
           : null}
       </box>
     );
@@ -742,8 +820,8 @@ export function Dashboard(props: DashboardProps) {
     const mission = selectedMission();
     return (
       <box flexDirection="column" width="100%" height="100%">
-        <box border borderStyle="rounded" title=" Mission detail " titleAlignment="left" padding={1}>
-          <text>
+        <box border borderStyle="rounded" borderColor={palette.border} title=" Mission detail " titleAlignment="left" padding={1}>
+          <text fg={palette.fg}>
             {mission
               ? `${mission.id} · ${mission.name || mission.id} · workflow=${mission.workflow || "—"} · runtime-result=${detail?.runtimeStatus ?? "loading"}`
               : "No mission selected."}
@@ -755,6 +833,7 @@ export function Dashboard(props: DashboardProps) {
             flexDirection="column"
             border
             borderStyle="rounded"
+            borderColor={detailFocus() === "artifacts" ? palette.accent : palette.border}
             title={detailFocus() === "artifacts" ? " Artifacts ◀ " : " Artifacts "}
             titleAlignment="left"
             padding={1}
@@ -777,6 +856,7 @@ export function Dashboard(props: DashboardProps) {
               flexDirection="column"
               border
               borderStyle="rounded"
+              borderColor={detailFocus() === "viewer" ? palette.accent : palette.border}
               title={detailFocus() === "viewer" ? ` ${activeArtifact()?.label ?? "Viewer"} ◀ ` : ` ${activeArtifact()?.label ?? "Viewer"} `}
               titleAlignment="left"
               padding={1}
@@ -786,10 +866,10 @@ export function Dashboard(props: DashboardProps) {
           )}
         </box>
         <box flexDirection="column" paddingLeft={1} paddingRight={1}>
-          <text>
+          <text fg={state.missionDetailError() ? palette.error : palette.mutedFg}>
             {state.missionDetailError() ? `error: ${state.missionDetailError()!.message}` : activeArtifact()?.path ?? "—"}
           </text>
-          <text>
+          <text fg={palette.mutedFg}>
             {footerHint("missionDetail")}
           </text>
         </box>
@@ -812,21 +892,23 @@ export function Dashboard(props: DashboardProps) {
             flexDirection="column"
             border
             borderStyle="rounded"
+            borderColor={palette.warning}
+            backgroundColor={palette.cardBg}
             title=" Not a UH project "
             titleAlignment="left"
             padding={2}
             width={64}
           >
-            <text>
+            <text fg={palette.fg}>
               This directory does not contain a .harness/ tree.
             </text>
-            <text marginTop={1}>
+            <text fg={palette.mutedFg} marginTop={1}>
               Run  uh init             to scaffold one here, or
             </text>
-            <text>
+            <text fg={palette.mutedFg}>
               run  uh tui --root PATH  to point at an existing project.
             </text>
-            <text marginTop={1}>
+            <text fg={palette.mutedFg} marginTop={1}>
               q quit   r retry
             </text>
           </box>
@@ -839,6 +921,7 @@ export function Dashboard(props: DashboardProps) {
               flexDirection="column"
               border
               borderStyle="rounded"
+              borderColor={focused() === "adapters" ? palette.accent : palette.border}
               title={paneTitle("adapters", "Adapters", "a")}
               titleAlignment="left"
               padding={1}
@@ -859,6 +942,7 @@ export function Dashboard(props: DashboardProps) {
               flexDirection="column"
               border
               borderStyle="rounded"
+              borderColor={focused() === "missions" ? palette.accent : palette.border}
               title={paneTitle("missions", "Missions", "m")}
               titleAlignment="left"
               padding={1}
@@ -880,6 +964,7 @@ export function Dashboard(props: DashboardProps) {
               flexDirection="column"
               border
               borderStyle="rounded"
+              borderColor={focused() === "sandboxes" ? palette.accent : palette.border}
               title={paneTitle("sandboxes", "Sandboxes", "s")}
               titleAlignment="left"
               padding={1}
@@ -897,15 +982,15 @@ export function Dashboard(props: DashboardProps) {
             </box>
           </box>
           <box flexDirection="column" paddingLeft={1} paddingRight={1}>
-            <text>
+            <text fg={palette.fg}>
               {previewLine() || "—"}
             </text>
-            <text>
+            <text fg={error() ? palette.error : palette.mutedFg}>
               {isLoading() ? "loading…" : `synced ${capturedAt()}${harness().projectName ? "  ·  " + harness().projectName : ""}`}
               {error() ? `  ·  error: ${error()!.message}` : ""}
             </text>
-            {watcherWarning() ? <text>{`⚠ ${watcherWarning()}`}</text> : null}
-            <text>
+            {watcherWarning() ? <text fg={palette.warning}>{`⚠ ${watcherWarning()}`}</text> : null}
+            <text fg={palette.mutedFg}>
               {footerHint("dashboard")}
             </text>
           </box>

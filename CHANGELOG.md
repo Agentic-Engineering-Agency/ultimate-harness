@@ -16,6 +16,10 @@ Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [Git
 - `uh mission run --runtime-config-overrides <json>` flag merges JSON-encoded overrides on top of the mission's `runtime_config_overrides` block. The Hermes plugin Run modal now passes user-supplied overrides through ([UH-81](https://linear.app/agentic-eng/issue/UH-81)).
 - Per-run artifact directories under `.harness/missions/<id>/runs/<run_id>/` with a `latest.json` pointer and append-only `runs/index.json` history. Concurrent runs of the same mission no longer interleave; the Hermes plugin's per-run route now serves the correct run ([UH-82](https://linear.app/agentic-eng/issue/UH-82)).
 - Recent runs pane on the Hermes Dashboard Mission detail tab with sortable columns, status-chip filtering, and run-id prefix search. Click a row to drill into that run's artifacts ([UH-85](https://linear.app/agentic-eng/issue/UH-85), [UH-86](https://linear.app/agentic-eng/issue/UH-86), [UH-88](https://linear.app/agentic-eng/issue/UH-88)).
+- `UH_TUI_THEME=dark|light|system` palette switch with full `src/tui/theme.ts` palette module ([UH-48](https://linear.app/agentic-eng/issue/UH-48)).
+- Ctrl+Z / `fg` suspend-resume lifecycle in the TUI, backed by OpenTUI 0.2.13's `renderer.suspend()` / `renderer.resume()` ([UH-50](https://linear.app/agentic-eng/issue/UH-50)).
+- `uh tui screenshot --view <name> --out <path>` automated capture pipeline with `overview` / `missions` / `sandboxes` / `workflows` views ([UH-51](https://linear.app/agentic-eng/issue/UH-51)).
+- `e` opens the current mission manifest in `$EDITOR` from the TUI mission detail view, suspending and resuming the renderer cleanly ([UH-49](https://linear.app/agentic-eng/issue/UH-49)).
 
 ### Changed
 
