@@ -11,6 +11,14 @@ import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
 import { auditLog, workflowsDir } from "../harness/paths.js";
 import {
+  appendRunsIndexEntry,
+  ensureRunDir,
+  generateRunId,
+  mirrorRuntimeResultToLatest,
+  writeLatestPointer,
+} from "../harness/run-id.js";
+import type { RunStatus } from "../schema/runs.js";
+import {
   RuntimeSessionDocument,
   RuntimeResultDocument,
   RuntimeResultStatus,
@@ -34,6 +42,7 @@ import {
 
 type MissionArtifactContext = {
   missionDir: string;
+  runDir: string;
   promptPath: string;
   runtimeSessionPath: string;
   eventsPath: string;
@@ -120,6 +129,8 @@ export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
 export interface PlanOhMyPiOptions {
   /** UH-81 — CLI-time overrides spread on top of mission.runtime_config_overrides. */
   extraRuntimeConfigOverrides?: Record<string, unknown>;
+  /** UH-82 — explicit per-run id; generated when absent. */
+  runId?: string;
 }
 
 export interface RunOhMyPiOptions {
@@ -128,6 +139,8 @@ export interface RunOhMyPiOptions {
   collectDiff?: DiffCollector;
   /** UH-81 — forwarded into the planner so the merge happens before strict-parse. */
   extraRuntimeConfigOverrides?: Record<string, unknown>;
+  /** Explicit per-run id; generated when absent. UH-82. */
+  runId?: string;
 }
 
 export interface RunOhMyPiResult {
@@ -135,6 +148,8 @@ export interface RunOhMyPiResult {
   stdout: string;
   stderr: string;
   result?: RuntimeResultDocument;
+  /** UH-82 — id of the per-run artifact directory written. */
+  runId: string;
 }
 
 export interface OhMyPiCollectInput {
@@ -239,7 +254,7 @@ export async function checkOhMyPi(root?: string): Promise<CheckResult> {
 export async function dryRunOhMyPi(root: string, missionPath: string): Promise<DryRunResult> {
   try {
     const plan = await planOhMyPiRun(root, missionPath);
-    const artifacts = await getMissionArtifactContext(root, missionPath);
+    const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
         schema_version: "uh.runtime-session.v0",
@@ -443,10 +458,23 @@ export async function runOhMyPi(
     throw new Error(plan.errors.join("; "));
   }
 
-  const artifacts = await getMissionArtifactContext(root, missionPath);
+  const runId = options.runId ?? generateRunId();
   const startedAt = new Date().toISOString();
+  const artifacts = await getMissionArtifactContext(root, missionPath, runId);
 
   if (artifacts) {
+    await writeLatestPointer(root, plan.mission.id, {
+      schema_version: "uh.latest-run.v0",
+      run_id: runId,
+      started_at: startedAt,
+      status: "running",
+    });
+    await appendRunsIndexEntry(root, plan.mission.id, {
+      run_id: runId,
+      started_at: startedAt,
+      status: "running",
+      runtime: "oh-my-pi",
+    });
     await persistPromptAndSession(artifacts, plan.prompt, {
       schema_version: "uh.runtime-session.v0",
       mission_id: plan.mission.id,
@@ -463,6 +491,7 @@ export async function runOhMyPi(
       mission_id: plan.mission.id,
       command: plan.command,
       args: plan.args,
+      run_id: runId,
     });
   }
 
@@ -476,6 +505,7 @@ export async function runOhMyPi(
       mission_id: plan.mission.id,
       mission_name: plan.mission.name,
       workflow: plan.mission.workflow_profile,
+      run_id: runId,
     });
     await appendFile(logPath, `${auditEntry}\n`, "utf-8");
   } catch {
@@ -483,26 +513,38 @@ export async function runOhMyPi(
   }
 
   const runner = options.runner ?? defaultOhMyPiRunner;
-  const runnerResult = await runner({
-    command: plan.command,
-    args: plan.args,
-    cwd: root,
-    timeoutMs: options.timeoutMs,
-  });
+  let runnerResult: OhMyPiRunnerOutput;
+  let collection: OhMyPiCollectOutput;
+  try {
+    runnerResult = await runner({
+      command: plan.command,
+      args: plan.args,
+      cwd: root,
+      timeoutMs: options.timeoutMs,
+    });
 
-  const collectDiff = options.collectDiff ?? defaultDiffCollector;
-  const diff = await collectDiff(root);
-  const finishedAt = new Date().toISOString();
+    const collectDiff = options.collectDiff ?? defaultDiffCollector;
+    const diff = await collectDiff(root);
+    const finishedAt = new Date().toISOString();
 
-  const collection = await collectOhMyPiSession({
-    root,
-    artifacts,
-    plan,
-    startedAt,
-    finishedAt,
-    runnerResult,
-    diff,
-  });
+    collection = await collectOhMyPiSession({
+      root,
+      artifacts,
+      plan,
+      startedAt,
+      finishedAt,
+      runnerResult,
+      diff,
+    });
+  } finally {
+    if (artifacts) {
+      try {
+        await mirrorRuntimeResultToLatest(root, plan.mission.id, runId);
+      } catch {
+        // best-effort.
+      }
+    }
+  }
 
   try {
     if (collection.finalMessage) {
@@ -515,12 +557,40 @@ export async function runOhMyPi(
     await flushPendingHonchoSaves();
   }
 
+  if (artifacts) {
+    const finishedAt = new Date().toISOString();
+    const terminalStatus = deriveOmpRunStatus(collection.result, collection.exitCode);
+    await writeLatestPointer(root, plan.mission.id, {
+      schema_version: "uh.latest-run.v0",
+      run_id: runId,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      status: terminalStatus,
+    });
+    await appendRunsIndexEntry(root, plan.mission.id, {
+      run_id: runId,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      status: terminalStatus,
+      runtime: "oh-my-pi",
+    });
+  }
+
   return {
     exitCode: collection.exitCode,
     stdout: runnerResult.stdout,
     stderr: collection.stderr,
     result: collection.result,
+    runId,
   };
+}
+
+function deriveOmpRunStatus(
+  result: RuntimeResultDocument | undefined,
+  exitCode: number,
+): RunStatus {
+  if (result?.status) return result.status;
+  return exitCode === 0 ? "blocked" : "failed";
 }
 
 /**
@@ -778,7 +848,7 @@ async function persistFinalMessage(
   await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, finalMessage);
 }
 
-async function getMissionArtifactContext(root: string, missionPath: string): Promise<MissionArtifactContext | null> {
+async function getMissionArtifactContext(root: string, missionPath: string, runId: string): Promise<MissionArtifactContext | null> {
   const rootResolved = path.resolve(root);
   const missionsRoot = path.join(rootResolved, ".harness", "missions");
   const resolvedMissionPath = path.isAbsolute(missionPath)
@@ -817,16 +887,19 @@ async function getMissionArtifactContext(root: string, missionPath: string): Pro
     throw new Error(`Refusing to persist artifacts into non-directory mission path: ${missionDir}`);
   }
 
+  const runDir = await ensureRunDir(rootResolved, parts[0], runId);
+
   const context: MissionArtifactContext = {
     missionDir,
-    promptPath: path.join(missionDir, "prompt.md"),
-    runtimeSessionPath: path.join(missionDir, "runtime-session.yaml"),
-    eventsPath: path.join(missionDir, "events.ndjson"),
-    stdoutPath: path.join(missionDir, "runtime.stdout.log"),
-    stderrPath: path.join(missionDir, "runtime.stderr.log"),
-    diffPath: path.join(missionDir, "diff.patch"),
-    runtimeResultPath: path.join(missionDir, "runtime-result.yaml"),
-    finalMessagePath: path.join(missionDir, "runtime-final.txt"),
+    runDir,
+    promptPath: path.join(runDir, "prompt.md"),
+    runtimeSessionPath: path.join(runDir, "runtime-session.yaml"),
+    eventsPath: path.join(runDir, "events.ndjson"),
+    stdoutPath: path.join(runDir, "runtime.stdout.log"),
+    stderrPath: path.join(runDir, "runtime.stderr.log"),
+    diffPath: path.join(runDir, "diff.patch"),
+    runtimeResultPath: path.join(runDir, "runtime-result.yaml"),
+    finalMessagePath: path.join(runDir, "runtime-final.txt"),
   };
 
   for (const artifactPath of [

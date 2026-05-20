@@ -591,20 +591,52 @@ async function seedMissionPacket(canonicalMissionDir: string, worktreePath: stri
   }
 }
 
+/**
+ * UH-82: read the runtime sentinel for a worker. First try the active
+ * per-run dir via the worktree's `latest.json` pointer; fall back to the
+ * legacy mission-level path so tests/fakes that haven't migrated still
+ * work.
+ */
 async function readSentinel(worktreePath: string, missionId: string): Promise<string> {
-  const p = path.join(worktreePath, ".harness", "missions", missionId, "runtime-final.txt");
-  try { return await readFile(p, "utf-8"); } catch { return ""; }
+  const missionDir = path.join(worktreePath, ".harness", "missions", missionId);
+  const pointerPath = path.join(missionDir, "latest.json");
+  try {
+    const raw = await readFile(pointerPath, "utf-8");
+    const pointer = JSON.parse(raw) as { run_id?: unknown };
+    if (pointer && typeof pointer.run_id === "string" && pointer.run_id.length > 0) {
+      const perRun = path.join(missionDir, "runs", pointer.run_id, "runtime-final.txt");
+      try { return await readFile(perRun, "utf-8"); } catch { /* fall through */ }
+    }
+  } catch {
+    // no pointer; fall through to legacy mission-level path.
+  }
+  const legacy = path.join(missionDir, "runtime-final.txt");
+  try { return await readFile(legacy, "utf-8"); } catch { return ""; }
 }
 
 /**
- * Per-worker session artifacts under `.harness/missions/<id>/` are read in
- * memory for the integration report and then removed from the worktree —
- * leaving them on the worker branch would guarantee a leader merge conflict
- * (every worker writes the same files with different content).
+ * UH-82: per-run subdirectories under `.harness/missions/<id>/runs/<run_id>/`
+ * are unique-per-worker, so they don't conflict on the leader merge.
+ * The mission-level mirror `runtime-result.yaml` and the `latest.json`
+ * pointer DO conflict (every worker rewrites them), so those are the
+ * files we strip before handing the branch to the leader. The legacy
+ * mission-level artifacts (runtime-final.txt / events.ndjson / etc) are
+ * stripped too so older runners — and tests that mock the runner without
+ * going through `runHermes` — don't trigger a leader-merge conflict.
  */
 async function stripWorkerSessionArtifacts(worktreePath: string, missionId: string): Promise<void> {
   const dir = path.join(worktreePath, ".harness", "missions", missionId);
-  for (const name of ["runtime-final.txt", "events.ndjson", "stdout.log", "stderr.log", "runtime-result.yaml", "runtime-session.yaml", "diff.patch", "prompt.md"]) {
+  for (const name of [
+    "runtime-result.yaml",
+    "latest.json",
+    "runtime-final.txt",
+    "events.ndjson",
+    "runtime-session.yaml",
+    "runtime.stdout.log",
+    "runtime.stderr.log",
+    "diff.patch",
+    "prompt.md",
+  ]) {
     const p = path.join(dir, name);
     if (await fileExists(p)) {
       try { await rm(p, { force: true }); } catch { /* tolerated */ }

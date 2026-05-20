@@ -17,6 +17,7 @@ import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabiliti
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
+import { assertValidRunId } from "./harness/run-id.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -54,6 +55,7 @@ type RuntimeRunResult = {
   stdout: string;
   stderr: string;
   result?: { status?: string; errors?: string[] };
+  runId?: string;
 };
 type RuntimeDryRunResult = {
   command: string;
@@ -66,6 +68,8 @@ type RuntimeDryRunResult = {
 interface RuntimeRunOptions {
   /** UH-81 — CLI-time runtime_config overrides spread on top of the mission's own overrides. */
   extraRuntimeConfigOverrides?: Record<string, unknown>;
+  /** UH-82 — explicit per-run id; generated when absent. */
+  runId?: string;
 }
 interface RuntimeWiring {
   dryRun(root: string, missionPath: string): Promise<RuntimeDryRunResult>;
@@ -73,10 +77,10 @@ interface RuntimeWiring {
   surfaceBlocked: boolean;
 }
 const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
-  hermes: { dryRun: dryRunHermes, run: runHermes, surfaceBlocked: false },
-  codex: { dryRun: dryRunCodex, run: runCodex, surfaceBlocked: true },
-  "oh-my-pi": { dryRun: dryRunOhMyPi, run: runOhMyPi, surfaceBlocked: true },
-  "hermes-proxy": { dryRun: dryRunHermesProxy, run: runHermesProxy, surfaceBlocked: true },
+  hermes: { dryRun: dryRunHermes, run: (root, missionPath, opts) => runHermes(root, missionPath, opts), surfaceBlocked: false },
+  codex: { dryRun: dryRunCodex, run: (root, missionPath, opts) => runCodex(root, missionPath, opts), surfaceBlocked: true },
+  "oh-my-pi": { dryRun: dryRunOhMyPi, run: (root, missionPath, opts) => runOhMyPi(root, missionPath, opts), surfaceBlocked: true },
+  "hermes-proxy": { dryRun: dryRunHermesProxy, run: (root, missionPath, opts) => runHermesProxy(root, missionPath, opts), surfaceBlocked: true },
 };
 
 /**
@@ -751,10 +755,21 @@ missionCmd
     "--runtime-config-overrides <json>",
     "JSON object of runtime_config overrides applied on top of the mission file (e.g. '{\"model\":\"gpt-5\"}')",
   )
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string }) => {
+  .option("--run-id <id>", "Explicit run id; auto-generated if omitted")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
+
+    if (opts.runId !== undefined) {
+      try {
+        assertValidRunId(opts.runId);
+      } catch (err) {
+        console.error(`[FAIL] ${(err as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
 
     const wiring = RUNTIME_WIRINGS[runtime];
     if (!wiring) {
@@ -784,6 +799,9 @@ missionCmd
     }
     console.log(`Running mission: ${filePath}`);
     console.log(`Runtime: ${runtime}`);
+    if (opts.runId) {
+      console.log(`Run id: ${opts.runId}`);
+    }
     if (routing.sandbox) {
       console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
     }
@@ -792,11 +810,11 @@ missionCmd
       console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
     }
     console.log("");
-    let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] } };
+    let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] }; runId?: string };
     let uninstallCancelHandler: (() => void) | null = null;
     try {
       uninstallCancelHandler = await installRuntimeCancelledEventHandler(root, filePath, runtime);
-      result = await wiring.run(routing.effectiveRoot, filePath, { extraRuntimeConfigOverrides });
+      result = await wiring.run(routing.effectiveRoot, filePath, { extraRuntimeConfigOverrides, runId: opts.runId });
     } catch (err) {
       console.log("[FAIL] mission run error:");
       console.log(`  error: ${(err as Error).message}`);
@@ -804,6 +822,9 @@ missionCmd
       return;
     } finally {
       if (uninstallCancelHandler) uninstallCancelHandler();
+    }
+    if (!opts.runId && result.runId) {
+      console.log(`Run id: ${result.runId}`);
     }
     if (result.stdout) {
       console.log(result.stdout);

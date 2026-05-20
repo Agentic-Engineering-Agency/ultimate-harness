@@ -95,12 +95,38 @@ class FakeUhCli(plugin_api._UhCliRunner):
 
     def spawn(self, args: list[str], cwd: Path) -> Any:  # type: ignore[override]
         self.calls.append({"args": list(args), "cwd": str(cwd), "spawn": True})
+        # UH-82: per-run artifact directories live under
+        # `.harness/missions/<id>/runs/<run_id>/events.ndjson`. When tests
+        # don't pin `popen_events_path` explicitly, derive it from the
+        # spawn argv so FakePopen writes events to the same file the
+        # plugin's start_run is watching.
+        events_path = self.popen_events_path
+        if events_path is None:
+            events_path = _derive_per_run_events_path(args, cwd)
         self.last_popen = FakePopen(
             returncode=self.popen_returncode,
-            events_path=self.popen_events_path,
+            events_path=events_path,
             events_to_append=self.popen_events,
         )
         return self.last_popen
+
+
+def _derive_per_run_events_path(args: list[str], cwd: Path) -> Optional[Path]:
+    """Inspect ``uh mission run --root X --run-id Y <mission.yaml>`` argv
+    to compute the per-run events path the CLI would write to. Returns
+    None when the argv shape doesn't match."""
+    try:
+        root_idx = args.index("--root")
+        run_id_idx = args.index("--run-id")
+    except ValueError:
+        return None
+    root = Path(args[root_idx + 1])
+    run_id = args[run_id_idx + 1]
+    mission_yaml = next((a for a in args if a.endswith("mission.yaml")), None)
+    if mission_yaml is None:
+        return None
+    mission_id = Path(mission_yaml).parent.name
+    return root / ".harness" / "missions" / mission_id / "runs" / run_id / "events.ndjson"
 
 
 # ---------------------------------------------------------------------------
