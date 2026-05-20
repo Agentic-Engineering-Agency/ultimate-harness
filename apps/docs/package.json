@@ -8,7 +8,7 @@
     "build": "vite build && cp dist/client/_shell.html dist/client/index.html && printf '/* /index.html 200\\n' > dist/client/_redirects",
     "preview": "vite preview",
     "types:check": "fumadocs-mdx && tsc --noEmit",
-    "deploy": "bun run build && wrangler pages deploy dist/client --project-name uh-docs --branch=main"
+    "deploy": "bun run build && bunx wrangler pages deploy dist/client --project-name uh-docs --branch=main"
   },
   "dependencies": {
     "@orama/orama": "^3.1.18",
@@ -34,6 +34,7 @@
     "@vitejs/plugin-react": "^4.3.0",
     "nitro": "3.0.260429-beta",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "wrangler": "4.56.0"
   }
 }
