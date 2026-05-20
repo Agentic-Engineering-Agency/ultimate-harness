@@ -427,6 +427,19 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     overrides = body.get("runtime_config_overrides") or {}
     if not isinstance(overrides, dict):
         raise _err(400, "invalid_overrides", "runtime_config_overrides must be an object")
+    # Codex P1 round 4: a previous attempt persisted overrides to a sidecar
+    # file but the CLI never consumed them, so operators could start runs
+    # with overrides that were silently dropped — invalidating experiments.
+    # The honest move until the CLI grows real support is to reject
+    # non-empty overrides up-front so the operator sees the gap, not a
+    # silent miscompare.
+    if overrides:
+        raise _err(
+            400,
+            "overrides_not_yet_supported",
+            "runtime_config_overrides are not yet applied by the CLI; remove the overrides block and re-run.",
+            fields={"runtime_config_overrides": "Not yet supported. Tracked in UH-64 follow-up."},
+        )
 
     root = _project_root()
     mission_yaml = _harness(root) / "missions" / mission_id / "mission.yaml"
@@ -434,22 +447,8 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
         raise _err(404, "not_found", f"mission {mission_id} not found")
 
     run_id = _make_run_id()
-    # Codex P1: the CLI takes a mission file PATH, not the id slug. Passing
-    # only the id makes the subprocess fail to load the mission.
+    # Codex P1 round 3: the CLI takes a mission file PATH, not the id slug.
     args = ["mission", "run", str(mission_yaml), "--root", str(root)]
-    if overrides:
-        # Codex P1: `uh mission run` does NOT define --runtime-config-overrides.
-        # Persist the overrides next to the mission so they survive for
-        # forensics and so future adapter support can pick them up, but do
-        # NOT pass an unsupported flag (Commander would reject it and the
-        # run would never start).
-        overrides_path = mission_yaml.parent / "runtime-config-overrides.json"
-        try:
-            overrides_path.write_text(json.dumps(overrides, indent=2) + "\n", encoding="utf-8")
-        except OSError:
-            # Disk failure shouldn't block the run; the CLI will proceed
-            # without overrides applied.
-            pass
     started_iso = datetime.now(tz=timezone.utc).isoformat()
     try:
         proc = _runner.spawn(args, cwd=root)
@@ -665,11 +664,22 @@ async def get_run_artifact(mission_id: str, run_id: str, kind: str) -> dict[str,
     filename = _ARTIFACT_KIND_TO_FILE.get(kind)
     if filename is None:
         raise _err(400, "unknown_kind", f"unknown artifact kind {kind}")
-    # Current on-disk layout writes one set of artifacts per mission directory,
-    # so the same files cover the latest run. We accept the run_id for routing
-    # symmetry but read the per-mission file. Future per-run subdirectories
-    # would land under ``<mission_dir>/runs/<run_id>/``.
-    return _artifact_response(mission_id, filename)
+    # Codex P1 round 4: adapters currently write one set of artifacts per
+    # mission directory, so per-run isolation is not yet possible. Returning
+    # the mission-level file while keeping the per-run URL silently
+    # misattributes evidence during triage (older runs show newest-run
+    # artifacts). Surface that gap in the response payload so the frontend
+    # can render a "viewing mission-latest" banner instead of pretending
+    # the served content matches the requested run_id.
+    payload = _artifact_response(mission_id, filename)
+    payload["requested_run_id"] = run_id
+    payload["served_run_id"] = "mission-latest"
+    payload["is_run_scoped"] = False
+    payload["note"] = (
+        "Per-run artifact directories are not yet emitted by adapters; "
+        "this response serves the mission-level file. Tracked in UH-63 follow-up."
+    )
+    return payload
 
 
 _ARTIFACT_KIND_TO_FILE = {

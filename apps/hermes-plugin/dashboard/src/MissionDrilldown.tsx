@@ -65,9 +65,22 @@ function EventsPane({ missionId, runId }: { missionId: string; runId?: string })
   if (!data) return <div className="uh-muted">Loading events…</div>;
   if (data.kind === "missing") return <div className="uh-empty">{data.reason ?? "No events yet."}</div>;
   const lines = data.content.split("\n").filter(Boolean);
+  // Codex P1 round 4: backend payload may carry is_run_scoped:false when
+  // the per-run URL was requested but adapters only wrote mission-level
+  // artifacts. Surface that gap so operators don't misattribute evidence.
+  const isRunScoped = (data as ArtifactPayload & { is_run_scoped?: boolean }).is_run_scoped;
+  const showStaleBanner = runId !== undefined && isRunScoped === false;
   return (
-    <div className="uh-event-log" style={{ maxHeight: 480 }}>
-      {lines.length === 0 ? <div className="uh-muted">No events.</div> : lines.map((l, i) => <div key={i} className="uh-event-row">{l}</div>)}
+    <div>
+      {showStaleBanner ? (
+        <div className="uh-warn" style={{ marginBottom: 6, fontSize: 11 }}>
+          ⚠ Per-run artifacts are not yet emitted by adapters; showing
+          mission-latest events. Older runs may be misattributed here.
+        </div>
+      ) : null}
+      <div className="uh-event-log" style={{ maxHeight: 480 }}>
+        {lines.length === 0 ? <div className="uh-muted">No events.</div> : lines.map((l, i) => <div key={i} className="uh-event-row">{l}</div>)}
+      </div>
     </div>
   );
 }

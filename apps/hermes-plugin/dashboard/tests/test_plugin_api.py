@@ -130,24 +130,55 @@ async def test_runs_list_empty_then_populated(client: httpx.AsyncClient, isolate
 
 @pytest.mark.asyncio
 async def test_create_and_run_mission_invokes_uh(client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any) -> None:
-    # Run an existing mission (`demo` from the fixture).
-    resp = await client.post("/api/plugins/uh/missions/demo/run", json={"runtime_config_overrides": {"foo": 1}})
+    # Codex P1 round 4: empty overrides — happy path. The CLI is invoked
+    # with the mission file PATH, not the id slug, and no overrides flag.
+    resp = await client.post("/api/plugins/uh/missions/demo/run", json={})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert "runId" in body
     spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
     assert spawn_calls, "expected spawn() to be called"
-    # Codex P1: CLI takes a file PATH, not an id slug.
     args = spawn_calls[0]["args"]
     assert args[:2] == ["mission", "run"]
     assert args[2].endswith("/missions/demo/mission.yaml"), f"expected mission file path, got {args[2]}"
-    # Codex P1: --runtime-config-overrides is NOT a real CLI flag; the
-    # backend now persists overrides to a sidecar file instead.
     assert "--runtime-config-overrides" not in args
-    overrides_path = isolated_project / ".harness" / "missions" / "demo" / "runtime-config-overrides.json"
-    assert overrides_path.is_file(), "overrides should be persisted next to mission.yaml"
-    persisted = json.loads(overrides_path.read_text(encoding="utf-8"))
-    assert persisted == {"foo": 1}
+
+
+@pytest.mark.asyncio
+async def test_non_empty_overrides_rejected_until_cli_supports_them(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P1 round 4: silently persisting overrides while running with
+    defaults invalidates experiments. Reject non-empty overrides up-front
+    until the CLI actually consumes them."""
+    resp = await client.post(
+        "/api/plugins/uh/missions/demo/run",
+        json={"runtime_config_overrides": {"model": "claude-opus-4.6"}},
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == "overrides_not_yet_supported"
+    assert "runtime_config_overrides" in body.get("fields", {})
+
+
+@pytest.mark.asyncio
+async def test_per_run_artifact_marks_response_as_not_run_scoped(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P1 round 4: until adapters write per-run subdirectories, the
+    per-run artifact route serves mission-latest. The response must say so
+    explicitly so callers don't misattribute evidence."""
+    final_path = isolated_project / ".harness" / "missions" / "demo" / "runtime-final.txt"
+    final_path.write_text("demo final message\n", encoding="utf-8")
+    resp = await client.get(
+        "/api/plugins/uh/missions/demo/runs/some-run-id/final-message"
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["is_run_scoped"] is False
+    assert body["requested_run_id"] == "some-run-id"
+    assert body["served_run_id"] == "mission-latest"
+    assert "note" in body
 
 
 @pytest.mark.asyncio

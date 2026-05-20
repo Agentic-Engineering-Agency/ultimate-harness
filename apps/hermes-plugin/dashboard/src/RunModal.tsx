@@ -124,7 +124,13 @@ export function RunModal({
               value={overrides}
               onChange={(e: any) => setOverrides(e.target.value)}
               spellCheck={false}
+              placeholder='{} — overrides are not yet applied by the CLI; leave empty.'
             />
+            <div className="uh-muted" style={{ fontSize: 11 }}>
+              ⚠ Non-empty overrides are rejected by the backend until the
+              CLI grows real <code>--runtime-config-overrides</code> support
+              (UH-64 follow-up).
+            </div>
             {error ? <div className="uh-error">{error}</div> : null}
             <div className="uh-row" style={{ justifyContent: "flex-end" }}>
               <UI.Button variant="outline" onClick={onClose} disabled={submitting}>Cancel</UI.Button>
