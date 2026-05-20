@@ -490,6 +490,40 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
         except yaml.YAMLError:
             pass
     summary.setdefault("status", "draft")
+    # UH-82: surface the per-run history from runs/index.json so the
+    # frontend can render a run picker / timeline without scanning the
+    # filesystem itself. Cap at 50 newest-first to keep the response
+    # bounded; consumers needing more can paginate via a future endpoint.
+    runs_list: list[dict[str, Any]] = []
+    runs_index_path = mission_dir / "runs" / "index.json"
+    if runs_index_path.is_file():
+        try:
+            idx = json.loads(runs_index_path.read_text(encoding="utf-8"))
+            if isinstance(idx, dict) and isinstance(idx.get("runs"), list):
+                for entry in idx["runs"]:
+                    if not isinstance(entry, dict):
+                        continue
+                    runs_list.append({
+                        "run_id": str(entry.get("run_id") or ""),
+                        "started_at": str(entry.get("started_at") or ""),
+                        "finished_at": entry.get("finished_at"),
+                        "status": str(entry.get("status") or ""),
+                        "runtime": entry.get("runtime"),
+                    })
+        except (OSError, ValueError):
+            # Corrupt index: omit; caller still gets summary + last_run.
+            pass
+    # Newest first; cap at 50.
+    runs_list = list(reversed(runs_list))[:50]
+    # UH-82: if latest.json exists, surface its run_id alongside last_run.
+    latest_pointer_path = mission_dir / "latest.json"
+    if latest_pointer_path.is_file():
+        try:
+            pointer = json.loads(latest_pointer_path.read_text(encoding="utf-8"))
+            if isinstance(pointer, dict) and pointer.get("run_id"):
+                summary.setdefault("last_run_id", str(pointer["run_id"]))
+        except (OSError, ValueError):
+            pass
     return {
         **summary,
         "id": mission_id,
@@ -507,6 +541,7 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
         ],
         "capabilities": [str(c) for c in (doc.get("capabilities") or [])],
         "raw": raw,
+        "runs": runs_list,
     }
 
 
@@ -559,33 +594,27 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     mission_yaml = _harness(root) / "missions" / mission_id / "mission.yaml"
     if not mission_yaml.is_file():
         raise _err(404, "not_found", f"mission {mission_id} not found")
-
-    # Codex P1 round 12: artifacts (events.ndjson, runtime-result.yaml) are
-    # mission-scoped, not per-run. Two concurrent runs for the same mission
-    # would interleave writes and corrupt evidence. Reject up-front with
-    # 409 Conflict until per-run artifact directories land (UH-63 follow-up).
-    for existing_run_id, existing in _active_runs.items():
-        if existing.get("missionId") == mission_id and existing.get("status") == "running":
-            raise _err(
-                409,
-                "run_already_active",
-                f"mission {mission_id} already has an active run ({existing_run_id}); "
-                "cancel it or wait for completion before starting another.",
-                fields={"activeRunId": existing_run_id},
-            )
-
     run_id = _make_run_id()
+    # UH-82: per-run artifact directories eliminate the interleave hazard
+    # that motivated the previous 409 `run_already_active` guard. The
+    # plugin now passes `--run-id <id>` to the CLI so both sides agree on
+    # a single `runs/<run_id>/` directory per run.
     # Codex P1 round 3: the CLI takes a mission file PATH, not the id slug.
     # Codex P1 round 13: pass --no-sandbox so the run doesn't get rerouted
     # into a sandbox worktree. The dashboard's spawn semantic is "run THIS
     # mission against THIS root"; sandbox routing would skip artifact
     # persistence in the canonical mission dir, leaving the plugin with no
     # events / runtime-result to surface.
-    args = ["mission", "run", str(mission_yaml), "--root", str(root), "--no-sandbox"]
+    args = [
+        "mission", "run", str(mission_yaml),
+        "--root", str(root),
+        "--no-sandbox",
+        "--run-id", run_id,
+    ]
     if overrides_arg is not None:
         args.extend(["--runtime-config-overrides", overrides_arg])
     started_iso = datetime.now(tz=timezone.utc).isoformat()
-    events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
+    events_path = _harness(root) / "missions" / mission_id / "runs" / run_id / "events.ndjson"
     # Codex P1 round 8: capture the events.ndjson byte offset BEFORE spawning
     # the child process. If we snapshot after spawn, a fast CLI can append
     # the first events (runtime.started) between spawn() and stat(), and the
@@ -734,7 +763,7 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
     if info is None:
         raise _err(404, "not_found", f"run {run_id} not tracked")
     mission_id = info["missionId"]
-    events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
+    events_path = _harness(root) / "missions" / mission_id / "runs" / run_id / "events.ndjson"
 
     async def gen() -> AsyncIterator[bytes]:
         # Stream the existing tail first, then poll for additions until the
@@ -825,24 +854,33 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
 # ---- artifact endpoints (UH-63) --------------------------------------------
 
 
-def _artifact_response(mission_id: str, filename: str) -> dict[str, Any]:
-    _safe_id(mission_id, "mission_id")
-    mission_dir = _harness(_project_root()) / "missions" / mission_id
-    candidate = mission_dir / filename
-    # Codex P2 round 13: artifact paths must stay inside the mission
+def _artifact_response_at(base: Path, filename: str) -> dict[str, Any]:
+    """Bounded reader for an artifact at `<base>/<filename>`.
+
+    Refuses to follow symlinks or paths that resolve outside `base`. Used
+    by both the mission-level `/missions/{id}/<kind>` routes (UH-63) and
+    the per-run `/missions/{id}/runs/{run_id}/<kind>` routes (UH-82).
+    """
+    candidate = base / filename
+    # Codex P2 round 13: artifact paths must stay inside the bound base
     # directory. A symlinked artifact (e.g. prompt.md -> /etc/passwd) would
     # otherwise be followed by _read_text and disclosed via the dashboard.
-    # Reject symlinks AND resolve-and-bound-check the final path.
     if candidate.exists() and candidate.is_symlink():
         raise _err(400, "symlink_artifact", f"artifact {filename} is a symlink; refusing to read")
     try:
         resolved = candidate.resolve(strict=False)
-        mission_resolved = mission_dir.resolve(strict=False)
+        base_resolved = base.resolve(strict=False)
     except OSError as exc:
         raise _err(500, "io_error", f"cannot resolve artifact path: {exc}") from exc
-    if mission_resolved not in resolved.parents and resolved != mission_resolved:
-        raise _err(400, "path_escape", f"artifact {filename} resolves outside mission directory")
+    if base_resolved not in resolved.parents and resolved != base_resolved:
+        raise _err(400, "path_escape", f"artifact {filename} resolves outside base directory")
     return _read_text(candidate)
+
+
+def _artifact_response(mission_id: str, filename: str) -> dict[str, Any]:
+    _safe_id(mission_id, "mission_id")
+    mission_dir = _harness(_project_root()) / "missions" / mission_id
+    return _artifact_response_at(mission_dir, filename)
 
 
 @router.get("/missions/{mission_id}/prompt")
@@ -877,21 +915,17 @@ async def get_run_artifact(mission_id: str, run_id: str, kind: str) -> dict[str,
     filename = _ARTIFACT_KIND_TO_FILE.get(kind)
     if filename is None:
         raise _err(400, "unknown_kind", f"unknown artifact kind {kind}")
-    # Codex P1 round 4: adapters currently write one set of artifacts per
-    # mission directory, so per-run isolation is not yet possible. Returning
-    # the mission-level file while keeping the per-run URL silently
-    # misattributes evidence during triage (older runs show newest-run
-    # artifacts). Surface that gap in the response payload so the frontend
-    # can render a "viewing mission-latest" banner instead of pretending
-    # the served content matches the requested run_id.
-    payload = _artifact_response(mission_id, filename)
+    # UH-82: adapters now write per-run artifact directories under
+    # `runs/<run_id>/`. Serve the requested run's file directly with the
+    # same symlink/bounds guard as `_artifact_response`.
+    root = _project_root()
+    run_dir = _harness(root) / "missions" / mission_id / "runs" / run_id
+    if not run_dir.is_dir():
+        raise _err(404, "not_found", f"run {run_id} not found for mission {mission_id}")
+    payload = _artifact_response_at(run_dir, filename)
     payload["requested_run_id"] = run_id
-    payload["served_run_id"] = "mission-latest"
-    payload["is_run_scoped"] = False
-    payload["note"] = (
-        "Per-run artifact directories are not yet emitted by adapters; "
-        "this response serves the mission-level file. Tracked in UH-63 follow-up."
-    )
+    payload["served_run_id"] = run_id
+    payload["is_run_scoped"] = True
     return payload
 
 

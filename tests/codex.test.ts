@@ -105,7 +105,12 @@ describe("uh mission dry-run --runtime codex", () => {
     const result = await dryRunCodex(TEST_ROOT, missionPath);
 
     expect(result.errors).toEqual([]);
-    expect(await readFile(join(missionDir, "prompt.md"), "utf-8")).toBe(result.prompt);
+    // UH-82: dry-run writes into the per-run dir.
+    const runsDir = join(missionDir, "runs");
+    const runDirs = await (await import("node:fs/promises")).readdir(runsDir);
+    expect(runDirs).toHaveLength(1);
+    const runDir = join(runsDir, runDirs[0]);
+    expect(await readFile(join(runDir, "prompt.md"), "utf-8")).toBe(result.prompt);
     expect(result.args).toEqual(expect.arrayContaining([
       "exec",
       "--cd",
@@ -114,10 +119,10 @@ describe("uh mission dry-run --runtime codex", () => {
       "workspace-write",
       "--json",
       "--output-last-message",
-      join(missionDir, "runtime-final.txt"),
+      join(runDir, "runtime-final.txt"),
       "--skip-git-repo-check",
     ]));
-    const sessionPath = join(missionDir, "runtime-session.yaml");
+    const sessionPath = join(runDir, "runtime-session.yaml");
     const sessionValidation = await validateFile(sessionPath);
     expect(sessionValidation).toMatchObject({ valid: true, schema_version: "uh.runtime-session.v0" });
     const session = parse(await readFile(sessionPath, "utf-8"));
@@ -219,7 +224,12 @@ describe("codex stream parsing", () => {
 describe("uh mission run --runtime codex", () => {
   test("persists success artifacts with codex events and runtime result", async () => {
     const { missionDir, missionPath } = await writeHarnessMission("run-success");
-    await writeFile(join(missionDir, "runtime-final.txt"), "Codex completed the mission.", "utf-8");
+    const runId = "test-run-success";
+    const runDir = join(missionDir, "runs", runId);
+    await (await import("node:fs/promises")).mkdir(runDir, { recursive: true });
+    // The --output-last-message arg now points at runDir; codex would have
+    // written the raw message there.
+    await writeFile(join(runDir, "runtime-final.txt"), "Codex completed the mission.", "utf-8");
     const runner: CodexRunner = async () => ({
       stdout: '{"type":"thread.started","thread_id":"abc"}\n{"type":"turn.completed"}\n',
       stderr: "",
@@ -228,11 +238,11 @@ describe("uh mission run --runtime codex", () => {
     });
     const collectDiff: DiffCollector = async () => ({ patch: "diff --git a/x b/x\n" });
 
-    const result = await runCodex(TEST_ROOT, missionPath, { runner, collectDiff });
+    const result = await runCodex(TEST_ROOT, missionPath, { runner, collectDiff, runId });
 
     expect(result.exitCode).toBe(0);
     expect(result.result?.status).toBe("passed");
-    const events = (await readFile(join(missionDir, "events.ndjson"), "utf-8"))
+    const events = (await readFile(join(runDir, "events.ndjson"), "utf-8"))
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
@@ -242,15 +252,16 @@ describe("uh mission run --runtime codex", () => {
       "codex.turn.completed",
       "runtime.finished",
     ]);
+    // runtime-result.yaml is mirrored from runDir up to missionDir.
     const runtimeResultPath = join(missionDir, "runtime-result.yaml");
     expect(await validateFile(runtimeResultPath)).toMatchObject({ valid: true, schema_version: "uh.runtime-result.v0" });
     const runtimeResult = parse(await readFile(runtimeResultPath, "utf-8"));
     expect(runtimeResult).toMatchObject({
       status: "passed",
       runtime: "codex",
-      diff_path: ".harness/missions/run-success/diff.patch",
-      stdout_path: ".harness/missions/run-success/runtime.stdout.log",
-      stderr_path: ".harness/missions/run-success/runtime.stderr.log",
+      diff_path: `.harness/missions/run-success/runs/${runId}/diff.patch`,
+      stdout_path: `.harness/missions/run-success/runs/${runId}/runtime.stdout.log`,
+      stderr_path: `.harness/missions/run-success/runs/${runId}/runtime.stderr.log`,
     });
   });
 
@@ -289,9 +300,12 @@ describe("uh mission run --runtime codex", () => {
 
   test("prefers UH-28 sentinel block over raw --output-last-message content", async () => {
     const { missionDir, missionPath } = await writeHarnessMission("sentinel-prefer");
-    // Codex writes its raw last-message to runtime-final.txt; the file
-    // contains preamble plus the sentinel fenced block at the tail.
-    await writeFile(join(missionDir, "runtime-final.txt"), [
+    const runId = "test-sentinel-prefer";
+    const runDir = join(missionDir, "runs", runId);
+    await (await import("node:fs/promises")).mkdir(runDir, { recursive: true });
+    // Codex writes its raw last-message to runDir/runtime-final.txt; the
+    // file contains preamble plus the sentinel fenced block at the tail.
+    await writeFile(join(runDir, "runtime-final.txt"), [
       "Some preamble Codex emitted as its raw final message.",
       "",
       "```uh-runtime-final-message",
@@ -307,10 +321,10 @@ describe("uh mission run --runtime codex", () => {
     });
     const collectDiff: DiffCollector = async () => ({ patch: "" });
 
-    const result = await runCodex(TEST_ROOT, missionPath, { runner, collectDiff });
+    const result = await runCodex(TEST_ROOT, missionPath, { runner, collectDiff, runId });
 
     expect(result.exitCode).toBe(0);
     expect(result.result?.status).toBe("passed");
-    expect(await readFile(join(missionDir, "runtime-final.txt"), "utf-8")).toBe("Bounded sentinel summary.");
+    expect(await readFile(join(runDir, "runtime-final.txt"), "utf-8")).toBe("Bounded sentinel summary.");
   });
 });

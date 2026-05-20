@@ -545,6 +545,7 @@ describe("defaultHermesProxyRunner", () => {
 describe("runHermesProxy (orchestrator)", () => {
   test("passed when runner returns 200 + content + sentinel", async () => {
     const { missionPath } = await setupHarness();
+    const runId = "test-proxy-pass";
     const result = await runHermesProxy(TEST_ROOT, missionPath, {
       runner: async (): Promise<HermesProxyRunnerOutput> => ({
         stdout: "Mission accomplished.\n```uh-runtime-final-message\nDone.\n```",
@@ -555,10 +556,11 @@ describe("runHermesProxy (orchestrator)", () => {
         events: [{ choices: [{ delta: { content: "..." } }] }],
       }),
       collectDiff: async () => ({ patch: "", errors: undefined }),
+      runId,
     });
     expect(result.exitCode).toBe(0);
     expect(result.result?.status).toBe("passed");
-    const finalPath = join(TEST_ROOT, ".harness", "missions", "test-uh39", "runtime-final.txt");
+    const finalPath = join(TEST_ROOT, ".harness", "missions", "test-uh39", "runs", runId, "runtime-final.txt");
     expect(await readFile(finalPath, "utf-8")).toBe("Done.");
     const runtimeResultPath = join(TEST_ROOT, ".harness", "missions", "test-uh39", "runtime-result.yaml");
     const rr = parseYaml(await readFile(runtimeResultPath, "utf-8"));
@@ -645,6 +647,7 @@ describe("runHermesProxy (orchestrator)", () => {
 
   test("passed on 200 with content but no sentinel (runtime-final.txt empty)", async () => {
     const { missionPath } = await setupHarness();
+    const runId = "test-proxy-no-sentinel";
     const result = await runHermesProxy(TEST_ROOT, missionPath, {
       runner: async (): Promise<HermesProxyRunnerOutput> => ({
         stdout: "Just a regular response with no sentinel.",
@@ -655,9 +658,10 @@ describe("runHermesProxy (orchestrator)", () => {
         events: [],
       }),
       collectDiff: async () => ({ patch: "" }),
+      runId,
     });
     expect(result.result?.status).toBe("passed");
-    const finalPath = join(TEST_ROOT, ".harness", "missions", "test-uh39", "runtime-final.txt");
+    const finalPath = join(TEST_ROOT, ".harness", "missions", "test-uh39", "runs", runId, "runtime-final.txt");
     expect(await readFile(finalPath, "utf-8")).toBe("");
     await cleanup();
   });
