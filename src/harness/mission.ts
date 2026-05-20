@@ -210,6 +210,20 @@ export function isPathWithin(candidate: string, parent: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+/**
+ * Resolves `candidate` against `root` and asserts the result is contained
+ * within `root`. Throws with a `label`-prefixed message when the path
+ * escapes (`..` traversal, absolute paths to elsewhere, etc.).
+ */
+export function assertWithinRoot(candidate: string, root: string, label: string): string {
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(resolvedRoot, candidate);
+  if (!isPathWithin(resolved, resolvedRoot)) {
+    throw new Error(`${label} resolves outside of root: ${candidate}`);
+  }
+  return resolved;
+}
+
 export async function fileExists(filePath: string): Promise<boolean> {
   try {
     await access(filePath);

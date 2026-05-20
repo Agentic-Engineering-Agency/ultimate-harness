@@ -1,0 +1,65 @@
+schema_version: uh.workflow.v0
+id: adversarial-qa
+name: Adversarial QA (six-phase hostile probe)
+description: >-
+  Hostile-by-design QA profile distilled from OMX's $ultraqa: stress-test
+  a mission by running prompt-injection attempts, simulated interrupt /
+  resume cycles, stale-state probes, and cleanup-evidence audits, then
+  produce an adversarial-qa-report.md with PASS / NEEDS-ATTENTION verdict
+  and reproducible repro commands. The verdict gate requires every
+  acceptance criterion listed in src/harness/workflow/adversarial-qa.ts
+  to hold; a missing criterion blocks PASS even if every individual probe
+  succeeded.
+bmad:
+  inspiration: BMAD-METHOD
+  dependency: false
+  roles:
+    - Analyst
+    - Product Manager
+    - Architect
+    - Scrum Master / Workflow Designer
+    - Developer
+    - QA / Test Architect
+    - Technical Writer
+  guardrails:
+    - BMAD is inspiration only, not a runtime dependency.
+    - Roles are hats; a single agent may play multiple roles.
+    - Outputs should be traceable and reviewable.
+    - Do not import BMAD-METHOD as a dependency.
+phases:
+  - name: threat-model
+    agent_role: reviewer
+    bmad_role: QA / Test Architect
+    description: Enumerate ≥3 hostile scenarios + ≥1 prompt-injection vector before running anything.
+    outputs:
+      - threat-model.md
+  - name: hostile-execution
+    agent_role: developer
+    bmad_role: Developer
+    description: Run the mission against each hostile scenario; record per-scenario outcome.
+    outputs:
+      - hostile-execution.md
+  - name: interrupt-resume
+    agent_role: developer
+    bmad_role: Developer
+    description: Run ≥1 SIGTERM-interrupt + restart cycle; confirm no orphaned state.
+    outputs:
+      - interrupt-resume.md
+  - name: stale-state-probe
+    agent_role: reviewer
+    bmad_role: QA / Test Architect
+    description: Replay against a deliberately stale .harness state; confirm fail-fast or repair.
+    outputs:
+      - stale-state.md
+  - name: cleanup-evidence
+    agent_role: reviewer
+    bmad_role: QA / Test Architect
+    description: Audit on-disk state — no orphaned worktrees, no leaked secrets, redaction guardrails intact.
+    outputs:
+      - cleanup-evidence.md
+  - name: verdict
+    agent_role: reviewer
+    bmad_role: QA / Test Architect
+    description: Render adversarial-qa-report.md with PASS / NEEDS-ATTENTION and reproducible repro commands.
+    outputs:
+      - adversarial-qa-report.md
