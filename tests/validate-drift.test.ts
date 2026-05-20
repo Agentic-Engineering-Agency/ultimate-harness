@@ -304,7 +304,7 @@ describe("UH-77 registry cap=2 settle", () => {
     expect(grouped["truncated-events-ndjson"]).toEqual([]);
   });
 
-  test("DRIFT_KINDS exposes the seven declared kinds", () => {
+  test("DRIFT_KINDS exposes the eight declared kinds", () => {
     const kinds = DRIFT_KINDS.map((k) => k.kind);
     expect(new Set(kinds)).toEqual(new Set([
       "stale-worker",
@@ -314,6 +314,7 @@ describe("UH-77 registry cap=2 settle", () => {
       "truncated-events-ndjson",
       "stale-render",
       "roadmap-linear-divergence",
+      "spec-stale",
     ]));
   });
 });

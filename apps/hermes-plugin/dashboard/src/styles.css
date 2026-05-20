@@ -66,6 +66,15 @@
 }
 .uh-event-row { padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
 .uh-event-row.is-error { color: var(--color-destructive, #ff6b6b); }
+.uh-event-row.is-warn { color: var(--color-warning, #e6a700); }
+.uh-event-severity {
+  display: inline-block;
+  min-width: 3.2em;
+  margin-right: 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
 
 .uh-modal-backdrop {
   position: fixed; inset: 0;

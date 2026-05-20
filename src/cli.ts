@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
 import { assertSafeMissionId, createMission } from "./harness/mission.js";
-import { parseIssueRef, parseRequiredCheck, proposeMission, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
+import { parseIssueRef, parseRequiredCheck, proposeMission, proposeMissionFromSpec, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
@@ -14,9 +14,12 @@ import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
 import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
+import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
+import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
+import { parseScaffoldLang, scaffoldTestsFromSpec } from "./harness/test-scaffold.js";
 import { assertValidRunId } from "./harness/run-id.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
@@ -124,6 +127,18 @@ async function enforceRuntimeCapabilities(
   await assertRuntimeCapabilities(root, missionPath, runtime);
 }
 
+/** Preflight after runtime is chosen (`--runtime` or post `--auto` routing). */
+async function enforceRuntimePreflight(
+  root: string,
+  missionPath: string,
+  runtime: string,
+  force: boolean,
+): Promise<void> {
+  if (force) return;
+  await enforceRuntimeCapabilities(root, missionPath, runtime, false);
+  await assertRuntimeRequirements(missionPath, runtime);
+}
+
 async function installRuntimeCancelledEventHandler(
   root: string,
   missionPath: string,
@@ -180,12 +195,16 @@ program
   .option("--all-workflows", "Validate all workflow profiles")
   .option("--all-missions", "Validate all mission files")
   .option("--repair", "Run drift detection with auto-repair (idempotent)")
+  .option("--strict-spec", "Run drift detection; spec-stale issues are errors (default: warn)")
   .option("--json", "Emit drift detection output as JSON instead of human text")
-  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; json?: boolean }) => {
+  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; strictSpec?: boolean; json?: boolean }) => {
     const root = resolveRoot(opts.root);
-    if (opts.json || opts.repair) {
+    if (opts.json || opts.repair || opts.strictSpec) {
       const { runDrift, groupByKind, DRIFT_KINDS } = await import("./harness/validate/drift/registry.js");
-      const outcome = await runDrift(root, { repair: opts.repair === true });
+      const outcome = await runDrift(root, {
+        repair: opts.repair === true,
+        strictSpec: opts.strictSpec === true,
+      });
       if (opts.json) {
         const grouped = groupByKind(outcome.issues);
         console.log(JSON.stringify({
@@ -366,11 +385,12 @@ function parsePositiveIntegerOption(name: string, value: string): number {
 // uh propose
 program
   .command("propose")
-  .description("Generate a mission packet from request/issue metadata")
-  .argument("<id>", "Mission id")
-  .requiredOption("--title <title>", "Mission title")
-  .requiredOption("--workflow <profile>", "Workflow profile")
-  .requiredOption("--objective <text>", "Mission objective")
+  .description("Generate a mission packet from request/issue metadata or a .spec.md file")
+  .argument("[id]", "Mission id (defaults to spec front-matter id when --from is set)")
+  .option("--from <spec.md>", "Load mission fields from a uh.spec.v0 markdown spec")
+  .option("--title <title>", "Mission title (required without --from)")
+  .option("--workflow <profile>", "Workflow profile (default: spec-first-feature with --from)")
+  .option("--objective <text>", "Mission objective (defaults to spec ## Goal with --from)")
   .option("--priority <priority>", "Mission priority (default: medium)")
   .option("--issue <provider:id[:url]>", "Issue ref; repeatable", collectIssueRefOption, [] as ProposeIssueRef[])
   .option("--read-first <path>", "Read-first context path; repeatable", collectRepeatedOption, [])
@@ -388,10 +408,11 @@ program
   .option("--output <path>", "Explicit output path (default: .harness/missions/<id>/mission.yaml)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--force", "Overwrite existing mission file")
-  .action(async (id: string, opts: {
-    title: string;
-    workflow: string;
-    objective: string;
+  .action(async (id: string | undefined, opts: {
+    from?: string;
+    title?: string;
+    workflow?: string;
+    objective?: string;
     priority?: string;
     issue: ProposeIssueRef[];
     readFirst: string[];
@@ -412,6 +433,42 @@ program
   }) => {
     const root = resolveRoot(opts.root);
     try {
+      if (opts.from !== undefined) {
+        const workflow = opts.workflow ?? "spec-first-feature";
+        const result = await proposeMissionFromSpec(root, {
+          specPath: opts.from,
+          workflow,
+          id,
+          title: opts.title,
+          objective: opts.objective,
+          priority: opts.priority,
+          issueRefs: opts.issue,
+          readFirst: opts.readFirst,
+          sourceLinks: opts.sourceLink,
+          repoRoot: opts.repoRoot,
+          constraints: opts.constraint,
+          requiredSkills: opts.requiredSkill,
+          suggestedSkills: opts.suggestedSkill,
+          expectedOutputs: opts.expectedOutput,
+          requiredChecks: opts.requiredCheck,
+          reviewGates: opts.reviewGate,
+          sandboxBackend: opts.sandboxBackend,
+          promotionPolicy: opts.promotionPolicy,
+          outputPath: opts.output,
+          force: opts.force ?? false,
+        });
+        console.log(`${result.created ? "Created" : "Updated"} mission: ${result.mission.id}`);
+        console.log(`Path: ${result.path}`);
+        return;
+      }
+
+      if (!id) {
+        throw new Error("Mission id is required when --from is not set.");
+      }
+      if (!opts.title || !opts.workflow || !opts.objective) {
+        throw new Error("--title, --workflow, and --objective are required when --from is not set.");
+      }
+
       const result = await proposeMission(root, {
         id,
         title: opts.title,
@@ -450,6 +507,36 @@ function collectIssueRefOption(value: string, previous: ProposeIssueRef[]): Prop
 function collectRequiredCheckOption(value: string, previous: ProposeRequiredCheck[]): ProposeRequiredCheck[] {
   return [...previous, parseRequiredCheck(value)];
 }
+
+
+// uh spec
+const specCmd = program.command("spec").description("Spec-driven development helpers");
+
+specCmd
+  .command("scaffold")
+  .description("Generate starter tests from uh.spec.v0 acceptance criteria")
+  .requiredOption("--from <path>", "Path to .spec.md file")
+  .requiredOption("--lang <lang>", "Target language: ts | py")
+  .requiredOption("--out <path>", "Output test file path")
+  .action(async (opts: { from: string; lang: string; out: string }) => {
+    try {
+      const lang = parseScaffoldLang(opts.lang);
+      const result = await scaffoldTestsFromSpec({
+        specPath: opts.from,
+        lang,
+        outPath: opts.out,
+      });
+      const verb = result.created ? "Created" : "Merged";
+      console.log(`${verb} test scaffold: ${result.path}`);
+      if (result.addedAcIds.length > 0) {
+        console.log(`Added acceptance criteria: ${result.addedAcIds.join(", ")}`);
+      }
+    } catch (err) {
+      console.error("[FAIL] spec scaffold error:");
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
 
 // uh adapter
 const adapterCmd = program
@@ -714,9 +801,9 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimeCapabilities(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
     } catch (err) {
-      console.error(`[BLOCKED] runtime capability mismatch:`);
+      console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
       console.error(`  pass --force to bypass this safety check`);
       process.exit(1);
@@ -778,9 +865,9 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimeCapabilities(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
     } catch (err) {
-      console.error(`[BLOCKED] runtime capability mismatch:`);
+      console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
       console.error(`  pass --force to bypass this safety check`);
       process.exit(1);
@@ -846,6 +933,52 @@ missionCmd
   });
 
 missionCmd
+  .command("cancel")
+  .description("Cancel an in-flight mission run via the Hermes plugin API")
+  .requiredOption("--mission <id>", "Mission id (validated; run lookup uses --run-id)")
+  .requiredOption("--run-id <id>", "Run id to cancel")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--plugin-url <url>", "Hermes plugin API base URL", defaultPluginApiBase())
+  .action(async (opts: { mission: string; runId: string; root?: string; pluginUrl: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      assertSafeMissionId(opts.mission);
+      assertValidRunId(opts.runId);
+    } catch (err) {
+      console.error(`[FAIL] ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    const missionPath = path.join(root, ".harness", "missions", opts.mission, "mission.yaml");
+    try {
+      await readFileAsync(missionPath, "utf-8");
+    } catch {
+      console.error(`[FAIL] mission ${opts.mission} not found under ${root}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const result = await cancelMissionRunViaPlugin(opts.pluginUrl, opts.runId);
+      console.log(`Cancelled run ${opts.runId} for mission ${opts.mission} (status: ${result.status})`);
+    } catch (err) {
+      if (err instanceof MissionCancelError) {
+        if (err.code === "already_finished") {
+          console.error(`[FAIL] run ${opts.runId} already finished`);
+          process.exit(1);
+          return;
+        }
+        console.error(`[FAIL] mission cancel error:`);
+        console.error(`  error: ${err.message}`);
+        process.exit(err.status === 0 ? 1 : err.status);
+        return;
+      }
+      console.error(`[FAIL] mission cancel error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+missionCmd
   .command("run-all")
   .description("Run a mission across multiple adapter runtimes and produce a side-by-side comparison")
   .argument("<mission-id>", "Mission id (must exist in .harness/missions/)")
@@ -872,9 +1005,9 @@ missionCmd
     if (opts.force !== true) {
       for (const rt of requested) {
         try {
-          await enforceRuntimeCapabilities(root, canonicalMissionPath, rt, false);
+          await enforceRuntimePreflight(root, canonicalMissionPath, rt, false);
         } catch (err) {
-          console.error(`[BLOCKED] runtime capability mismatch for ${rt}:`);
+          console.error(`[BLOCKED] runtime preflight failed for ${rt}:`);
           console.error(`  error: ${(err as Error).message}`);
           console.error(`  pass --force to bypass this safety check`);
           process.exit(1);

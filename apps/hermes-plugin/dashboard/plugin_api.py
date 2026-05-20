@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 
@@ -56,6 +56,7 @@ _UH_BIN_ENV = "UH_CLI_BIN"
 _UH_PROJECT_ROOT_ENV = "UH_PROJECT_ROOT"
 _READ_TIMEOUT_S = float(os.environ.get("UH_READ_TIMEOUT_S", "30"))
 _RUN_TIMEOUT_S = float(os.environ.get("UH_RUN_TIMEOUT_S", "3600"))
+_SSE_KEEPALIVE_S = float(os.environ.get("UH_SSE_KEEPALIVE_S", "15"))
 _MAX_ARTIFACT_BYTES = int(os.environ.get("UH_MAX_ARTIFACT_BYTES", str(5 * 1024 * 1024)))
 _MAX_OVERRIDES_JSON_BYTES = int(os.environ.get("UH_MAX_OVERRIDES_JSON_BYTES", "8192"))
 
@@ -259,6 +260,239 @@ def _schedule_run_eviction(run_id: str) -> None:
     if info is None or info.get("eviction") is not None:
         return
     info["eviction"] = asyncio.create_task(_evict_run_after_grace(run_id))
+
+
+# ---------------------------------------------------------------------------
+# Run events — shared NDJSON tail (UH-93).
+# ---------------------------------------------------------------------------
+
+_TERMINAL_EVENT_LABELS = frozenset({
+    "runtime.cancelled",
+    "runtime.finished",
+    "runtime.timeout",
+})
+
+_active_sse_tails = 0
+
+
+def _event_label(obj: dict[str, Any]) -> Optional[str]:
+    for key in ("event", "kind", "type"):
+        val = obj.get(key)
+        if isinstance(val, str):
+            return val
+    return None
+
+
+def _line_is_terminal(line: bytes) -> bool:
+    try:
+        obj = json.loads(line.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(obj, dict):
+        return False
+    label = _event_label(obj)
+    return label in _TERMINAL_EVENT_LABELS if label is not None else False
+
+
+def _run_events_path(root: Path, mission_id: str, run_id: str) -> Path:
+    return _harness(root) / "missions" / mission_id / "runs" / run_id / "events.ndjson"
+
+
+def _locate_run_events(
+    root: Path, run_id: str, *, mission_id: Optional[str] = None,
+) -> tuple[str, Path]:
+    """Resolve ``(mission_id, events.ndjson path)`` for a run."""
+    _safe_id(run_id, "run_id")
+    if mission_id is not None:
+        _safe_id(mission_id, "mission_id")
+        events_path = _run_events_path(root, mission_id, run_id)
+        run_dir = events_path.parent
+        if not run_dir.is_dir():
+            info = _active_runs.get(run_id)
+            if info is not None and str(info.get("missionId")) == mission_id:
+                return mission_id, events_path
+            if _run_is_archived(root, mission_id, run_id):
+                raise _err(
+                    404,
+                    "archived",
+                    f"run {run_id} artifacts were pruned by the retention policy",
+                )
+            raise _err(404, "not_found", f"run {run_id} not found for mission {mission_id}")
+        return mission_id, events_path
+    info = _active_runs.get(run_id)
+    if info is not None:
+        mid = str(info["missionId"])
+        return mid, _run_events_path(root, mid, run_id)
+    missions_dir = _harness(root) / "missions"
+    if missions_dir.is_dir():
+        for entry in sorted(missions_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            run_dir = entry / "runs" / run_id
+            if run_dir.is_dir():
+                return entry.name, run_dir / "events.ndjson"
+    raise _err(404, "not_found", f"run {run_id} not found")
+
+
+def _parse_events_ndjson(events_path: Path) -> list[dict[str, Any]]:
+    if not events_path.is_file():
+        return []
+    try:
+        text = events_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise _err(500, "io_error", f"cannot read events.ndjson: {exc}") from exc
+    events: list[dict[str, Any]] = []
+    for ln in text.splitlines():
+        if not ln.strip():
+            continue
+        try:
+            obj = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            events.append(obj)
+    return events
+
+
+def _historical_run_events_payload(
+    root: Path, mission_id: str, run_id: str,
+) -> dict[str, Any]:
+    _, events_path = _locate_run_events(root, run_id, mission_id=mission_id)
+    return {
+        "mission_id": mission_id,
+        "run_id": run_id,
+        "events": _parse_events_ndjson(events_path),
+    }
+
+
+async def _iter_run_events_sse(
+    events_path: Path,
+    *,
+    run_id: str,
+    start_offset: int = 0,
+    proc: Any = None,
+    active_info: Optional[dict[str, Any]] = None,
+) -> AsyncIterator[bytes]:
+    """Tail ``events.ndjson`` for hot (live proc) and cold (finished) runs."""
+    last_size = start_offset
+    started_mono = (
+        active_info.get("started_mono") if active_info is not None else time.monotonic()
+    )
+    last_event_mono = time.monotonic()
+    import sys as _sys
+    run_timeout = float(getattr(_sys.modules[__name__], "_RUN_TIMEOUT_S", 3600.0))
+    keepalive_s = float(getattr(_sys.modules[__name__], "_SSE_KEEPALIVE_S", 15.0))
+    poll_s = 0.2
+    saw_terminal = False
+    idle_polls_after_terminal = 0
+    idle_polls_no_growth = 0
+
+    def _drain_chunk() -> bytes:
+        nonlocal last_size
+        if not events_path.is_file():
+            return b""
+        with events_path.open("rb") as fh:
+            fh.seek(last_size)
+            data = fh.read()
+            last_size += len(data)
+        return data
+
+    def _emit_chunk(chunk: bytes) -> list[bytes]:
+        nonlocal saw_terminal, idle_polls_after_terminal, last_event_mono
+        frames: list[bytes] = []
+        if not chunk:
+            return frames
+        for line in chunk.splitlines():
+            if not line:
+                continue
+            frames.append(b"data: " + line + b"\n\n")
+            if _line_is_terminal(line):
+                saw_terminal = True
+        if frames:
+            last_event_mono = time.monotonic()
+            idle_polls_after_terminal = 0
+        return frames
+
+    if proc is not None:
+        for _ in range(600):
+            if events_path.is_file():
+                break
+            if proc.poll() is not None:
+                break
+            await asyncio.sleep(0.1)
+
+    global _active_sse_tails
+    _active_sse_tails += 1
+    try:
+        while True:
+            chunk = _drain_chunk()
+            for frame in _emit_chunk(chunk):
+                yield frame
+
+            now = time.monotonic()
+            exited = proc.poll() is not None if proc is not None else True
+            timed_out = (
+                proc is not None
+                and active_info is not None
+                and (now - started_mono) > run_timeout
+            )
+
+            if (now - last_event_mono) >= keepalive_s:
+                yield b": keepalive\n\n"
+                last_event_mono = now
+
+            if proc is None:
+                if chunk:
+                    idle_polls_no_growth = 0
+                else:
+                    idle_polls_no_growth += 1
+                if saw_terminal:
+                    idle_polls_after_terminal += 1
+                    if idle_polls_after_terminal >= 2:
+                        yield b"event: done\ndata: closed\n\n"
+                        return
+                elif idle_polls_no_growth >= 3:
+                    yield b"event: done\ndata: closed\n\n"
+                    return
+
+            if proc is not None and (exited or timed_out):
+                if timed_out and not exited:
+                    try:
+                        proc.terminate()
+                    except (ProcessLookupError, OSError):
+                        pass
+                final = _drain_chunk()
+                for frame in _emit_chunk(final):
+                    yield frame
+                if active_info is not None:
+                    watchdog = active_info.get("watchdog")
+                    if watchdog is not None and not watchdog.done():
+                        watchdog.cancel()
+                    if active_info.get("status") == "running":
+                        active_info["status"] = "timeout" if timed_out else "finished"
+                    if timed_out:
+                        yield b"event: timeout\ndata: " + str(int(run_timeout)).encode() + b"s\n\n"
+                    _schedule_run_eviction(run_id)
+                yield b"event: done\ndata: closed\n\n"
+                return
+
+            if saw_terminal and proc is not None and exited:
+                final = _drain_chunk()
+                for frame in _emit_chunk(final):
+                    yield frame
+                if active_info is not None:
+                    watchdog = active_info.get("watchdog")
+                    if watchdog is not None and not watchdog.done():
+                        watchdog.cancel()
+                    if active_info.get("status") == "running":
+                        active_info["status"] = "finished"
+                    _schedule_run_eviction(run_id)
+                yield b"event: done\ndata: closed\n\n"
+                return
+
+            await asyncio.sleep(poll_s)
+    finally:
+        _active_sse_tails -= 1
 
 
 # ---------------------------------------------------------------------------
@@ -870,13 +1104,65 @@ async def _enforce_run_timeout(
     # any SSE consumer doesn't linger in _active_runs forever.
     _schedule_run_eviction(run_id)
 
+def _events_show_terminal(events_path: Path) -> bool:
+    if not events_path.is_file():
+        return False
+    try:
+        text = events_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for ln in text.splitlines():
+        stripped = ln.strip()
+        if stripped and _line_is_terminal(stripped.encode("utf-8")):
+            return True
+    return False
+
+
+def _append_runtime_cancelled_event(
+    events_path: Path,
+    *,
+    mission_id: str,
+    run_id: str,
+    source: str = "plugin-api",
+) -> None:
+    try:
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "event": "runtime.cancelled",
+                        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                        "mission_id": mission_id,
+                        "run_id": run_id,
+                        "signal": "SIGTERM",
+                        "source": source,
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str) -> dict[str, Any]:
     _safe_id(run_id, "run_id")
+    root = _project_root()
     info = _active_runs.get(run_id)
     if info is None:
+        try:
+            _, events_path = _locate_run_events(root, run_id)
+        except HTTPException:
+            raise
+        if _events_show_terminal(events_path):
+            raise _err(409, "already_finished", f"run {run_id} already finished")
         raise _err(404, "not_found", f"run {run_id} not tracked (server may have restarted)")
+    mission_id = str(info["missionId"])
+    events_path = _run_events_path(root, mission_id, run_id)
     proc: subprocess.Popen[str] = info["process"]
+    wrote_cancel_event = False
     if proc.poll() is None:
         # Codex P2 round 10: there is a race between the poll() above and
         # terminate(). The child may exit naturally in that window. On
@@ -897,9 +1183,19 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
                 info["status"] = "finished"
         else:
             info["status"] = "cancelled"
+            wrote_cancel_event = True
+    elif _events_show_terminal(events_path) or info.get("status") not in (None, "running"):
+        raise _err(409, "already_finished", f"run {run_id} already finished")
     watchdog = info.get("watchdog")
     if watchdog is not None and not watchdog.done():
         watchdog.cancel()
+    if wrote_cancel_event:
+        _append_runtime_cancelled_event(
+            events_path,
+            mission_id=mission_id,
+            run_id=run_id,
+            source="plugin-ui",
+        )
     # Codex P2 round 5: terminal state — schedule registry eviction.
     _schedule_run_eviction(run_id)
     return {"ok": True, "status": info["status"]}
@@ -907,98 +1203,66 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
 
 @router.get("/runs/{run_id}/events")
 async def stream_run_events(run_id: str) -> StreamingResponse:
-    _safe_id(run_id, "run_id")
-    info = _active_runs.get(run_id)
+    """SSE tail for a run (active or on-disk cold runs)."""
     root = _project_root()
-    if info is None:
-        raise _err(404, "not_found", f"run {run_id} not tracked")
-    mission_id = info["missionId"]
-    events_path = _harness(root) / "missions" / mission_id / "runs" / run_id / "events.ndjson"
+    info = _active_runs.get(run_id)
+    if info is not None:
+        mission_id = str(info["missionId"])
+        events_path = _run_events_path(root, mission_id, run_id)
+        start_offset = int(info.get("started_byte_offset") or 0)
+        proc = info["process"]
+        active_info = info
+    else:
+        _, events_path = _locate_run_events(root, run_id)
+        start_offset = 0
+        proc = None
+        active_info = None
 
     async def gen() -> AsyncIterator[bytes]:
-        # Stream the existing tail first, then poll for additions until the
-        # process exits, the run timeout fires, or the client disconnects.
-        # Codex P1 round 5: start from the byte offset captured at spawn so
-        # we don't replay historical events from earlier runs.
-        last_size = int(info.get("started_byte_offset") or 0)
-        proc: subprocess.Popen[str] = info["process"]
-        started_mono: float = info.get("started_mono") or time.monotonic()
-        last_event_mono = time.monotonic()
-        # Tests monkeypatch ``plugin_api._RUN_TIMEOUT_S``; read it dynamically.
-        import sys as _sys
-        run_timeout = float(getattr(_sys.modules[__name__], "_RUN_TIMEOUT_S", 3600.0))
-        # Idle keepalive so reverse proxies don't drop the long-lived stream.
-        keepalive_s = 15.0
-
-        def _drain_chunk() -> bytes:
-            nonlocal last_size
-            if not events_path.is_file():
-                return b""
-            with events_path.open("rb") as fh:
-                fh.seek(last_size)
-                data = fh.read()
-                last_size += len(data)
-            return data
-
-        for _ in range(600):  # ~60s upper bound on the first wait for the file.
-            if events_path.is_file():
-                break
-            if proc.poll() is not None:
-                break
-            await asyncio.sleep(0.1)
-        # Drain.
-        while True:
-            chunk = _drain_chunk()
-            if chunk:
-                for line in chunk.splitlines():
-                    if not line:
-                        continue
-                    yield b"data: " + line + b"\n\n"
-                last_event_mono = time.monotonic()
-            now = time.monotonic()
-            timed_out = (now - started_mono) > run_timeout
-            exited = proc.poll() is not None
-            if exited or timed_out:
-                if timed_out and not exited:
-                    # Best-effort SIGTERM; the proc may race-exit on its own.
-                    try:
-                        proc.terminate()
-                    except (ProcessLookupError, OSError):
-                        pass
-                # Final read pass so we don't drop events flushed between the
-                # last drain and the exit/timeout decision.
-                final = _drain_chunk()
-                if final:
-                    for line in final.splitlines():
-                        if not line:
-                            continue
-                        yield b"data: " + line + b"\n\n"
-                # Codex P2: cancel the watchdog on normal/timeout exit so we
-                # don't leak one sleeping asyncio task per finished run.
-                watchdog = info.get("watchdog")
-                if watchdog is not None and not watchdog.done():
-                    watchdog.cancel()
-                # Codex P2 round 6: only flip status when we're actually
-                # transitioning OUT of "running". A cancel from the cancel
-                # endpoint already set "cancelled"; the watchdog already set
-                # "timeout". Overwriting either here would lose the terminal
-                # state operators rely on for triage.
-                if info.get("status") == "running":
-                    if timed_out:
-                        info["status"] = "timeout"
-                    else:
-                        info["status"] = "finished"
-                if timed_out:
-                    yield b"event: timeout\ndata: " + str(int(run_timeout)).encode() + b"s\n\n"
-                _schedule_run_eviction(run_id)
-                yield b"event: done\ndata: closed\n\n"
-                return
-            if (now - last_event_mono) >= keepalive_s:
-                yield b": keepalive\n\n"
-                last_event_mono = now
-            await asyncio.sleep(0.25)
+        async for frame in _iter_run_events_sse(
+            events_path,
+            run_id=run_id,
+            start_offset=start_offset,
+            proc=proc,
+            active_info=active_info,
+        ):
+            yield frame
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.get("/missions/{mission_id}/runs/{run_id}/events")
+async def mission_run_events(
+    mission_id: str,
+    run_id: str,
+    stream: int = Query(0, ge=0, le=1, description="1 for SSE tail, 0 for JSON history"),
+) -> Any:
+    """UH-93 — mission-scoped run events (SSE or historical JSON)."""
+    root = _project_root()
+    if stream:
+        _, events_path = _locate_run_events(root, run_id, mission_id=mission_id)
+        info = _active_runs.get(run_id)
+        if info is not None and str(info.get("missionId")) == mission_id:
+            start_offset = int(info.get("started_byte_offset") or 0)
+            proc = info["process"]
+            active_info = info
+        else:
+            start_offset = 0
+            proc = None
+            active_info = None
+
+        async def gen() -> AsyncIterator[bytes]:
+            async for frame in _iter_run_events_sse(
+                events_path,
+                run_id=run_id,
+                start_offset=start_offset,
+                proc=proc,
+                active_info=active_info,
+            ):
+                yield frame
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+    return _historical_run_events_payload(root, mission_id, run_id)
 
 
 # ---- artifact endpoints (UH-63) --------------------------------------------

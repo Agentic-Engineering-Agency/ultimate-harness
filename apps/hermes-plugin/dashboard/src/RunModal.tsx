@@ -15,48 +15,10 @@
  * Virtualization: we keep only the last 500 events in state; the SSE source
  * still drains continuously so we never block the backend.
  */
-import { pluginEventSource, pluginFetch, UI, type MissionSummary, type RunStartResponse } from "./sdk";
+import { pluginFetch, UI, type MissionSummary, type RunStartResponse } from "./sdk";
 import { replayBannerText, runModalTitle } from "./mission-compare-helpers";
-
-const MAX_EVENTS = 500;
-
-interface EventRow { ts: number; line: string; error?: boolean }
-
-function useEventTail(runId: string | null): { events: EventRow[]; closed: boolean } {
-  const [events, setEvents] = React.useState<EventRow[]>([]);
-  const [closed, setClosed] = React.useState(false);
-  React.useEffect(() => {
-    if (!runId) return;
-    setEvents([]);
-    setClosed(false);
-    const es = pluginEventSource(`/runs/${encodeURIComponent(runId)}/events`);
-    const onMessage = (msg: MessageEvent) => {
-      setEvents((prev) => {
-        const next = prev.length >= MAX_EVENTS ? prev.slice(prev.length - MAX_EVENTS + 1) : prev.slice();
-        next.push({ ts: Date.now(), line: msg.data });
-        return next;
-      });
-    };
-    const onError = () => {
-      // Browser auto-reconnects on EventSource errors; we surface the state
-      // only when the server explicitly closes via a `done` event below.
-    };
-    const onDone = () => {
-      setClosed(true);
-      es.close();
-    };
-    es.addEventListener("message", onMessage);
-    es.addEventListener("error", onError);
-    es.addEventListener("done", onDone as EventListener);
-    return () => {
-      es.removeEventListener("message", onMessage);
-      es.removeEventListener("error", onError);
-      es.removeEventListener("done", onDone as EventListener);
-      es.close();
-    };
-  }, [runId]);
-  return { events, closed };
-}
+import { useEventTail } from "./live-events-hooks";
+import { severityRowClass } from "./live-events-utils";
 
 export function RunModal({
   mission,
@@ -165,8 +127,8 @@ export function RunModal({
             <div ref={logRef} className="uh-event-log">
               {events.length === 0 ? (
                 <div className="uh-muted">Waiting for events…</div>
-              ) : events.map((e, i) => (
-                <div key={i} className={"uh-event-row" + (e.error ? " is-error" : "")}>{e.line}</div>
+              ) : events.map((e) => (
+                <div key={e.id} className={"uh-event-row" + severityRowClass(e.severity)}>{e.line}</div>
               ))}
             </div>
             {error ? <div className="uh-error">{error}</div> : null}

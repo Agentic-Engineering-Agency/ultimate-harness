@@ -12,6 +12,7 @@ import {
   requireInitializedProject,
   requireWorkflowProfile,
 } from "./mission.js";
+import { loadSpecFile, linearRefsFromSpec, missionIdFromSpecId } from "./spec-loader.js";
 
 export type ProposeIssueRef = {
   provider: string;
@@ -22,6 +23,13 @@ export type ProposeIssueRef = {
 export type ProposeRequiredCheck = {
   name: string;
   command?: string;
+};
+
+export type ProposeAcceptanceCriterion = {
+  id: string;
+  description: string;
+  severity?: "block" | "warn";
+  checkCommand?: string;
 };
 
 export type ProposeMissionOptions = {
@@ -39,6 +47,7 @@ export type ProposeMissionOptions = {
   suggestedSkills?: string[];
   expectedOutputs?: string[];
   completionCriteria?: string[];
+  acceptanceCriteria?: ProposeAcceptanceCriterion[];
   sandboxBackend?: string;
   promotionPolicy?: string;
   requiredChecks?: ProposeRequiredCheck[];
@@ -164,7 +173,92 @@ function buildMissionDocument(opts: ProposeMissionOptions): Record<string, unkno
       review_gates: reviewGates,
     },
     completion_criteria: opts.completionCriteria ?? [],
+    ...(opts.acceptanceCriteria && opts.acceptanceCriteria.length > 0
+      ? {
+          acceptance_criteria: opts.acceptanceCriteria.map((ac) => ({
+            id: ac.id,
+            description: ac.description,
+            ...(ac.checkCommand ? { check_command: ac.checkCommand } : {}),
+            severity: ac.severity ?? "block",
+          })),
+        }
+      : {}),
   };
+}
+
+export type ProposeFromSpecOptions = {
+  specPath: string;
+  workflow: string;
+  id?: string;
+  title?: string;
+  objective?: string;
+  priority?: string;
+  issueRefs?: ProposeIssueRef[];
+  readFirst?: string[];
+  sourceLinks?: string[];
+  repoRoot?: string;
+  constraints?: string[];
+  requiredSkills?: string[];
+  suggestedSkills?: string[];
+  expectedOutputs?: string[];
+  requiredChecks?: ProposeRequiredCheck[];
+  reviewGates?: string[];
+  sandboxBackend?: string;
+  promotionPolicy?: string;
+  outputPath?: string;
+  force?: boolean;
+  root?: string;
+};
+
+export async function proposeMissionFromSpec(
+  root: string,
+  opts: ProposeFromSpecOptions,
+): Promise<ProposeMissionResult> {
+  const resolvedSpec = path.isAbsolute(opts.specPath)
+    ? opts.specPath
+    : path.resolve(root, opts.specPath);
+  const spec = await loadSpecFile(resolvedSpec);
+
+  const specRelative = path.relative(root, resolvedSpec);
+  const readFirst = [...new Set([
+    ...(opts.readFirst ?? []),
+    specRelative.startsWith("..") ? resolvedSpec : specRelative,
+  ])];
+
+  const linearRefs = linearRefsFromSpec(spec);
+  const issueRefs = [
+    ...linearRefs,
+    ...(opts.issueRefs ?? []).filter(
+      (ref) => !linearRefs.some((lr) => lr.provider === ref.provider && lr.id === ref.id),
+    ),
+  ];
+
+  return proposeMission(root, {
+    id: opts.id ?? missionIdFromSpecId(spec.frontMatter.id),
+    title: opts.title ?? spec.frontMatter.title,
+    workflow: opts.workflow,
+    objective: opts.objective ?? spec.goal,
+    priority: opts.priority,
+    issueRefs,
+    readFirst,
+    sourceLinks: opts.sourceLinks,
+    repoRoot: opts.repoRoot,
+    constraints: opts.constraints,
+    requiredSkills: opts.requiredSkills,
+    suggestedSkills: opts.suggestedSkills,
+    expectedOutputs: opts.expectedOutputs,
+    requiredChecks: opts.requiredChecks,
+    reviewGates: opts.reviewGates,
+    acceptanceCriteria: spec.acceptanceCriteria.map((ac) => ({
+      id: ac.id,
+      description: ac.description,
+      severity: "block",
+    })),
+    sandboxBackend: opts.sandboxBackend,
+    promotionPolicy: opts.promotionPolicy,
+    outputPath: opts.outputPath,
+    force: opts.force,
+  });
 }
 
 function serializeIssueRef(ref: ProposeIssueRef): Record<string, string> {

@@ -79,6 +79,43 @@ export function pluginEventSource(path: string): EventSource {
   return new EventSource(`${PLUGIN_API_BASE}${path}`);
 }
 
+export type RunEventStreamStatus = "connecting" | "open" | "closed" | "error";
+
+/**
+ * UH-94 — subscribe to mission-scoped run event SSE (`?stream=1`).
+ * Returns an unsubscribe function that closes the EventSource.
+ */
+export function subscribeToRunEvents(
+  missionId: string,
+  runId: string,
+  onEvent: (line: string, raw: MessageEvent) => void,
+  onStatus?: (status: RunEventStreamStatus) => void,
+): () => void {
+  const path =
+    `/missions/${encodeURIComponent(missionId)}/runs/${encodeURIComponent(runId)}/events?stream=1`;
+  onStatus?.("connecting");
+  const es = pluginEventSource(path);
+
+  const onOpen = () => onStatus?.("open");
+  const onMessage = (msg: MessageEvent) => onEvent(String(msg.data), msg);
+  const onDone = () => {
+    onStatus?.("closed");
+    es.close();
+  };
+
+  es.addEventListener("open", onOpen);
+  es.addEventListener("message", onMessage);
+  es.addEventListener("done", onDone as EventListener);
+
+  return () => {
+    es.removeEventListener("open", onOpen);
+    es.removeEventListener("message", onMessage);
+    es.removeEventListener("done", onDone as EventListener);
+    es.close();
+    onStatus?.("closed");
+  };
+}
+
 // ---- Backend payload shapes (mirror plugin_api.py) -------------------------
 
 export interface AdapterEntry {
