@@ -239,6 +239,64 @@ async def test_active_runs_evicted_after_terminal_state(
 
 
 @pytest.mark.asyncio
+async def test_sse_does_not_overwrite_cancelled_status(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """Codex P2 round 6: when a run is cancelled while an SSE stream is
+    open (or opened later), the drain loop must NOT overwrite
+    info['status']='cancelled' with 'finished'/'timeout'."""
+    import plugin_api as _api  # type: ignore[import-not-found]
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    assert fake_cli.last_popen is not None
+    # Cancel first — sets status=cancelled and schedules eviction.
+    cancel = await client.post(f"/api/plugins/uh/runs/{run_id}/cancel")
+    assert cancel.status_code == 200
+    assert _api._active_runs[run_id]["status"] == "cancelled"
+    # The cancel-side terminate() called schedule_exit() on FakePopen so the
+    # SSE drain loop will see the proc as exited on first poll.
+    async with client.stream("GET", f"/api/plugins/uh/runs/{run_id}/events") as resp:
+        async for _ in resp.aiter_bytes():
+            pass
+    # Status must STILL be 'cancelled' — the SSE drain must not have
+    # downgraded the terminal state.
+    assert _api._active_runs.get(run_id, {}).get("status") == "cancelled" or \
+           run_id not in _api._active_runs, (
+        "SSE drain overwrote cancelled status — see Codex round 6 P2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recent_runs_runid_round_trips_through_safe_regex(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P2 round 6: the runId fallback used for legacy rows (no
+    explicit run_id) must round-trip through _SAFE_ID_RE so the UI can
+    deep-link to per-run routes without a 400 invalid_id."""
+    import re
+    from plugin_api import _SAFE_ID_RE  # type: ignore[import-not-found]
+    # Seed a runtime-result.yaml without an explicit run_id but with a
+    # started_at containing ':' (the worst-case fallback shape).
+    rr_path = isolated_project / ".harness" / "missions" / "demo" / "runtime-result.yaml"
+    rr_path.parent.mkdir(parents=True, exist_ok=True)
+    rr_path.write_text(
+        "schema_version: uh.runtime-result.v0\n"
+        "mission_id: demo\n"
+        "started_at: '2026-05-19T12:00:00Z'\n"
+        "status: passed\n",
+        encoding="utf-8",
+    )
+    resp = await client.get("/api/plugins/uh/runs?limit=5")
+    runs = resp.json()["runs"]
+    assert runs, "expected at least one run row"
+    for row in runs:
+        assert _SAFE_ID_RE.match(row["runId"]), (
+            f"runId {row['runId']!r} does not match _SAFE_ID_RE; "
+            "UI deep-link to /runs/{run_id}/... will 400"
+        )
+
+
+@pytest.mark.asyncio
 async def test_run_unknown_mission_returns_404(client: httpx.AsyncClient, isolated_project: Path) -> None:
     resp = await client.post("/api/plugins/uh/missions/ghost/run", json={})
     assert resp.status_code == 404

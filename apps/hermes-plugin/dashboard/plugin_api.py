@@ -343,8 +343,19 @@ def _scan_runs(root: Path, limit: int = 20) -> list[dict[str, Any]]:
         rr = _read_yaml(entry / "runtime-result.yaml")
         if not rr:
             continue
+        # Codex P2 round 6: the runId fallback must round-trip through
+        # _SAFE_ID_RE so the UI can deep-link into /runs/{run_id}/... routes.
+        # A real run_id is already safe (e.g. "20260519T120000Z-deadbeef");
+        # only sanitize the started_at fallback, which is an ISO timestamp
+        # containing `:` characters the regex rejects.
+        explicit_run_id = rr.get("run_id")
+        if explicit_run_id:
+            safe_run_id = str(explicit_run_id)
+        else:
+            fallback = str(rr.get("started_at") or entry.name)
+            safe_run_id = fallback.replace(":", "-")
         rows.append({
-            "runId": str(rr.get("run_id") or rr.get("started_at") or entry.name),
+            "runId": safe_run_id,
             "missionId": str(rr.get("mission_id") or entry.name),
             "status": str(rr.get("status") or "unknown"),
             "startedAt": str(rr.get("started_at") or ""),
@@ -653,15 +664,18 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
                 watchdog = info.get("watchdog")
                 if watchdog is not None and not watchdog.done():
                     watchdog.cancel()
+                # Codex P2 round 6: only flip status when we're actually
+                # transitioning OUT of "running". A cancel from the cancel
+                # endpoint already set "cancelled"; the watchdog already set
+                # "timeout". Overwriting either here would lose the terminal
+                # state operators rely on for triage.
+                if info.get("status") == "running":
+                    if timed_out:
+                        info["status"] = "timeout"
+                    else:
+                        info["status"] = "finished"
                 if timed_out:
                     yield b"event: timeout\ndata: " + str(int(run_timeout)).encode() + b"s\n\n"
-                    info["status"] = "timeout"
-                else:
-                    info["status"] = "finished"
-                # Codex P2 round 5: schedule eviction from _active_runs so the
-                # registry doesn't grow unbounded in a long-lived dashboard.
-                # Delay 60s so the frontend has time to poll final status
-                # before the entry disappears.
                 _schedule_run_eviction(run_id)
                 yield b"event: done\ndata: closed\n\n"
                 return
