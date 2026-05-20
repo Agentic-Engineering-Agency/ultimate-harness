@@ -33,8 +33,8 @@ walk(docsRoot);
 // SPA + prerender for /docs/* routes. The /docs/$ route uses createServerFn
 // with staticFunctionMiddleware — those need prerender to bake the server
 // function output into static JSON. Without it, the client at runtime
-// fetches /_serverFn/... which doesn't exist on Cloudflare Pages and the
-// _redirects fallback returns index.html, breaking JSON.parse.
+// fetches /_serverFn/... without a matching static asset. Alchemy deploys a
+// Worker (spa: true in alchemy.run.ts); do not add Pages _redirects (CF 10021).
 //
 // The active prerender config is the top-level `prerender` (not
 // `spa.prerender`, which only governs the SPA shell). `crawlLinks: false`

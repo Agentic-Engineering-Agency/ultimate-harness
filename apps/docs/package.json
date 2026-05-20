@@ -5,11 +5,11 @@
   "sideEffects": false,
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build && cp dist/client/_shell.html dist/client/index.html && printf '/* /index.html 200\\n' > dist/client/_redirects",
+    "build": "vite build && cp dist/client/_shell.html dist/client/index.html && rm -f dist/client/_redirects",
     "preview": "vite preview",
     "types:check": "fumadocs-mdx && tsc --noEmit",
-    "deploy": "alchemy deploy --stage prod",
-    "destroy": "alchemy destroy --stage prod",
+    "deploy": "bash scripts/alchemy-deploy.sh prod",
+    "destroy": "bash scripts/alchemy-destroy.sh prod",
     "alchemy:dev": "alchemy dev"
   },
   "dependencies": {
