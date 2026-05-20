@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   missionDir,
@@ -135,4 +135,72 @@ export async function mirrorRuntimeResultToLatest(
   const tmp = `${dst}.tmp`;
   await copyFile(src, tmp);
   await rename(tmp, dst);
+}
+
+/**
+ * UH-90 — retention. Mark the N oldest non-archived entries as archived
+ * and remove their per-run dirs. `max` is the cap; if entries.length <= max,
+ * no-op. Returns the count of pruned runs.
+ *
+ * Idempotent: re-running on the same on-disk state is a no-op because
+ * already-archived entries are excluded from the cap calculation.
+ *
+ * `max` must be a positive integer. The plugin's caller checks for `null`
+ * (= "no cap, do not invoke") before calling — we throw rather than
+ * silently no-op so misconfigured callers fail fast.
+ */
+export async function pruneOldRuns(
+  root: string,
+  missionId: string,
+  max: number,
+): Promise<number> {
+  if (!Number.isInteger(max) || max <= 0) {
+    throw new Error("max_runs_per_mission must be a positive integer or null");
+  }
+  const indexPath = missionRunsIndex(root, missionId);
+  let current: { schema_version: "uh.runs-index.v0"; runs: RunsIndexEntry[] };
+  try {
+    const raw = await readFile(indexPath, "utf-8");
+    current = RunsIndexSchema.parse(JSON.parse(raw));
+  } catch {
+    // No index yet (mission has never run) or it's corrupt — either way
+    // there's nothing for retention to prune.
+    return 0;
+  }
+  const nonArchived = current.runs.filter((r) => r.archived !== true);
+  if (nonArchived.length <= max) {
+    return 0;
+  }
+  // Sort by started_at ASC so the oldest entries are at the front.
+  // Tie-break on run_id to keep the order deterministic when two runs
+  // share an ISO timestamp (the `_make_run_id()` minute granularity makes
+  // collisions plausible under load).
+  const oldestFirst = [...nonArchived].sort((a, b) => {
+    if (a.started_at !== b.started_at) return a.started_at < b.started_at ? -1 : 1;
+    return a.run_id < b.run_id ? -1 : 1;
+  });
+  const pruneCount = nonArchived.length - max;
+  const toPrune = oldestFirst.slice(0, pruneCount);
+  // Flip the archived flag on the in-memory entries (lookup by run_id —
+  // we don't depend on indices because the sort reordered them).
+  const archivedIds = new Set(toPrune.map((r) => r.run_id));
+  for (const entry of current.runs) {
+    if (archivedIds.has(entry.run_id)) {
+      entry.archived = true;
+    }
+  }
+  // Best-effort per-run dir removal. `force: true` already swallows
+  // ENOENT, so re-running prune after a partial failure converges.
+  for (const entry of toPrune) {
+    await rm(missionRunDir(root, missionId, entry.run_id), { recursive: true, force: true });
+  }
+  // Atomic write via the same unique-tmp rename strategy as
+  // appendRunsIndexEntry. Two writers (e.g. prune + a concurrent
+  // appendRunsIndexEntry from a still-finishing terminal-status flip)
+  // could still race on the read-modify-write window, but each rename
+  // is atomic and per-writer staging files don't collide.
+  const tmp = `${indexPath}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(tmp, JSON.stringify(current, null, 2), "utf-8");
+  await rename(tmp, indexPath);
+  return pruneCount;
 }

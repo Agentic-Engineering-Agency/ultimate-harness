@@ -11,5 +11,8 @@
   "slots": ["sessions:bottom"],
   "entry": "dist/index.js",
   "css": "dist/style.css",
-  "api": "plugin_api.py"
+  "api": "plugin_api.py",
+  "config": {
+    "max_runs_per_mission": null
+  }
 }

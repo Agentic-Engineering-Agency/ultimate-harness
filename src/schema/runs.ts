@@ -36,6 +36,12 @@ export const RunsIndexEntrySchema = z
     finished_at: z.string().nullable().optional(),
     status: RunStatusSchema,
     runtime: z.string().optional(),
+    // UH-90 — retention. Present + true means the per-run directory has
+    // been pruned by the retention policy; the index entry survives so
+    // the audit trail stays intact. Absent (i.e. entries written before
+    // UH-90) is treated as "not archived" — no default is applied here
+    // on purpose so a missing field round-trips as missing on rewrite.
+    archived: z.boolean().optional(),
   })
   .strict();
 export type RunsIndexEntry = z.infer<typeof RunsIndexEntrySchema>;

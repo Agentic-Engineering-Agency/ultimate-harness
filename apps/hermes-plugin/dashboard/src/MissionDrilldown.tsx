@@ -9,7 +9,7 @@
  * Events tab tails the on-disk `events.ndjson` for a pinned `runId` if one was
  * supplied via the route, otherwise the latest run for the mission.
  */
-import { pluginFetch, UI, type MissionDetail } from "./sdk";
+import { pluginFetch, UI, type MissionDetail, fmt } from "./sdk";
 import { yamlStringify } from "./yaml-pretty";
 import { VerificationViewer } from "./VerificationViewer";
 import { RunModal } from "./RunModal";
@@ -29,6 +29,22 @@ const TABS = [
   { key: "verify",   label: "Verification" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
+
+/**
+ * UH-90 — placeholder shown in artifact tabs when the pinned run was
+ * pruned by the retention policy. The per-run dir is gone, but the
+ * `runs/index.json` entry survives with `archived: true`. Rendered
+ * before any fetch so we don't surface a generic 404.
+ */
+function ArchivedRunPane({ runId }: { runId: string }) {
+  return (
+    <div className="uh-empty">
+      Artifacts for run <span className="uh-mono">{runId}</span> have been
+      archived (UH-90 retention policy). The run still appears in the
+      mission history; the per-run files are no longer on disk.
+    </div>
+  );
+}
 
 function ArtifactPane({ url, language }: { url: string; language?: string }) {
   const [data, setData] = React.useState<ArtifactPayload | null>(null);
@@ -126,6 +142,7 @@ function MissionMeta({ mission }: { mission: MissionDetail }) {
   );
 }
 
+
 export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string; pinnedRunId?: string }) {
   const [tab, setTab] = React.useState<TabKey>(pinnedRunId ? "events" : "mission");
   const [mission, setMission] = React.useState<MissionDetail | null>(null);
@@ -152,6 +169,20 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
 
   if (error) return <div className="uh-error">Failed to load mission {missionId}: {error}</div>;
   if (!mission) return <div className="uh-muted">Loading mission…</div>;
+
+  // UH-90: short-circuit per-run artifact tabs when the pinned run is
+  // archived. The per-run dir is gone so the fetch would 404 with code
+  // `archived` — we'd rather show a tailored placeholder before any
+  // network round-trip. The Mission/Verification tabs still render
+  // (they're mission-scoped, not per-run).
+  const pinnedRun = pinnedRunId
+    ? mission.runs?.find((r) => r.run_id === pinnedRunId)
+    : undefined;
+  const pinnedRunArchived = pinnedRun?.archived === true;
+  const isPerRunArtifactTab =
+    tab === "prompt" || tab === "final" || tab === "diff" ||
+    tab === "result" || tab === "events";
+  const showArchivedPane = pinnedRunId !== undefined && pinnedRunArchived && isPerRunArtifactTab;
 
   return (
     <div className="uh-stack">
@@ -183,11 +214,15 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
         ))}
       </div>
       {tab === "mission" ? <MissionMeta mission={mission} /> : null}
-      {tab === "prompt" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "prompt")} /> : null}
-      {tab === "final"  ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "final-message")} /> : null}
-      {tab === "diff"   ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "diff")} /> : null}
-      {tab === "result" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "result")} /> : null}
-      {tab === "events" ? <EventsPane missionId={missionId} runId={pinnedRunId} /> : null}
+      {showArchivedPane ? <ArchivedRunPane runId={pinnedRunId!} /> : (
+        <>
+          {tab === "prompt" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "prompt")} /> : null}
+          {tab === "final"  ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "final-message")} /> : null}
+          {tab === "diff"   ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "diff")} /> : null}
+          {tab === "result" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "result")} /> : null}
+          {tab === "events" ? <EventsPane missionId={missionId} runId={pinnedRunId} /> : null}
+        </>
+      )}
       {tab === "verify" ? <VerificationViewer missionId={missionId} /> : null}
       {showRunModal ? (
         <RunModal mission={mission} onClose={() => setShowRunModal(false)} />
