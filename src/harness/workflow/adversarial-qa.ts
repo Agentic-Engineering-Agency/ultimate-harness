@@ -7,7 +7,7 @@
  * and decides PASS vs NEEDS-ATTENTION.
  *
  * The acceptance contract is intentionally strict: PASS requires every
- * one of the five gates below to hold. A missing gate blocks PASS even
+ * one of the gates below to hold. A missing gate blocks PASS even
  * if every individual probe succeeded — "no evidence" is treated as
  * "needs attention", never as "fine".
  *
@@ -19,6 +19,10 @@
  *                                          worktrees left on disk
  *   gate-5  redaction_guardrail_intact    Honcho (or equivalent) redaction
  *                                          guardrail not bypassed
+ *   gate-6  no_leaked_artifacts           cleanup.leakedArtifacts must be
+ *                                          empty (matches the workflow YAML
+ *                                          contract: "no leaked secrets in
+ *                                          artifacts"). Codex P1.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -143,6 +147,28 @@ export function evaluateAdversarialQa(input: AdversarialQaInput): AdversarialQaR
     detail: input.cleanup.redactionGuardrailIntact ? "redaction guardrail intact" : "redaction guardrail bypassed",
   });
 
+  // gate-6 ---------------------------------------------------------------- gate
+  // Codex P1: leaked artifacts (secrets, dangling branches, etc) MUST block
+  // PASS. The workflow YAML's cleanup-evidence phase requires "no leaked
+  // secrets" — without this gate, a run with leaks present but
+  // `redactionGuardrailIntact === true` would still verdict PASS, producing
+  // a false-green security signal.
+  // Codex P1 follow-up: missing leak evidence (null/undefined/non-array) must
+  // NOT default to "satisfied". The module contract is "no evidence = no PASS",
+  // so a malformed cleanup payload blocks gate-6 instead of fail-opening.
+  const leakedArtifacts = input.cleanup.leakedArtifacts;
+  const evidenceCollected = Array.isArray(leakedArtifacts);
+  gates.push({
+    id: "gate-6-no-leaked-artifacts",
+    description: "no leaked artifacts detected during cleanup (evidence required)",
+    satisfied: evidenceCollected && leakedArtifacts.length === 0,
+    detail: !evidenceCollected
+      ? "leak evidence not collected (cleanup.leakedArtifacts missing or not an array)"
+      : leakedArtifacts.length === 0
+        ? "no leaked artifacts detected"
+        : `${leakedArtifacts.length} leaked artifact(s) detected`,
+  });
+
   const verdict: AdversarialQaVerdict = gates.every((g) => g.satisfied) ? "PASS" : "NEEDS-ATTENTION";
   const scenariosHandled = input.hostileScenarios.filter((s) => s.outcome === "deflected" || s.outcome === "surfaced").length;
   const markdown = renderMarkdown(input, gates, verdict, scenariosHandled);
@@ -231,8 +257,14 @@ function renderMarkdown(
   for (const p of input.cleanup.orphanedWorktreePaths) {
     lines.push(`  - \`${p}\``);
   }
-  lines.push(`- Leaked artifacts: ${input.cleanup.leakedArtifacts.length}`);
-  for (const a of input.cleanup.leakedArtifacts) {
+  // Defense-in-depth: if cleanup.leakedArtifacts is missing (gate-6
+  // fail-closed catches this), the renderer must still produce valid
+  // markdown instead of throwing during report generation.
+  const leaksForReport = Array.isArray(input.cleanup.leakedArtifacts)
+    ? input.cleanup.leakedArtifacts
+    : [];
+  lines.push(`- Leaked artifacts: ${Array.isArray(input.cleanup.leakedArtifacts) ? leaksForReport.length : "(evidence missing)"}`);
+  for (const a of leaksForReport) {
     lines.push(`  - ${a}`);
   }
   lines.push(`- Redaction guardrail intact: ${input.cleanup.redactionGuardrailIntact ? "yes" : "no"}`);

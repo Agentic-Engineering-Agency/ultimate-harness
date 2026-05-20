@@ -135,6 +135,13 @@ export interface GitOps {
 export interface MergeOutcome {
   /** True when conflict markers landed on disk and the merge was aborted. */
   conflicted: boolean;
+  /**
+   * True when `git merge` failed for a non-conflict reason (corrupt branch,
+   * missing ref, dirty index, etc.). A `failed` outcome is NEVER integrated
+   * — downstream callers must treat it as a hard merge failure that drops
+   * the worker from the integrated set, just like a conflict.
+   */
+  failed?: boolean;
   /** Conflicting paths reported by `git`. Empty when `conflicted === false`. */
   conflictPaths: string[];
   /** Free-form note attached to the integration report. */
@@ -313,7 +320,17 @@ export const defaultGitOps: GitOps = {
         : path.join(cwd, ".git", "MERGE_HEAD");
       const inConflict = await fileExists(resolved);
       if (!inConflict) {
-        return { conflicted: false, conflictPaths: [], note: `merge failed: ${(err as Error).message}` };
+        // Codex P1: a non-conflict `git merge` failure (corrupt branch, missing
+        // ref, dirty index, etc.) is NOT a clean integration. Returning
+        // `conflicted: false` here caused downstream code to treat the worker
+        // as integrated when no merge commit ever landed. Flag it as `failed`
+        // so the consumer drops it from the integrated set.
+        return {
+          conflicted: false,
+          failed: true,
+          conflictPaths: [],
+          note: `merge failed: ${(err as Error).message}`,
+        };
       }
       const { stdout } = await execFileP("git", ["diff", "--name-only", "--diff-filter=U"], { cwd });
       const paths = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -468,8 +485,11 @@ export async function runTeamMission(
       }
       const mergeOutcome = await gitOps.merge(plan.leader.worktreePath, outcome.plan.branch);
       outcome.merge = mergeOutcome;
-      outcome.integrated = !mergeOutcome.conflicted;
-      if (mergeOutcome.conflicted) hadConflicts = true;
+      // Codex P1: only a clean (non-conflicted, non-failed) merge counts as
+      // integrated. A non-conflict merge failure must NOT mark the worker
+      // integrated just because conflict markers are absent.
+      outcome.integrated = !mergeOutcome.conflicted && !mergeOutcome.failed;
+      if (mergeOutcome.conflicted || mergeOutcome.failed) hadConflicts = true;
     }
   }
 
@@ -626,7 +646,15 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
       for (const p of outcome.filesTouched) lines.push(`  - \`${p}\``);
     }
     if (outcome.merge) {
-      const verdict = outcome.merge.conflicted ? `conflict (${outcome.merge.conflictPaths.length} path(s))` : "clean";
+      // Codex P2: the report verdict must distinguish three states —
+      // clean, conflict, and non-conflict failure — so operators don't
+      // get a "merge: clean" line on a blocked run where `git merge`
+      // actually failed without producing MERGE_HEAD.
+      const verdict = outcome.merge.conflicted
+        ? `conflict (${outcome.merge.conflictPaths.length} path(s))`
+        : outcome.merge.failed
+          ? "failed (non-conflict)"
+          : "clean";
       lines.push(`- Leader merge: ${verdict}`);
       if (outcome.merge.conflicted) {
         for (const p of outcome.merge.conflictPaths) lines.push(`  - conflict: \`${p}\``);

@@ -48,12 +48,52 @@ function cleanPassInput(overrides: Partial<AdversarialQaInput> = {}): Adversaria
 /* -------------------------------------------------------------------------- */
 
 describe("evaluateAdversarialQa", () => {
-  test("clean-pass run: all 5 gates satisfied → PASS", () => {
+  test("clean-pass run: all 6 gates satisfied → PASS", () => {
     const report = evaluateAdversarialQa(cleanPassInput());
     expect(report.verdict).toBe("PASS");
     expect(report.gates.every((g) => g.satisfied)).toBe(true);
+    expect(report.gates).toHaveLength(6);
     expect(report.scenariosHandled).toBe(3);
     expect(report.markdown).toMatch(/Verdict: \*\*PASS\*\*/);
+  });
+
+  test("Codex P1: leaked artifacts block PASS even when redaction guardrail intact", () => {
+    const report = evaluateAdversarialQa(cleanPassInput({
+      cleanup: {
+        orphanedWorktreePaths: [],
+        leakedArtifacts: ["AWS_SECRET_ACCESS_KEY found in events.ndjson"],
+        redactionGuardrailIntact: true,
+      },
+    }));
+    expect(report.verdict).toBe("NEEDS-ATTENTION");
+    const gate6 = report.gates.find((g) => g.id === "gate-6-no-leaked-artifacts");
+    expect(gate6).toBeDefined();
+    expect(gate6!.satisfied).toBe(false);
+    expect(gate6!.detail).toMatch(/1 leaked artifact/);
+    // gate-5 still passes — leak detection is independent of redaction guardrail.
+    const gate5 = report.gates.find((g) => g.id === "gate-5-redaction-guardrail");
+    expect(gate5!.satisfied).toBe(true);
+  });
+
+  test("Codex P1: missing leak evidence (non-array leakedArtifacts) blocks PASS — fail-closed", () => {
+    // Runtime defense-in-depth: even though the TS type says `string[]`, a
+    // partially-populated cleanup payload (e.g., loaded from a malformed
+    // JSON artifact) must not produce a false-green verdict. The module
+    // contract is "no evidence = no PASS".
+    const base = cleanPassInput();
+    const malformed: AdversarialQaInput = {
+      ...base,
+      cleanup: {
+        ...base.cleanup,
+        // Force-cast away the required string[] to model a wire-deserialization bug.
+        leakedArtifacts: undefined as unknown as string[],
+      },
+    };
+    const report = evaluateAdversarialQa(malformed);
+    expect(report.verdict).toBe("NEEDS-ATTENTION");
+    const gate6 = report.gates.find((g) => g.id === "gate-6-no-leaked-artifacts");
+    expect(gate6!.satisfied).toBe(false);
+    expect(gate6!.detail).toMatch(/leak evidence not collected/);
   });
 
   test("injection-deflected run: prompt-injection deflected scenario counts toward gate-2", () => {

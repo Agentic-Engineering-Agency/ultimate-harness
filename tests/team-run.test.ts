@@ -544,6 +544,62 @@ describe("runTeamMission — fake gitOps", () => {
     expect(repo.branches.has("uh/team/team-mission/frontend")).toBe(false);
     expect(repo.branches.has("uh/team/team-mission/leader")).toBe(false);
   });
+
+  test("Codex P1: non-conflict merge failure drops worker from integrated set (not silently merged)", async () => {
+    // When `git merge` exits non-zero but MERGE_HEAD is NOT present (e.g.
+    // corrupt branch, missing ref, dirty index), the old code returned
+    // `{ conflicted: false }` and the consumer marked the worker integrated.
+    // The fix: a non-conflict failure now sets `failed: true` and the worker
+    // MUST NOT be integrated.
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async (_p: string, _c: string) => { /* no-op */ } };
+    const runner = makeRunner({
+      writes: {
+        backend: { files: { "src/a.ts": "a\n" }, sentinel: "ok" },
+        frontend: { files: { "src/b.ts": "b\n" }, sentinel: "ok" },
+      },
+    }, repo);
+    const baseOps = fakeGitOps(repo, fs);
+    const gitOps: GitOps = {
+      ...baseOps,
+      // Simulate a non-conflict merge failure for the frontend branch only.
+      async merge(cwd, branch) {
+        if (branch === "uh/team/team-mission/frontend") {
+          return { conflicted: false, failed: true, conflictPaths: [], note: "merge failed: refs/heads/uh/team/team-mission/frontend points to a corrupt object" };
+        }
+        return baseOps.merge(cwd, branch);
+      },
+    };
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      runnerFor: runner,
+      gitOps,
+      retainOnSuccess: true,
+    });
+
+    const frontend = result.workers.find((w) => w.plan.id === "frontend")!;
+    expect(frontend.merge?.conflicted).toBe(false);
+    expect(frontend.merge?.failed).toBe(true);
+    expect(frontend.integrated).toBe(false);
+    // The clean worker (backend) is still integrated.
+    const backend = result.workers.find((w) => w.plan.id === "backend")!;
+    expect(backend.integrated).toBe(true);
+    // hadConflicts is set because the partial integration is not clean.
+    expect(result.hadConflicts).toBe(true);
+    // Without a verifier, the overall verdict is blocked (partial integration).
+    expect(result.status).toBe("blocked");
+
+    // Codex P2 follow-up: the integration report must reflect the failed
+    // merge — operators should NOT see "Leader merge: clean" on a blocked
+    // run where git merge actually failed.
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toMatch(/Leader merge: failed \(non-conflict\)/);
+    expect(report).not.toMatch(/frontend[\s\S]*?Leader merge: clean/);
+  });
 });
 
 /* ---------------------------------------------------------- real git smoke  */
