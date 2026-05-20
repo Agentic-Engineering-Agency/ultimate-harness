@@ -592,6 +592,13 @@ describe("runTeamMission — fake gitOps", () => {
     expect(result.hadConflicts).toBe(true);
     // Without a verifier, the overall verdict is blocked (partial integration).
     expect(result.status).toBe("blocked");
+
+    // Codex P2 follow-up: the integration report must reflect the failed
+    // merge — operators should NOT see "Leader merge: clean" on a blocked
+    // run where git merge actually failed.
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toMatch(/Leader merge: failed \(non-conflict\)/);
+    expect(report).not.toMatch(/frontend[\s\S]*?Leader merge: clean/);
   });
 });
 

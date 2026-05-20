@@ -646,7 +646,15 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
       for (const p of outcome.filesTouched) lines.push(`  - \`${p}\``);
     }
     if (outcome.merge) {
-      const verdict = outcome.merge.conflicted ? `conflict (${outcome.merge.conflictPaths.length} path(s))` : "clean";
+      // Codex P2: the report verdict must distinguish three states —
+      // clean, conflict, and non-conflict failure — so operators don't
+      // get a "merge: clean" line on a blocked run where `git merge`
+      // actually failed without producing MERGE_HEAD.
+      const verdict = outcome.merge.conflicted
+        ? `conflict (${outcome.merge.conflictPaths.length} path(s))`
+        : outcome.merge.failed
+          ? "failed (non-conflict)"
+          : "clean";
       lines.push(`- Leader merge: ${verdict}`);
       if (outcome.merge.conflicted) {
         for (const p of outcome.merge.conflictPaths) lines.push(`  - conflict: \`${p}\``);
