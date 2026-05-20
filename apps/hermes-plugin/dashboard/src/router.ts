@@ -13,57 +13,14 @@
  *
  * That way deep-links survive reloads, the back button works, and we don't
  * have to add `react-router-dom` to the bundle.
+ *
+ * Codex round 7 P3: parseRoute + buildHash + ParsedRoute live in
+ * `router-pure.ts` so Node tests can import them without dragging React
+ * into the harness vitest typecheck. The React-bound `useHashRoute` hook
+ * stays here.
  */
-export interface ParsedRoute {
-  view:
-    | "overview"
-    | "mission"
-    | "missionRun"
-    | "missionNew"
-    | "workflow"
-    | "workflowEdit";
-  missionId?: string;
-  runId?: string;
-  workflowName?: string;
-}
-
-export function parseRoute(hash: string): ParsedRoute {
-  const h = hash.replace(/^#/, "").replace(/^\/+/, "");
-  if (h === "" || h === "/") return { view: "overview" };
-  const parts = h.split("/").filter(Boolean);
-  if (parts[0] === "missions") {
-    if (parts[1] === "new") return { view: "missionNew" };
-    const id = decodeURIComponent(parts[1] ?? "");
-    if (!id) return { view: "overview" };
-    if (parts[2] === "runs" && parts[3]) {
-      return { view: "missionRun", missionId: id, runId: decodeURIComponent(parts[3]) };
-    }
-    return { view: "mission", missionId: id };
-  }
-  if (parts[0] === "workflows" && parts[1]) {
-    const name = decodeURIComponent(parts[1]);
-    if (parts[2] === "edit") return { view: "workflowEdit", workflowName: name };
-    return { view: "workflow", workflowName: name };
-  }
-  return { view: "overview" };
-}
-
-export function buildHash(route: ParsedRoute): string {
-  switch (route.view) {
-    case "overview":
-      return "#/";
-    case "missionNew":
-      return "#/missions/new";
-    case "mission":
-      return `#/missions/${encodeURIComponent(route.missionId ?? "")}`;
-    case "missionRun":
-      return `#/missions/${encodeURIComponent(route.missionId ?? "")}/runs/${encodeURIComponent(route.runId ?? "")}`;
-    case "workflow":
-      return `#/workflows/${encodeURIComponent(route.workflowName ?? "")}`;
-    case "workflowEdit":
-      return `#/workflows/${encodeURIComponent(route.workflowName ?? "")}/edit`;
-  }
-}
+export { parseRoute, buildHash, type ParsedRoute } from "./router-pure.js";
+import { parseRoute, buildHash, type ParsedRoute } from "./router-pure.js";
 
 export function useHashRoute(): [ParsedRoute, (next: ParsedRoute) => void] {
   const [hash, setHash] = React.useState<string>(() => window.location.hash);

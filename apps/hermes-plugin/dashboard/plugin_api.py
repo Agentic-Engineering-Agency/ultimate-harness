@@ -319,7 +319,10 @@ def _summarize_mission_status(
     if verification.get("status") == "passed":
         return "verified"
     rt_status = runtime_result.get("status") if runtime_result else None
-    if rt_status in {"failed", "blocked"}:
+    # Codex P1 round 7: 'cancelled' is a terminal state; falling through to
+    # the 'running' branch below would misreport a finished run as active
+    # in /missions and /status, misleading operators during triage.
+    if rt_status in {"failed", "blocked", "cancelled"}:
         return rt_status
     if rt_status == "passed":
         # Passed runtime + no verification yet ⇒ awaiting verify, but we

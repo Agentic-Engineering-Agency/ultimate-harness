@@ -297,6 +297,31 @@ async def test_recent_runs_runid_round_trips_through_safe_regex(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_runtime_status_treated_as_terminal(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P1 round 7: a runtime_result with status='cancelled' must
+    surface as a terminal status (cancelled), NOT fall through to
+    'running'."""
+    rr_path = isolated_project / ".harness" / "missions" / "demo" / "runtime-result.yaml"
+    rr_path.parent.mkdir(parents=True, exist_ok=True)
+    rr_path.write_text(
+        "schema_version: uh.runtime-result.v0\n"
+        "mission_id: demo\n"
+        "status: cancelled\n"
+        "started_at: '2026-05-19T12:00:00Z'\n",
+        encoding="utf-8",
+    )
+    resp = await client.get("/api/plugins/uh/missions")
+    body = resp.json()
+    demo = next((m for m in body["missions"] if m["id"] == "demo"), None)
+    assert demo is not None
+    assert demo["status"] == "cancelled", (
+        f"expected cancelled, got {demo['status']!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_unknown_mission_returns_404(client: httpx.AsyncClient, isolated_project: Path) -> None:
     resp = await client.post("/api/plugins/uh/missions/ghost/run", json={})
     assert resp.status_code == 404
