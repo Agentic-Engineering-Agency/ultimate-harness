@@ -420,3 +420,55 @@ async def test_get_mission_handles_malformed_yaml(
     assert body["code"] == "malformed_yaml"
     assert body["error"]
     assert "details" in body
+
+@pytest.mark.asyncio
+async def test_get_workflow_handles_malformed_yaml(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P2 followup: malformed workflow yaml must surface as 400
+    ``malformed_yaml`` instead of a generic 500."""
+    wf_yaml = isolated_project / ".harness" / "workflows" / "research-docs.yaml"
+    wf_yaml.write_text(":\n:::bad:::\n  - [unbalanced", encoding="utf-8")
+
+    resp = await client.get("/api/plugins/uh/workflows/research-docs")
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == "malformed_yaml"
+    assert body["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_watchdog_cancelled_on_normal_sse_completion(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P2 followup: when a run exits via the SSE drain loop, the
+    timeout watchdog task MUST be cancelled — otherwise every finished
+    run leaves a sleeping asyncio task until UH_RUN_TIMEOUT_S elapses."""
+    import plugin_api as _api  # type: ignore[import-not-found]
+
+    # Watchdog comfortably outlives the run so the SSE drain loop wins the
+    # race. If the watchdog were not cancelled on normal exit, it would
+    # still be sleeping after the SSE stream returns.
+    monkeypatch.setattr(_api, "_RUN_TIMEOUT_S", 5.0)
+
+    # Mark the spawned process as exited immediately after spawn so the SSE
+    # drain loop hits the natural completion path before the watchdog runs.
+    # FakePopen.schedule_exit() makes poll() return the returncode on next call.
+
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    assert fake_cli.last_popen is not None
+    fake_cli.last_popen.schedule_exit()
+
+    # Drain the SSE stream end-to-end so the normal completion path runs.
+    async with client.stream("GET", f"/api/plugins/uh/runs/{run_id}/events") as resp:
+        async for _ in resp.aiter_bytes():
+            pass
+
+    info = _api._active_runs.get(run_id)
+    assert info is not None
+    assert info["status"] == "finished"
+    watchdog = info.get("watchdog")
+    assert watchdog is not None
+    # The watchdog task must be done (cancelled) — no leaked sleeping task.
+    assert watchdog.done(), "watchdog task was not cancelled after normal SSE completion"

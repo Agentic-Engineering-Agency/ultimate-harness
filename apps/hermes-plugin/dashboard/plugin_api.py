@@ -595,6 +595,11 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
                         if not line:
                             continue
                         yield b"data: " + line + b"\n\n"
+                # Codex P2: cancel the watchdog on normal/timeout exit so we
+                # don't leak one sleeping asyncio task per finished run.
+                watchdog = info.get("watchdog")
+                if watchdog is not None and not watchdog.done():
+                    watchdog.cancel()
                 if timed_out:
                     yield b"event: timeout\ndata: " + str(int(run_timeout)).encode() + b"s\n\n"
                     info["status"] = "timeout"
@@ -698,7 +703,14 @@ async def get_workflow(name: str) -> dict[str, Any]:
     if not path.is_file():
         raise _err(404, "not_found", f"workflow {name} not found")
     raw = path.read_text(encoding="utf-8")
-    doc = yaml.safe_load(raw) or {}
+    # Codex P2: malformed YAML or non-mapping shape must surface as a
+    # structured 400 error, not a generic 500.
+    try:
+        doc = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as exc:
+        raise _err(400, "malformed_yaml", "malformed workflow yaml", details=str(exc)) from exc
+    if not isinstance(doc, dict):
+        raise _err(400, "malformed_yaml", "workflow yaml is not a mapping")
     phases = []
     for p in (doc.get("phases") or []):
         if not isinstance(p, dict):
@@ -754,7 +766,13 @@ async def get_verification(mission_id: str) -> dict[str, Any]:
     if not path.is_file():
         raise _err(404, "not_found", "verification.yaml not produced yet")
     raw = path.read_text(encoding="utf-8")
-    doc = yaml.safe_load(raw) or {}
+    # Codex P2 sibling: same guard for verification.yaml shape.
+    try:
+        doc = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as exc:
+        raise _err(400, "malformed_yaml", "malformed verification yaml", details=str(exc)) from exc
+    if not isinstance(doc, dict):
+        raise _err(400, "malformed_yaml", "verification yaml is not a mapping")
     acceptance = []
     for ac in (doc.get("acceptance_criteria") or []):
         if not isinstance(ac, dict):
