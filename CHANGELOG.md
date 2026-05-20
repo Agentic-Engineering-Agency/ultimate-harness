@@ -21,6 +21,8 @@ Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [Git
 - Ctrl+Z / `fg` suspend-resume lifecycle in the TUI, backed by OpenTUI 0.2.13's `renderer.suspend()` / `renderer.resume()` ([UH-50](https://linear.app/agentic-eng/issue/UH-50)).
 - `uh tui screenshot --view <name> --out <path>` automated capture pipeline with `overview` / `missions` / `sandboxes` / `workflows` views ([UH-51](https://linear.app/agentic-eng/issue/UH-51)).
 - `e` opens the current mission manifest in `$EDITOR` from the TUI mission detail view, suspending and resuming the renderer cleanly ([UH-49](https://linear.app/agentic-eng/issue/UH-49)).
+- Compare two runs side-by-side: new `MissionCompare` view with runtime-result field diff, prompt.md line diff, and events.ndjson side-by-side stream. Triggered via "Compare" mode on the Recent runs pane ([UH-89](https://linear.app/agentic-eng/issue/UH-89)).
+- Replay a historical run: "Replay" button on Recent runs rows + per-run drilldown opens the Run modal pre-filled with the source run's `runtime_config_overrides`; `runs/index.json` carries the `replay_of` lineage ([UH-87](https://linear.app/agentic-eng/issue/UH-87)).
 
 ### Changed
 

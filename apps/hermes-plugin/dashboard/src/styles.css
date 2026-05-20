@@ -142,3 +142,77 @@
 .uh-status-blocked { background: rgba(245,158,11,0.18); color: #d97706; }
 .uh-status-needs-attention { background: rgba(234,179,8,0.18); color: #ca8a04; }
 .uh-status-needs-remediation { background: rgba(249,115,22,0.18); color: #ea580c; }
+
+/* UH-87 / UH-89 — compare + replay surfaces. */
+.uh-replay-banner {
+  background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-accent) 30%, transparent);
+  color: var(--color-fg);
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: calc(var(--radius, 8px) * 0.5);
+}
+.uh-compare-tag {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 4px;
+  margin-right: 6px;
+  background: var(--color-accent, #3b82f6);
+  color: var(--color-accent-fg, white);
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+}
+.uh-runs-row.is-compare-mode { cursor: crosshair; }
+.uh-runs-row.is-compare-a {
+  background: color-mix(in oklab, var(--color-accent) 18%, transparent);
+}
+.uh-runs-row.is-compare-b {
+  background: color-mix(in oklab, #22c55e 18%, transparent);
+}
+
+.uh-compare-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.uh-compare-table th,
+.uh-compare-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+.uh-compare-table th { text-align: left; color: var(--color-muted-foreground); }
+.uh-compare-table tr.uh-compare-differs td { font-weight: 500; }
+.uh-compare-a {
+  background: color-mix(in oklab, #ef4444 14%, transparent);
+}
+.uh-compare-b {
+  background: color-mix(in oklab, #22c55e 14%, transparent);
+}
+
+.uh-compare-diff {
+  margin: 0;
+  padding: 8px;
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  max-height: 480px;
+  overflow: auto;
+  white-space: pre;
+}
+.uh-diff-line { padding: 0 2px; }
+.uh-diff-add { background: color-mix(in oklab, #22c55e 18%, transparent); color: #16a34a; }
+.uh-diff-del { background: color-mix(in oklab, #ef4444 18%, transparent); color: #dc2626; }
+.uh-diff-eq { color: var(--color-muted-foreground); }
+
+.uh-compare-events-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.uh-compare-events { display: flex; flex-direction: column; gap: 6px; }
+.uh-compare-events-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-fg);
+}

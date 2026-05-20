@@ -8,6 +8,7 @@
 import { useHashRoute } from "./router";
 import { OverviewTab } from "./OverviewTab";
 import { MissionDrilldown } from "./MissionDrilldown";
+import { MissionCompare } from "./MissionCompare";
 import { WorkflowViewer } from "./WorkflowViewer";
 import { MissionWizard } from "./MissionWizard";
 import { WorkflowEditor } from "./WorkflowEditor";
@@ -22,6 +23,14 @@ export function App() {
       return <MissionDrilldown missionId={route.missionId ?? ""} />;
     case "missionRun":
       return <MissionDrilldown missionId={route.missionId ?? ""} pinnedRunId={route.runId} />;
+    case "missionCompare":
+      return (
+        <MissionCompare
+          missionId={route.missionId ?? ""}
+          runA={route.runA ?? ""}
+          runB={route.runB ?? ""}
+        />
+      );
     case "workflow":
       return <WorkflowViewer name={route.workflowName ?? ""} />;
     case "workflowEdit":

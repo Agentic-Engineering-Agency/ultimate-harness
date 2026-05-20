@@ -33,3 +33,30 @@ describe("parseRoute", () => {
     expect(parsed).toEqual({ view: "missionRun", missionId: "M-1", runId: "20260519T120000Z-deadbeef" });
   });
 });
+
+describe("parseRoute — missionCompare (UH-89)", () => {
+  test("parses #/missions/<id>/compare?a=<runA>&b=<runB>", () => {
+    const r = parseRoute("#/missions/m/compare?a=r1&b=r2");
+    expect(r).toEqual({ view: "missionCompare", missionId: "m", runA: "r1", runB: "r2" });
+  });
+
+  test("falls back to mission view when a or b is missing", () => {
+    expect(parseRoute("#/missions/m/compare?a=r1").view).toBe("mission");
+    expect(parseRoute("#/missions/m/compare?b=r2").view).toBe("mission");
+    expect(parseRoute("#/missions/m/compare").view).toBe("mission");
+  });
+
+  test("buildHash round-trips a missionCompare route", () => {
+    const hash = buildHash({ view: "missionCompare", missionId: "m", runA: "r1", runB: "r2" });
+    expect(hash).toBe("#/missions/m/compare?a=r1&b=r2");
+    expect(parseRoute(hash)).toEqual({ view: "missionCompare", missionId: "m", runA: "r1", runB: "r2" });
+  });
+
+  test("URL-encodes special characters in run ids on build", () => {
+    const hash = buildHash({ view: "missionCompare", missionId: "m", runA: "a/b", runB: "c d" });
+    expect(hash).toBe("#/missions/m/compare?a=a%2Fb&b=c%20d");
+    const back = parseRoute(hash);
+    expect(back.runA).toBe("a/b");
+    expect(back.runB).toBe("c d");
+  });
+});

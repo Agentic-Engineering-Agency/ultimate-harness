@@ -42,6 +42,13 @@ export const RunsIndexEntrySchema = z
     // UH-90) is treated as "not archived" — no default is applied here
     // on purpose so a missing field round-trips as missing on rewrite.
     archived: z.boolean().optional(),
+    /**
+     * UH-87 — when this run was triggered via "Replay", points at the
+     * source run id whose `runtime_config_overrides` and prompt were
+     * lifted as the starting point. Lineage only — has no effect on
+     * how the new run executes.
+     */
+    replay_of: z.string().optional(),
   })
   .strict();
 export type RunsIndexEntry = z.infer<typeof RunsIndexEntrySchema>;

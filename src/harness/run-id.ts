@@ -96,7 +96,16 @@ export async function appendRunsIndexEntry(
   }
   const idx = current.runs.findIndex((r) => r.run_id === entry.run_id);
   if (idx >= 0) {
-    current.runs[idx] = entry;
+    // UH-87: `replay_of` is set by the Hermes plugin when start_run is
+    // called with a `replay_of` body field; adapters never set it. Without
+    // this preservation the adapter's first running -> terminal row
+    // overwrite would erase the lineage breadcrumb the plugin just wrote.
+    const preserved = current.runs[idx];
+    if (entry.replay_of === undefined && preserved?.replay_of !== undefined) {
+      current.runs[idx] = { ...entry, replay_of: preserved.replay_of };
+    } else {
+      current.runs[idx] = entry;
+    }
   } else {
     current.runs.push(entry);
   }
