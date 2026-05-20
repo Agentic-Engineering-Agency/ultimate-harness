@@ -1,6 +1,6 @@
 # Hermes Dashboard Plugin for Ultimate Harness
 
-Drop-in extension for the [Hermes Agent dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) that exposes UH end-to-end from the web UI: adapter health, mission list, mission run trigger + live event tail, artifact drilldown (prompt / final message / diff / runtime-result / events / verification), workflow viewer + editor, mission wizard, and a `sessions:bottom` slot that deep-links Hermes sessions back to their UH missions.
+Drop-in extension for the [Hermes Agent dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) that exposes UH end-to-end from the web UI: adapter health, mission list, mission run trigger + live event tail, artifact drilldown (prompt / final message / diff / runtime-result / events / verification), a sortable Recent runs pane with status-chip + run_id prefix filters that deep-links into per-run artifacts, workflow viewer + editor, mission wizard, and a `sessions:bottom` slot that deep-links Hermes sessions back to their UH missions.
 
 ## Install (one-liner)
 

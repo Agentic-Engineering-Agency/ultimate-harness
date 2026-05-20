@@ -123,3 +123,22 @@
   cursor: pointer;
 }
 .uh-sessions-link:hover { background: color-mix(in oklab, var(--color-accent) 14%, transparent); }
+
+/* UH-85 / UH-88 — Recent runs pane (table, sort headers, chip filters, status badges). */
+.uh-runs-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.uh-runs-table th { text-align: left; padding: 6px 8px; cursor: pointer; user-select: none; border-bottom: 1px solid var(--color-border); }
+.uh-runs-table th.is-sorted { color: var(--color-fg); }
+.uh-runs-table td { padding: 6px 8px; border-bottom: 1px solid var(--color-border); }
+.uh-runs-row { cursor: pointer; }
+.uh-runs-row:hover { background: var(--color-card-hover, rgba(255,255,255,0.04)); }
+.uh-chip { display: inline-block; padding: 2px 8px; margin-right: 6px; border-radius: 999px; border: 1px solid var(--color-border); cursor: pointer; font-size: 11px; }
+.uh-chip.is-active { background: var(--color-accent, #3b82f6); color: var(--color-accent-fg, white); border-color: transparent; }
+.uh-status-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+.uh-status-passed { background: rgba(34,197,94,0.18); color: #16a34a; }
+.uh-status-failed { background: rgba(239,68,68,0.18); color: #dc2626; }
+.uh-status-cancelled { background: rgba(148,163,184,0.2); color: #64748b; }
+.uh-status-timeout { background: rgba(239,68,68,0.18); color: #dc2626; }
+.uh-status-running { background: rgba(59,130,246,0.18); color: #2563eb; }
+.uh-status-blocked { background: rgba(245,158,11,0.18); color: #d97706; }
+.uh-status-needs-attention { background: rgba(234,179,8,0.18); color: #ca8a04; }
+.uh-status-needs-remediation { background: rgba(249,115,22,0.18); color: #ea580c; }

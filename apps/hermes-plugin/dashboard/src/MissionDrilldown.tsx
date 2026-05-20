@@ -13,6 +13,8 @@ import { pluginFetch, UI, type MissionDetail } from "./sdk";
 import { yamlStringify } from "./yaml-pretty";
 import { VerificationViewer } from "./VerificationViewer";
 import { RunModal } from "./RunModal";
+import { RecentRunsPane } from "./RecentRunsPane";
+import { runArtifactUrl } from "./recent-runs-utils";
 import { buildHash } from "./router";
 
 type ArtifactPayload = { kind: "text"; content: string } | { kind: "missing"; reason?: string };
@@ -54,9 +56,7 @@ function EventsPane({ missionId, runId }: { missionId: string; runId?: string })
   const [data, setData] = React.useState<ArtifactPayload | null>(null);
   React.useEffect(() => {
     let cancelled = false;
-    const url = runId
-      ? `/missions/${encodeURIComponent(missionId)}/runs/${encodeURIComponent(runId)}/events`
-      : `/missions/${encodeURIComponent(missionId)}/events`;
+    const url = runArtifactUrl(missionId, runId, "events");
     pluginFetch<ArtifactPayload>(url)
       .then((r) => { if (!cancelled) setData(r); })
       .catch((e: any) => { if (!cancelled) setData({ kind: "missing", reason: e?.message ?? String(e) }); });
@@ -159,16 +159,34 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
         <UI.Button variant="ghost" size="sm" onClick={() => { window.location.hash = buildHash({ view: "overview" }); }}>← Back</UI.Button>
         <UI.Button onClick={() => setShowRunModal(true)}>Run</UI.Button>
       </div>
+      {!pinnedRunId ? (
+        <RecentRunsPane missionId={missionId} runs={mission.runs ?? []} />
+      ) : null}
+      {pinnedRunId ? (
+        <div className="uh-breadcrumb" style={{ fontSize: 12, marginBottom: 8 }}>
+          <span className="uh-muted">{missionId}</span>
+          <span className="uh-muted"> › </span>
+          <span className="uh-mono">{pinnedRunId.slice(0, 16)}{pinnedRunId.length > 16 ? "…" : ""}</span>
+          <UI.Button
+            variant="ghost"
+            size="sm"
+            style={{ marginLeft: 12 }}
+            onClick={() => { window.location.hash = buildHash({ view: "mission", missionId }); }}
+          >
+            Back to latest
+          </UI.Button>
+        </div>
+      ) : null}
       <div className="uh-tabs">
         {TABS.map((t) => (
           <button key={t.key} className={"uh-tab" + (tab === t.key ? " is-active" : "")} onClick={() => setTab(t.key)}>{t.label}</button>
         ))}
       </div>
       {tab === "mission" ? <MissionMeta mission={mission} /> : null}
-      {tab === "prompt" ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/prompt`} /> : null}
-      {tab === "final"  ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/final-message`} /> : null}
-      {tab === "diff"   ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/diff`} /> : null}
-      {tab === "result" ? <ArtifactPane url={`/missions/${encodeURIComponent(missionId)}/result`} /> : null}
+      {tab === "prompt" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "prompt")} /> : null}
+      {tab === "final"  ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "final-message")} /> : null}
+      {tab === "diff"   ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "diff")} /> : null}
+      {tab === "result" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "result")} /> : null}
       {tab === "events" ? <EventsPane missionId={missionId} runId={pinnedRunId} /> : null}
       {tab === "verify" ? <VerificationViewer missionId={missionId} /> : null}
       {showRunModal ? (

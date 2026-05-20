@@ -86,6 +86,17 @@ bun run plugin:typecheck  # editor parity; the bundle ships without this
 
 The dashboard reloads the bundle on its own when the file mtime changes, but a hard refresh (`Cmd+R`) is the most reliable signal. After editing `plugin_api.py`, restart `hermes dashboard` so the FastAPI router re-mounts.
 
+## Browsing run history
+
+UH-85 / UH-86 / UH-88 — the Mission detail tab renders a **Recent runs** pane above the artifact tabs whenever you are on the mission-latest view (no `pinnedRunId`). The pane reads `mission.runs[]` (the backend cap is 50 newest-first; older runs paginate in a follow-up).
+
+- **Sort.** Click any column header — `Run ID`, `Started`, `Duration`, `Status`, `Runtime` — to toggle the sort key. Time-ish columns default to descending on first click; textual columns default to ascending. Running rows float to the top when you sort by duration.
+- **Filter by status.** The chip strip above the table lists the seven run statuses (`passed`, `needs-attention`, `needs-remediation`, `failed`, `cancelled`, `timeout`, `running`). Click chips to multi-select; OR semantics within the chip set. The `Showing N of M runs` counter and the `Clear filters` button surface only when a filter is active.
+- **Filter by run id.** The free-text input next to the chips does a case-insensitive prefix match on `run_id` as you type.
+- **Drill into a run.** Click any row to navigate to `#/missions/<id>/runs/<run_id>`. The drilldown hides the Recent runs pane, shows a breadcrumb with the truncated run id, and routes the Prompt / Final message / Diff / Result / Events tabs through `/missions/<id>/runs/<run_id>/<kind>` so every artifact reflects that specific run. Use the **Back to latest** button to return to the mission-latest view.
+
+Filter and sort state is component-local — refreshing the page or navigating away resets it.
+
 ## Configuration knobs (backend)
 
 | Env var | Default | Purpose |
