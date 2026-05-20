@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
 import { assertSafeMissionId, createMission } from "./harness/mission.js";
-import { parseIssueRef, parseRequiredCheck, proposeMission, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
+import { parseIssueRef, parseRequiredCheck, proposeMission, proposeMissionFromSpec, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
@@ -366,11 +366,12 @@ function parsePositiveIntegerOption(name: string, value: string): number {
 // uh propose
 program
   .command("propose")
-  .description("Generate a mission packet from request/issue metadata")
-  .argument("<id>", "Mission id")
-  .requiredOption("--title <title>", "Mission title")
-  .requiredOption("--workflow <profile>", "Workflow profile")
-  .requiredOption("--objective <text>", "Mission objective")
+  .description("Generate a mission packet from request/issue metadata or a .spec.md file")
+  .argument("[id]", "Mission id (defaults to spec front-matter id when --from is set)")
+  .option("--from <spec.md>", "Load mission fields from a uh.spec.v0 markdown spec")
+  .option("--title <title>", "Mission title (required without --from)")
+  .option("--workflow <profile>", "Workflow profile (default: spec-first-feature with --from)")
+  .option("--objective <text>", "Mission objective (defaults to spec ## Goal with --from)")
   .option("--priority <priority>", "Mission priority (default: medium)")
   .option("--issue <provider:id[:url]>", "Issue ref; repeatable", collectIssueRefOption, [] as ProposeIssueRef[])
   .option("--read-first <path>", "Read-first context path; repeatable", collectRepeatedOption, [])
@@ -388,10 +389,11 @@ program
   .option("--output <path>", "Explicit output path (default: .harness/missions/<id>/mission.yaml)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--force", "Overwrite existing mission file")
-  .action(async (id: string, opts: {
-    title: string;
-    workflow: string;
-    objective: string;
+  .action(async (id: string | undefined, opts: {
+    from?: string;
+    title?: string;
+    workflow?: string;
+    objective?: string;
     priority?: string;
     issue: ProposeIssueRef[];
     readFirst: string[];
@@ -412,6 +414,42 @@ program
   }) => {
     const root = resolveRoot(opts.root);
     try {
+      if (opts.from !== undefined) {
+        const workflow = opts.workflow ?? "spec-first-feature";
+        const result = await proposeMissionFromSpec(root, {
+          specPath: opts.from,
+          workflow,
+          id,
+          title: opts.title,
+          objective: opts.objective,
+          priority: opts.priority,
+          issueRefs: opts.issue,
+          readFirst: opts.readFirst,
+          sourceLinks: opts.sourceLink,
+          repoRoot: opts.repoRoot,
+          constraints: opts.constraint,
+          requiredSkills: opts.requiredSkill,
+          suggestedSkills: opts.suggestedSkill,
+          expectedOutputs: opts.expectedOutput,
+          requiredChecks: opts.requiredCheck,
+          reviewGates: opts.reviewGate,
+          sandboxBackend: opts.sandboxBackend,
+          promotionPolicy: opts.promotionPolicy,
+          outputPath: opts.output,
+          force: opts.force ?? false,
+        });
+        console.log(`${result.created ? "Created" : "Updated"} mission: ${result.mission.id}`);
+        console.log(`Path: ${result.path}`);
+        return;
+      }
+
+      if (!id) {
+        throw new Error("Mission id is required when --from is not set.");
+      }
+      if (!opts.title || !opts.workflow || !opts.objective) {
+        throw new Error("--title, --workflow, and --objective are required when --from is not set.");
+      }
+
       const result = await proposeMission(root, {
         id,
         title: opts.title,
