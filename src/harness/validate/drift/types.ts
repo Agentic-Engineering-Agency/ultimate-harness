@@ -9,6 +9,7 @@
 export type DriftKind =
   | "stale-worker"
   | "orphaned-worktree"
+  | "orphaned-run-dir"
   | "roadmap-linear-divergence"
   | "missing-completion-timestamp"
   | "truncated-events-ndjson"

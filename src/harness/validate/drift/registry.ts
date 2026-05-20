@@ -5,6 +5,7 @@ import { roadmapLinearDivergenceKind } from "./kinds/roadmap-linear-divergence.j
 import { missingCompletionTimestampKind } from "./kinds/missing-completion-timestamp.js";
 import { truncatedEventsNdjsonKind } from "./kinds/truncated-events-ndjson.js";
 import { staleRenderKind } from "./kinds/stale-render.js";
+import { orphanedRunDirKind } from "./kinds/orphaned-run-dir.js";
 
 /**
  * UH-77 drift registry, declared in execution order. The order matters: when
@@ -14,6 +15,7 @@ import { staleRenderKind } from "./kinds/stale-render.js";
 export const DRIFT_KINDS: readonly DriftKindModule[] = [
   staleWorkerKind,
   orphanedWorktreeKind,
+  orphanedRunDirKind,
   missingCompletionTimestampKind,
   truncatedEventsNdjsonKind,
   staleRenderKind,
@@ -39,6 +41,7 @@ export function emptyIssuesByKind(): IssuesByKind {
   return {
     "stale-worker": [],
     "orphaned-worktree": [],
+    "orphaned-run-dir": [],
     "roadmap-linear-divergence": [],
     "missing-completion-timestamp": [],
     "truncated-events-ndjson": [],

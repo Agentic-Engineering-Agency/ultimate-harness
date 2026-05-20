@@ -46,17 +46,61 @@ describe("runtime cancellation events", () => {
     }
   });
 
-  test("returns null when no latest.json pointer exists", async () => {
+  test("returns null and emits stderr warning when no latest.json pointer exists", async () => {
     const root = await mkdtemp(join(tmpdir(), "uh-test-runtime-events-noptr-"));
     try {
-      const result = appendRuntimeCancelledEvent({
-        root,
-        missionId: "m-no-run",
-        runtime: "codex",
-        signal: "SIGTERM",
-      });
-      expect(result).toBeNull();
+      // Capture stderr writes to verify the operator-visible warning fires.
+      const original = process.stderr.write.bind(process.stderr);
+      const captured: string[] = [];
+      (process.stderr as unknown as { write: (c: string | Uint8Array) => boolean }).write = (chunk) => {
+        captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+        return true;
+      };
+      try {
+        const result = appendRuntimeCancelledEvent({
+          root,
+          missionId: "m-no-run",
+          runtime: "codex",
+          signal: "SIGTERM",
+        });
+        expect(result).toBeNull();
+        expect(captured.join("")).toContain(
+          "runtime.cancelled skipped: no latest.json for mission m-no-run",
+        );
+      } finally {
+        (process.stderr as unknown as { write: typeof original }).write = original;
+      }
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("UH_QUIET_CANCEL=1 suppresses the missing-pointer warning", async () => {
+    const root = await mkdtemp(join(tmpdir(), "uh-test-runtime-events-quiet-"));
+    const prev = process.env.UH_QUIET_CANCEL;
+    process.env.UH_QUIET_CANCEL = "1";
+    try {
+      const captured: string[] = [];
+      const original = process.stderr.write.bind(process.stderr);
+      (process.stderr as unknown as { write: (c: string | Uint8Array) => boolean }).write = (chunk) => {
+        captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+        return true;
+      };
+      try {
+        const result = appendRuntimeCancelledEvent({
+          root,
+          missionId: "m-quiet",
+          runtime: "codex",
+          signal: "SIGTERM",
+        });
+        expect(result).toBeNull();
+        expect(captured.join("")).not.toContain("runtime.cancelled skipped");
+      } finally {
+        (process.stderr as unknown as { write: typeof original }).write = original;
+      }
+    } finally {
+      if (prev === undefined) delete process.env.UH_QUIET_CANCEL;
+      else process.env.UH_QUIET_CANCEL = prev;
       await rm(root, { recursive: true, force: true });
     }
   });
