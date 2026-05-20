@@ -16,6 +16,7 @@ import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
+import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
 import { assertValidRunId } from "./harness/run-id.js";
 import { parse as parseYaml } from "yaml";
@@ -842,6 +843,52 @@ missionCmd
     if (result.exitCode !== 0) {
       console.log(`[FAIL] mission exited with code ${result.exitCode}`);
       process.exit(result.exitCode);
+    }
+  });
+
+missionCmd
+  .command("cancel")
+  .description("Cancel an in-flight mission run via the Hermes plugin API")
+  .requiredOption("--mission <id>", "Mission id (validated; run lookup uses --run-id)")
+  .requiredOption("--run-id <id>", "Run id to cancel")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--plugin-url <url>", "Hermes plugin API base URL", defaultPluginApiBase())
+  .action(async (opts: { mission: string; runId: string; root?: string; pluginUrl: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      assertSafeMissionId(opts.mission);
+      assertValidRunId(opts.runId);
+    } catch (err) {
+      console.error(`[FAIL] ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    const missionPath = path.join(root, ".harness", "missions", opts.mission, "mission.yaml");
+    try {
+      await readFileAsync(missionPath, "utf-8");
+    } catch {
+      console.error(`[FAIL] mission ${opts.mission} not found under ${root}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const result = await cancelMissionRunViaPlugin(opts.pluginUrl, opts.runId);
+      console.log(`Cancelled run ${opts.runId} for mission ${opts.mission} (status: ${result.status})`);
+    } catch (err) {
+      if (err instanceof MissionCancelError) {
+        if (err.code === "already_finished") {
+          console.error(`[FAIL] run ${opts.runId} already finished`);
+          process.exit(1);
+          return;
+        }
+        console.error(`[FAIL] mission cancel error:`);
+        console.error(`  error: ${err.message}`);
+        process.exit(err.status === 0 ? 1 : err.status);
+        return;
+      }
+      console.error(`[FAIL] mission cancel error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
     }
   });
 

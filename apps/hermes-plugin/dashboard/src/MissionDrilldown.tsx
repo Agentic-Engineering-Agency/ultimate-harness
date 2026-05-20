@@ -14,7 +14,9 @@ import { yamlStringify } from "./yaml-pretty";
 import { VerificationViewer } from "./VerificationViewer";
 import { RunModal } from "./RunModal";
 import { RecentRunsPane } from "./RecentRunsPane";
-import { runArtifactUrl } from "./recent-runs-utils";
+import { LiveEventsPane } from "./LiveEventsPane";
+import { runArtifactUrl, type MissionRunSummary } from "./recent-runs-utils";
+import { isRunLiveStatus } from "./live-events-utils";
 import { buildHash } from "./router";
 
 type ArtifactPayload = { kind: "text"; content: string } | { kind: "missing"; reason?: string };
@@ -66,6 +68,18 @@ function ArtifactPane({ url, language }: { url: string; language?: string }) {
       {data.content}
     </pre>
   );
+}
+
+function resolveEventsTarget(
+  pinnedRunId: string | undefined,
+  runs: MissionRunSummary[],
+): { runId: string; status: string | undefined } | null {
+  if (pinnedRunId) {
+    const pinned = runs.find((r) => r.run_id === pinnedRunId);
+    return { runId: pinnedRunId, status: pinned?.status };
+  }
+  const latest = runs[0];
+  return latest ? { runId: latest.run_id, status: latest.status } : null;
 }
 
 function EventsPane({ missionId, runId }: { missionId: string; runId?: string }) {
@@ -211,6 +225,12 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
     tab === "prompt" || tab === "final" || tab === "diff" ||
     tab === "result" || tab === "events";
   const showArchivedPane = pinnedRunId !== undefined && pinnedRunArchived && isPerRunArtifactTab;
+  const eventsTarget = resolveEventsTarget(pinnedRunId, mission.runs ?? []);
+  const showLiveEvents =
+    tab === "events"
+    && eventsTarget !== null
+    && isRunLiveStatus(eventsTarget.status)
+    && !(pinnedRunId !== undefined && pinnedRunArchived);
 
   return (
     <div className="uh-stack">
@@ -258,7 +278,12 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
           {tab === "final"  ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "final-message")} /> : null}
           {tab === "diff"   ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "diff")} /> : null}
           {tab === "result" ? <ArtifactPane url={runArtifactUrl(missionId, pinnedRunId, "result")} /> : null}
-          {tab === "events" ? <EventsPane missionId={missionId} runId={pinnedRunId} /> : null}
+          {tab === "events" && showLiveEvents && eventsTarget ? (
+            <LiveEventsPane missionId={missionId} runId={eventsTarget.runId} />
+          ) : null}
+          {tab === "events" && !showLiveEvents ? (
+            <EventsPane missionId={missionId} runId={pinnedRunId} />
+          ) : null}
         </>
       )}
       {tab === "verify" ? <VerificationViewer missionId={missionId} /> : null}
