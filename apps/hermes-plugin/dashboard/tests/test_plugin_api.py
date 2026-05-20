@@ -664,6 +664,25 @@ async def test_get_mission_handles_malformed_yaml(
     assert body["error"]
     assert "details" in body
 
+
+@pytest.mark.asyncio
+async def test_get_mission_tolerates_malformed_sibling(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P2 round 9: a malformed mission.yaml in some OTHER mission
+    directory must NOT break the drilldown for a valid mission. The
+    previous implementation called _scan_missions(root) here which
+    parses every mission and would 500 the valid mission's detail."""
+    # Drop a corrupt mission alongside the valid 'demo' one.
+    bad_dir = isolated_project / ".harness" / "missions" / "corrupt"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    (bad_dir / "mission.yaml").write_text(":\n:::bad:::\n  - [unbalanced", encoding="utf-8")
+    # The valid mission's detail must still succeed.
+    resp = await client.get("/api/plugins/uh/missions/demo")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == "demo"
+
 @pytest.mark.asyncio
 async def test_get_workflow_handles_malformed_yaml(
     client: httpx.AsyncClient, isolated_project: Path,

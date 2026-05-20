@@ -433,8 +433,52 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
         raise _err(400, "malformed_yaml", "malformed mission yaml", details=str(exc)) from exc
     if not isinstance(doc, dict):
         raise _err(400, "malformed_yaml", "mission yaml is not a mapping")
-    summaries = {m["id"]: m for m in _scan_missions(root)}
-    summary = summaries.get(mission_id, {})
+    # Codex P2 round 9: only build a summary from the requested mission.
+    # Calling _scan_missions(root) here parses every mission directory; a
+    # malformed YAML in an unrelated mission would surface as a 500 on this
+    # endpoint and break drilldown for every mission. Read just this one.
+    summary: dict[str, Any] = {
+        "id": mission_id,
+        "name": str(doc.get("name") or doc.get("title") or mission_id),
+        "workflow_profile": str(doc.get("workflow_profile") or "unknown"),
+    }
+    # Surface status + last_run from THIS mission's runtime-result.yaml.
+    # We tolerate this mission's runtime-result being malformed (last_run
+    # stays unset); the mission's own mission.yaml has already been parsed
+    # successfully above, so we still produce a usable detail response.
+    rr_path = mission_dir / "runtime-result.yaml"
+    if rr_path.is_file():
+        try:
+            rr = yaml.safe_load(rr_path.read_text(encoding="utf-8")) or {}
+            if isinstance(rr, dict):
+                ver_path = mission_dir / "verification.yaml"
+                ver = {}
+                if ver_path.is_file():
+                    try:
+                        ver_doc = yaml.safe_load(ver_path.read_text(encoding="utf-8")) or {}
+                        if isinstance(ver_doc, dict):
+                            ver = ver_doc
+                    except yaml.YAMLError:
+                        pass
+                prom_path = mission_dir / "promotion.yaml"
+                prom = {}
+                if prom_path.is_file():
+                    try:
+                        prom_doc = yaml.safe_load(prom_path.read_text(encoding="utf-8")) or {}
+                        if isinstance(prom_doc, dict):
+                            prom = prom_doc
+                    except yaml.YAMLError:
+                        pass
+                summary["status"] = _summarize_mission_status(rr, ver, prom)
+                summary["last_run"] = {
+                    "runtime": rr.get("runtime"),
+                    "status": rr.get("status"),
+                    "startedAt": rr.get("started_at"),
+                    "durationMs": rr.get("duration_ms"),
+                }
+        except yaml.YAMLError:
+            pass
+    summary.setdefault("status", "draft")
     return {
         **summary,
         "id": mission_id,
@@ -539,10 +583,29 @@ async def _enforce_run_timeout(
     defensive ``proc.terminate()`` so whichever fires first wins. A natural
     exit before the deadline makes this a no-op.
     """
-    try:
-        await asyncio.sleep(timeout_s)
-    except asyncio.CancelledError:
-        return
+    # Codex P2 round 9: poll for natural exit at small intervals instead of
+    # sleeping the full timeout. Without this, a naturally-completed run
+    # with no SSE consumer attached stayed in _active_runs as 'running' for
+    # up to _RUN_TIMEOUT_S (default 3600s). Poll every 1s — cheap, and the
+    # watchdog covers the no-SSE path on the order of seconds, not hours.
+    elapsed = 0.0
+    poll_interval = 1.0
+    while elapsed < timeout_s:
+        try:
+            await asyncio.sleep(min(poll_interval, timeout_s - elapsed))
+        except asyncio.CancelledError:
+            return
+        elapsed += poll_interval
+        proc = info.get("process")
+        if proc is None:
+            return
+        if proc.poll() is not None:
+            # Natural exit — handle as the round-8 fast path.
+            if info.get("status") == "running":
+                info["status"] = "finished"
+            _schedule_run_eviction(run_id)
+            return
+    # Timeout expired without exit — fall through to the SIGTERM path below.
     proc = info.get("process")
     if proc is None:
         return
