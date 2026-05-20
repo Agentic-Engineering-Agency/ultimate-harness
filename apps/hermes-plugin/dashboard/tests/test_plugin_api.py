@@ -200,6 +200,34 @@ async def test_oversize_overrides_rejected(
 
 
 @pytest.mark.asyncio
+async def test_non_finite_overrides_rejected_before_spawn(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """Codex P2 (PR #95): the dashboard MUST reject NaN/Infinity values in
+    runtime_config_overrides up-front. Python's json.dumps emits them as
+    bare ``NaN`` / ``Infinity`` tokens which Node's JSON.parse — used by the
+    CLI's ``parseRuntimeConfigOverridesJson`` — rejects. Without strict
+    serialization the dashboard would spawn a run that exits 1 immediately,
+    turning a validation problem into a failed run."""
+    # httpx (and most JSON libs) refuse to serialize NaN client-side, but a
+    # caller using requests with allow_nan=True or hand-crafted JSON CAN send
+    # `NaN` as a bare token. FastAPI's request.json() (orjson under the hood,
+    # via _json_body in plugin_api) accepts it as a Python float('nan'). We
+    # simulate that by posting a raw body with the bare token.
+    resp = await client.post(
+        "/api/plugins/uh/missions/demo/run",
+        content=b'{"runtime_config_overrides": {"temperature": NaN}}',
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == "invalid_overrides"
+    assert "non-finite" in body["error"].lower(), body["error"]
+    spawn_calls = [c for c in fake_cli.calls if c.get("spawn")]
+    assert spawn_calls == [], "spawn must not be called on non-finite rejection"
+
+
+@pytest.mark.asyncio
 async def test_per_run_artifact_marks_response_as_not_run_scoped(
     client: httpx.AsyncClient, isolated_project: Path,
 ) -> None:

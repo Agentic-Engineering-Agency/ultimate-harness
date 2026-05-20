@@ -530,7 +530,22 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     # shell), so embedded quotes/spaces are safe.
     overrides_arg: str | None = None
     if overrides:
-        overrides_arg = json.dumps(overrides, separators=(",", ":"))
+        # Codex P2 (PR #95): strict-finite JSON only. Python's json.dumps
+        # accepts NaN/Infinity by default and emits them as bare tokens
+        # (e.g. `{"temperature":NaN}`), which Node's JSON.parse — used by
+        # parseRuntimeConfigOverridesJson on the CLI side — rejects. Without
+        # allow_nan=False the dashboard would happily spawn the run and the
+        # CLI would then exit 1 with [BLOCKED] invalid JSON. Reject up-front
+        # with a 400 so the operator sees the validation error in the UI.
+        try:
+            overrides_arg = json.dumps(overrides, separators=(",", ":"), allow_nan=False)
+        except ValueError as exc:
+            raise _err(
+                400,
+                "invalid_overrides",
+                f"runtime_config_overrides contains non-finite numeric values: {exc}",
+                fields={"runtime_config_overrides": "NaN / Infinity not allowed"},
+            ) from exc
         if len(overrides_arg.encode("utf-8")) > _MAX_OVERRIDES_JSON_BYTES:
             raise _err(
                 400,
