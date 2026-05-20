@@ -1,6 +1,6 @@
 # Hermes dashboard plugin runbook
 
-Status: shipped 2026-05-19 (Wave 3, [UH-60](https://linear.app/agentic-eng/issue/UH-60) epic).
+Status: merged for downstream integration testing 2026-05-19 (Wave 3, [UH-60](https://linear.app/agentic-eng/issue/UH-60) epic); live dashboard smoke pending [UH-68](https://linear.app/agentic-eng/issue/UH-68).
 
 The `uh` plugin makes Ultimate Harness drivable from the Hermes web dashboard: live adapter health, mission list, mission run trigger with live event tail, artifact drilldown (prompt, final-message, diff, runtime-result, events, verification), workflow viewer + editor, mission wizard, and a Sessions-page deep-link slot.
 

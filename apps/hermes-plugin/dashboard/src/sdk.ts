@@ -20,9 +20,58 @@ export const PLUGIN_NAME = "uh";
 export const PLUGIN_BASE_PATH = "/uh";
 export const PLUGIN_API_BASE = `/api/plugins/${PLUGIN_NAME}`;
 
-export function pluginFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * Backend error envelope as thrown from {@link pluginFetch}.
+ *
+ * The dashboard SDK's underlying ``fetchJSON`` only surfaces a stringified
+ * message on its rejection. Callers (mission wizard, workflow editor) need
+ * the typed `{error, code, fields}` payload to render per-field validation
+ * inline, so we parse it once here and hang it off ``e.payload``.
+ *
+ * Consumers should ``catch (e)`` and narrow via ``e instanceof PluginFetchError``.
+ */
+export class PluginFetchError extends Error {
+  readonly status?: number;
+  readonly payload?: ErrorPayload;
+  constructor(message: string, opts: { status?: number; payload?: ErrorPayload; cause?: unknown } = {}) {
+    super(message);
+    this.name = "PluginFetchError";
+    this.status = opts.status;
+    this.payload = opts.payload;
+    if (opts.cause !== undefined) (this as any).cause = opts.cause;
+  }
+}
+
+/** Match a trailing JSON object in an error message (the SDK appends it). */
+const TRAILING_JSON = /\{[^{}]*\}\s*$/;
+
+/**
+ * Fetch a plugin-scoped JSON endpoint. Resolves with the parsed body on 2xx;
+ * rejects with {@link PluginFetchError} on transport or backend errors. The
+ * backend always returns ``{error, code, fields?}`` for non-2xx responses —
+ * we surface that as the typed ``e.payload``.
+ */
+export async function pluginFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
   if (!path.startsWith("/")) path = `/${path}`;
-  return SDK.fetchJSON<T>(`${PLUGIN_API_BASE}${path}`, init);
+  try {
+    return await SDK.fetchJSON<T>(`${PLUGIN_API_BASE}${path}`, init);
+  } catch (cause: unknown) {
+    const rawMessage = (cause as { message?: string } | null)?.message ?? String(cause);
+    let payload: ErrorPayload | undefined;
+    const match = TRAILING_JSON.exec(rawMessage);
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[0]);
+        if (parsed && typeof parsed === "object" && typeof parsed.error === "string" && typeof parsed.code === "string") {
+          payload = parsed as ErrorPayload;
+        }
+      } catch {
+        /* leave payload undefined — message-only error */
+      }
+    }
+    const status = (cause as { status?: number } | null)?.status;
+    throw new PluginFetchError(payload?.error ?? rawMessage, { status, payload, cause });
+  }
 }
 
 /** Build an SSE EventSource at a plugin-scoped path. */
@@ -107,4 +156,6 @@ export interface ErrorPayload {
   error: string;
   code: string;
   stderr?: string;
+  /** Per-field validation messages from wizards/editors. */
+  fields?: Record<string, string>;
 }

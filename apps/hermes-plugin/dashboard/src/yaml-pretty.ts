@@ -39,10 +39,12 @@ export function yamlStringify(value: unknown, indent = 0): string {
     return value.map((item) => {
       if (isPlain(item)) return `${pad}- ${renderScalar(item)}`;
       const nested = yamlStringify(item, indent + 2);
-      // Strip leading indent from first line so it sits next to `- `.
-      const trimmed = nested.replace(/^ +/, "");
-      const tail = nested.split("\n").slice(1).join("\n");
-      return tail ? `${pad}- ${trimmed}\n${tail}` : `${pad}- ${trimmed}`;
+      // Place the first nested line beside `- ` (stripping only its leading
+      // indent), and keep every following line at its full indent.
+      const lines = nested.split("\n");
+      const head = lines[0].replace(/^ +/, "");
+      const tail = lines.slice(1).join("\n");
+      return tail ? `${pad}- ${head}\n${tail}` : `${pad}- ${head}`;
     }).join("\n");
   }
   if (typeof value === "object") {

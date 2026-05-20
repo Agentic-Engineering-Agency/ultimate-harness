@@ -5,7 +5,7 @@
  * Server-side validation errors arrive as `{error, code, fields: {field: msg}}`
  * — we render per-field messages inline.
  */
-import { pluginFetch, UI } from "./sdk";
+import { pluginFetch, PluginFetchError, UI } from "./sdk";
 import { yamlStringify } from "./yaml-pretty";
 import { buildHash } from "./router";
 
@@ -62,19 +62,18 @@ export function MissionWizard() {
         body: JSON.stringify(doc),
       });
       window.location.hash = buildHash({ view: "mission", missionId: state.id });
-    } catch (e: any) {
-      const msg = e?.message || String(e);
-      // Backend errors come back as JSON: {error, code, fields?}
-      try {
-        const m = msg.match(/\{.*\}$/);
-        if (m) {
-          const payload = JSON.parse(m[0]);
-          if (payload.fields && typeof payload.fields === "object") {
-            setFieldErrors(payload.fields);
-          }
-          setError(payload.error ?? msg);
-        } else setError(msg);
-      } catch { setError(msg); }
+    } catch (e: unknown) {
+      // Backend errors come back as PluginFetchError with the typed payload
+      // `{error, code, fields?}` already parsed off the SDK message envelope.
+      const fields = e instanceof PluginFetchError ? e.payload?.fields : undefined;
+      if (fields && typeof fields === "object") {
+        setFieldErrors(fields);
+      }
+      const message =
+        (e instanceof PluginFetchError && e.payload?.error)
+        || (e instanceof Error ? e.message : null)
+        || String(e);
+      setError(message);
     } finally { setSubmitting(false); }
   }, [doc, state.id]);
 

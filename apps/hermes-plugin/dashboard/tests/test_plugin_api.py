@@ -76,16 +76,30 @@ async def test_missions_list_and_detail(client: httpx.AsyncClient, isolated_proj
 
 @pytest.mark.asyncio
 async def test_path_traversal_rejected(client: httpx.AsyncClient, isolated_project: Path) -> None:
-    for bad in ("../etc", "..", "with/slash", "with space"):
+    # Probes that DO reach the handler (Starlette doesn't normalize them out)
+    # and must be rejected by ``_SAFE_ID_RE`` with HTTP 400 / ``invalid_id``:
+    #
+    #   * ``..foo``    — traversal-flavored prefix, leading dot fails the
+    #                    ``^[A-Za-z0-9]`` head anchor.
+    #   * ``foo!bar`` — ``!`` is outside ``[A-Za-z0-9._-]``.
+    #   * ``foo bar`` — httpx percent-encodes the space, Starlette decodes
+    #                    it back, regex rejects.
+    for bad in ("..foo", "foo!bar", "foo bar"):
         resp = await client.get(f"/api/plugins/uh/missions/{bad}")
-        # FastAPI rewrites `..` and `/` in URL — `with space` would normally
-        # 404 at the router level, but `..` may resolve to the parent route.
-        # Whatever path makes it through to the handler must be rejected as
-        # 400 with `code: invalid_id`.
-        if resp.status_code in {400, 404}:
-            if resp.status_code == 400:
-                payload = resp.json()
-                assert payload["code"] == "invalid_id"
+        assert resp.status_code == 400, (
+            f"expected 400 for {bad!r}, got {resp.status_code}: {resp.text}"
+        )
+        payload = resp.json()
+        assert payload["code"] == "invalid_id", payload
+
+    # Bonus: keep the historical probes, but only assert the contract for
+    # responses that actually reach the handler. ``..`` and ``with/slash``
+    # are URL-normalized into different routes (200/404) before our handler
+    # sees them — that's defense-in-depth handled by the router, not us.
+    for bad in ("../etc", "..", "with/slash"):
+        resp = await client.get(f"/api/plugins/uh/missions/{bad}")
+        if resp.status_code == 400:
+            assert resp.json()["code"] == "invalid_id"
 
 
 @pytest.mark.asyncio
@@ -288,3 +302,42 @@ async def test_error_handler_returns_uniform_shape(client: httpx.AsyncClient, is
     assert resp.status_code == 400
     body = resp.json()
     assert "error" in body and "code" in body
+
+
+@pytest.mark.asyncio
+async def test_run_timeout_terminates_and_emits_timeout_event(
+    client: httpx.AsyncClient,
+    isolated_project: Path,
+    fake_cli: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run exceeding ``UH_RUN_TIMEOUT_S`` is SIGTERMed by the SSE
+    drain loop; the stream surfaces ``event: timeout`` before ``event: done``.
+
+    Closes the gap where the timeout knob was documented but not enforced
+    (PR #89 finding #2).
+    """
+    monkeypatch.setattr("plugin_api._RUN_TIMEOUT_S", 0.5)
+    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
+    fake_cli.popen_events_path = events_path
+    # Stage one event so the SSE generator's initial "wait for the file"
+    # loop returns quickly. We deliberately do NOT call ``schedule_exit``
+    # — the FakePopen stays in the running state so the timeout branch
+    # is the only termination path.
+    fake_cli.popen_events = [json.dumps({"type": "runtime.started"})]
+
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+
+    async with client.stream("GET", f"/api/plugins/uh/runs/{run_id}/events") as stream:
+        chunks: list[str] = []
+        async for chunk in stream.aiter_text():
+            chunks.append(chunk)
+            if "event: done" in "".join(chunks):
+                break
+    body = "".join(chunks)
+    assert "runtime.started" in body, body
+    assert "event: timeout" in body, body
+    assert "event: done" in body, body
+    assert body.index("event: timeout") < body.index("event: done")
+    assert fake_cli.last_popen.terminated is True

@@ -178,12 +178,14 @@ def _read_text(path: Path, limit: Optional[int] = None) -> dict[str, Any]:
 
 
 _active_runs: dict[str, dict[str, Any]] = {}
-"""runId -> {missionId, started_at_iso, process, status}.
+"""runId -> {missionId, started_at_iso, started_mono, process, status}.
 
 We don't persist this; it's a lightweight in-memory map so the SSE endpoint
 can resolve a runId to its events.ndjson path and the cancel endpoint can
-SIGTERM the running CLI process. Server restart loses the map; the run files
-on disk are still discoverable via :func:`_scan_runs`.
+SIGTERM the running CLI process. ``started_mono`` is the wallclock-independent
+start instant we compare against ``_RUN_TIMEOUT_S`` from inside the SSE drain
+loop. Server restart loses the map; the run files on disk are still
+discoverable via :func:`_scan_runs`.
 """
 
 
@@ -289,7 +291,11 @@ def _summarize_mission_status(
     if rt_status in {"failed", "blocked"}:
         return rt_status
     if rt_status == "passed":
-        return "running" if False else "verified"  # passed runtime + no verify ⇒ awaiting verify; treat as verified rough.
+        # Passed runtime + no verification yet ⇒ awaiting verify, but we
+        # surface that to the UI as "verified" so the mission list isn't
+        # cluttered with a transient state. Promote to a real
+        # ``awaiting_verify`` only when the UI grows a column for it.
+        return "verified"
     if runtime_result:
         return "running"
     return "draft"
@@ -434,6 +440,7 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     _active_runs[run_id] = {
         "missionId": mission_id,
         "startedAt": started_iso,
+        "started_mono": time.monotonic(),
         "process": proc,
         "status": "running",
     }
@@ -448,7 +455,15 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
         raise _err(404, "not_found", f"run {run_id} not tracked (server may have restarted)")
     proc: subprocess.Popen[str] = info["process"]
     if proc.poll() is None:
-        proc.terminate()
+        # Between the poll above and terminate() the process may have exited
+        # on its own; on POSIX that surfaces as ProcessLookupError, on Windows
+        # as OSError. Treat both as "already gone" and re-poll so the caller
+        # sees the real terminal status.
+        try:
+            proc.terminate()
+        except (ProcessLookupError, OSError):
+            pass
+        proc.poll()
         info["status"] = "cancelled"
     return {"ok": True, "status": info["status"]}
 
@@ -465,9 +480,27 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
 
     async def gen() -> AsyncIterator[bytes]:
         # Stream the existing tail first, then poll for additions until the
-        # process exits or the client disconnects.
+        # process exits, the run timeout fires, or the client disconnects.
         last_size = 0
         proc: subprocess.Popen[str] = info["process"]
+        started_mono: float = info.get("started_mono") or time.monotonic()
+        last_event_mono = time.monotonic()
+        # Tests monkeypatch ``plugin_api._RUN_TIMEOUT_S``; read it dynamically.
+        import sys as _sys
+        run_timeout = float(getattr(_sys.modules[__name__], "_RUN_TIMEOUT_S", 3600.0))
+        # Idle keepalive so reverse proxies don't drop the long-lived stream.
+        keepalive_s = 15.0
+
+        def _drain_chunk() -> bytes:
+            nonlocal last_size
+            if not events_path.is_file():
+                return b""
+            with events_path.open("rb") as fh:
+                fh.seek(last_size)
+                data = fh.read()
+                last_size += len(data)
+            return data
+
         for _ in range(600):  # ~60s upper bound on the first wait for the file.
             if events_path.is_file():
                 break
@@ -476,20 +509,41 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
             await asyncio.sleep(0.1)
         # Drain.
         while True:
-            if events_path.is_file():
-                with events_path.open("rb") as fh:
-                    fh.seek(last_size)
-                    chunk = fh.read()
-                    last_size += len(chunk)
-                if chunk:
-                    for line in chunk.splitlines():
+            chunk = _drain_chunk()
+            if chunk:
+                for line in chunk.splitlines():
+                    if not line:
+                        continue
+                    yield b"data: " + line + b"\n\n"
+                last_event_mono = time.monotonic()
+            now = time.monotonic()
+            timed_out = (now - started_mono) > run_timeout
+            exited = proc.poll() is not None
+            if exited or timed_out:
+                if timed_out and not exited:
+                    # Best-effort SIGTERM; the proc may race-exit on its own.
+                    try:
+                        proc.terminate()
+                    except (ProcessLookupError, OSError):
+                        pass
+                # Final read pass so we don't drop events flushed between the
+                # last drain and the exit/timeout decision.
+                final = _drain_chunk()
+                if final:
+                    for line in final.splitlines():
                         if not line:
                             continue
                         yield b"data: " + line + b"\n\n"
-            if proc.poll() is not None:
+                if timed_out:
+                    yield b"event: timeout\ndata: " + str(int(run_timeout)).encode() + b"s\n\n"
+                    info["status"] = "timeout"
+                else:
+                    info["status"] = "finished"
                 yield b"event: done\ndata: closed\n\n"
-                info["status"] = "finished"
                 return
+            if (now - last_event_mono) >= keepalive_s:
+                yield b": keepalive\n\n"
+                last_event_mono = now
             await asyncio.sleep(0.25)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
