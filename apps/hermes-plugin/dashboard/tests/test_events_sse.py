@@ -89,7 +89,7 @@ async def test_hot_tail_receives_events_in_order(
 
 @pytest.mark.asyncio
 async def test_sse_keepalive_within_sixteen_seconds(
-    client: httpx.AsyncClient, isolated_project: Path, monkeypatch: pytest.MonkeyPatch,
+    isolated_project: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import plugin_api as _api  # type: ignore[import-not-found]
 
@@ -98,18 +98,15 @@ async def test_sse_keepalive_within_sixteen_seconds(
     events_path = _run_dir(isolated_project, run_id) / "events.ndjson"
     _write_events(events_path, [{"event": "runtime.started"}])
 
-    url = f"/api/plugins/uh/missions/{_MISSION}/runs/{run_id}/events?stream=1"
-
-    async def _read_until_keepalive() -> str:
-        async with client.stream("GET", url) as resp:
-            chunks: list[str] = []
-            async for chunk in resp.aiter_text():
-                chunks.append(chunk)
-                if ": keepalive" in "".join(chunks):
-                    return "".join(chunks)
+    async def _collect_until_keepalive() -> str:
+        chunks: list[str] = []
+        async for frame in _api._iter_run_events_sse(events_path, run_id=run_id):
+            chunks.append(frame.decode("utf-8"))
+            if ": keepalive" in "".join(chunks):
+                return "".join(chunks)
         return "".join(chunks)
 
-    body = await asyncio.wait_for(_read_until_keepalive(), timeout=3.0)
+    body = await asyncio.wait_for(_collect_until_keepalive(), timeout=3.0)
     assert ": keepalive" in body
 
 
@@ -129,6 +126,37 @@ async def test_disconnect_stops_server_generator(
             break
     await asyncio.sleep(0.3)
     assert _api._active_sse_tails == 0
+
+
+@pytest.mark.asyncio
+async def test_untracked_tail_survives_idle_gap_before_terminal(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Cold tail without a live proc must not close on short idle gaps (Codex P1)."""
+    run_id = "idle-gap-run"
+    events_path = _run_dir(isolated_project, run_id) / "events.ndjson"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    url = f"/api/plugins/uh/missions/{_MISSION}/runs/{run_id}/events?stream=1"
+
+    async def _append_with_gap() -> None:
+        _append_event(events_path, {"event": "runtime.started", "seq": 1})
+        await asyncio.sleep(0.75)
+        _append_event(events_path, {"event": "runtime.finished", "seq": 2, "status": "passed"})
+
+    writer = asyncio.create_task(_append_with_gap())
+    try:
+        async with client.stream("GET", url) as resp:
+            chunks: list[str] = []
+            async for chunk in resp.aiter_text():
+                chunks.append(chunk)
+                if "event: done" in "".join(chunks):
+                    break
+        body = "".join(chunks)
+        assert "runtime.started" in body
+        assert "runtime.finished" in body
+        assert "event: done" in body
+    finally:
+        await writer
 
 
 @pytest.mark.asyncio

@@ -386,6 +386,9 @@ async def _iter_run_events_sse(
     saw_terminal = False
     idle_polls_after_terminal = 0
     idle_polls_no_growth = 0
+    # Cold/untracked tails without a terminal event: allow long idle gaps (Codex P1)
+    # but still close abandoned streams (~30s at 0.2s poll).
+    _COLD_IDLE_CLOSE_POLLS = 150
 
     def _drain_chunk() -> bytes:
         nonlocal last_size
@@ -451,7 +454,7 @@ async def _iter_run_events_sse(
                     if idle_polls_after_terminal >= 2:
                         yield b"event: done\ndata: closed\n\n"
                         return
-                elif idle_polls_no_growth >= 3:
+                elif idle_polls_no_growth >= _COLD_IDLE_CLOSE_POLLS:
                     yield b"event: done\ndata: closed\n\n"
                     return
 
