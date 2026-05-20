@@ -557,7 +557,12 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
 
     run_id = _make_run_id()
     # Codex P1 round 3: the CLI takes a mission file PATH, not the id slug.
-    args = ["mission", "run", str(mission_yaml), "--root", str(root)]
+    # Codex P1 round 13: pass --no-sandbox so the run doesn't get rerouted
+    # into a sandbox worktree. The dashboard's spawn semantic is "run THIS
+    # mission against THIS root"; sandbox routing would skip artifact
+    # persistence in the canonical mission dir, leaving the plugin with no
+    # events / runtime-result to surface.
+    args = ["mission", "run", str(mission_yaml), "--root", str(root), "--no-sandbox"]
     started_iso = datetime.now(tz=timezone.utc).isoformat()
     events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
     # Codex P1 round 8: capture the events.ndjson byte offset BEFORE spawning
@@ -801,7 +806,22 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
 
 def _artifact_response(mission_id: str, filename: str) -> dict[str, Any]:
     _safe_id(mission_id, "mission_id")
-    return _read_text(_harness(_project_root()) / "missions" / mission_id / filename)
+    mission_dir = _harness(_project_root()) / "missions" / mission_id
+    candidate = mission_dir / filename
+    # Codex P2 round 13: artifact paths must stay inside the mission
+    # directory. A symlinked artifact (e.g. prompt.md -> /etc/passwd) would
+    # otherwise be followed by _read_text and disclosed via the dashboard.
+    # Reject symlinks AND resolve-and-bound-check the final path.
+    if candidate.exists() and candidate.is_symlink():
+        raise _err(400, "symlink_artifact", f"artifact {filename} is a symlink; refusing to read")
+    try:
+        resolved = candidate.resolve(strict=False)
+        mission_resolved = mission_dir.resolve(strict=False)
+    except OSError as exc:
+        raise _err(500, "io_error", f"cannot resolve artifact path: {exc}") from exc
+    if mission_resolved not in resolved.parents and resolved != mission_resolved:
+        raise _err(400, "path_escape", f"artifact {filename} resolves outside mission directory")
+    return _read_text(candidate)
 
 
 @router.get("/missions/{mission_id}/prompt")

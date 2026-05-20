@@ -142,6 +142,10 @@ async def test_create_and_run_mission_invokes_uh(client: httpx.AsyncClient, isol
     assert args[:2] == ["mission", "run"]
     assert args[2].endswith("/missions/demo/mission.yaml"), f"expected mission file path, got {args[2]}"
     assert "--runtime-config-overrides" not in args
+    # Codex P1 round 13: --no-sandbox prevents the CLI from rerouting the
+    # dashboard-triggered run into a bound sandbox worktree where artifact
+    # persistence would skip the canonical mission directory.
+    assert "--no-sandbox" in args
 
 
 @pytest.mark.asyncio
@@ -439,6 +443,27 @@ async def test_concurrent_runs_for_same_mission_rejected(
     body = second.json()
     assert body["code"] == "run_already_active"
     assert body.get("fields", {}).get("activeRunId") == first.json()["runId"]
+
+
+@pytest.mark.asyncio
+async def test_artifact_endpoint_rejects_symlinked_artifact(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Codex P2 round 13: a symlinked artifact (e.g. prompt.md ->
+    /etc/passwd) must NOT be readable through the dashboard. Plugin must
+    reject symlinks AND assert the resolved target is inside the mission
+    directory."""
+    mission_dir = isolated_project / ".harness" / "missions" / "demo"
+    mission_dir.mkdir(parents=True, exist_ok=True)
+    target = isolated_project / "secret.txt"
+    target.write_text("SECRET", encoding="utf-8")
+    (mission_dir / "prompt.md").symlink_to(target)
+    resp = await client.get("/api/plugins/uh/missions/demo/prompt")
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] in {"symlink_artifact", "path_escape"}
+    # Sanity: secret must NOT have leaked.
+    assert "SECRET" not in resp.text
 
 
 @pytest.mark.asyncio
