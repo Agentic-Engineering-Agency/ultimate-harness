@@ -385,6 +385,33 @@ async def test_watchdog_evicts_natural_exit_without_sse(
     )
 
 @pytest.mark.asyncio
+async def test_cancel_does_not_misreport_natural_exit_as_cancelled(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P2 round 10: if the child exits naturally between poll() and
+    terminate() in cancel_run, the status MUST NOT be set to 'cancelled' —
+    that would misreport a normal completion as cancelled."""
+    import plugin_api as _api  # type: ignore[import-not-found]
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    assert fake_cli.last_popen is not None
+    fake_popen = fake_cli.last_popen
+    # Monkeypatch terminate to raise ProcessLookupError — simulating the
+    # race where the child exited between the cancel handler's poll() and
+    # its terminate() call.
+    def terminate_already_gone() -> None:
+        raise ProcessLookupError(3, "No such process")
+    monkeypatch.setattr(fake_popen, "terminate", terminate_already_gone)
+    resp = await client.post(f"/api/plugins/uh/runs/{run_id}/cancel")
+    assert resp.status_code == 200
+    body = resp.json()
+    # Status must be 'finished' (natural exit), NOT 'cancelled'.
+    assert body["status"] == "finished", (
+        f"natural exit misreported as cancelled: {body}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_unknown_mission_returns_404(client: httpx.AsyncClient, isolated_project: Path) -> None:
     resp = await client.post("/api/plugins/uh/missions/ghost/run", json={})
     assert resp.status_code == 404

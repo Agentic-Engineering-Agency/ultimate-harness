@@ -649,16 +649,25 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
         raise _err(404, "not_found", f"run {run_id} not tracked (server may have restarted)")
     proc: subprocess.Popen[str] = info["process"]
     if proc.poll() is None:
-        # Between the poll above and terminate() the process may have exited
-        # on its own; on POSIX that surfaces as ProcessLookupError, on Windows
-        # as OSError. Treat both as "already gone" and re-poll so the caller
-        # sees the real terminal status.
+        # Codex P2 round 10: there is a race between the poll() above and
+        # terminate(). The child may exit naturally in that window. On
+        # POSIX that surfaces as ProcessLookupError, on Windows as OSError;
+        # `terminate_failed` flags that path so we don't misreport a
+        # naturally-completed run as cancelled.
+        terminate_failed = False
         try:
             proc.terminate()
         except (ProcessLookupError, OSError):
-            pass
+            terminate_failed = True
         proc.poll()
-        info["status"] = "cancelled"
+        if terminate_failed:
+            # The child was already gone — this was a natural exit, not a
+            # cancel. Only flip status if we still own 'running' (respect
+            # any terminal state already set by the watchdog / SSE drain).
+            if info.get("status") == "running":
+                info["status"] = "finished"
+        else:
+            info["status"] = "cancelled"
     watchdog = info.get("watchdog")
     if watchdog is not None and not watchdog.done():
         watchdog.cancel()

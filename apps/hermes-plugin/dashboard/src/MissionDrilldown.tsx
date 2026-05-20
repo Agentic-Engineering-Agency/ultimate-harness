@@ -132,6 +132,16 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
   const [error, setError] = React.useState<string | null>(null);
   const [showRunModal, setShowRunModal] = React.useState(false);
 
+
+  // Codex P2 round 10: when the route flips from `mission` to `missionRun`
+  // without unmounting (hash-driven nav), the initial useState above never
+  // re-runs, so the events tab is not auto-selected. Watch pinnedRunId and
+  // switch to events whenever it transitions from undefined to a real id.
+  // We do NOT switch away from events when pinnedRunId clears — that
+  // would yank the user off a tab they may still want to see.
+  React.useEffect(() => {
+    if (pinnedRunId) setTab("events");
+  }, [pinnedRunId]);
   React.useEffect(() => {
     let cancelled = false;
     pluginFetch<MissionDetail>(`/missions/${encodeURIComponent(missionId)}`)
