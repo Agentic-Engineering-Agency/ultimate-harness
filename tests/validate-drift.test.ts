@@ -8,6 +8,7 @@ import { staleWorkerKind } from "../src/harness/validate/drift/kinds/stale-worke
 import { missingCompletionTimestampKind } from "../src/harness/validate/drift/kinds/missing-completion-timestamp.js";
 import { truncatedEventsNdjsonKind } from "../src/harness/validate/drift/kinds/truncated-events-ndjson.js";
 import { staleRenderKind } from "../src/harness/validate/drift/kinds/stale-render.js";
+import { orphanedRunDirKind } from "../src/harness/validate/drift/kinds/orphaned-run-dir.js";
 import { roadmapLinearDivergenceKind } from "../src/harness/validate/drift/kinds/roadmap-linear-divergence.js";
 import { runDrift, groupByKind, DRIFT_KINDS } from "../src/harness/validate/drift/registry.js";
 
@@ -186,6 +187,69 @@ describe("UH-77 roadmap-linear-divergence (warn-only)", () => {
   });
 });
 
+describe("UH-82 orphaned-run-dir", () => {
+  async function seedRunDir(missionId: string, runId: string, indexed: boolean): Promise<string> {
+    const runDir = join(TEST_ROOT, ".harness", "missions", missionId, "runs", runId);
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "runtime-result.yaml"), "status: passed\n", "utf-8");
+    if (indexed) {
+      const indexPath = join(TEST_ROOT, ".harness", "missions", missionId, "runs", "index.json");
+      await writeFile(
+        indexPath,
+        JSON.stringify({
+          schema_version: "uh.runs-index.v0",
+          runs: [
+            {
+              run_id: runId,
+              started_at: "2026-05-19T00:00:00.000Z",
+              finished_at: "2026-05-19T00:01:00.000Z",
+              status: "passed",
+              runtime: "hermes",
+            },
+          ],
+        }),
+        "utf-8",
+      );
+    }
+    return runDir;
+  }
+
+  test("detects a run dir with no index entry", async () => {
+    const runDir = await seedRunDir("m-orph", "20260519T000000Z-orphan", false);
+    const issues = await orphanedRunDirKind.detect(TEST_ROOT);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].kind).toBe("orphaned-run-dir");
+    expect(issues[0].target).toBe(runDir);
+    expect(issues[0].metadata).toEqual({ missionId: "m-orph", runId: "20260519T000000Z-orphan" });
+  });
+
+  test("does not flag a run dir that IS in the index", async () => {
+    await seedRunDir("m-clean", "20260519T000000Z-clean", true);
+    const issues = await orphanedRunDirKind.detect(TEST_ROOT);
+    expect(issues).toEqual([]);
+  });
+
+  test("treats every run dir as orphaned when index.json is malformed", async () => {
+    await seedRunDir("m-bad-idx", "20260519T000000Z-a", false);
+    await seedRunDir("m-bad-idx", "20260519T000000Z-b", false);
+    const indexPath = join(TEST_ROOT, ".harness", "missions", "m-bad-idx", "runs", "index.json");
+    await writeFile(indexPath, "{not json", "utf-8");
+    const issues = await orphanedRunDirKind.detect(TEST_ROOT);
+    const runIds = issues.map((i) => i.metadata?.runId).sort();
+    expect(runIds).toEqual(["20260519T000000Z-a", "20260519T000000Z-b"]);
+  });
+
+  test("repair removes the orphaned run dir", async () => {
+    const runDir = await seedRunDir("m-rep", "20260519T000000Z-rep", false);
+    const before = await stat(runDir);
+    expect(before.isDirectory()).toBe(true);
+    const [issue] = await orphanedRunDirKind.detect(TEST_ROOT);
+    const result = await orphanedRunDirKind.repair(issue, TEST_ROOT);
+    expect(result.outcome).toBe("repaired");
+    await expect(stat(runDir)).rejects.toThrow();
+  });
+});
+
 describe("UH-77 registry cap=2 settle", () => {
   test("runs detect-repair-detect with --repair=false (no mutation)", async () => {
     await seedStaleWorker("m6", "frontend", 999999);
@@ -240,11 +304,12 @@ describe("UH-77 registry cap=2 settle", () => {
     expect(grouped["truncated-events-ndjson"]).toEqual([]);
   });
 
-  test("DRIFT_KINDS exposes the six declared kinds", () => {
+  test("DRIFT_KINDS exposes the seven declared kinds", () => {
     const kinds = DRIFT_KINDS.map((k) => k.kind);
     expect(new Set(kinds)).toEqual(new Set([
       "stale-worker",
       "orphaned-worktree",
+      "orphaned-run-dir",
       "missing-completion-timestamp",
       "truncated-events-ndjson",
       "stale-render",
