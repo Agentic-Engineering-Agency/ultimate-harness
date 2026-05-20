@@ -195,12 +195,16 @@ program
   .option("--all-workflows", "Validate all workflow profiles")
   .option("--all-missions", "Validate all mission files")
   .option("--repair", "Run drift detection with auto-repair (idempotent)")
+  .option("--strict-spec", "Run drift detection; spec-stale issues are errors (default: warn)")
   .option("--json", "Emit drift detection output as JSON instead of human text")
-  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; json?: boolean }) => {
+  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; strictSpec?: boolean; json?: boolean }) => {
     const root = resolveRoot(opts.root);
-    if (opts.json || opts.repair) {
+    if (opts.json || opts.repair || opts.strictSpec) {
       const { runDrift, groupByKind, DRIFT_KINDS } = await import("./harness/validate/drift/registry.js");
-      const outcome = await runDrift(root, { repair: opts.repair === true });
+      const outcome = await runDrift(root, {
+        repair: opts.repair === true,
+        strictSpec: opts.strictSpec === true,
+      });
       if (opts.json) {
         const grouped = groupByKind(outcome.issues);
         console.log(JSON.stringify({

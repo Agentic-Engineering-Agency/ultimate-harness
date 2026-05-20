@@ -1,3 +1,4 @@
+import type { DriftDetectOptions } from "./detect-options.js";
 import type { DriftIssue, DriftKind, DriftKindModule, RepairResult } from "./types.js";
 import { staleWorkerKind } from "./kinds/stale-worker.js";
 import { orphanedWorktreeKind } from "./kinds/orphaned-worktree.js";
@@ -6,6 +7,7 @@ import { missingCompletionTimestampKind } from "./kinds/missing-completion-times
 import { truncatedEventsNdjsonKind } from "./kinds/truncated-events-ndjson.js";
 import { staleRenderKind } from "./kinds/stale-render.js";
 import { orphanedRunDirKind } from "./kinds/orphaned-run-dir.js";
+import { specStaleKind } from "./kinds/spec-stale.js";
 
 /**
  * UH-77 drift registry, declared in execution order. The order matters: when
@@ -20,6 +22,7 @@ export const DRIFT_KINDS: readonly DriftKindModule[] = [
   truncatedEventsNdjsonKind,
   staleRenderKind,
   roadmapLinearDivergenceKind,
+  specStaleKind,
 ];
 
 export const REPAIR_CYCLE_CAP = 2;
@@ -46,13 +49,14 @@ export function emptyIssuesByKind(): IssuesByKind {
     "missing-completion-timestamp": [],
     "truncated-events-ndjson": [],
     "stale-render": [],
+    "spec-stale": [],
   };
 }
 
-export async function detectAll(root: string): Promise<DriftIssue[]> {
+export async function detectAll(root: string, options?: DriftDetectOptions): Promise<DriftIssue[]> {
   const out: DriftIssue[] = [];
   for (const kind of DRIFT_KINDS) {
-    out.push(...await kind.detect(root));
+    out.push(...await kind.detect(root, options));
   }
   return out;
 }
@@ -80,18 +84,21 @@ export function groupByKind(issues: DriftIssue[]): IssuesByKind {
  */
 export async function runDrift(
   root: string,
-  options: { repair?: boolean } = {},
+  options: { repair?: boolean; strictSpec?: boolean } = {},
 ): Promise<DriftRunOutcome> {
   const repair = options.repair === true;
+  const detectOptions: DriftDetectOptions = {
+    strictSpec: options.strictSpec === true,
+  };
   if (!repair) {
-    const issues = await detectAll(root);
+    const issues = await detectAll(root, detectOptions);
     return { issues, repairs: [], cycles: 0, capReached: false };
   }
 
   const kindIndex = new Map<DriftKind, DriftKindModule>();
   for (const k of DRIFT_KINDS) kindIndex.set(k.kind, k);
 
-  let issues = await detectAll(root);
+  let issues = await detectAll(root, detectOptions);
   const repairs: RepairResult[] = [];
   let cycles = 0;
   while (issues.length > 0 && cycles < REPAIR_CYCLE_CAP) {
@@ -109,7 +116,7 @@ export async function runDrift(
       const result = await module.repair(issue, root);
       repairs.push(result);
     }
-    issues = await detectAll(root);
+    issues = await detectAll(root, detectOptions);
     // If every remaining issue is warning-only / needs-human, stop early —
     // additional cycles cannot help.
     if (issues.every((i) => {
