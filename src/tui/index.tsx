@@ -12,6 +12,7 @@
  */
 import { render } from "@opentui/solid";
 import { Dashboard } from "./dashboard.js";
+import { PALETTES, resolveTheme } from "./theme.js";
 
 // Side-effect imports — adapter modules self-register checkers.
 import "../adapters/hermes.js";
@@ -23,8 +24,9 @@ const rootEnv = process.env.UH_TUI_ROOT;
 const rootArg = process.argv.slice(2).find((a) => !a.startsWith("--"));
 const root = rootEnv ?? rootArg ?? process.cwd();
 const once = process.argv.includes("--once") || process.env.UH_TUI_ONCE === "1";
+const palette = PALETTES[resolveTheme(process.env)];
 
-render(() => <Dashboard root={root} once={once} />, {
+render(() => <Dashboard root={root} once={once} palette={palette} />, {
   exitOnCtrlC: true,
   clearOnShutdown: true,
   targetFps: 30,
