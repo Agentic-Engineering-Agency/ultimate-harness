@@ -12,14 +12,14 @@ Surface the per-run artifact backend ([UH-82](https://linear.app/agentic-eng/iss
 
 | Phase | Issue | Slice | Size | Status |
 |---|---|---|---|---|
-| Core | [UH-85](https://linear.app/agentic-eng/issue/UH-85) | Recent runs pane on Mission detail | S | filed |
-| Core | [UH-86](https://linear.app/agentic-eng/issue/UH-86) | Per-run drilldown (`?run_id=` param) | M | filed |
-| Core | [UH-88](https://linear.app/agentic-eng/issue/UH-88) | Filter + search runs in the pane | S | filed |
-| Later | [UH-89](https://linear.app/agentic-eng/issue/UH-89) | Compare two runs side-by-side | M | filed |
-| Later | [UH-87](https://linear.app/agentic-eng/issue/UH-87) | Replay a run with same/modified overrides | M | filed |
-| Optional | [UH-90](https://linear.app/agentic-eng/issue/UH-90) | Run history retention policy | S | filed |
+| Core | [UH-85](https://linear.app/agentic-eng/issue/UH-85) | Recent runs pane on Mission detail | S | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
+| Core | [UH-86](https://linear.app/agentic-eng/issue/UH-86) | Per-run drilldown (`?run_id=` param) | M | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
+| Core | [UH-88](https://linear.app/agentic-eng/issue/UH-88) | Filter + search runs in the pane | S | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
+| Later | [UH-89](https://linear.app/agentic-eng/issue/UH-89) | Compare two runs side-by-side | M | **shipped** — [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101) |
+| Later | [UH-87](https://linear.app/agentic-eng/issue/UH-87) | Replay a run with same/modified overrides | M | **shipped** — [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101) |
+| Optional | [UH-90](https://linear.app/agentic-eng/issue/UH-90) | Run history retention policy | S | **shipped** — [#100](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/100) |
 
-Backend foundation shipped in PR #96 (UH-82): `runs/<run_id>/` per-run dirs, `runs/index.json` history, `latest.json` pointer, per-run artifact route honoring `run_id`, `get_mission` returns `runs[]`.
+Epic 5 shipped end-to-end across [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) + [#100](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/100) + [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101). Backend foundation shipped earlier in PR [#96](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/96) (UH-82): `runs/<run_id>/` per-run dirs, `runs/index.json` history, `latest.json` pointer, per-run artifact route honoring `run_id`, `get_mission` returns `runs[]`. TUI polish slices ([UH-48](https://linear.app/agentic-eng/issue/UH-48) / [UH-49](https://linear.app/agentic-eng/issue/UH-49) / [UH-50](https://linear.app/agentic-eng/issue/UH-50) / [UH-51](https://linear.app/agentic-eng/issue/UH-51)) shipped in [#99](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/99). Cut as v0.4.0 ([#103](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/103) + [#105](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/105) + [#107](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/107)) — **GitHub Release + plugin tarball published; npm publish blocked on token rotation ([UH-91](https://linear.app/agentic-eng/issue/UH-91))**.
 
 ### Epic 3 — Hermes Dashboard plugin for UH ([UH-60](https://linear.app/agentic-eng/issue/UH-60))
 
