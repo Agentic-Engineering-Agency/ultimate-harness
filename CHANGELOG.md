@@ -4,6 +4,42 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
+## [0.5.0] — 2026-05-20
+
+Epics 6–8 integrated on `dev` from feature branches (live observability, adapter auto-routing, SDD hardening). Execution spec: [`docs/specs/epics-6-7-8.md`](docs/specs/epics-6-7-8.md).
+
+### Added
+
+**Epic 6 — Hermes plugin live runs & observability**
+
+- Disk-backed SSE endpoint tailing per-run `events.ndjson` with keepalive and byte-offset resume ([UH-93](https://linear.app/agentic-eng/issue/UH-93)).
+- `LiveEventsPane` in mission drilldown reusing run-modal tail patterns ([UH-94](https://linear.app/agentic-eng/issue/UH-94)).
+- Cancel running mission by `run_id` from drilldown, Run modal, and `uh mission cancel` CLI ([UH-95](https://linear.app/agentic-eng/issue/UH-95)).
+- Runbook: [`docs/runbooks/plugin-live-events-smoke.md`](docs/runbooks/plugin-live-events-smoke.md).
+
+**Epic 7 — Adapter capability matrix & runtime auto-routing**
+
+- `AdapterCapabilities` Zod schema and per-adapter manifests (`hermes`, `hermes-proxy`, `codex`, `oh-my-pi`) ([UH-100](https://linear.app/agentic-eng/issue/UH-100)).
+- `chooseAdapter` + `uh mission run --auto` routing by mission `runtime_requirements` and installed adapters ([UH-101](https://linear.app/agentic-eng/issue/UH-101)).
+- Preflight validator enforcing `runtime_requirements` separately from mission `capabilities` ([UH-102](https://linear.app/agentic-eng/issue/UH-102)).
+- Static cost-class table for routing hints ([`src/harness/cost-table.ts`](src/harness/cost-table.ts)).
+
+**Epic 8 — Spec-Driven Development hardening**
+
+- Spec loader + `uh propose --from <spec.md>` mission bootstrap ([UH-107](https://linear.app/agentic-eng/issue/UH-107)).
+- `uh spec scaffold` — acceptance-criteria → Vitest `it.todo` scaffold generator ([UH-108](https://linear.app/agentic-eng/issue/UH-108)).
+- `spec-stale` validate-drift kind + `--strict-spec` CLI flag ([UH-109](https://linear.app/agentic-eng/issue/UH-109)).
+
+### Changed
+
+- Hermes plugin bundle ships at **43.4 KB** (50 KB cap). Plugin manifest version **0.5.0**.
+
+### Known follow-ups
+
+- [UH-91](https://linear.app/agentic-eng/issue/UH-91) — npm scoped-package publish still blocked on org token rotation (404 on scoped PUT); GitHub release + `plugin-v*` tarball unaffected.
+- Linear epics UH-92 / UH-99 / UH-106 and child issues were not filed via MCP during this cut (orchestrator `linear-epics` step skipped).
+- Later/Optional slices UH-96–98, UH-103–105, UH-110–111 remain in the spec, not implemented.
+
 ## [0.4.0] — 2026-05-20
 
 ### Fixed
