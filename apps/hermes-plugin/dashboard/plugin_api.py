@@ -671,6 +671,18 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     overrides = body.get("runtime_config_overrides") or {}
     if not isinstance(overrides, dict):
         raise _err(400, "invalid_overrides", "runtime_config_overrides must be an object")
+    # UH-87: optional `replay_of` records the source run id whose
+    # overrides + prompt the operator lifted. The new run executes
+    # identically to a fresh run — `replay_of` is pure lineage metadata
+    # surfaced in runs/index.json. Validated through _safe_id so a
+    # forged run_id can't escape into the index payload.
+    replay_of_raw = body.get("replay_of")
+    replay_of: Optional[str] = None
+    if replay_of_raw is not None:
+        if not isinstance(replay_of_raw, str):
+            raise _err(400, "invalid_replay_of", "replay_of must be a string")
+        _safe_id(replay_of_raw, "replay_of")
+        replay_of = replay_of_raw
     # UH-81 (shipped): the CLI now consumes `--runtime-config-overrides <json>`
     # and threads the parsed object through all four adapter planners on top
     # of `mission.runtime_config_overrides`. We forward the JSON-encoded
@@ -737,6 +749,21 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     if overrides_arg is not None:
         args.extend(["--runtime-config-overrides", overrides_arg])
     started_iso = datetime.now(tz=timezone.utc).isoformat()
+    if replay_of is not None:
+        # Pre-populate the runs/index.json row with the replay_of
+        # breadcrumb BEFORE the adapter writes its own running row. The
+        # adapter's `appendRunsIndexEntry` preserves replay_of when it
+        # replaces an existing row by run_id (see run-id.ts).
+        _append_runs_index_row(
+            root,
+            mission_id,
+            {
+                "run_id": run_id,
+                "started_at": started_iso,
+                "status": "running",
+                "replay_of": replay_of,
+            },
+        )
     events_path = _harness(root) / "missions" / mission_id / "runs" / run_id / "events.ndjson"
     # Codex P1 round 8: capture the events.ndjson byte offset BEFORE spawning
     # the child process. If we snapshot after spawn, a fast CLI can append
@@ -1047,6 +1074,176 @@ def _run_is_archived(root: Path, mission_id: str, run_id: str) -> bool:
         if isinstance(entry, dict) and entry.get("run_id") == run_id:
             return entry.get("archived") is True
     return False
+# ---- compare + replay (UH-87 / UH-89) --------------------------------------
+
+
+_COMPARE_EVENTS_CAP = 500
+
+
+def _read_text_or_none(base: Path, filename: str) -> Optional[str]:
+    """Bounded reader that returns text content or None when missing.
+
+    Mirrors `_artifact_response_at`'s safety posture (symlink + escape
+    refusal -> None instead of raising) so the compare endpoint can
+    surface "missing artifact" as `null` per-side without aborting the
+    whole comparison."""
+    candidate = base / filename
+    if candidate.exists() and candidate.is_symlink():
+        return None
+    try:
+        resolved = candidate.resolve(strict=False)
+        base_resolved = base.resolve(strict=False)
+    except OSError:
+        return None
+    if base_resolved not in resolved.parents and resolved != base_resolved:
+        return None
+    try:
+        if not candidate.is_file():
+            return None
+        size = candidate.stat().st_size
+    except OSError:
+        return None
+    import sys as _sys
+    limit = getattr(_sys.modules[__name__], "_MAX_ARTIFACT_BYTES", 5 * 1024 * 1024)
+    if size > limit:
+        return None
+    with candidate.open("r", encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def _compare_side(mission_dir: Path, run_id: str) -> dict[str, Any]:
+    run_dir = mission_dir / "runs" / run_id
+    prompt = _read_text_or_none(run_dir, "prompt.md")
+    final_message = _read_text_or_none(run_dir, "runtime-final.txt")
+    diff = _read_text_or_none(run_dir, "diff.patch")
+    runtime_result: Optional[dict[str, Any]] = None
+    rr_text = _read_text_or_none(run_dir, "runtime-result.yaml")
+    if rr_text is not None:
+        try:
+            parsed = yaml.safe_load(rr_text)
+        except yaml.YAMLError:
+            parsed = None
+        if isinstance(parsed, dict):
+            runtime_result = parsed
+    events: list[dict[str, Any]] = []
+    truncated_to: Optional[int] = None
+    events_text = _read_text_or_none(run_dir, "events.ndjson")
+    if events_text is not None:
+        lines = [ln for ln in events_text.splitlines() if ln.strip()]
+        if len(lines) > _COMPARE_EVENTS_CAP:
+            # Keep the most recent N — terminal events are what an
+            # operator usually wants when comparing two runs.
+            lines = lines[-_COMPARE_EVENTS_CAP:]
+            truncated_to = _COMPARE_EVENTS_CAP
+        for ln in lines:
+            try:
+                obj = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                events.append(obj)
+    side: dict[str, Any] = {
+        "run_id": run_id,
+        "prompt": prompt,
+        "final_message": final_message,
+        "diff": diff,
+        "runtime_result": runtime_result,
+        "events": events,
+    }
+    if truncated_to is not None:
+        side["truncated_to"] = truncated_to
+    return side
+
+
+@router.get("/missions/{mission_id}/compare")
+async def compare_runs(mission_id: str, a: str, b: str) -> dict[str, Any]:
+    """UH-89 — side-by-side comparison of two runs of the same mission.
+
+    Returns prompt, final message, diff, parsed runtime-result, and the
+    most recent 500 events for each side. 400 when the caller asks to
+    compare a run against itself; 404 when either run directory is
+    missing.
+    """
+    _safe_id(mission_id, "mission_id")
+    _safe_id(a, "a")
+    _safe_id(b, "b")
+    if a == b:
+        raise _err(400, "same_run", "compare requires two distinct run ids")
+    root = _project_root()
+    mission_dir = _harness(root) / "missions" / mission_id
+    for rid in (a, b):
+        if not (mission_dir / "runs" / rid).is_dir():
+            raise _err(404, "not_found", f"run {rid} not found for mission {mission_id}")
+    return {
+        "mission_id": mission_id,
+        "a": _compare_side(mission_dir, a),
+        "b": _compare_side(mission_dir, b),
+    }
+
+
+@router.get("/missions/{mission_id}/runs/{run_id}/overrides")
+async def get_run_overrides(mission_id: str, run_id: str) -> dict[str, Any]:
+    """UH-87 — surface the prior run's `runtime_config` so the Run modal
+    can pre-fill the JSON textarea for a replay.
+
+    Reads `runs/<run_id>/runtime-session.yaml`. When the file is absent
+    or the block is empty, returns `{ runtime_config_overrides: {} }`
+    rather than 404 — operators can still replay from a clean slate.
+    """
+    _safe_id(mission_id, "mission_id")
+    _safe_id(run_id, "run_id")
+    session_path = (
+        _harness(_project_root()) / "missions" / mission_id / "runs" / run_id / "runtime-session.yaml"
+    )
+    empty = {"runtime_config_overrides": {}}
+    if not session_path.is_file():
+        return empty
+    try:
+        with session_path.open("r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+    except yaml.YAMLError:
+        return empty
+    if not isinstance(doc, dict):
+        return empty
+    block = doc.get("runtime_config")
+    if not isinstance(block, dict):
+        return empty
+    return {"runtime_config_overrides": block}
+
+
+def _append_runs_index_row(root: Path, mission_id: str, entry: dict[str, Any]) -> None:
+    """Python-side mirror of `appendRunsIndexEntry` in `src/harness/run-id.ts`.
+
+    Used by `start_run` to pre-write a `replay_of` breadcrumb so the
+    runs/index.json row carries the lineage even before the adapter's
+    first write. The TS adapter preserves `replay_of` on row replacement
+    so the breadcrumb survives the running -> terminal transition.
+    """
+    runs_dir = _harness(root) / "missions" / mission_id / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    index_path = runs_dir / "index.json"
+    current: dict[str, Any]
+    try:
+        current = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(current, dict) or not isinstance(current.get("runs"), list):
+            current = {"schema_version": "uh.runs-index.v0", "runs": []}
+    except (OSError, ValueError):
+        current = {"schema_version": "uh.runs-index.v0", "runs": []}
+    runs = current["runs"]
+    idx = next(
+        (i for i, r in enumerate(runs) if isinstance(r, dict) and r.get("run_id") == entry["run_id"]),
+        -1,
+    )
+    if idx >= 0:
+        merged = {**runs[idx], **entry}
+        runs[idx] = merged
+    else:
+        runs.append(entry)
+    # Suffix the tmp path with a random nibble: matches the
+    # concurrent-writer protection in run-id.ts (Codex P1 PR #96).
+    tmp = index_path.with_name(f"index.json.{uuid.uuid4().hex[:6]}.tmp")
+    tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    tmp.replace(index_path)
 
 
 @router.get("/missions/{mission_id}/runs/{run_id}/{kind}")

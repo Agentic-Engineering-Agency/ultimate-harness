@@ -148,6 +148,34 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
   const [mission, setMission] = React.useState<MissionDetail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [showRunModal, setShowRunModal] = React.useState(false);
+  /** UH-87 — when set, the next RunModal opens in replay mode pre-filled
+   * with this run's runtime_config_overrides + replay_of breadcrumb. */
+  const [replaySpec, setReplaySpec] = React.useState<{
+    replay_of: string;
+    pre_filled_overrides: Record<string, unknown>;
+  } | null>(null);
+  const [replayError, setReplayError] = React.useState<string | null>(null);
+
+  const openReplay = React.useCallback(async (runId: string) => {
+    setReplayError(null);
+    try {
+      const resp = await pluginFetch<{ runtime_config_overrides: Record<string, unknown> }>(
+        `/missions/${encodeURIComponent(missionId)}/runs/${encodeURIComponent(runId)}/overrides`,
+      );
+      setReplaySpec({
+        replay_of: runId,
+        pre_filled_overrides: resp.runtime_config_overrides ?? {},
+      });
+      setShowRunModal(true);
+    } catch (e: any) {
+      setReplayError(e?.message || String(e));
+    }
+  }, [missionId]);
+
+  const closeRunModal = React.useCallback(() => {
+    setShowRunModal(false);
+    setReplaySpec(null);
+  }, []);
 
 
   // Codex P2 round 10: when the route flips from `mission` to `missionRun`
@@ -188,10 +216,20 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
     <div className="uh-stack">
       <div className="uh-row-between">
         <UI.Button variant="ghost" size="sm" onClick={() => { window.location.hash = buildHash({ view: "overview" }); }}>← Back</UI.Button>
-        <UI.Button onClick={() => setShowRunModal(true)}>Run</UI.Button>
+        <div className="uh-row" style={{ gap: 8 }}>
+          {pinnedRunId ? (
+            <UI.Button variant="outline" onClick={() => openReplay(pinnedRunId)}>Replay this run</UI.Button>
+          ) : null}
+          <UI.Button onClick={() => { setReplaySpec(null); setShowRunModal(true); }}>Run</UI.Button>
+        </div>
       </div>
+      {replayError ? <div className="uh-error">Failed to load replay overrides: {replayError}</div> : null}
       {!pinnedRunId ? (
-        <RecentRunsPane missionId={missionId} runs={mission.runs ?? []} />
+        <RecentRunsPane
+          missionId={missionId}
+          runs={mission.runs ?? []}
+          onReplay={openReplay}
+        />
       ) : null}
       {pinnedRunId ? (
         <div className="uh-breadcrumb" style={{ fontSize: 12, marginBottom: 8 }}>
@@ -225,7 +263,12 @@ export function MissionDrilldown({ missionId, pinnedRunId }: { missionId: string
       )}
       {tab === "verify" ? <VerificationViewer missionId={missionId} /> : null}
       {showRunModal ? (
-        <RunModal mission={mission} onClose={() => setShowRunModal(false)} />
+        <RunModal
+          mission={mission}
+          onClose={closeRunModal}
+          replay_of={replaySpec?.replay_of}
+          pre_filled_overrides={replaySpec?.pre_filled_overrides}
+        />
       ) : null}
     </div>
   );
