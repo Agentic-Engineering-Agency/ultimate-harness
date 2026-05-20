@@ -14,6 +14,7 @@ import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
 import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
+import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
@@ -123,6 +124,18 @@ async function enforceRuntimeCapabilities(
 ): Promise<void> {
   if (force) return;
   await assertRuntimeCapabilities(root, missionPath, runtime);
+}
+
+/** Preflight after runtime is chosen (`--runtime` or post `--auto` routing). */
+async function enforceRuntimePreflight(
+  root: string,
+  missionPath: string,
+  runtime: string,
+  force: boolean,
+): Promise<void> {
+  if (force) return;
+  await enforceRuntimeCapabilities(root, missionPath, runtime, false);
+  await assertRuntimeRequirements(missionPath, runtime);
 }
 
 async function installRuntimeCancelledEventHandler(
@@ -715,9 +728,9 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimeCapabilities(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
     } catch (err) {
-      console.error(`[BLOCKED] runtime capability mismatch:`);
+      console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
       console.error(`  pass --force to bypass this safety check`);
       process.exit(1);
@@ -779,9 +792,9 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimeCapabilities(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
     } catch (err) {
-      console.error(`[BLOCKED] runtime capability mismatch:`);
+      console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
       console.error(`  pass --force to bypass this safety check`);
       process.exit(1);
@@ -919,9 +932,9 @@ missionCmd
     if (opts.force !== true) {
       for (const rt of requested) {
         try {
-          await enforceRuntimeCapabilities(root, canonicalMissionPath, rt, false);
+          await enforceRuntimePreflight(root, canonicalMissionPath, rt, false);
         } catch (err) {
-          console.error(`[BLOCKED] runtime capability mismatch for ${rt}:`);
+          console.error(`[BLOCKED] runtime preflight failed for ${rt}:`);
           console.error(`  error: ${(err as Error).message}`);
           console.error(`  pass --force to bypass this safety check`);
           process.exit(1);

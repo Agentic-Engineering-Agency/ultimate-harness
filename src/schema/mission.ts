@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CostClassSchema } from "./adapter-capabilities.js";
 
 const IssueSchema = z.object({
   source: z.string(),
@@ -82,6 +83,14 @@ const TddOptionsSchema = z.object({
   source_paths: z.array(z.string().min(1)).optional().default(DEFAULT_SOURCE_PATHS),
 }).strict();
 
+export const RuntimeRequirementsSchema = z.object({
+  needs_network: z.boolean().default(false),
+  needs_shell: z.boolean().default(true),
+  needs_fs_write: z.boolean().default(true),
+  min_context_tokens: z.number().int().positive().optional(),
+  max_cost_class: CostClassSchema.default("premium"),
+}).strict();
+
 const MissionInputSchema = z.object({
   schema_version: z.literal("uh.mission.v0"),
   id: z.string().min(1),
@@ -109,6 +118,7 @@ const MissionInputSchema = z.object({
   acceptance_criteria: z.array(AcceptanceCriterionSchema).optional().default([]),
   tdd: TddOptionsSchema.optional(),
   capabilities: z.array(CapabilitySchema).optional().default([]),
+  runtime_requirements: RuntimeRequirementsSchema.optional(),
 
   // Backward-compatible fields.
   name: z.string().min(1).optional(),
@@ -221,6 +231,7 @@ export const MissionSchema = MissionInputSchema;
 export type MissionDocument = z.infer<typeof MissionSchema>;
 export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>;
 export type TddOptions = z.infer<typeof TddOptionsSchema>;
+export type RuntimeRequirements = z.infer<typeof RuntimeRequirementsSchema>;
 export const TDD_DEFAULT_TEST_PATHS = DEFAULT_TEST_PATHS;
 export const TDD_DEFAULT_SOURCE_PATHS = DEFAULT_SOURCE_PATHS;
 
