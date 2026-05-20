@@ -42,8 +42,8 @@ export class PluginFetchError extends Error {
   }
 }
 
-/** Match a trailing JSON object in an error message (the SDK appends it). */
-const TRAILING_JSON = /\{[^{}]*\}\s*$/;
+import { extractTrailingJsonPayload } from "./errorPayload";
+export { extractTrailingJsonPayload } from "./errorPayload";
 
 /**
  * Fetch a plugin-scoped JSON endpoint. Resolves with the parsed body on 2xx;
@@ -58,16 +58,15 @@ export async function pluginFetch<T = any>(path: string, init?: RequestInit): Pr
   } catch (cause: unknown) {
     const rawMessage = (cause as { message?: string } | null)?.message ?? String(cause);
     let payload: ErrorPayload | undefined;
-    const match = TRAILING_JSON.exec(rawMessage);
-    if (match) {
-      try {
-        const parsed = JSON.parse(match[0]);
-        if (parsed && typeof parsed === "object" && typeof parsed.error === "string" && typeof parsed.code === "string") {
-          payload = parsed as ErrorPayload;
-        }
-      } catch {
-        /* leave payload undefined — message-only error */
-      }
+    const parsed = extractTrailingJsonPayload(rawMessage);
+    if (
+      parsed !== undefined
+      && parsed !== null
+      && typeof parsed === "object"
+      && typeof (parsed as { error?: unknown }).error === "string"
+      && typeof (parsed as { code?: unknown }).code === "string"
+    ) {
+      payload = parsed as ErrorPayload;
     }
     const status = (cause as { status?: number } | null)?.status;
     throw new PluginFetchError(payload?.error ?? rawMessage, { status, payload, cause });

@@ -115,11 +115,15 @@ class _UhCliRunner:
         )
 
     def spawn(self, args: list[str], cwd: Path) -> subprocess.Popen[str]:
+        # stdout/stderr are intentionally DEVNULL: the CLI's user-facing
+        # channel is events.ndjson (read by the SSE endpoint from disk), and
+        # leaving the pipes attached without a reader risks a deadlock once
+        # the OS pipe buffer fills (PR #89 finding #1).
         return subprocess.Popen(  # noqa: S603 — args are constructed from a closed set.
             [_uh_bin(), *args],
             cwd=str(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             text=True,
         )
 
@@ -382,7 +386,12 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
     raw = mission_yaml.read_text(encoding="utf-8") if mission_yaml.is_file() else None
     if raw is None:
         raise _err(404, "not_found", f"mission {mission_id} not found")
-    doc = yaml.safe_load(raw) or {}
+    try:
+        doc = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as exc:
+        raise _err(400, "malformed_yaml", "malformed mission yaml", details=str(exc)) from exc
+    if not isinstance(doc, dict):
+        raise _err(400, "malformed_yaml", "mission yaml is not a mapping")
     summaries = {m["id"]: m for m in _scan_missions(root)}
     summary = summaries.get(mission_id, {})
     return {
@@ -437,14 +446,63 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     except FileNotFoundError as exc:
         raise _err(500, "uh_missing", f"uh CLI binary not found: {exc}") from exc
 
-    _active_runs[run_id] = {
+    events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
+    info: dict[str, Any] = {
         "missionId": mission_id,
         "startedAt": started_iso,
         "started_mono": time.monotonic(),
         "process": proc,
         "status": "running",
     }
+    _active_runs[run_id] = info
+    # Dynamic read so tests that monkeypatch ``_RUN_TIMEOUT_S`` after import
+    # still see the new value when starting a run.
+    import sys as _sys
+    timeout_s = float(getattr(_sys.modules[__name__], "_RUN_TIMEOUT_S", 3600.0))
+    # Background watchdog: SIGTERMs the child if it outlives the timeout,
+    # even when no SSE consumer is attached (PR #89 finding #2).
+    info["watchdog"] = asyncio.create_task(
+        _enforce_run_timeout(run_id, info, events_path, timeout_s)
+    )
     return {"runId": run_id, "startedAt": started_iso}
+
+
+async def _enforce_run_timeout(
+    run_id: str,
+    info: dict[str, Any],
+    events_path: Path,
+    timeout_s: float,
+) -> None:
+    """Terminate a hung child after ``timeout_s`` without an attached reader.
+
+    Idempotent with the SSE drain loop: both share ``info`` and use a
+    defensive ``proc.terminate()`` so whichever fires first wins. A natural
+    exit before the deadline makes this a no-op.
+    """
+    try:
+        await asyncio.sleep(timeout_s)
+    except asyncio.CancelledError:
+        return
+    proc = info.get("process")
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except (ProcessLookupError, OSError):
+        pass
+    info["status"] = "timeout"
+    try:
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {"type": "runtime.timeout", "run_id": run_id, "timeout_s": timeout_s}
+                )
+                + "\n"
+            )
+    except OSError:
+        # Disk failure shouldn't mask the in-memory timeout signal.
+        pass
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -465,6 +523,9 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
             pass
         proc.poll()
         info["status"] = "cancelled"
+    watchdog = info.get("watchdog")
+    if watchdog is not None and not watchdog.done():
+        watchdog.cancel()
     return {"ok": True, "status": info["status"]}
 
 

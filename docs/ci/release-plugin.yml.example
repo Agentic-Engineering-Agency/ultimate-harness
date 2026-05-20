@@ -9,9 +9,12 @@
 # the existing `dev`/`main` CI for typecheck + bundle size; this workflow only
 # runs the bundle + tarball + upload step on tags.
 #
-# Output: `hermes-plugin-<tag>.tar.gz` attached to the GitHub Release. Layout
-# inside the tarball mirrors `~/.hermes/plugins/uh/` (one extraction step =
-# fully installed).
+# Output: two tarballs attached to the GitHub Release —
+#   * `hermes-plugin-<tag>.tar.gz` (version-pinned, for archival / pinning)
+#   * `hermes-plugin.tar.gz`       (stable name, so the install one-liner
+#     `releases/latest/download/hermes-plugin.tar.gz` keeps working).
+# Layout inside each tarball mirrors `~/.hermes/plugins/uh/` (one extraction
+# step = fully installed).
 name: Release Hermes plugin
 
 on:
@@ -61,19 +64,27 @@ jobs:
           cp -a apps/hermes-plugin/dashboard/dist "$STAGE/uh/dashboard/"
           cp -a apps/hermes-plugin/theme/ultimate-harness.yaml "$STAGE/uh/theme/"
           cp -a apps/hermes-plugin/README.md "$STAGE/uh/"
+          # Build both the version-pinned and the stable-named tarballs so
+          # `releases/latest/download/hermes-plugin.tar.gz` (used by the
+          # install one-liner in README + runbook) keeps resolving.
           tar -czf "$RUNNER_TEMP/hermes-plugin-${GITHUB_REF_NAME}.tar.gz" -C "$STAGE" .
+          cp "$RUNNER_TEMP/hermes-plugin-${GITHUB_REF_NAME}.tar.gz" "$RUNNER_TEMP/hermes-plugin.tar.gz"
           ls -la "$RUNNER_TEMP" | grep hermes-plugin
 
       - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ runner.temp }}/hermes-plugin-${{ github.ref_name }}.tar.gz
+          files: |
+            ${{ runner.temp }}/hermes-plugin-${{ github.ref_name }}.tar.gz
+            ${{ runner.temp }}/hermes-plugin.tar.gz
 
       - name: Upload as workflow artifact
         if: github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
           name: hermes-plugin-${{ github.ref_name }}
-          path: ${{ runner.temp }}/hermes-plugin-${{ github.ref_name }}.tar.gz
+          path: |
+            ${{ runner.temp }}/hermes-plugin-${{ github.ref_name }}.tar.gz
+            ${{ runner.temp }}/hermes-plugin.tar.gz
           if-no-files-found: error

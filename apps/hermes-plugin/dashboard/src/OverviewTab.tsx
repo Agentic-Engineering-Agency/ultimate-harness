@@ -8,6 +8,7 @@
  * surfaces inline in the affected panel — we never silently swap to stale data.
  */
 import { pluginFetch, UI, type AdapterEntry, type MissionSummary, type RunRow, type StatusPayload, fmt } from "./sdk";
+import { adapterHealthBadge } from "./adapterHealth";
 import { buildHash } from "./router";
 import { RunModal } from "./RunModal";
 
@@ -95,7 +96,7 @@ function AdaptersPanel() {
         {data && data.adapters.length === 0 ? <div className="uh-empty">No adapters configured.</div> : null}
         <div className="uh-list">
           {data?.adapters.map((a: AdapterEntry) => {
-            const ok = a.check?.ok !== false;
+            const health = adapterHealthBadge(a.check);
             return (
               <div key={a.id} className="uh-list-row">
                 <div>
@@ -104,7 +105,7 @@ function AdaptersPanel() {
                   {a.check?.error ? <div className="uh-error">{a.check.error}</div> : null}
                 </div>
                 <UI.Badge variant={statusBadge(a.status)}>{a.status}</UI.Badge>
-                <UI.Badge variant={ok ? "default" : "destructive"}>{ok ? "OK" : "fail"}</UI.Badge>
+                <UI.Badge variant={health.variant} title={health.title}>{health.label}</UI.Badge>
               </div>
             );
           })}

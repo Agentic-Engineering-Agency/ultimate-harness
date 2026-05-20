@@ -341,3 +341,82 @@ async def test_run_timeout_terminates_and_emits_timeout_event(
     assert "event: done" in body, body
     assert body.index("event: timeout") < body.index("event: done")
     assert fake_cli.last_popen.terminated is True
+
+
+@pytest.mark.asyncio
+async def test_start_run_timeout_terminates_even_without_sse(
+    client: httpx.AsyncClient,
+    isolated_project: Path,
+    fake_cli: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watchdog SIGTERMs a hung child even when nobody opens the SSE stream.
+
+    Pre-fix, the timeout only fired inside the SSE drain loop; an operator
+    who started a run and never opened the live tail (or whose tab crashed)
+    saw the run hang in ``running`` forever. The watchdog is spawned by
+    ``start_run`` and is independent of any reader (PR #89 finding #1).
+    """
+    monkeypatch.setattr("plugin_api._RUN_TIMEOUT_S", 0.4)
+    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
+    fake_cli.popen_events_path = events_path
+    fake_cli.popen_events = []  # nothing staged — proc just hangs
+
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    assert start.status_code == 200, start.text
+    run_id = start.json()["runId"]
+
+    # Do NOT open the SSE stream. Sleep past the timeout deadline and let
+    # the watchdog do its job.
+    await asyncio.sleep(0.7)
+
+    assert fake_cli.last_popen.terminated is True
+    import plugin_api as _api
+    assert _api._active_runs[run_id]["status"] == "timeout"
+    # The watchdog also persists the timeout to events.ndjson so a fresh
+    # SSE reader catching up sees it.
+    on_disk = events_path.read_text(encoding="utf-8")
+    assert "runtime.timeout" in on_disk, on_disk
+
+
+async def test_uh_cli_runner_spawn_uses_devnull(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_UhCliRunner.spawn`` must NOT attach PIPEs to the child's stdio.
+
+    Without a reader, full pipe buffers deadlock the child (PR #89 finding
+    #1, second sub-finding). Events flow via the on-disk ``events.ndjson``
+    file the CLI writes; stdout/stderr are noise that goes to ``/dev/null``.
+    """
+    import subprocess as _sp
+    import plugin_api as _api
+
+    captured: dict[str, Any] = {}
+
+    class _FakePopen:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(_api.subprocess, "Popen", _FakePopen)
+    _api._UhCliRunner().spawn(["mission", "run", "demo"], Path("/tmp"))
+
+    assert captured["kwargs"]["stdout"] is _sp.DEVNULL
+    assert captured["kwargs"]["stderr"] is _sp.DEVNULL
+    assert "stdin" not in captured["kwargs"] or captured["kwargs"]["stdin"] is not _sp.PIPE
+
+
+@pytest.mark.asyncio
+async def test_get_mission_handles_malformed_yaml(
+    client: httpx.AsyncClient, isolated_project: Path,
+) -> None:
+    """Malformed ``mission.yaml`` returns the structured ``malformed_yaml``
+    400 instead of an unhandled YAMLError bubbling up as a generic 500
+    (PR #89 finding #6)."""
+    mission_yaml = isolated_project / ".harness" / "missions" / "demo" / "mission.yaml"
+    mission_yaml.write_text(":\n:::bad:::\n  - [unbalanced", encoding="utf-8")
+
+    resp = await client.get("/api/plugins/uh/missions/demo")
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == "malformed_yaml"
+    assert body["error"]
+    assert "details" in body
