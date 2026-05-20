@@ -99,6 +99,26 @@ describe("UH-108 — uh spec scaffold", () => {
     expect(merged).toContain('it.todo("AC3: preserves implemented test bodies on re-run");');
     expect(merged).not.toContain('it.todo("AC1: generates a new TypeScript test file")');
   });
+
+  test("preserves implemented Python tests after skip decorator is removed", () => {
+    const spec = parseSpecContent(VALID_SPEC, "fixture.spec.md");
+    const existing = `"""Generated from docs/specs/fixture.spec.md @ UH-108"""
+import pytest
+
+class TestUH_108:
+    def test_ac1_generates_a_new_typescript_test_file(self):
+        assert True
+
+    @pytest.mark.skip(reason="AC2: merges new criteria into an existing file")
+    def test_ac2_merges_new_criteria_into_an_existing_file(self):
+        pytest.skip("AC2: merges new criteria into an existing file")
+`;
+    const merged = mergeScaffoldContent(existing, spec, "py");
+    expect(merged).toContain("def test_ac1_generates_a_new_typescript_test_file");
+    expect(merged).toContain("assert True");
+    expect(merged).not.toContain('@pytest.mark.skip(reason="AC1:');
+    expect(merged).toContain('@pytest.mark.skip(reason="AC3:');
+  });
 });
 
 describe("scaffoldTestsFromSpec", () => {

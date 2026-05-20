@@ -160,30 +160,33 @@ function extractPythonAcBlocks(content: string): AcBlockMap {
   const lines = content.split("\n");
   let index = 0;
   while (index < lines.length) {
-    const skipMatch = /^\s*@pytest\.mark\.skip\(reason=["'](AC\d+):/.exec(lines[index]);
-    if (!skipMatch) {
+    const line = lines[index];
+    const skipMatch = /^\s*@pytest\.mark\.skip\(reason=["'](AC\d+):/.exec(line);
+    const defMatch = /^\s*def test_(ac\d+)_/.exec(line);
+    let acId: string | undefined;
+    let start = index;
+
+    if (skipMatch) {
+      acId = skipMatch[1];
+      index += 1;
+      if (index >= lines.length || !/^\s*def test_/.test(lines[index])) {
+        continue;
+      }
+      index += 1;
+    } else if (defMatch) {
+      acId = defMatch[1].toUpperCase();
+      start = index;
+      index += 1;
+    } else {
       index += 1;
       continue;
     }
-    const acId = skipMatch[1];
-    const start = index;
-    index += 1;
-    if (index >= lines.length || !/^\s*def test_/.test(lines[index])) {
-      continue;
-    }
-    index += 1;
+
     while (index < lines.length && (lines[index].trim() === "" || /^\s{4,}/.test(lines[index]))) {
       index += 1;
     }
     const block = lines.slice(start, index).join("\n").trimEnd();
-    const bodyLines = block.split("\n").slice(2);
-    const implemented = bodyLines.some(
-      (line) =>
-        line.trim().length > 0 &&
-        !line.includes("pytest.skip") &&
-        line.trim() !== "pass" &&
-        !line.trim().startsWith("#"),
-    );
+    const implemented = shouldPreserveBlock(block, "py");
     if (implemented || !blocks.has(acId)) {
       blocks.set(acId, block);
     }
@@ -215,7 +218,9 @@ function shouldPreserveBlock(block: string, lang: ScaffoldLang): boolean {
   if (lang === "ts") {
     return /^\s*it\s*\(/.test(block) && !/^\s*it\.todo/.test(block);
   }
-  const bodyLines = block.split("\n").slice(2);
+  const lines = block.split("\n");
+  const defIdx = lines.findIndex((l) => /^\s*def test_/.test(l));
+  const bodyLines = defIdx >= 0 ? lines.slice(defIdx + 1) : lines;
   return bodyLines.some(
     (line) =>
       line.trim().length > 0 &&
