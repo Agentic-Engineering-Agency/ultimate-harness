@@ -491,22 +491,21 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
     # Codex P1 round 3: the CLI takes a mission file PATH, not the id slug.
     args = ["mission", "run", str(mission_yaml), "--root", str(root)]
     started_iso = datetime.now(tz=timezone.utc).isoformat()
-    try:
-        proc = _runner.spawn(args, cwd=root)
-    except FileNotFoundError as exc:
-        raise _err(500, "uh_missing", f"uh CLI binary not found: {exc}") from exc
-
     events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
-    # Codex P1 round 5: capture the events.ndjson byte offset at spawn time
-    # so the live SSE tail starts AFTER any historical events from previous
-    # runs of the same mission. Without this, opening the Run modal replays
-    # the entire mission's event history as if it were the current run's
-    # output — misattributing evidence during active triage and dumping a
-    # large stale backlog before live events arrive.
+    # Codex P1 round 8: capture the events.ndjson byte offset BEFORE spawning
+    # the child process. If we snapshot after spawn, a fast CLI can append
+    # the first events (runtime.started) between spawn() and stat(), and the
+    # SSE tail then skips those initial events because last_size starts past
+    # them. Sampling before spawn means any new bytes written by the spawned
+    # process are guaranteed to land beyond last_size.
     try:
         started_byte_offset = events_path.stat().st_size if events_path.is_file() else 0
     except OSError:
         started_byte_offset = 0
+    try:
+        proc = _runner.spawn(args, cwd=root)
+    except FileNotFoundError as exc:
+        raise _err(500, "uh_missing", f"uh CLI binary not found: {exc}") from exc
     info: dict[str, Any] = {
         "missionId": mission_id,
         "startedAt": started_iso,
@@ -545,7 +544,18 @@ async def _enforce_run_timeout(
     except asyncio.CancelledError:
         return
     proc = info.get("process")
-    if proc is None or proc.poll() is not None:
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        # Codex P1 round 8: child already exited (natural completion before
+        # the timeout). When no SSE consumer attached, the SSE drain loop
+        # never ran — so we must update status and schedule eviction
+        # ourselves, or _active_runs stays stuck as 'running' indefinitely.
+        # Only flip status if we still owned 'running'; respect cancel/
+        # timeout terminal states (round 6 P2).
+        if info.get("status") == "running":
+            info["status"] = "finished"
+        _schedule_run_eviction(run_id)
         return
     try:
         proc.terminate()

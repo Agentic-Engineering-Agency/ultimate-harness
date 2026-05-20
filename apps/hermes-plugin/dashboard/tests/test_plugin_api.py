@@ -322,6 +322,69 @@ async def test_cancelled_runtime_status_treated_as_terminal(
 
 
 @pytest.mark.asyncio
+async def test_byte_offset_captured_before_spawn(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P1 round 8: the events.ndjson offset MUST be captured BEFORE
+    spawn() so events appended by the freshly-spawned child are still
+    visible to the SSE tail (not skipped past)."""
+    import plugin_api as _api  # type: ignore[import-not-found]
+    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    # Pre-seed historical events to confirm the offset still skips them.
+    events_path.write_text(
+        '{"type":"hist","run_id":"old"}\n',
+        encoding="utf-8",
+    )
+    historical_size = events_path.stat().st_size
+
+    # Hook fake_cli.spawn so it writes one event BEFORE returning the
+    # FakePopen — simulating a fast CLI that appends runtime.started
+    # between stat() and spawn() in start_run.
+    real_spawn = fake_cli.spawn
+
+    def hooked_spawn(args: list[str], cwd: Path) -> Any:
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write('{"type":"runtime.started","run_id":"x"}\n')
+        return real_spawn(args, cwd)
+
+    monkeypatch.setattr(fake_cli, "spawn", hooked_spawn)
+
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    info = _api._active_runs[run_id]
+    # Offset must be at the historical end (pre-spawn snapshot), NOT
+    # past the runtime.started event the hooked_spawn appended.
+    assert info["started_byte_offset"] == historical_size, (
+        f"offset captured after spawn: {info['started_byte_offset']} != {historical_size}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_watchdog_evicts_natural_exit_without_sse(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P1 round 8: when a run completes naturally and no SSE
+    consumer ever attaches, the watchdog must still evict from
+    _active_runs and update status — otherwise it leaks forever."""
+    import plugin_api as _api  # type: ignore[import-not-found]
+    monkeypatch.setattr(_api, "_RUN_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(_api, "_RUN_EVICTION_GRACE_S", 0.05)
+
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    assert fake_cli.last_popen is not None
+    # Simulate natural exit before the watchdog fires.
+    fake_cli.last_popen.schedule_exit()
+
+    # Wait past the timeout + eviction grace so the watchdog runs and
+    # evicts. NO SSE consumer is attached during this test.
+    await asyncio.sleep(0.5)
+    assert run_id not in _api._active_runs, (
+        "watchdog must evict naturally-completed runs without an SSE consumer"
+    )
+
+@pytest.mark.asyncio
 async def test_run_unknown_mission_returns_404(client: httpx.AsyncClient, isolated_project: Path) -> None:
     resp = await client.post("/api/plugins/uh/missions/ghost/run", json={})
     assert resp.status_code == 404
