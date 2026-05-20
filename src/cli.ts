@@ -17,6 +17,7 @@ import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabiliti
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
+import { parseScaffoldLang, scaffoldTestsFromSpec } from "./harness/test-scaffold.js";
 import { assertValidRunId } from "./harness/run-id.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
@@ -488,6 +489,36 @@ function collectIssueRefOption(value: string, previous: ProposeIssueRef[]): Prop
 function collectRequiredCheckOption(value: string, previous: ProposeRequiredCheck[]): ProposeRequiredCheck[] {
   return [...previous, parseRequiredCheck(value)];
 }
+
+
+// uh spec
+const specCmd = program.command("spec").description("Spec-driven development helpers");
+
+specCmd
+  .command("scaffold")
+  .description("Generate starter tests from uh.spec.v0 acceptance criteria")
+  .requiredOption("--from <path>", "Path to .spec.md file")
+  .requiredOption("--lang <lang>", "Target language: ts | py")
+  .requiredOption("--out <path>", "Output test file path")
+  .action(async (opts: { from: string; lang: string; out: string }) => {
+    try {
+      const lang = parseScaffoldLang(opts.lang);
+      const result = await scaffoldTestsFromSpec({
+        specPath: opts.from,
+        lang,
+        outPath: opts.out,
+      });
+      const verb = result.created ? "Created" : "Merged";
+      console.log(`${verb} test scaffold: ${result.path}`);
+      if (result.addedAcIds.length > 0) {
+        console.log(`Added acceptance criteria: ${result.addedAcIds.join(", ")}`);
+      }
+    } catch (err) {
+      console.error("[FAIL] spec scaffold error:");
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
 
 // uh adapter
 const adapterCmd = program
