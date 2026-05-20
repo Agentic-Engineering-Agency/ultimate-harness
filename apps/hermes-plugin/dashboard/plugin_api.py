@@ -198,6 +198,33 @@ def _make_run_id() -> str:
     return f"{ts}-{uuid.uuid4().hex[:8]}"
 
 
+# Codex P2 round 5: keep _active_runs from growing unbounded. After a run
+# reaches a terminal state we wait RUN_EVICTION_GRACE_S before removing the
+# entry so the frontend can still fetch the final status. Tests monkeypatch
+# this to 0 for fast eviction assertions.
+_RUN_EVICTION_GRACE_S: float = 60.0
+
+
+async def _evict_run_after_grace(run_id: str) -> None:
+    try:
+        await asyncio.sleep(_RUN_EVICTION_GRACE_S)
+    except asyncio.CancelledError:
+        return
+    _active_runs.pop(run_id, None)
+
+
+def _schedule_run_eviction(run_id: str) -> None:
+    """Schedule the run's _active_runs entry for removal after a grace period.
+
+    Idempotent: if called twice for the same run_id, the second call is a
+    no-op (the existing eviction task already covers it).
+    """
+    info = _active_runs.get(run_id)
+    if info is None or info.get("eviction") is not None:
+        return
+    info["eviction"] = asyncio.create_task(_evict_run_after_grace(run_id))
+
+
 # ---------------------------------------------------------------------------
 # Scanners (file-system fallback when --json subcommands don't exist).
 # ---------------------------------------------------------------------------
@@ -456,10 +483,21 @@ async def start_run(mission_id: str, request: Request) -> dict[str, Any]:
         raise _err(500, "uh_missing", f"uh CLI binary not found: {exc}") from exc
 
     events_path = _harness(root) / "missions" / mission_id / "events.ndjson"
+    # Codex P1 round 5: capture the events.ndjson byte offset at spawn time
+    # so the live SSE tail starts AFTER any historical events from previous
+    # runs of the same mission. Without this, opening the Run modal replays
+    # the entire mission's event history as if it were the current run's
+    # output — misattributing evidence during active triage and dumping a
+    # large stale backlog before live events arrive.
+    try:
+        started_byte_offset = events_path.stat().st_size if events_path.is_file() else 0
+    except OSError:
+        started_byte_offset = 0
     info: dict[str, Any] = {
         "missionId": mission_id,
         "startedAt": started_iso,
         "started_mono": time.monotonic(),
+        "started_byte_offset": started_byte_offset,
         "process": proc,
         "status": "running",
     }
@@ -512,7 +550,9 @@ async def _enforce_run_timeout(
     except OSError:
         # Disk failure shouldn't mask the in-memory timeout signal.
         pass
-
+    # Codex P2 round 5: watchdog also evicts so a run that times out without
+    # any SSE consumer doesn't linger in _active_runs forever.
+    _schedule_run_eviction(run_id)
 
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str) -> dict[str, Any]:
@@ -535,6 +575,8 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
     watchdog = info.get("watchdog")
     if watchdog is not None and not watchdog.done():
         watchdog.cancel()
+    # Codex P2 round 5: terminal state — schedule registry eviction.
+    _schedule_run_eviction(run_id)
     return {"ok": True, "status": info["status"]}
 
 
@@ -551,7 +593,9 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
     async def gen() -> AsyncIterator[bytes]:
         # Stream the existing tail first, then poll for additions until the
         # process exits, the run timeout fires, or the client disconnects.
-        last_size = 0
+        # Codex P1 round 5: start from the byte offset captured at spawn so
+        # we don't replay historical events from earlier runs.
+        last_size = int(info.get("started_byte_offset") or 0)
         proc: subprocess.Popen[str] = info["process"]
         started_mono: float = info.get("started_mono") or time.monotonic()
         last_event_mono = time.monotonic()
@@ -614,6 +658,11 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
                     info["status"] = "timeout"
                 else:
                     info["status"] = "finished"
+                # Codex P2 round 5: schedule eviction from _active_runs so the
+                # registry doesn't grow unbounded in a long-lived dashboard.
+                # Delay 60s so the frontend has time to poll final status
+                # before the entry disappears.
+                _schedule_run_eviction(run_id)
                 yield b"event: done\ndata: closed\n\n"
                 return
             if (now - last_event_mono) >= keepalive_s:

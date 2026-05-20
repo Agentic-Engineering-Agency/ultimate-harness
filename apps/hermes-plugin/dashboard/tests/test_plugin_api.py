@@ -182,6 +182,63 @@ async def test_per_run_artifact_marks_response_as_not_run_scoped(
 
 
 @pytest.mark.asyncio
+async def test_sse_starts_after_historical_events(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """Codex P1 round 5: pre-existing events from a previous run must NOT
+    be replayed on the new run's SSE stream."""
+    events_path = isolated_project / ".harness" / "missions" / "demo" / "events.ndjson"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    # Pre-seed historical events from an earlier run.
+    events_path.write_text(
+        '{"type":"runtime.started","run_id":"old-run"}\n'
+        '{"type":"runtime.finished","run_id":"old-run"}\n',
+        encoding="utf-8",
+    )
+    fake_cli.popen_events_path = events_path
+    fake_cli.popen_events = ['{"type":"runtime.started","run_id":"new-run"}']
+
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    assert fake_cli.last_popen is not None
+    fake_cli.last_popen.schedule_exit()
+
+    async with client.stream("GET", f"/api/plugins/uh/runs/{run_id}/events") as resp:
+        chunks: list[str] = []
+        async for chunk in resp.aiter_text():
+            chunks.append(chunk)
+    body = "".join(chunks)
+    # Old run's events MUST NOT appear in the new run's stream.
+    assert "old-run" not in body, f"historical events replayed: {body!r}"
+    # The new run's event MUST appear (the staged one appended on first poll).
+    assert "new-run" in body, f"new run event missing: {body!r}"
+
+
+@pytest.mark.asyncio
+async def test_active_runs_evicted_after_terminal_state(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P2 round 5: terminal-state runs must be evicted from
+    _active_runs so the registry doesn't grow unbounded."""
+    import plugin_api as _api  # type: ignore[import-not-found]
+    monkeypatch.setattr(_api, "_RUN_EVICTION_GRACE_S", 0.05)
+    monkeypatch.setattr(_api, "_RUN_TIMEOUT_S", 5.0)
+
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    assert fake_cli.last_popen is not None
+    fake_cli.last_popen.schedule_exit()
+
+    async with client.stream("GET", f"/api/plugins/uh/runs/{run_id}/events") as resp:
+        async for _ in resp.aiter_bytes():
+            pass
+    # Eviction is scheduled after `done` is emitted; give the grace period
+    # plus a small buffer to actually run the eviction task.
+    await asyncio.sleep(0.2)
+    assert run_id not in _api._active_runs, "run not evicted after terminal state"
+
+
+@pytest.mark.asyncio
 async def test_run_unknown_mission_returns_404(client: httpx.AsyncClient, isolated_project: Path) -> None:
     resp = await client.post("/api/plugins/uh/missions/ghost/run", json={})
     assert resp.status_code == 404
