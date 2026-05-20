@@ -1,0 +1,8 @@
+# Test-only dependencies for the Hermes dashboard plugin backend.
+# Runtime deps (fastapi, pyyaml) are provided by the Hermes dashboard process
+# that hosts the plugin; tests need them locally too.
+fastapi
+PyYAML
+httpx
+pytest
+pytest-asyncio

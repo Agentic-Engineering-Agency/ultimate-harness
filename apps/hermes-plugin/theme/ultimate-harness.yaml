@@ -1,0 +1,65 @@
+# UH-69 — Ultimate Harness theme for the Hermes dashboard.
+#
+# Drop this file into ~/.hermes/dashboard-themes/ to make it appear in the
+# theme switcher. The notched-card chrome plus the UH wordmark are wired via
+# `componentStyles` + `assets`; the `sessions:bottom` slot rendered by the
+# `uh` plugin (SessionsLink.tsx) re-uses the same CSS vars.
+name: ultimate-harness
+label: Ultimate Harness
+description: Workbench palette tuned for the UH dashboard plugin (notched cards, forge accents).
+
+palette:
+  background:
+    hex: "#0e0f17"
+    alpha: 1.0
+  midground:
+    hex: "#d4e2ff"
+    alpha: 1.0
+  foreground:
+    hex: "#ffffff"
+    alpha: 0
+  warmGlow: "rgba(255, 138, 64, 0.22)"
+  noiseOpacity: 0.55
+
+typography:
+  fontSans: "Inter, system-ui, sans-serif"
+  fontMono: "JetBrains Mono, ui-monospace, monospace"
+  fontDisplay: "Inter, system-ui, sans-serif"
+  fontUrl: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+  baseSize: "14px"
+  lineHeight: "1.5"
+  letterSpacing: "0.005em"
+
+layout:
+  radius: "0.25rem"
+  density: comfortable
+
+layoutVariant: standard
+
+assets:
+  hero: "https://uh.agenticengineering.lat/og.png"
+  crest: "https://uh.agenticengineering.lat/icon.svg"
+  logo: "https://uh.agenticengineering.lat/wordmark.svg"
+
+componentStyles:
+  card:
+    clipPath: "polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px)"
+    background: "linear-gradient(180deg, rgba(28, 32, 56, 0.92), rgba(14, 15, 23, 0.96))"
+    boxShadow: "inset 0 0 0 1px rgba(212, 226, 255, 0.18)"
+  tab:
+    clipPath: "polygon(6px 0, 100% 0, calc(100% - 6px) 100%, 0 100%)"
+  header:
+    background: "linear-gradient(180deg, rgba(20, 22, 40, 0.95), rgba(14, 15, 23, 0.9))"
+
+colorOverrides:
+  primary: "#ff8a40"
+  primaryForeground: "#0e0f17"
+  ring: "#ff8a40"
+  destructive: "#ff5664"
+  border: "rgba(212, 226, 255, 0.18)"
+
+customCSS: |
+  /* Anvil-tinted hover state on UH list rows so the plugin reads as native. */
+  .uh-list-row:hover {
+    border-color: color-mix(in oklab, var(--color-primary) 28%, var(--color-border));
+  }
