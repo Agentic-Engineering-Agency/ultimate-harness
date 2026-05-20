@@ -153,14 +153,20 @@ export function evaluateAdversarialQa(input: AdversarialQaInput): AdversarialQaR
   // secrets" — without this gate, a run with leaks present but
   // `redactionGuardrailIntact === true` would still verdict PASS, producing
   // a false-green security signal.
-  const leakedArtifacts = input.cleanup.leakedArtifacts ?? [];
+  // Codex P1 follow-up: missing leak evidence (null/undefined/non-array) must
+  // NOT default to "satisfied". The module contract is "no evidence = no PASS",
+  // so a malformed cleanup payload blocks gate-6 instead of fail-opening.
+  const leakedArtifacts = input.cleanup.leakedArtifacts;
+  const evidenceCollected = Array.isArray(leakedArtifacts);
   gates.push({
     id: "gate-6-no-leaked-artifacts",
-    description: "no leaked artifacts detected during cleanup",
-    satisfied: leakedArtifacts.length === 0,
-    detail: leakedArtifacts.length === 0
-      ? "no leaked artifacts detected"
-      : `${leakedArtifacts.length} leaked artifact(s) detected`,
+    description: "no leaked artifacts detected during cleanup (evidence required)",
+    satisfied: evidenceCollected && leakedArtifacts.length === 0,
+    detail: !evidenceCollected
+      ? "leak evidence not collected (cleanup.leakedArtifacts missing or not an array)"
+      : leakedArtifacts.length === 0
+        ? "no leaked artifacts detected"
+        : `${leakedArtifacts.length} leaked artifact(s) detected`,
   });
 
   const verdict: AdversarialQaVerdict = gates.every((g) => g.satisfied) ? "PASS" : "NEEDS-ATTENTION";
@@ -251,8 +257,14 @@ function renderMarkdown(
   for (const p of input.cleanup.orphanedWorktreePaths) {
     lines.push(`  - \`${p}\``);
   }
-  lines.push(`- Leaked artifacts: ${input.cleanup.leakedArtifacts.length}`);
-  for (const a of input.cleanup.leakedArtifacts) {
+  // Defense-in-depth: if cleanup.leakedArtifacts is missing (gate-6
+  // fail-closed catches this), the renderer must still produce valid
+  // markdown instead of throwing during report generation.
+  const leaksForReport = Array.isArray(input.cleanup.leakedArtifacts)
+    ? input.cleanup.leakedArtifacts
+    : [];
+  lines.push(`- Leaked artifacts: ${Array.isArray(input.cleanup.leakedArtifacts) ? leaksForReport.length : "(evidence missing)"}`);
+  for (const a of leaksForReport) {
     lines.push(`  - ${a}`);
   }
   lines.push(`- Redaction guardrail intact: ${input.cleanup.redactionGuardrailIntact ? "yes" : "no"}`);

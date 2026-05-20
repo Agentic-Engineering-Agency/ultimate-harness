@@ -75,6 +75,27 @@ describe("evaluateAdversarialQa", () => {
     expect(gate5!.satisfied).toBe(true);
   });
 
+  test("Codex P1: missing leak evidence (non-array leakedArtifacts) blocks PASS — fail-closed", () => {
+    // Runtime defense-in-depth: even though the TS type says `string[]`, a
+    // partially-populated cleanup payload (e.g., loaded from a malformed
+    // JSON artifact) must not produce a false-green verdict. The module
+    // contract is "no evidence = no PASS".
+    const base = cleanPassInput();
+    const malformed: AdversarialQaInput = {
+      ...base,
+      cleanup: {
+        ...base.cleanup,
+        // Force-cast away the required string[] to model a wire-deserialization bug.
+        leakedArtifacts: undefined as unknown as string[],
+      },
+    };
+    const report = evaluateAdversarialQa(malformed);
+    expect(report.verdict).toBe("NEEDS-ATTENTION");
+    const gate6 = report.gates.find((g) => g.id === "gate-6-no-leaked-artifacts");
+    expect(gate6!.satisfied).toBe(false);
+    expect(gate6!.detail).toMatch(/leak evidence not collected/);
+  });
+
   test("injection-deflected run: prompt-injection deflected scenario counts toward gate-2", () => {
     const input = cleanPassInput({
       hostileScenarios: [
