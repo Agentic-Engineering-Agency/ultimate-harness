@@ -25,26 +25,11 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 | Adapter | Status | Doc / Runbook |
 |---|---|---|
 | `hermes` | active | [Runtime adapter contract](./architecture/runtime-adapter-contract.md) defines the shape; `src/adapters/hermes.ts` is the reference implementation. |
-| `codex` | active | [`architecture/adapter-codex.md`](./architecture/adapter-codex.md), [`runbooks/codex-e2e-smoke.md`](./runbooks/codex-e2e-smoke.md) |
-| `oh-my-pi` | experimental | [`runbooks/anthropic-via-omp.md`](./runbooks/anthropic-via-omp.md) — covers the Anthropic-via-OMP routing path and its ToS posture. |
+| `codex` | active | [Codex adapter design](./architecture/adapter-codex.md), [Codex E2E smoke](./runbooks/codex-e2e-smoke.md) |
+| `hermes-proxy` | active | [Hermes proxy adapter](./architecture/adapter-hermes-proxy.md), [setup](./runbooks/hermes-proxy-setup.md), [E2E smoke](./runbooks/hermes-proxy-e2e-smoke.md) |
+| `oh-my-pi` | experimental | [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md) — covers the OMP routing path and its ToS posture. |
 
-In flight (see [ROADMAP.md](./ROADMAP.md)):
-
-- `hermes-proxy` — clean ToS-positioned path to subscription routing via Hermes v0.14.0's `hermes proxy` local OAI-compat endpoint (epic [UH-32](https://linear.app/agentic-eng/issue/UH-32)).
-- `uh tui` — interactive terminal UI built on OpenTUI (epic [UH-41](https://linear.app/agentic-eng/issue/UH-41)).
-
-## Adapters
-
-| Adapter | Status | Doc / Runbook |
-|---|---|---|
-| `hermes` | active | [Runtime adapter contract](./architecture/runtime-adapter-contract.md) defines the shape; `src/adapters/hermes.ts` is the reference implementation. |
-| `codex` | active | [`architecture/adapter-codex.md`](./architecture/adapter-codex.md), [`runbooks/codex-e2e-smoke.md`](./runbooks/codex-e2e-smoke.md) |
-| `oh-my-pi` | experimental | [`runbooks/anthropic-via-omp.md`](./runbooks/anthropic-via-omp.md) — covers the Anthropic-via-OMP routing path and its ToS posture. |
-
-In flight (see [ROADMAP.md](./ROADMAP.md)):
-
-- `hermes-proxy` — clean ToS-positioned path to subscription routing via Hermes v0.14.0's `hermes proxy` local OAI-compat endpoint (epic [UH-32](https://linear.app/agentic-eng/issue/UH-32)).
-- `uh tui` — interactive terminal UI built on OpenTUI (epic [UH-41](https://linear.app/agentic-eng/issue/UH-41)).
+For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 
 ## Documentation map
 
@@ -67,6 +52,8 @@ In flight (see [ROADMAP.md](./ROADMAP.md)):
 - [Entities](./architecture/entities.md)
 - [Runtime adapter contract](./architecture/runtime-adapter-contract.md)
 - [Codex adapter design](./architecture/adapter-codex.md)
+- [Hermes proxy adapter design](./architecture/adapter-hermes-proxy.md)
+- [TUI architecture](./architecture/tui.md)
 - [Mission packet schema](./architecture/mission-packet-schema.md)
 - [.harness artifacts](./architecture/harness-artifacts.md)
 - [Skill format](./architecture/skill-format.md)
@@ -79,13 +66,11 @@ In flight (see [ROADMAP.md](./ROADMAP.md)):
 
 - [Codex E2E smoke](./runbooks/codex-e2e-smoke.md)
 - [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md)
+- [Hermes proxy setup](./runbooks/hermes-proxy-setup.md)
+- [Hermes proxy E2E smoke](./runbooks/hermes-proxy-e2e-smoke.md)
+- [Hermes dashboard plugin](./runbooks/hermes-dashboard-plugin.md)
 - [Using `uh tui`](./runbooks/using-the-tui.md)
-- [Publishing](./runbooks/publishing.md)
-
-### Runbooks
-
-- [Codex E2E smoke](./runbooks/codex-e2e-smoke.md)
-- [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md)
+- [Honcho persistent memory](./runbooks/honcho-memory.md)
 - [Publishing](./runbooks/publishing.md)
 
 ### Workflows
