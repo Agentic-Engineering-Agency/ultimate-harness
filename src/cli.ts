@@ -19,6 +19,7 @@ import { chooseAdapter, formatAutoRouteExplain } from "./harness/auto-route.js";
 import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabilities/index.js";
 import { forecastCost } from "./harness/cost-forecast.js";
 import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
+import { COST_CLASSES } from "./schema/adapter-capabilities.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
@@ -664,7 +665,13 @@ adapterCmd
       }
     }
     if (opts.json) {
-      console.log(JSON.stringify(opts.probe ? { adapters: caps, probed } : { adapters: caps }, null, 2));
+      console.log(JSON.stringify(
+        opts.probe
+          ? { adapters: caps, cost_classes: COST_CLASSES, probed }
+          : { adapters: caps, cost_classes: COST_CLASSES },
+        null,
+        2,
+      ));
       return;
     }
     for (const c of caps) {
