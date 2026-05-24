@@ -11,6 +11,7 @@ Milestone **"Adapter expansion & sandbox backends"** (tracked as GitHub issues #
 ### Added
 
 - **OpenRouter adapter** (#134) — OpenAI-compat HTTP client for openrouter.ai, the cheapest pay-per-token routing target. API key via `OPENROUTER_API_KEY` (never stored in the manifest); a missing key degrades `uh adapter check openrouter` gracefully (the CI-skip signal) and makes `mission run` fail fast via a plan error. Optional HTTP-Referer / X-Title ranking headers. Registered as a first-class routable adapter (auto-route, capabilities, `uh adapter add openrouter`).
+- **Vanilla `pi` adapter** (#135, #150) — the base pi agent CLI that oh-my-pi (`omp`) extends; CLI-exec (`pi --print --mode json --no-session`), `config.cli_command` overridable. Registered active (TEAM_ADAPTER_IDS, capabilities, `uh adapter add pi`). Flag surface + output parsing verified against live `pi` v0.73.1 (#150 fixed the parser to read pi's `message_end`/content-block shape).
 - **Sandbox backend abstraction + `directory` backend** (#136) — a `SandboxBackend` interface behind `uh sandbox create --backend <git-worktree|directory>`. The `directory` backend is a self-contained local clone (hard-linked objects) that does not register with the parent repo's worktree list or branch namespace.
 - **`container` sandbox backend** (#137) — registered as a fail-fast stub with an ADR ([`docs/architecture/sandbox-backends.md`](docs/architecture/sandbox-backends.md)); the implementation is deferred pending a container runtime in CI.
 - **Verify-then-promote auto-trigger** (#139) — opt-in `sandbox.promotion_policy: auto-on-verify`; a passed `uh verify` auto-promotes. The default `human-approved` still requires a manual `uh mission promote`; a typo'd policy never auto-promotes.
@@ -23,7 +24,7 @@ Milestone **"Adapter expansion & sandbox backends"** (tracked as GitHub issues #
 ### Notes
 
 - **Capability-match enforcement** (#138) was found already implemented (`enforceRuntimePreflight` → `assertRuntimeRequirements`, with a `--force` escape hatch) and was closed as evidence-ready; the ROADMAP "advisory-only" note was stale.
-- **Deferred:** the vanilla `pi` adapter + `oh-my-pi` graduation (#135) — blocked on confirming whether a vanilla `pi` CLI exists distinct from `omp`.
+- **Deferred:** `oh-my-pi` graduation to `active` (ToS posture) — tracked on the road-to-1.0. (The vanilla `pi` adapter shipped in this release; see Added.)
 
 ## [0.6.0] — 2026-05-23
 
