@@ -19,7 +19,7 @@ The goal is to combine proven patterns from specification-driven development, ag
 
 ## Current status
 
-UH ships an end-to-end CLI with a schema-backed artifact lifecycle and three wired adapters. See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for in-flight epics and the [v0.1.0 release notes](https://github.com/Agentic-Engineering-Agency/ultimate-harness/releases/tag/v0.1.0) for the initial cut.
+UH ships an end-to-end CLI with a schema-backed artifact lifecycle and four wired adapters (`hermes`, `codex`, `hermes-proxy` active; `oh-my-pi` experimental). Latest release: **v0.6.0** on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness). See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 | Adapter | Status | Notes |
 |---|---|---|
