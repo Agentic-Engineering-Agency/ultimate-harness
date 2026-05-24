@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import {
   SandboxesIndexSchema,
@@ -15,8 +13,7 @@ import {
   isPathWithin,
   rejectSymlinkIfExists,
 } from "./mission.js";
-
-const execFileP = promisify(execFile);
+import { getSandboxBackend } from "./sandbox-backends.js";
 
 const SANDBOX_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
@@ -32,6 +29,8 @@ export type CreateSandboxOptions = {
   id: string;
   missionId: string;
   baseRef?: string;
+  /** Sandbox backend id (default "git-worktree"). See sandbox-backends.ts. */
+  backend?: string;
 };
 
 export type SandboxIndexEntry = SandboxesIndexDocument["sandboxes"][number];
@@ -89,13 +88,19 @@ export async function createSandbox(
     throw new Error(`Sandbox already exists: ${opts.id}. Refusing to overwrite.`);
   }
 
+  const backend = getSandboxBackend(opts.backend ?? "git-worktree");
   const baseRef = opts.baseRef ?? "HEAD";
-  const branch = `sandbox/${opts.id}`;
 
   await mkdir(sandboxDir, { recursive: true });
 
+  let materialized: { branch: string; base_ref: string };
   try {
-    await runGit(root, ["worktree", "add", "-b", branch, worktreePath, baseRef]);
+    materialized = await backend.materialize({
+      root,
+      sandboxId: opts.id,
+      worktreePath,
+      baseRef,
+    });
   } catch (err) {
     await rm(sandboxDir, { recursive: true, force: true });
     throw err;
@@ -123,10 +128,10 @@ export async function createSandbox(
   const record: SandboxRecord = {
     id: opts.id,
     mission_id: opts.missionId,
-    backend: "git-worktree",
-    branch,
+    backend: backend.name,
+    branch: materialized.branch,
     path: toForwardSlash(path.relative(root, worktreePath)),
-    base_ref: baseRef,
+    base_ref: materialized.base_ref,
     status: "created",
     created_at: now,
     updated_at: now,
@@ -163,7 +168,7 @@ export async function getSandboxStatus(
   if (!isPathWithin(worktreePath, sandboxesRoot)) {
     throw new Error(`Unsafe sandbox worktree path: ${worktreePath}`);
   }
-  const changes = await collectDirtyChanges(worktreePath);
+  const changes = await getSandboxBackend(record.backend).collectDirtyChanges(worktreePath);
   return {
     ...record,
     worktree_path: worktreePath,
@@ -193,13 +198,15 @@ export async function discardSandbox(
     throw new Error(`Unsafe sandbox worktree path: ${worktreePath}`);
   }
 
+  const backend = getSandboxBackend(record.backend);
+
   if (!opts.force) {
     if (!(await fileExists(worktreePath))) {
       throw new Error(
         `Sandbox worktree missing: ${worktreePath}. Re-run with --force to discard the orphaned entry.`,
       );
     }
-    const changes = await collectDirtyChanges(worktreePath);
+    const changes = await backend.collectDirtyChanges(worktreePath);
     if (changes.length > 0) {
       throw new Error(
         `Sandbox ${id} has ${changes.length} uncommitted change(s). Re-run with --force to discard.`,
@@ -207,27 +214,10 @@ export async function discardSandbox(
     }
   }
 
-  if (await fileExists(worktreePath)) {
-    const removeArgs = ["worktree", "remove"];
-    if (opts.force) {
-      removeArgs.push("--force");
-    }
-    removeArgs.push(worktreePath);
-    await runGit(root, removeArgs);
-  } else {
-    // Worktree directory was deleted out-of-band; prune the registration.
-    await runGit(root, ["worktree", "prune"]);
-  }
-
-  let branchRemoved = false;
-  if (record.branch && !opts.keepBranch) {
-    try {
-      await runGit(root, ["branch", "-D", record.branch]);
-      branchRemoved = true;
-    } catch {
-      branchRemoved = false;
-    }
-  }
+  const { branch_removed: branchRemoved } = await backend.teardown(
+    { root, worktreePath, branch: record.branch },
+    { force: opts.force ?? false, keepBranch: opts.keepBranch ?? false },
+  );
 
   await rm(sandboxDir, { recursive: true, force: true });
   index.sandboxes.splice(entryIndex, 1);
@@ -309,33 +299,6 @@ async function readMetadata(root: string, id: string): Promise<SandboxRecord> {
     throw new Error(`Sandbox metadata is not an object: ${filePath}`);
   }
   return parsed as SandboxRecord;
-}
-
-async function collectDirtyChanges(worktreePath: string): Promise<string[]> {
-  if (!(await fileExists(worktreePath))) {
-    throw new Error(`Sandbox worktree missing: ${worktreePath}`);
-  }
-  const { stdout } = await runGit(worktreePath, ["status", "--porcelain"]);
-  return stdout.split("\n").filter((line) => line.length > 0);
-}
-
-async function runGit(
-  cwd: string,
-  args: string[],
-): Promise<{ stdout: string; stderr: string }> {
-  try {
-    const res = await execFileP("git", ["-C", cwd, ...args]);
-    return {
-      stdout: String(res.stdout),
-      stderr: String(res.stderr),
-    };
-  } catch (err) {
-    const e = err as { message: string; stderr?: string | Buffer; stdout?: string | Buffer };
-    const stderr = e.stderr ? String(e.stderr).trim() : "";
-    const stdout = e.stdout ? String(e.stdout).trim() : "";
-    const detail = stderr || stdout || e.message;
-    throw new Error(`git ${args.join(" ")} failed: ${detail}`);
-  }
 }
 
 function toIndexEntry(record: SandboxRecord): SandboxIndexEntry {
