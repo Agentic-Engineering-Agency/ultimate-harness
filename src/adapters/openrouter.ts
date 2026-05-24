@@ -41,73 +41,82 @@ import { renderPrompt } from "../harness/render-prompt.js";
 import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides.js";
 
 /**
- * hermes-proxy runtime adapter — UH-32 / UH-35 / UH-39.
+ * OpenRouter runtime adapter (S1 #134).
  *
- * HTTP client targeting a local `hermes proxy` instance (Hermes Agent ≥ 0.14.0).
- * Officially sanctioned OAuth-backed subscription routing — replaces the OMP
- * stealth path. v0.14.0 ships only the `nous` upstream provider; future Hermes
- * versions may add claude/chatgpt/supergrok. The adapter stays
- * provider-agnostic: it speaks OpenAI-compat HTTP to `endpoint` and lets the
- * proxy handle the upstream credential attach.
- *
- * Wire reference: docs/architecture/hermes-proxy-spike.md.
+ * OpenAI-compatible HTTP client for https://openrouter.ai/api/v1 — the cheapest
+ * pay-per-token routing target, complementary to the subscription-backed
+ * hermes-proxy. The API key is read from the OPENROUTER_API_KEY environment
+ * variable and never stored in the manifest; when it is absent the adapter
+ * check degrades gracefully (found:false) so CI can skip live calls. Optional
+ * HTTP-Referer / X-Title headers identify the app in OpenRouter's rankings.
  */
 
-// ---------- schema (UH-35; do not touch without coordinating a downstream slice) ----------
+/** Env var holding the OpenRouter API key (a secret — never in the manifest). */
+export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
+/** Default OpenRouter OpenAI-compat base URL. */
+export const DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1";
+
+function openRouterApiKey(): string {
+  return process.env[OPENROUTER_API_KEY_ENV] ?? "";
+}
+
+// ---------- schema ----------
 
 /**
- * Strict Zod schema for `.harness/adapters/hermes-proxy.yaml` →
+ * Strict Zod schema for `.harness/adapters/openrouter.yaml` →
  * `config.runtime_config`. Strict so typos at adapter-load or mission-override
- * time raise a Zod error instead of being silently dropped.
+ * time raise a Zod error instead of being silently dropped. The API key is NOT
+ * part of the manifest — it is read from OPENROUTER_API_KEY at run time.
  */
-export const HermesProxyRuntimeConfigSchema = z
+export const OpenRouterRuntimeConfigSchema = z
   .object({
-    endpoint: z.string().url(),
+    endpoint: z.string().url().default(DEFAULT_OPENROUTER_ENDPOINT),
     model: z.string().min(1),
-    provider: z.enum(["nous", "claude", "chatgpt", "supergrok"]).optional(),
     request_timeout_ms: z.number().int().positive().optional().default(120_000),
     extra_headers: z.record(z.string(), z.string()).optional().default({}),
+    /** Optional OpenRouter ranking headers (HTTP-Referer / X-Title). */
+    referer: z.string().url().optional(),
+    title: z.string().min(1).optional(),
   })
   .strict();
-export type HermesProxyRuntimeConfig = z.infer<typeof HermesProxyRuntimeConfigSchema>;
-registerRuntimeConfigSchema("hermes-proxy", HermesProxyRuntimeConfigSchema);
+export type OpenRouterRuntimeConfig = z.infer<typeof OpenRouterRuntimeConfigSchema>;
+registerRuntimeConfigSchema("openrouter", OpenRouterRuntimeConfigSchema);
 
 /**
- * Live runtime checker (UH-37). Hits `GET <endpoint>/models` against the
- * configured proxy, with a tight timeout. Maps the response to the
- * AdapterCheckResult shape:
+ * Live runtime checker. Hits `GET <endpoint>/models` with the OPENROUTER_API_KEY
+ * bearer and a tight timeout. Maps the response to AdapterCheckResult:
  *
- *  - 200 with JSON `{ data: [...] }`     → found, version: "<n> models available"
- *  - 401 / 403                            → not found, errors: re-auth hint
- *  - 404 / path_not_allowed               → not found, errors: proxy version mismatch
- *  - ECONNREFUSED / network unreachable   → not found, errors: "proxy not running"
+ *  - no OPENROUTER_API_KEY                → not found, errors: set the env var (CI-skip signal)
+ *  - 200 with JSON `{ data: [...] }`      → found, version: "<n> models available"
+ *  - 401 / 403                            → not found, errors: check OPENROUTER_API_KEY
+ *  - 404                                   → not found, errors: endpoint mismatch
+ *  - ECONNREFUSED / network unreachable   → not found, errors: network unreachable
  *  - timeout                              → not found, errors: "adapter check timed out"
  *  - other 4xx / 5xx                      → not found, errors: verbatim
  */
-export const HERMES_PROXY_CHECK_TIMEOUT_MS = 5_000;
+export const OPENROUTER_CHECK_TIMEOUT_MS = 5_000;
 
-export const hermesProxyRuntimeChecker: AdapterRuntimeChecker = async (manifest): Promise<AdapterCheckResult> => {
+export const openRouterRuntimeChecker: AdapterRuntimeChecker = async (manifest): Promise<AdapterCheckResult> => {
   const rc = manifest.config?.runtime_config as Record<string, unknown> | undefined;
-  const endpoint = typeof rc?.endpoint === "string" ? rc.endpoint : "";
-  if (endpoint.length === 0) {
+  const endpoint = typeof rc?.endpoint === "string" && rc.endpoint.length > 0 ? rc.endpoint : DEFAULT_OPENROUTER_ENDPOINT;
+  const apiKey = openRouterApiKey();
+  if (apiKey.length === 0) {
     return {
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       found: false,
       version: "",
-      errors: ["hermes-proxy: missing endpoint in runtime_config"],
+      errors: [`openrouter: ${OPENROUTER_API_KEY_ENV} not set; export it to enable the openrouter adapter`],
     };
   }
-  const provider = typeof rc?.provider === "string" ? rc.provider : "";
-  const providerHint = provider.length > 0 ? ` (run \`hermes auth status ${provider}\` to re-auth)` : " (run `hermes auth status <provider>` to re-auth)";
   const url = `${endpoint.replace(/\/$/, "")}/models`;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HERMES_PROXY_CHECK_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), OPENROUTER_CHECK_TIMEOUT_MS);
   let response: Response;
   try {
     response = await fetch(url, {
       method: "GET",
-      headers: { authorization: "Bearer hermes-proxy" },
+      headers: { authorization: `Bearer ${apiKey}` },
       signal: controller.signal,
     });
   } catch (err) {
@@ -117,25 +126,25 @@ export const hermesProxyRuntimeChecker: AdapterRuntimeChecker = async (manifest)
     const code = cause?.code;
     if (controller.signal.aborted) {
       return {
-        runtime: "hermes-proxy",
+        runtime: "openrouter",
         found: false,
         version: "",
-        errors: [`hermes-proxy: adapter check timed out after ${HERMES_PROXY_CHECK_TIMEOUT_MS} ms`],
+        errors: [`openrouter: adapter check timed out after ${OPENROUTER_CHECK_TIMEOUT_MS} ms`],
       };
     }
     if (code === "ECONNREFUSED" || /ECONNREFUSED|fetch failed/i.test(message)) {
       return {
-        runtime: "hermes-proxy",
+        runtime: "openrouter",
         found: false,
         version: "",
-        errors: [`hermes-proxy: endpoint unreachable: ${endpoint} (is \`hermes proxy start\` running?)`],
+        errors: [`openrouter: endpoint unreachable: ${endpoint} (network unreachable or endpoint misconfigured)`],
       };
     }
     return {
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       found: false,
       version: "",
-      errors: [`hermes-proxy: network error: ${code ? `${code}: ${message}` : message}`],
+      errors: [`openrouter: network error: ${code ? `${code}: ${message}` : message}`],
     };
   }
   clearTimeout(timer);
@@ -151,10 +160,10 @@ export const hermesProxyRuntimeChecker: AdapterRuntimeChecker = async (manifest)
     const envelope = safeJsonEnvelope(bodyText);
     const detail = envelope ? `: ${envelope.message}` : "";
     return {
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       found: false,
       version: "",
-      errors: [`hermes-proxy: HTTP ${response.status} from proxy${detail}${providerHint}`],
+      errors: [`openrouter: HTTP ${response.status} from OpenRouter${detail} (check OPENROUTER_API_KEY)`],
     };
   }
 
@@ -162,10 +171,10 @@ export const hermesProxyRuntimeChecker: AdapterRuntimeChecker = async (manifest)
     const envelope = safeJsonEnvelope(bodyText);
     const detail = envelope ? `: ${envelope.message}` : "";
     return {
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       found: false,
       version: "",
-      errors: [`hermes-proxy: HTTP 404${detail} (proxy version may not forward /models)`],
+      errors: [`openrouter: HTTP 404${detail} (check the endpoint URL)`],
     };
   }
 
@@ -173,10 +182,10 @@ export const hermesProxyRuntimeChecker: AdapterRuntimeChecker = async (manifest)
     const envelope = safeJsonEnvelope(bodyText);
     const detail = envelope ? `: ${envelope.message}` : ` (body: ${bodyText.slice(0, 200)})`;
     return {
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       found: false,
       version: "",
-      errors: [`hermes-proxy: HTTP ${response.status}${detail}`],
+      errors: [`openrouter: HTTP ${response.status}${detail}`],
     };
   }
 
@@ -189,11 +198,11 @@ export const hermesProxyRuntimeChecker: AdapterRuntimeChecker = async (manifest)
     // tolerate non-JSON bodies — surface the raw text in version.
   }
   return {
-    runtime: "hermes-proxy",
+    runtime: "openrouter",
     found: true,
     version: modelCount > 0
-      ? `proxy reachable at ${endpoint} (${modelCount} models available)`
-      : `proxy reachable at ${endpoint}`,
+      ? `openrouter reachable at ${endpoint} (${modelCount} models available)`
+      : `openrouter reachable at ${endpoint}`,
     errors: [],
   };
 };
@@ -207,7 +216,7 @@ function safeJsonEnvelope(text: string): { message: string } | null {
     return null;
   }
 }
-runtimeRegistry.register("hermes-proxy", hermesProxyRuntimeChecker);
+runtimeRegistry.register("openrouter", openRouterRuntimeChecker);
 
 // ---------- types ----------
 
@@ -237,7 +246,7 @@ export type RunResult = {
   runId: string;
 };
 
-export type HermesProxyRunPlan = {
+export type OpenRouterRunPlan = {
   command: string;
   args: string[];
   prompt: string;
@@ -247,25 +256,25 @@ export type HermesProxyRunPlan = {
   mission: MissionDocument;
   endpoint: string;
   headers: Record<string, string>;
-  body: HermesProxyRequestBody;
+  body: OpenRouterRequestBody;
   requestTimeoutMs: number;
 };
 
-export interface HermesProxyRequestBody {
+export interface OpenRouterRequestBody {
   model: string;
   messages: Array<{ role: "user" | "system" | "assistant"; content: string }>;
   stream: boolean;
 }
 
-export interface HermesProxyRunnerInput {
+export interface OpenRouterRunnerInput {
   endpoint: string;
   headers: Record<string, string>;
-  body: HermesProxyRequestBody;
+  body: OpenRouterRequestBody;
   cwd: string;
   timeoutMs: number;
 }
 
-export interface HermesProxyRunnerOutput {
+export interface OpenRouterRunnerOutput {
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -280,7 +289,7 @@ export interface HermesProxyRunnerOutput {
   usageModel?: string;
 }
 
-export type HermesProxyRunner = (input: HermesProxyRunnerInput) => Promise<HermesProxyRunnerOutput>;
+export type OpenRouterRunner = (input: OpenRouterRunnerInput) => Promise<OpenRouterRunnerOutput>;
 
 export interface DiffCaptureResult {
   patch: string;
@@ -289,15 +298,15 @@ export interface DiffCaptureResult {
 
 export type DiffCollector = (cwd: string) => Promise<DiffCaptureResult>;
 
-export interface PlanHermesProxyOptions {
+export interface PlanOpenRouterOptions {
   /** UH-81 — CLI-time overrides spread on top of mission.runtime_config_overrides. */
   extraRuntimeConfigOverrides?: Record<string, unknown>;
   /** UH-82 — explicit per-run id; generated when absent. */
   runId?: string;
 }
 
-export interface RunHermesProxyOptions {
-  runner?: HermesProxyRunner;
+export interface RunOpenRouterOptions {
+  runner?: OpenRouterRunner;
   collectDiff?: DiffCollector;
   timeoutMs?: number;
   /** UH-81 — forwarded into the planner so the merge happens before strict-parse. */
@@ -306,17 +315,17 @@ export interface RunHermesProxyOptions {
   runId?: string;
 }
 
-export interface HermesProxyCollectInput {
+export interface OpenRouterCollectInput {
   root: string;
   artifacts: MissionArtifactContext | null;
-  plan: HermesProxyRunPlan;
+  plan: OpenRouterRunPlan;
   startedAt: string;
   finishedAt: string;
-  runnerResult: HermesProxyRunnerOutput;
+  runnerResult: OpenRouterRunnerOutput;
   diff: DiffCaptureResult;
 }
 
-export interface HermesProxyCollectOutput {
+export interface OpenRouterCollectOutput {
   exitCode: number;
   stderr: string;
   result?: RuntimeResultDocument;
@@ -332,21 +341,13 @@ export async function loadAdapterConfig(root: string, runtimeId: string): Promis
 // ---------- planner ----------
 
 /**
- * Default placeholder bearer value. The hermes-proxy *requires* an
- * `Authorization: Bearer …` header but ignores its value (the proxy attaches
- * its own credentials downstream). Sending a constant placeholder keeps the
- * adapter testable and lets operators see exactly what shape went on the wire.
- */
-const DEFAULT_AUTH_PLACEHOLDER = "hermes-proxy";
-
-/**
  * Compile a mission into the HTTP request plan the runner will dispatch.
  * Throws when the mission or adapter manifest cannot be loaded; recoverable
  * issues (missing workflow profile) are surfaced in `plan.errors[]`.
  */
-export async function planHermesProxyRun(root: string, missionPath: string, options: PlanHermesProxyOptions = {}): Promise<HermesProxyRunPlan> {
+export async function planOpenRouterRun(root: string, missionPath: string, options: PlanOpenRouterOptions = {}): Promise<OpenRouterRunPlan> {
   const errors: string[] = [];
-  const adapter = await loadAdapterConfig(root, "hermes-proxy");
+  const adapter = await loadAdapterConfig(root, "openrouter");
 
   let mission: MissionDocument;
   try {
@@ -366,9 +367,9 @@ export async function planHermesProxyRun(root: string, missionPath: string, opti
     ...(adapter.config?.runtime_config ?? {}),
     ...mergeRuntimeConfigOverrides(mission, options.extraRuntimeConfigOverrides),
   };
-  let runtimeConfig: HermesProxyRuntimeConfig;
+  let runtimeConfig: OpenRouterRuntimeConfig;
   try {
-    runtimeConfig = HermesProxyRuntimeConfigSchema.parse(mergedRuntimeConfig);
+    runtimeConfig = OpenRouterRuntimeConfigSchema.parse(mergedRuntimeConfig);
   } catch (e) {
     throw new Error(`Mission runtime_config_overrides validation failed: ${(e as Error).message}`);
   }
@@ -385,19 +386,27 @@ export async function planHermesProxyRun(root: string, missionPath: string, opti
 
   const prompt = renderPrompt(buildDispatchContext(mission, workflow));
 
-  const body: HermesProxyRequestBody = {
+  const body: OpenRouterRequestBody = {
     model: runtimeConfig.model,
     messages: [{ role: "user", content: prompt }],
     stream: true,
   };
 
-  // Build headers. extra_headers wins for forward-compat; the adapter
-  // ALWAYS sets content-type and authorization. Header keys are normalized
-  // to lower-case so duplicates don't slip in.
+  // Build headers. The OpenRouter API key comes from OPENROUTER_API_KEY (a
+  // secret, never the manifest); a missing key is surfaced as a plan error so
+  // `run` fails fast and `dry-run` shows it. Optional referer/title set the
+  // OpenRouter ranking headers. extra_headers wins for forward-compat; keys are
+  // lower-cased so duplicates don't slip in.
+  const apiKey = openRouterApiKey();
+  if (apiKey.length === 0) {
+    errors.push(`${OPENROUTER_API_KEY_ENV} not set; export it before running the openrouter adapter`);
+  }
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    authorization: `Bearer ${DEFAULT_AUTH_PLACEHOLDER}`,
+    authorization: `Bearer ${apiKey}`,
   };
+  if (runtimeConfig.referer) headers["http-referer"] = runtimeConfig.referer;
+  if (runtimeConfig.title) headers["x-title"] = runtimeConfig.title;
   for (const [k, v] of Object.entries(runtimeConfig.extra_headers)) {
     headers[k.toLowerCase()] = v;
   }
@@ -430,10 +439,10 @@ export async function planHermesProxyRun(root: string, missionPath: string, opti
  *  - SSE events via `events`
  *
  * Never throws — callers translate the structured output into a
- * RuntimeResultStatus via `collectHermesProxySession`.
+ * RuntimeResultStatus via `collectOpenRouterSession`.
  */
-export const defaultHermesProxyRunner: HermesProxyRunner = async (input) => {
-  const out: HermesProxyRunnerOutput = {
+export const defaultOpenRouterRunner: OpenRouterRunner = async (input) => {
+  const out: OpenRouterRunnerOutput = {
     stdout: "",
     stderr: "",
     exitCode: 0,
@@ -477,7 +486,7 @@ export const defaultHermesProxyRunner: HermesProxyRunner = async (input) => {
   if (response.ok && contentType.includes("text/event-stream")) {
     const reader = response.body?.getReader();
     if (!reader) {
-      out.stderr = "hermes-proxy: response had no readable body\n";
+      out.stderr = "openrouter: response had no readable body\n";
       out.exitCode = 1;
       if (timer) clearTimeout(timer);
       return out;
@@ -509,10 +518,10 @@ export const defaultHermesProxyRunner: HermesProxyRunner = async (input) => {
     } catch (err) {
       // AbortError surfaces here on timeout.
       if (out.timedOut) {
-        out.stderr += `hermes-proxy: request timed out after ${input.timeoutMs} ms\n`;
+        out.stderr += `openrouter: request timed out after ${input.timeoutMs} ms\n`;
       } else {
         const message = (err as Error).message ?? String(err);
-        out.stderr += `hermes-proxy stream read error: ${message}\n`;
+        out.stderr += `openrouter stream read error: ${message}\n`;
       }
       out.exitCode = 1;
     } finally {
@@ -540,7 +549,7 @@ export const defaultHermesProxyRunner: HermesProxyRunner = async (input) => {
         if (parsed.usage !== undefined) out.usage = parsed.usage;
         if (typeof parsed.model === "string") out.usageModel = parsed.model;
         if (out.stdout.length === 0) {
-          out.stderr = "hermes-proxy: empty assistant message\n";
+          out.stderr = "openrouter: empty assistant message\n";
           out.exitCode = 1;
         }
       } else {
@@ -550,7 +559,7 @@ export const defaultHermesProxyRunner: HermesProxyRunner = async (input) => {
         out.exitCode = 1;
       }
     } catch (err) {
-      out.stderr = `hermes-proxy: invalid JSON response: ${(err as Error).message}\nbody: ${bodyText}\n`;
+      out.stderr = `openrouter: invalid JSON response: ${(err as Error).message}\nbody: ${bodyText}\n`;
       out.exitCode = 1;
     }
   } else {
@@ -562,7 +571,7 @@ export const defaultHermesProxyRunner: HermesProxyRunner = async (input) => {
   return out;
 };
 
-function handleSseFrame(rawFrame: string, out: HermesProxyRunnerOutput): "DONE" | "OK" {
+function handleSseFrame(rawFrame: string, out: OpenRouterRunnerOutput): "DONE" | "OK" {
   const trimmed = rawFrame.trim();
   if (trimmed.length === 0) return "OK";
   for (const line of trimmed.split("\n")) {
@@ -597,7 +606,7 @@ function handleSseFrame(rawFrame: string, out: HermesProxyRunnerOutput): "DONE" 
         }
       }
     } catch (err) {
-      out.stderr += `hermes-proxy SSE parse error: ${(err as Error).message}\nframe: ${data}\n`;
+      out.stderr += `openrouter SSE parse error: ${(err as Error).message}\nframe: ${data}\n`;
     }
   }
   return "OK";
@@ -646,12 +655,12 @@ function extractMessageContent(payload: Record<string, unknown>): string {
  * concatenated content, the parsed event objects, and any error envelope
  * encountered.
  */
-export function parseHermesProxyStream(buffer: string): {
+export function parseOpenRouterStream(buffer: string): {
   content: string;
   events: Array<Record<string, unknown>>;
   errorEnvelope: { message: string; type?: string; code?: string } | null;
 } {
-  const out: HermesProxyRunnerOutput = {
+  const out: OpenRouterRunnerOutput = {
     stdout: "",
     stderr: "",
     exitCode: 0,
@@ -678,15 +687,15 @@ export const defaultDiffCollector: DiffCollector = async (cwd) => {
 
 // ---------- orchestrator ----------
 
-export async function dryRunHermesProxy(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunOpenRouter(root: string, missionPath: string): Promise<DryRunResult> {
   try {
-    const plan = await planHermesProxyRun(root, missionPath);
+    const plan = await planOpenRouterRun(root, missionPath);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
         schema_version: "uh.runtime-session.v0",
         mission_id: plan.mission.id,
-        runtime: "hermes-proxy",
+        runtime: "openrouter",
         status: "planned",
         command: plan.command,
         args: plan.args,
@@ -713,20 +722,20 @@ export async function dryRunHermesProxy(root: string, missionPath: string): Prom
 }
 
 /**
- * Execute a mission against the hermes-proxy runtime end-to-end.
+ * Execute a mission against the openrouter runtime end-to-end.
  *
- * Orchestrates: planHermesProxyRun -> writeable artifact context ->
+ * Orchestrates: planOpenRouterRun -> writeable artifact context ->
  * runtime.started audit -> runner invocation -> diff capture ->
- * collectHermesProxySession. The runner and diff collector are injectable
+ * collectOpenRouterSession. The runner and diff collector are injectable
  * so tests can drive deterministic outcomes via in-process http servers
  * or pure mocks.
  */
-export async function runHermesProxy(
+export async function runOpenRouter(
   root: string,
   missionPath: string,
-  options: RunHermesProxyOptions = {},
+  options: RunOpenRouterOptions = {},
 ): Promise<RunResult> {
-  const plan = await planHermesProxyRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides });
+  const plan = await planOpenRouterRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
@@ -746,12 +755,12 @@ export async function runHermesProxy(
       run_id: runId,
       started_at: startedAt,
       status: "running",
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
     });
     await persistPromptAndSession(artifacts, plan.prompt, {
       schema_version: "uh.runtime-session.v0",
       mission_id: plan.mission.id,
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       status: "running",
       command: plan.command,
       args: plan.args,
@@ -760,7 +769,7 @@ export async function runHermesProxy(
     await appendMissionEvent(artifacts, {
       event: "runtime.started",
       timestamp: startedAt,
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       mission_id: plan.mission.id,
       command: plan.command,
       args: plan.args,
@@ -773,7 +782,7 @@ export async function runHermesProxy(
     const auditEntry = JSON.stringify({
       event: "mission.run",
       timestamp: new Date().toISOString(),
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       mission_id: plan.mission.id,
       mission_name: plan.mission.name,
       workflow: plan.mission.workflow_profile,
@@ -784,9 +793,9 @@ export async function runHermesProxy(
     // audit failure shouldn't block run
   }
 
-  const runner = options.runner ?? defaultHermesProxyRunner;
-  let runnerResult: HermesProxyRunnerOutput;
-  let collection: HermesProxyCollectOutput;
+  const runner = options.runner ?? defaultOpenRouterRunner;
+  let runnerResult: OpenRouterRunnerOutput;
+  let collection: OpenRouterCollectOutput;
   try {
     runnerResult = await runner({
       endpoint: plan.endpoint,
@@ -800,7 +809,7 @@ export async function runHermesProxy(
     const diff = await collectDiff(root);
     const finishedAt = new Date().toISOString();
 
-    collection = await collectHermesProxySession({
+    collection = await collectOpenRouterSession({
       root,
       artifacts,
       plan,
@@ -821,7 +830,7 @@ export async function runHermesProxy(
 
   if (artifacts) {
     const finishedAt = new Date().toISOString();
-    const terminalStatus = deriveHermesProxyRunStatus(collection.result, collection.exitCode);
+    const terminalStatus = deriveOpenRouterRunStatus(collection.result, collection.exitCode);
     await writeLatestPointer(root, plan.mission.id, {
       schema_version: "uh.latest-run.v0",
       run_id: runId,
@@ -834,7 +843,7 @@ export async function runHermesProxy(
       started_at: startedAt,
       finished_at: finishedAt,
       status: terminalStatus,
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
     });
   }
 
@@ -847,7 +856,7 @@ export async function runHermesProxy(
   };
 }
 
-function deriveHermesProxyRunStatus(
+function deriveOpenRouterRunStatus(
   result: RuntimeResultDocument | undefined,
   exitCode: number,
 ): RunStatus {
@@ -858,14 +867,14 @@ function deriveHermesProxyRunStatus(
 // ---------- collector ----------
 
 /**
- * Persist a completed hermes-proxy session and classify the
+ * Persist a completed openrouter session and classify the
  * RuntimeResultStatus. Mirrors `collectHermesSession` /
  * `collectOhMyPiSession` shape. Classification table:
  *
- *  network ECONNREFUSED       -> blocked ("is `hermes proxy start` running?")
+ *  network ECONNREFUSED       -> blocked ("network unreachable or endpoint misconfigured")
  *  network ETIMEDOUT          -> blocked
  *  timedOut (AbortController) -> failed
- *  errorEnvelope auth_failed  -> blocked  ("hermes auth status <provider>")
+ *  errorEnvelope auth_failed  -> blocked  ("check OPENROUTER_API_KEY")
  *  http 401 / 403             -> blocked
  *  http 404 + model_not_found -> blocked
  *  http 4xx/5xx               -> failed
@@ -875,9 +884,9 @@ function deriveHermesProxyRunStatus(
  *  200 + content (no sentinel) -> passed; runtime-final.txt = "" (matches
  *                                 oh-my-pi behaviour)
  */
-export async function collectHermesProxySession(
-  input: HermesProxyCollectInput,
-): Promise<HermesProxyCollectOutput> {
+export async function collectOpenRouterSession(
+  input: OpenRouterCollectInput,
+): Promise<OpenRouterCollectOutput> {
   const { artifacts, plan, runnerResult, diff, startedAt, finishedAt, root } = input;
 
   const errors: string[] = [];
@@ -885,7 +894,7 @@ export async function collectHermesProxySession(
   let exitCode = runnerResult.exitCode;
 
   if (runnerResult.timedOut) {
-    errors.push(`hermes-proxy: request timed out after ${plan.requestTimeoutMs} ms`);
+    errors.push(`openrouter: request timed out after ${plan.requestTimeoutMs} ms`);
     if (exitCode === 0) exitCode = 1;
   }
   if (diff.errors) {
@@ -911,7 +920,7 @@ export async function collectHermesProxySession(
 
     for (const event of runnerResult.events) {
       await appendMissionEvent(artifacts, {
-        event: "hermes-proxy.sse",
+        event: "openrouter.sse",
         timestamp: new Date().toISOString(),
         payload: event,
       });
@@ -920,7 +929,7 @@ export async function collectHermesProxySession(
     const draft: RuntimeResultDocument = {
       schema_version: "uh.runtime-result.v0",
       mission_id: plan.mission.id,
-      runtime: "hermes-proxy",
+      runtime: "openrouter",
       status,
       started_at: startedAt,
       finished_at: finishedAt,
@@ -948,7 +957,7 @@ export async function collectHermesProxySession(
       estimateUsage(plan.prompt, sentinel);
     await appendMissionEvent(
       artifacts,
-      buildUsageEvent("hermes-proxy", plan.mission.id, proxyUsage, finishedAt),
+      buildUsageEvent("openrouter", plan.mission.id, proxyUsage, finishedAt),
     );
   } catch (err) {
     const message = (err as Error).message;
@@ -961,21 +970,21 @@ export async function collectHermesProxySession(
 }
 
 function classifyStatus(
-  runner: HermesProxyRunnerOutput,
-  plan: HermesProxyRunPlan,
+  runner: OpenRouterRunnerOutput,
+  plan: OpenRouterRunPlan,
   errors: string[],
 ): RuntimeResultStatus {
   // Network-level failure first; the proxy may simply not be running.
   if (runner.networkError) {
     if (/ECONNREFUSED/.test(runner.networkError)) {
-      errors.push(`hermes-proxy: endpoint unreachable: ${plan.endpoint} (is \`hermes proxy start\` running?)`);
+      errors.push(`openrouter: endpoint unreachable: ${plan.endpoint} (network unreachable or endpoint misconfigured)`);
       return "blocked";
     }
     if (/ETIMEDOUT/.test(runner.networkError) || /ENETUNREACH/.test(runner.networkError)) {
-      errors.push(`hermes-proxy: network error: ${runner.networkError}`);
+      errors.push(`openrouter: network error: ${runner.networkError}`);
       return "blocked";
     }
-    errors.push(`hermes-proxy: network error: ${runner.networkError}`);
+    errors.push(`openrouter: network error: ${runner.networkError}`);
     return "failed";
   }
 
@@ -984,14 +993,8 @@ function classifyStatus(
   }
 
   const envelope = runner.errorEnvelope;
-  const providerHint = plan.body.model ? "" : "";
-  const provider = plan.headers["x-provider"] ?? "";
-  void providerHint;
-  void provider;
-
   if (envelope && /upstream_auth_failed|invalid_api_key|authentication/i.test(`${envelope.type ?? ""} ${envelope.code ?? ""} ${envelope.message}`)) {
-    const provHint = plan.endpoint ? ` (run \`hermes auth status <provider>\` to re-auth)` : "";
-    errors.push(`hermes-proxy: upstream auth failed: ${envelope.message}${provHint}`);
+    errors.push(`openrouter: upstream auth failed: ${envelope.message} (check OPENROUTER_API_KEY)`);
     return "blocked";
   }
 
@@ -999,29 +1002,29 @@ function classifyStatus(
   if (typeof status === "number") {
     if (status === 401 || status === 403) {
       errors.push(
-        `hermes-proxy: HTTP ${status} from proxy: ${envelope?.message ?? "auth required"} (run \`hermes auth status <provider>\` to re-auth)`,
+        `openrouter: HTTP ${status}: ${envelope?.message ?? "auth required"} (check OPENROUTER_API_KEY)`,
       );
       return "blocked";
     }
     if (status === 404 && envelope && /model/i.test(`${envelope.message} ${envelope.code ?? ""}`)) {
-      errors.push(`hermes-proxy: model "${plan.body.model}" not available on this proxy: ${envelope.message}`);
+      errors.push(`openrouter: model "${plan.body.model}" not available on openrouter: ${envelope.message}`);
       return "blocked";
     }
     if (status >= 400) {
-      errors.push(`hermes-proxy: HTTP ${status}: ${envelope?.message ?? "request failed"}`);
+      errors.push(`openrouter: HTTP ${status}: ${envelope?.message ?? "request failed"}`);
       return "failed";
     }
   }
 
   if (runner.exitCode !== 0) {
     if (runner.stdout.length === 0) {
-      errors.push("hermes-proxy: empty assistant message");
+      errors.push("openrouter: empty assistant message");
     }
     return "failed";
   }
 
   if (runner.stdout.trim().length === 0) {
-    errors.push("hermes-proxy: empty assistant message");
+    errors.push("openrouter: empty assistant message");
     return "failed";
   }
 
@@ -1030,7 +1033,7 @@ function classifyStatus(
 
 async function persistFinalRuntimeSession(
   artifacts: MissionArtifactContext,
-  plan: HermesProxyRunPlan,
+  plan: OpenRouterRunPlan,
   startedAt: string,
   finishedAt: string,
   exitCode: number,
@@ -1039,7 +1042,7 @@ async function persistFinalRuntimeSession(
   await persistPromptAndSession(artifacts, plan.prompt, {
     schema_version: "uh.runtime-session.v0",
     mission_id: plan.mission.id,
-    runtime: "hermes-proxy",
+    runtime: "openrouter",
     status: sessionStatus,
     command: plan.command,
     args: plan.args,
@@ -1050,7 +1053,7 @@ async function persistFinalRuntimeSession(
   await appendMissionEvent(artifacts, {
     event: "runtime.finished",
     timestamp: finishedAt,
-    runtime: "hermes-proxy",
+    runtime: "openrouter",
     mission_id: plan.mission.id,
     exit_code: exitCode,
     status: sessionStatus,

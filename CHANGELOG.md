@@ -4,6 +4,27 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
+## [0.7.0] — 2026-05-24
+
+Milestone **"Adapter expansion & sandbox backends"** (tracked as GitHub issues #133–#141 under the `v0.7.0` milestone; Linear UH-92.. remain pending a workspace upgrade). Builds on v0.6.0's cost-aware routing by adding cheaper routing targets and broader sandbox isolation.
+
+### Added
+
+- **OpenRouter adapter** (#134) — OpenAI-compat HTTP client for openrouter.ai, the cheapest pay-per-token routing target. API key via `OPENROUTER_API_KEY` (never stored in the manifest); a missing key degrades `uh adapter check openrouter` gracefully (the CI-skip signal) and makes `mission run` fail fast via a plan error. Optional HTTP-Referer / X-Title ranking headers. Registered as a first-class routable adapter (auto-route, capabilities, `uh adapter add openrouter`).
+- **Sandbox backend abstraction + `directory` backend** (#136) — a `SandboxBackend` interface behind `uh sandbox create --backend <git-worktree|directory>`. The `directory` backend is a self-contained local clone (hard-linked objects) that does not register with the parent repo's worktree list or branch namespace.
+- **`container` sandbox backend** (#137) — registered as a fail-fast stub with an ADR ([`docs/architecture/sandbox-backends.md`](docs/architecture/sandbox-backends.md)); the implementation is deferred pending a container runtime in CI.
+- **Verify-then-promote auto-trigger** (#139) — opt-in `sandbox.promotion_policy: auto-on-verify`; a passed `uh verify` auto-promotes. The default `human-approved` still requires a manual `uh mission promote`; a typo'd policy never auto-promotes.
+- **OpenRouter setup runbook** plus ROADMAP / README adapter-table updates (#140).
+
+### Changed
+
+- Extracted the mission-artifact helper block (path-safety guards + prompt/session/event writers) duplicated across `hermes` / `codex` / `oh-my-pi` / `hermes-proxy` into a single `src/adapters/_artifact-context.ts` (#133). Pure, behaviour-neutral refactor.
+
+### Notes
+
+- **Capability-match enforcement** (#138) was found already implemented (`enforceRuntimePreflight` → `assertRuntimeRequirements`, with a `--force` escape hatch) and was closed as evidence-ready; the ROADMAP "advisory-only" note was stale.
+- **Deferred:** the vanilla `pi` adapter + `oh-my-pi` graduation (#135) — blocked on confirming whether a vanilla `pi` CLI exists distinct from `omp`.
+
 ## [0.6.0] — 2026-05-23
 
 Epic 7 (adapter capability routing + cost) and Epic 8 (SDD hardening) completed, plus a suite-health pass and CI/release hygiene. Several v0.5.0 gaps were corrected: the UH-101 auto-router (claimed shipped but absent) was implemented, and token-usage capture (assumed by the cost features) was added.

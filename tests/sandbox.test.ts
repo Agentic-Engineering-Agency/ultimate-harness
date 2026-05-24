@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
+import { getSandboxBackend, listSandboxBackends } from "../src/harness/sandbox-backends.js";
 import {
   assertSafeSandboxId,
   createSandbox,
@@ -465,5 +466,94 @@ describe("uh sandbox CLI", () => {
     ]);
     expect(forced.stdout).toContain("[DISCARDED] cli-dirty");
     await expect(stat(worktreeAbs)).rejects.toThrow();
+  });
+});
+
+describe("sandbox backends (S3 #136)", () => {
+  test("directory backend clones into a self-contained dir, not a parent worktree", async () => {
+    const record = await createSandbox(TEST_ROOT, {
+      id: "dir-alpha",
+      missionId: "demo",
+      backend: "directory",
+    });
+
+    expect(record).toMatchObject({
+      id: "dir-alpha",
+      backend: "directory",
+      branch: "sandbox/dir-alpha",
+      base_ref: "HEAD",
+      status: "created",
+    });
+
+    const worktreeAbs = join(TEST_ROOT, record.path);
+    // Self-contained clone: has its own .git + the committed tree.
+    await expect(stat(join(worktreeAbs, ".git"))).resolves.toBeTruthy();
+    await expect(stat(join(worktreeAbs, "README.md"))).resolves.toBeTruthy();
+
+    // Crucially, it is NOT registered as a worktree of the parent repo and the
+    // parent branch namespace is untouched (the sandbox branch lives in the clone).
+    const worktreePaths = await listWorktrees(TEST_ROOT);
+    expect(worktreePaths).not.toContain(worktreeAbs);
+    const branches = await listBranches(TEST_ROOT);
+    expect(branches).not.toContain("sandbox/dir-alpha");
+
+    // The clone itself is on the sandbox branch.
+    const cloneBranches = await listBranches(worktreeAbs);
+    expect(cloneBranches).toContain("sandbox/dir-alpha");
+
+    const info = await getSandboxStatus(TEST_ROOT, "dir-alpha");
+    expect(info.dirty).toBe(false);
+    expect(info.changes).toEqual([]);
+  });
+
+  test("directory backend detects dirt and discards by directory removal", async () => {
+    const record = await createSandbox(TEST_ROOT, {
+      id: "dir-dirty",
+      missionId: "demo",
+      backend: "directory",
+    });
+    const worktreeAbs = join(TEST_ROOT, record.path);
+
+    await writeFile(join(worktreeAbs, "scratch.txt"), "work in progress\n", "utf-8");
+    const info = await getSandboxStatus(TEST_ROOT, "dir-dirty");
+    expect(info.dirty).toBe(true);
+    expect(info.changes.some((c) => c.includes("scratch.txt"))).toBe(true);
+
+    // Refuses without --force, then discards (dir removed, parent untouched).
+    await expect(discardSandbox(TEST_ROOT, "dir-dirty")).rejects.toThrow(/uncommitted change/i);
+    const result = await discardSandbox(TEST_ROOT, "dir-dirty", { force: true });
+    expect(result.branch_removed).toBe(false);
+    await expect(stat(worktreeAbs)).rejects.toThrow();
+    expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
+  });
+
+  test("createSandbox rejects an unknown backend", async () => {
+    await expect(
+      createSandbox(TEST_ROOT, { id: "bad-backend", missionId: "demo", backend: "nope" }),
+    ).rejects.toThrow(/Unknown sandbox backend: nope/);
+  });
+
+  test("CLI --backend directory round-trips", async () => {
+    const created = await runUh([
+      "sandbox", "create", "cli-dir", "--mission", "demo", "--backend", "directory", "--root", TEST_ROOT,
+    ]);
+    expect(created.stdout).toContain("[CREATED] cli-dir");
+    expect(created.stdout).toContain("backend: directory");
+    const list = await listSandboxes(TEST_ROOT);
+    expect(list.find((s) => s.id === "cli-dir")?.backend).toBe("directory");
+  });
+});
+
+describe("container backend (S4 #137)", () => {
+  test("is registered but fails fast with actionable guidance", async () => {
+    expect(listSandboxBackends()).toContain("container");
+    expect(getSandboxBackend("container").name).toBe("container");
+
+    await expect(
+      createSandbox(TEST_ROOT, { id: "ctr", missionId: "demo", backend: "container" }),
+    ).rejects.toThrow(/container sandbox backend is not yet available/);
+
+    // A failed materialize must leave nothing behind (no index entry, no dir).
+    expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
   });
 });

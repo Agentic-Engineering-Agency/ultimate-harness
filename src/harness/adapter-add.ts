@@ -139,6 +139,64 @@ config:
     request_timeout_ms: 120000
     extra_headers: {}
 `,
+  openrouter: `schema_version: uh.adapter.v0
+id: openrouter
+name: OpenRouter
+description: >-
+  OpenAI-compatible HTTP client for https://openrouter.ai/api/v1 — the cheapest
+  pay-per-token routing target, complementary to the subscription-backed
+  hermes-proxy. The API key is read from the OPENROUTER_API_KEY environment
+  variable and never stored here. See docs/runbooks/openrouter-setup.md.
+runtime: openrouter
+capabilities:
+  - oai-compat
+  - http-transport
+  - sentinel-protocol
+  - pay-per-token
+status: active
+config:
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    endpoint: "https://openrouter.ai/api/v1"
+    model: "openai/gpt-4o-mini"
+    request_timeout_ms: 120000
+    extra_headers: {}
+`,
+  pi: `schema_version: uh.adapter.v0
+id: pi
+name: pi
+description: >-
+  Runtime adapter for the vanilla \`pi\` agent CLI — the base CLI that oh-my-pi
+  (omp) extends. Executes missions via \`pi --mode json --no-session\` with
+  extensions/skills disabled by default for deterministic runs. Set
+  \`config.cli_command\` if the binary is not \`pi\` on PATH.
+  See docs/runbooks/pi-setup.md.
+runtime: pi
+capabilities:
+  - cli-execution
+  - non-interactive
+  - one-shot
+  - worktree-isolation
+  - json-output
+  - diff-output
+status: active
+config:
+  cli_command: pi
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    mode: json
+    thinking: ""
+    allow_extensions: false
+    allow_skills: false
+`,
 };
 
 export type AddAdapterResult = {

@@ -560,3 +560,64 @@ describe("tdd test-first gate (UH-55)", () => {
   });
 });
 
+describe("verify-then-promote auto-trigger (S6 #139)", () => {
+  async function writeMissionWithPolicy(id: string, promotionPolicy?: string) {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", id);
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(join(missionDir, "mission.yaml"), stringify({
+      schema_version: "uh.mission.v0",
+      id,
+      title: `Mission ${id}`,
+      workflow_profile: "research-docs",
+      objective: "Verify then maybe promote.",
+      ...(promotionPolicy ? { sandbox: { backend: "git-worktree", promotion_policy: promotionPolicy } } : {}),
+      verification: {
+        required_checks: [{ name: "noop", command: "true" }],
+        review_gates: [],
+      },
+    }), "utf-8");
+    return missionDir;
+  }
+
+  async function fileExists(p: string): Promise<boolean> {
+    try {
+      await access(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  test("auto-on-verify promotes after a passed verification", async () => {
+    const id = "auto-promote";
+    const missionDir = await writeMissionWithPolicy(id, "auto-on-verify");
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+    expect(result.promotion).toMatchObject({ decision: "promoted" });
+    expect(result.promotion_error).toBeUndefined();
+    expect(await fileExists(join(missionDir, "promotion.yaml"))).toBe(true);
+    const promotion = parse(await readFile(join(missionDir, "promotion.yaml"), "utf-8"));
+    expect(promotion).toMatchObject({ decision: "promoted", approved_by: "auto-on-verify" });
+    const eventsText = await readFile(join(missionDir, "events.ndjson"), "utf-8");
+    expect(eventsText).toMatch(/promotion\.auto-triggered/);
+  });
+
+  test("default policy (human-approved) does not auto-promote", async () => {
+    const id = "manual-promote";
+    const missionDir = await writeMissionWithPolicy(id);
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+    expect(result.promotion).toBeUndefined();
+    expect(await fileExists(join(missionDir, "promotion.yaml"))).toBe(false);
+  });
+
+  test("a typo'd policy never auto-promotes", async () => {
+    const id = "typo-policy";
+    const missionDir = await writeMissionWithPolicy(id, "auto-on-verfy");
+    const result = await verifyMission(TEST_ROOT, id);
+    expect(result.status).toBe("passed");
+    expect(result.promotion).toBeUndefined();
+    expect(await fileExists(join(missionDir, "promotion.yaml"))).toBe(false);
+  });
+});
+

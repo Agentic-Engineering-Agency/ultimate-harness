@@ -1,0 +1,59 @@
+---
+title: "OpenRouter — operator setup runbook"
+description: "Zero-to-passing for the openrouter adapter: the cheapest pay-per-token routing target. API key via OPENROUTER_API_KEY; any OpenRouter model id is reachable."
+---
+
+The `openrouter` adapter is an OpenAI-compatible HTTP client for
+[openrouter.ai](https://openrouter.ai) — the cheapest pay-per-token routing
+target, complementary to the subscription-backed `hermes-proxy`.
+
+## 1. Get an API key
+
+Create a key at [openrouter.ai/keys](https://openrouter.ai/keys) and export it
+(the adapter reads it from the environment — it is never stored in the manifest):
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
+Without the key, `uh adapter check openrouter` reports `found: false` with a
+"set OPENROUTER_API_KEY" message (also the CI-skip signal), and
+`uh mission run --runtime openrouter` fails fast with a clear plan error.
+
+## 2. Add the adapter manifest
+
+```bash
+uh adapter add openrouter
+```
+
+`config.runtime_config` keys (strict — typos are rejected at load):
+
+| Key | Required | Default | Notes |
+|---|---|---|---|
+| `endpoint` | no | `https://openrouter.ai/api/v1` | OpenAI-compat base URL |
+| `model` | yes | — | any OpenRouter model id, e.g. `openai/gpt-4o-mini`, `anthropic/claude-3.5-sonnet` |
+| `request_timeout_ms` | no | `120000` | per-request timeout |
+| `extra_headers` | no | `{}` | extra request headers (lower-cased) |
+| `referer` | no | — | sets `HTTP-Referer` (OpenRouter app ranking) |
+| `title` | no | — | sets `X-Title` (OpenRouter app ranking) |
+
+## 3. Verify + run
+
+```bash
+uh adapter check openrouter
+uh mission dry-run <mission> --runtime openrouter
+uh mission run <mission> --runtime openrouter
+```
+
+Per-mission model override via `runtime_config_overrides.model`.
+
+## 4. Cost routing
+
+`openrouter` carries `cost_class: cheap`, so `uh mission run --auto` picks it when
+it's the cheapest installed adapter that satisfies the mission's
+`runtime_requirements`. Use `--auto --explain` to see the decision matrix.
+
+## Notes
+
+- Live smoke is deferred in CI until an `OPENROUTER_API_KEY` repo secret is set;
+  the adapter's unit tests are fully HTTP-mocked and need no key.

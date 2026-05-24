@@ -12,6 +12,8 @@ import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
 import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
 import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
+import { dryRunOpenRouter, runOpenRouter } from "./adapters/openrouter.js";
+import { dryRunPi, runPi } from "./adapters/pi.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
@@ -91,6 +93,8 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
   codex: { dryRun: dryRunCodex, run: (root, missionPath, opts) => runCodex(root, missionPath, opts), surfaceBlocked: true },
   "oh-my-pi": { dryRun: dryRunOhMyPi, run: (root, missionPath, opts) => runOhMyPi(root, missionPath, opts), surfaceBlocked: true },
   "hermes-proxy": { dryRun: dryRunHermesProxy, run: (root, missionPath, opts) => runHermesProxy(root, missionPath, opts), surfaceBlocked: true },
+  openrouter: { dryRun: dryRunOpenRouter, run: (root, missionPath, opts) => runOpenRouter(root, missionPath, opts), surfaceBlocked: true },
+  pi: { dryRun: dryRunPi, run: (root, missionPath, opts) => runPi(root, missionPath, opts), surfaceBlocked: true },
 };
 
 /**
@@ -401,6 +405,12 @@ program
         console.log(`sandbox: ${result.sandbox.id} (${result.sandbox.path})`);
       }
       console.log(`artifact: ${result.path}`);
+      if (result.promotion) {
+        console.log(`promoted: auto-on-verify -> ${result.promotion.path}`);
+      }
+      if (result.promotion_error) {
+        console.error(`auto-promote failed: ${result.promotion_error}`);
+      }
       process.exit(result.status === "passed" ? 0 : 1);
     } catch (err) {
       console.error(`[BLOCKED] ${missionId}`);
@@ -1397,25 +1407,28 @@ async function resolveActiveRuntimes(root: string): Promise<string[]> {
 // uh sandbox
 const sandboxCmd = program
   .command("sandbox")
-  .description("Manage git worktree sandboxes");
+  .description("Manage mission sandboxes");
 
 sandboxCmd
   .command("create")
-  .description("Create a new git worktree sandbox bound to a mission")
+  .description("Create a new sandbox bound to a mission")
   .argument("<id>", "Sandbox id")
   .requiredOption("--mission <id>", "Mission id this sandbox belongs to")
   .option("--base <ref>", "Base git ref to branch from (default: HEAD)")
+  .option("--backend <name>", "Sandbox backend: git-worktree (default), directory, or container (planned — see docs/architecture/sandbox-backends.md)")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (id: string, opts: { mission: string; base?: string; root?: string }) => {
+  .action(async (id: string, opts: { mission: string; base?: string; backend?: string; root?: string }) => {
     const root = resolveRoot(opts.root);
     try {
       const record = await createSandbox(root, {
         id,
         missionId: opts.mission,
         baseRef: opts.base,
+        backend: opts.backend,
       });
       console.log(`[CREATED] ${record.id}`);
       console.log(`  mission: ${record.mission_id}`);
+      console.log(`  backend: ${record.backend}`);
       console.log(`  branch: ${record.branch}`);
       console.log(`  base: ${record.base_ref}`);
       console.log(`  path: ${record.path}`);

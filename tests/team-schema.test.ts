@@ -113,9 +113,9 @@ describe("mission shape: team", () => {
     })).toThrow();
   });
 
-  test("TEAM_ADAPTER_IDS exposes the four registered runtimes", () => {
+  test("TEAM_ADAPTER_IDS exposes the registered runtimes", () => {
     expect(new Set(TEAM_ADAPTER_IDS)).toEqual(
-      new Set(["hermes", "codex", "oh-my-pi", "hermes-proxy"]),
+      new Set(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "pi"]),
     );
   });
 });

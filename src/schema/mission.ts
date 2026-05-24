@@ -55,7 +55,7 @@ const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/
  * adapter modules. Keep in sync with `RUNTIME_WIRINGS` in `src/cli.ts` and the
  * adapter manifests under `.harness/adapters/`.
  */
-export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy"] as const;
+export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "pi"] as const;
 const AdapterIdSchema = z.enum(TEAM_ADAPTER_IDS);
 
 const TeamWorkerSchema = z.object({
@@ -128,6 +128,10 @@ const MissionInputSchema = z.object({
   expected_artifacts: z.array(ExpectedArtifactSchema).optional(),
   sandbox: z.object({
     backend: z.string().optional().default("directory"),
+    // Recognized values: "human-approved" (default behaviour — a manual
+    // `uh mission promote` is required) and "auto-on-verify" (S6 #139 — a
+    // passed `uh verify` auto-promotes). Any other/typo'd value is treated as
+    // human-approved (never auto-promotes), so a typo cannot trigger promotion.
     promotion_policy: z.string().optional(),
     config: z.record(z.string(), z.unknown()).optional().default({}),
   }).optional().default({ backend: "directory", config: {} }),

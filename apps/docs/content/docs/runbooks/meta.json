@@ -5,6 +5,7 @@
     "codex-e2e-smoke",
     "anthropic-via-omp",
     "hermes-proxy-setup",
-    "hermes-proxy-e2e-smoke"
+    "hermes-proxy-e2e-smoke",
+    "openrouter-setup"
   ]
 }
