@@ -1,7 +1,16 @@
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, appendFile, lstat, writeFile } from "node:fs/promises";
+import { readFile, appendFile } from "node:fs/promises";
+import {
+  type MissionArtifactContext,
+  getMissionArtifactContext,
+  assertWritableArtifact,
+  assertPathInsideMissionDir,
+  writeArtifactFile,
+  persistPromptAndSession,
+  appendMissionEvent,
+} from "./_artifact-context.js";
 import { parse, stringify } from "yaml";
 import path from "node:path";
 import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.js";
@@ -13,7 +22,6 @@ import { auditLog, workflowsDir } from "../harness/paths.js";
 import { buildUsageEvent, estimateUsage } from "../harness/usage.js";
 import {
   appendRunsIndexEntry,
-  ensureRunDir,
   generateRunId,
   mirrorRuntimeResultToLatest,
   writeLatestPointer,
@@ -41,18 +49,6 @@ import {
   recordMissionExchange,
 } from "../extensions/honcho-memory/index.js";
 
-type MissionArtifactContext = {
-  missionDir: string;
-  runDir: string;
-  promptPath: string;
-  runtimeSessionPath: string;
-  eventsPath: string;
-  stdoutPath: string;
-  stderrPath: string;
-  diffPath: string;
-  runtimeResultPath: string;
-  finalMessagePath: string;
-};
 
 export type CheckResult = {
   runtime: string;
@@ -852,115 +848,6 @@ async function persistFinalMessage(
   finalMessage: string,
 ): Promise<void> {
   await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, finalMessage);
-}
-
-async function getMissionArtifactContext(root: string, missionPath: string, runId: string): Promise<MissionArtifactContext | null> {
-  const rootResolved = path.resolve(root);
-  const missionsRoot = path.join(rootResolved, ".harness", "missions");
-  const resolvedMissionPath = path.isAbsolute(missionPath)
-    ? path.resolve(missionPath)
-    : path.resolve(rootResolved, missionPath);
-  const relative = path.relative(missionsRoot, resolvedMissionPath);
-  const parts = relative.split(path.sep);
-
-  if (relative.startsWith("..") || path.isAbsolute(relative) || parts.length !== 2 || parts[1] !== "mission.yaml" || !parts[0]) {
-    return null;
-  }
-
-  const harnessDir = path.join(rootResolved, ".harness");
-  const harnessStat = await lstat(harnessDir);
-  if (harnessStat.isSymbolicLink()) {
-    throw new Error(`Refusing to persist artifacts through symlinked .harness directory: ${harnessDir}`);
-  }
-  if (!harnessStat.isDirectory()) {
-    throw new Error(`Refusing to persist artifacts through non-directory .harness path: ${harnessDir}`);
-  }
-
-  const missionsRootStat = await lstat(missionsRoot);
-  if (missionsRootStat.isSymbolicLink()) {
-    throw new Error(`Refusing to persist artifacts through symlinked missions directory: ${missionsRoot}`);
-  }
-  if (!missionsRootStat.isDirectory()) {
-    throw new Error(`Refusing to persist artifacts through non-directory missions path: ${missionsRoot}`);
-  }
-
-  const missionDir = path.join(missionsRoot, parts[0]);
-  const missionDirStat = await lstat(missionDir);
-  if (missionDirStat.isSymbolicLink()) {
-    throw new Error(`Refusing to persist artifacts into symlinked mission directory: ${missionDir}`);
-  }
-  if (!missionDirStat.isDirectory()) {
-    throw new Error(`Refusing to persist artifacts into non-directory mission path: ${missionDir}`);
-  }
-
-  const runDir = await ensureRunDir(rootResolved, parts[0], runId);
-
-  const context: MissionArtifactContext = {
-    missionDir,
-    runDir,
-    promptPath: path.join(runDir, "prompt.md"),
-    runtimeSessionPath: path.join(runDir, "runtime-session.yaml"),
-    eventsPath: path.join(runDir, "events.ndjson"),
-    stdoutPath: path.join(runDir, "runtime.stdout.log"),
-    stderrPath: path.join(runDir, "runtime.stderr.log"),
-    diffPath: path.join(runDir, "diff.patch"),
-    runtimeResultPath: path.join(runDir, "runtime-result.yaml"),
-    finalMessagePath: path.join(runDir, "runtime-final.txt"),
-  };
-
-  for (const artifactPath of [
-    context.promptPath,
-    context.runtimeSessionPath,
-    context.eventsPath,
-    context.stdoutPath,
-    context.stderrPath,
-    context.diffPath,
-    context.runtimeResultPath,
-    context.finalMessagePath,
-  ]) {
-    assertPathInsideMissionDir(missionDir, artifactPath);
-  }
-
-  return context;
-}
-
-async function assertWritableArtifact(missionDir: string, artifactPath: string): Promise<void> {
-  assertPathInsideMissionDir(missionDir, artifactPath);
-  try {
-    const stat = await lstat(artifactPath);
-    if (stat.isSymbolicLink()) {
-      throw new Error(`Refusing to overwrite symlinked artifact: ${artifactPath}`);
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw err;
-  }
-}
-
-function assertPathInsideMissionDir(missionDir: string, artifactPath: string): void {
-  const relative = path.relative(missionDir, path.resolve(artifactPath));
-  if (relative.startsWith("..") || path.isAbsolute(relative) || relative === "") {
-    throw new Error(`Refusing to write artifact outside mission directory: ${artifactPath}`);
-  }
-}
-
-async function writeArtifactFile(missionDir: string, artifactPath: string, content: string): Promise<void> {
-  await assertWritableArtifact(missionDir, artifactPath);
-  await writeFile(artifactPath, content, "utf-8");
-}
-
-async function persistPromptAndSession(
-  artifacts: MissionArtifactContext,
-  prompt: string,
-  session: RuntimeSessionDocument,
-): Promise<void> {
-  await writeArtifactFile(artifacts.missionDir, artifacts.promptPath, prompt);
-  await writeArtifactFile(artifacts.missionDir, artifacts.runtimeSessionPath, stringify(session));
-}
-
-async function appendMissionEvent(artifacts: MissionArtifactContext, event: Record<string, unknown>): Promise<void> {
-  await assertWritableArtifact(artifacts.missionDir, artifacts.eventsPath);
-  await appendFile(artifacts.eventsPath, `${JSON.stringify(event)}\n`, "utf-8");
 }
 
 async function persistFinalRuntimeSession(
