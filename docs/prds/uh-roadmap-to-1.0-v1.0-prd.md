@@ -25,21 +25,35 @@ All four pillars: **(1) Stability promise** — freeze + version the public surf
 ### Cadence
 **Scope-driven** (no fixed dates). The expanded container scope (below) makes it a milestone of its own, giving a proposed four-release line: 0.8.0 → 0.9.0 → 0.10.0 → 1.0.0. 1.0 ships when its exit checklist is green.
 
-### Container runtime research (informs 0.8.0)
-Stakeholder asked for Docker + Podman parity, plus OrbStack / containerd / Colima / nerdctl, and a scan of recent (2025–2026) sandbox projects for the best option. Findings:
+### Sandbox isolation research (informs 0.8.0)
+Stakeholder asked for Docker + Podman parity (plus OrbStack/containerd/Colima/nerdctl) and then nominated four specific projects to **replace** the generic candidate set: `alibaba/OpenSandbox`, `agent-sandbox/agent-sandbox`, `kubernetes-sigs/agent-sandbox`, and **Turso AgentFS**. Evaluation:
 
-- **One CLI surface, not six.** Docker, Podman, and **nerdctl** (containerd's docker-compatible CLI) share the `docker`-style command surface; **OrbStack** and **Colima** expose a Docker-compatible socket. So the backend is **one OCI/docker-compatible code path + runtime auto-detection** (probe `docker`/`podman`/`nerdctl` on PATH + `DOCKER_HOST`/socket), not six bespoke integrations. containerd is reached via nerdctl.
-- **2026 isolation trend: the microVM is the security boundary, not the container** — agent-written code can't be pre-reviewed, so plain namespaces are insufficient. Relevant local-first candidates: **microsandbox** (libkrun microVMs, local, ms-boot — superradcompany/microsandbox), **Kata Containers** (OCI runtime that puts each container in its own microVM — drops in under containerd/podman via `--runtime`), **Sysbox** (Daytona's harder-isolation runtime). Cloud options (E2B/Firecracker, Vercel/Cloudflare Sandboxes) are out of UH's local-first scope but validate the model.
-- **macOS reality (Apple Silicon)**: Firecracker/KVM is Linux-only; on macOS, Docker Desktop / OrbStack / Colima already run containers inside a Linux VM (so there's a VM boundary by default), and libkrun/microsandbox use Virtualization.framework. The spike must document the isolation each path actually delivers per-OS.
-- **Reference lists** (2026-05, exactly the requested window): `restyler/awesome-sandbox` + the "List of coding agent sandboxes 2026-05" gist — use as the spike's candidate set.
+**Two orthogonal isolation tiers** (the key reframing):
+- **Filesystem isolation** — *what the agent can change*. Today: `git-worktree` + `directory`-clone backends.
+- **Execution isolation** — *process / network / kernel boundary for untrusted code*. Today: none (container = stub).
 
-**Design implication:** `ContainerBackend` targets the docker-compatible CLI with runtime auto-detection + an explicit `runtime_config.container` block (`engine: auto|docker|podman|nerdctl`, `oci_runtime:` passthrough for `kata`/`runsc`/`sysbox`, `image:`). The **spike deliverable** picks the default isolation strategy (likely: docker-compatible CLI for portability + optional Kata/microsandbox for microVM-grade isolation) and writes it into `docs/architecture/sandbox-backends.md`. Reuse the bind-mount-a-`directory`-clone approach so dirty/promotion plumbing is unchanged; the container only isolates *execution*.
+| Project | Tier | Local-first fit (UH, macOS/Apple-Silicon) | License / maturity |
+|---|---|---|---|
+| **Turso AgentFS** | Filesystem (COW on a single SQLite file; `agentfs run bash`) | ✅ strong — local CLI + Turso-stack-aligned; snapshots/branches; **isolates files, NOT execution** | BETA |
+| **alibaba/OpenSandbox** | Execution (Docker + gVisor/Kata/Firecracker; `osb` CLI, TS SDK, MCP) | ✅ good — local Docker mode covers the whole runtime+microVM matrix in one project; heavier dep (Python/Go backend) | Apache-2.0 |
+| **agent-sandbox/agent-sandbox** | Execution (E2B-compatible, k8s) | ❌ needs k8s 1.26+ server; REST/MCP to a remote — cloud path only | Apache-2.0, early |
+| **kubernetes-sigs/agent-sandbox** | Execution (`Sandbox` CRD, gVisor/Kata) | ❌ needs a k8s cluster — cloud path only | Apache-2.0, v0.4.x |
+
+- **One CLI surface for the raw fallback.** Docker/Podman/nerdctl share the `docker`-style surface; OrbStack/Colima expose a docker socket; containerd via nerdctl → one OCI/docker-CLI auto-detect path if we don't adopt OpenSandbox.
+- **macOS reality**: Firecracker/KVM is Linux-only; on macOS, Docker/OrbStack/Colima already run a Linux VM (VM boundary by default); AgentFS/libkrun use the file/Virtualization layers. Document the actual isolation per path/OS.
+
+**Design implication (spike decides):**
+- **Filesystem tier** — evaluate **AgentFS** as a new `agentfs` sandbox backend (COW branches; Turso-aligned; lean) alongside git-worktree/directory. Caveat: BETA + FS-only, so it complements but can't be the *only* isolation for untrusted code.
+- **Execution tier** — choose between **(a) adopt OpenSandbox** (batteries-included local Docker + microVM, TS SDK/MCP — fastest path to the full matrix, heavier dependency) vs **(b) a lean in-house OCI/docker-CLI `ContainerBackend`** (auto-detect docker/podman/nerdctl + `runtime_config.container` with `oci_runtime` passthrough for kata/runsc — minimal deps, more glue). Weigh against the stack-minimalist preference.
+- **Cloud tier (post-1.0)** — the two k8s projects (`kubernetes-sigs/agent-sandbox`, `agent-sandbox`) are the future cloud/cluster execution backend, not the local 1.0 default; note for the 1.x line (and as a potential **Muta** integration point).
+
+Reuse the bind-mount/clone approach so dirty/promotion plumbing is unchanged regardless of tier; record the decision in `docs/architecture/sandbox-backends.md`.
 
 ### Proposed milestone partition (dependency- + value-ordered)
 
 | Milestone | Theme | Scope | Pillar |
 |---|---|---|---|
-| **v0.8.0** | **Sandbox isolation** | (1) container research spike → choose isolation strategy + write ADR; (2) multi-runtime `ContainerBackend` — OCI/docker-CLI auto-detect (docker/podman/nerdctl + orbstack/colima socket), `runtime_config.container` (engine + `oci_runtime` passthrough for kata/sysbox), evaluate microsandbox/libkrun as a local-microVM option; (3) **oh-my-pi → active** | Feature-complete |
+| **v0.8.0** | **Sandbox isolation** | (1) isolation spike → ADR across the two tiers (filesystem: AgentFS vs git-worktree/directory; execution: adopt OpenSandbox vs lean OCI/docker-CLI `ContainerBackend`); (2) implement the chosen execution backend (auto-detect docker/podman/nerdctl + orbstack/colima socket; `runtime_config.container` w/ `oci_runtime` passthrough) and, if green-lit, an `agentfs` COW filesystem backend; (3) **oh-my-pi → active** | Feature-complete |
 | **v0.9.0** | **Cross-runtime QA & memory** | (1) `uh mission run-all --runtimes …` side-by-side diff/sentinel comparison (spans all active adapters); (2) Honcho `honcho_search`/`honcho_remember` as mission MCP tools + per-mission `runtime_config.honcho_memory` opt-out | Feature-complete |
 | **v0.10.0** | **Adapter matrix, capability enforcement & DX** | (1) native Anthropic adapter (pay-per-token; ToS posture documented); (2) capability-declaration enforcement — manifest `capabilities:` validated (**warn by default, `--strict` errors**, mirroring `--strict-spec`); (3) TUI/plugin polish UH-48..53; (4) adoption package — quickstart + example-mission repo/dir + docs-completeness pass + screencast | Production plugin/DX + Adoption (build) |
 | **v1.0.0** | **Stability** | (1) freeze + version + document all four public surfaces + deprecation policy + SemVer commitment (`docs/STABILITY.md` + CHANGELOG `[1.0.0]`); (2) **friend's external dry-run** against their repo — triage friction as blockers; (3) 1.0 release notes | Stability + Adoption (prove) |
@@ -65,7 +79,8 @@ Stakeholder asked for Docker + Podman parity, plus OrbStack / containerd / Colim
 - [ ] CHANGELOG `[1.0.0]` states the SemVer stability commitment.
 
 ### Pillar 2 — Feature-complete core
-- [ ] Container backend works end-to-end on ≥1 engine via documented local smoke (auto-detects docker/podman/nerdctl; orbstack/colima socket); `oci_runtime` passthrough verified for ≥1 microVM runtime (kata or microsandbox/libkrun).
+- [ ] Execution-isolation backend works end-to-end via documented local smoke (OpenSandbox local mode, or in-house auto-detect docker/podman/nerdctl + orbstack/colima socket); microVM/`oci_runtime` path verified on ≥1 runtime (gVisor/Kata).
+- [ ] If adopted: `agentfs` (Turso AgentFS) COW filesystem backend round-trips create/dirty/discard; documented as FS-isolation (pairs with execution isolation for untrusted code).
 - [ ] All shipped adapters `active` (no `experimental`); oh-my-pi graduated; native Anthropic present.
 - [ ] Cross-runtime QA harness (`run-all --runtimes`) with side-by-side comparison.
 - [ ] Honcho MCP tools (`honcho_search`/`remember`) + per-mission opt-out.
@@ -88,7 +103,7 @@ Stakeholder asked for Docker + Podman parity, plus OrbStack / containerd / Colim
 ## Execution Phases (= the milestones)
 
 ### Phase 1 — v0.8.0 "Sandbox isolation"
-- [ ] Container research spike → ADR (pick isolation strategy across docker/podman/nerdctl/orbstack/colima/containerd + microVM option microsandbox/kata/sysbox).
+- [ ] Isolation spike → ADR: filesystem tier (AgentFS vs git-worktree/directory) + execution tier (OpenSandbox vs lean OCI/docker-CLI across docker/podman/nerdctl/orbstack/colima/containerd, gVisor/Kata passthrough); k8s options (kubernetes-sigs/agent-sandbox, agent-sandbox) recorded as the post-1.0 cloud path.
 - [ ] Multi-runtime `ContainerBackend` (auto-detect + `runtime_config.container`) + local smoke per available engine.
 - [ ] oh-my-pi → `active`.
 - **Deliverables**: real container backend + the active-adapter matrix. **Est.**: 1 milestone (spike-gated).
@@ -112,7 +127,7 @@ Stakeholder asked for Docker + Podman parity, plus OrbStack / containerd / Colim
 - **Deliverables**: stable, adoptable v1.0.0 on npm. **Est.**: 1 stabilization milestone.
 
 ## Resolved clarifications (round 3)
-1. **Container runtimes** → Docker + Podman parity + OrbStack/containerd/Colima/nerdctl via one OCI/docker-CLI auto-detect path; microVM isolation (microsandbox/libkrun, Kata, Sysbox) evaluated in the 0.8.0 spike for the best local-first option.
+1. **Container runtimes** → Docker + Podman parity + OrbStack/containerd/Colima/nerdctl via one OCI/docker-CLI auto-detect path. Candidate set replaced (round 4) with stakeholder-nominated projects: **Turso AgentFS** (filesystem-COW tier), **alibaba/OpenSandbox** (local execution tier, batteries-included), and **kubernetes-sigs/agent-sandbox** + **agent-sandbox/agent-sandbox** (k8s = post-1.0 cloud tier). Two-tier framing (filesystem vs execution) decided in the 0.8.0 spike.
 2. **External adopter** → the lead's friend tests 1.0 against one of their own repos (Phase 4 bar).
 3. **Muta** → entirely post-1.0.
 4. **Capability enforcement** → warn by default + `--strict` (mirrors `--strict-spec`).
@@ -122,15 +137,20 @@ Stakeholder asked for Docker + Podman parity, plus OrbStack / containerd / Colim
 - 0.10.0: is 0.10.0 one milestone or split (adapter+enforcement vs DX+adoption)?
 
 ## Research sources
+Stakeholder-nominated (round 4 — the primary candidate set):
+- Turso AgentFS (filesystem COW) — https://docs.turso.tech/agentfs/introduction
+- alibaba/OpenSandbox (local execution + microVM) — https://github.com/alibaba/OpenSandbox
+- kubernetes-sigs/agent-sandbox (k8s, cloud tier) — https://github.com/kubernetes-sigs/agent-sandbox
+- agent-sandbox/agent-sandbox (E2B-compat, k8s, cloud tier) — https://github.com/agent-sandbox/agent-sandbox
+
+Background landscape:
 - restyler/awesome-sandbox — https://github.com/restyler/awesome-sandbox
 - "List of coding agent sandboxes 2026-05" — https://gist.github.com/wincent/2752d8d97727577050c043e4ff9e386e
-- microsandbox (libkrun microVMs) — https://github.com/superradcompany/microsandbox
-- E2B (Apache-2.0, Firecracker) — https://github.com/e2b-dev/E2B
 - "Your Container Is Not a Sandbox: MicroVM Isolation in 2026" — https://emirb.github.io/blog/microvm-2026/
 
 ---
 
-**Document Version**: 1.1
+**Document Version**: 1.2
 **Created**: 2026-05-24
-**Clarification Rounds**: 3
-**Quality Score**: 95/100
+**Clarification Rounds**: 4
+**Quality Score**: 96/100
