@@ -187,6 +187,42 @@ function RecentRunsPanel() {
   );
 }
 
+type ActiveRun = { missionId: string; runId: string; status: string; startedAt: string };
+
+function RunningPanel() {
+  const { data, error } = useVisibilityPolling<{ runs: ActiveRun[] }>(
+    React.useCallback(() => pluginFetch<{ runs: ActiveRun[] }>("/runs/active"), []),
+  );
+  const runs = data?.runs ?? [];
+  // Stay quiet when nothing is in flight (and no error to surface).
+  if (!error && runs.length === 0) return null;
+  return (
+    <UI.Card>
+      <UI.CardHeader>
+        <UI.CardTitle>Running now ({runs.length})</UI.CardTitle>
+      </UI.CardHeader>
+      <UI.CardContent>
+        {error ? <div className="uh-error">{error}</div> : null}
+        <div className="uh-list">
+          {runs.map((r) => (
+            <div
+              key={r.runId || r.missionId}
+              className="uh-list-row uh-clickable"
+              onClick={() => { window.location.hash = buildHash({ view: "missionRun", missionId: r.missionId, runId: r.runId }); }}
+            >
+              <div>
+                <div className="uh-id">{r.missionId}</div>
+                <div className="uh-muted">started {fmt.isoTimeAgo(r.startedAt)} · run {r.runId.slice(0, 12)}</div>
+              </div>
+              <UI.Badge variant={statusBadge(r.status)}>{r.status}</UI.Badge>
+            </div>
+          ))}
+        </div>
+      </UI.CardContent>
+    </UI.Card>
+  );
+}
+
 export function OverviewTab() {
   const [runMission, setRunMission] = React.useState<MissionSummary | null>(null);
   return (
@@ -201,6 +237,7 @@ export function OverviewTab() {
           + New mission
         </UI.Button>
       </div>
+      <RunningPanel />
       <div className="uh-grid-3">
         <AdaptersPanel />
         <MissionsPanel onRun={setRunMission} />

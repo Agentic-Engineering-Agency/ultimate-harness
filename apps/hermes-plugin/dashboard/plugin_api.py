@@ -649,6 +649,32 @@ def _scan_runs(root: Path, limit: int = 20) -> list[dict[str, Any]]:
     return rows[:limit]
 
 
+def _scan_active_runs(root: Path) -> list[dict[str, Any]]:
+    """UH-97: scan each mission's ``latest.json`` for in-flight runs.
+
+    ``latest.json`` (uh.latest-run.v0) carries run_id/started_at/status but no
+    mission_id, so the mission id is taken from the directory name. JSON parses
+    cleanly via the YAML loader (JSON is a YAML subset)."""
+    missions_dir = _harness(root) / "missions"
+    rows: list[dict[str, Any]] = []
+    if not missions_dir.is_dir():
+        return rows
+    for entry in sorted(missions_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        pointer = _read_yaml(entry / "latest.json")
+        if not isinstance(pointer, dict) or pointer.get("status") != "running":
+            continue
+        rows.append({
+            "missionId": entry.name,
+            "runId": str(pointer.get("run_id") or ""),
+            "status": "running",
+            "startedAt": str(pointer.get("started_at") or ""),
+        })
+    rows.sort(key=lambda r: r.get("startedAt") or "", reverse=True)
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Router.
 # ---------------------------------------------------------------------------
@@ -872,6 +898,12 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
 async def list_runs(limit: int = 20) -> dict[str, list[dict[str, Any]]]:
     limit = max(1, min(int(limit), 200))
     return {"runs": _scan_runs(_project_root(), limit=limit)}
+
+
+@router.get("/runs/active")
+async def list_active_runs() -> dict[str, list[dict[str, Any]]]:
+    """UH-97: missions with an in-flight run (latest.json status == running)."""
+    return {"runs": _scan_active_runs(_project_root())}
 
 
 # ---------------------------------------------------------------------------
