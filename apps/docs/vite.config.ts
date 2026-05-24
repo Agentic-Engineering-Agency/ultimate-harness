@@ -5,6 +5,7 @@ import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import { defineConfig } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
 import mdx from 'fumadocs-mdx/vite';
+import alchemy from "alchemy/cloudflare/tanstack-start";
 
 // Walk content/docs/**/*.mdx and turn each one into a static page path.
 // Doing this explicitly (rather than crawlLinks) avoids the crawler chasing
@@ -32,8 +33,8 @@ walk(docsRoot);
 // SPA + prerender for /docs/* routes. The /docs/$ route uses createServerFn
 // with staticFunctionMiddleware — those need prerender to bake the server
 // function output into static JSON. Without it, the client at runtime
-// fetches /_serverFn/... which doesn't exist on Cloudflare Pages and the
-// _redirects fallback returns index.html, breaking JSON.parse.
+// fetches /_serverFn/... without a matching static asset. Alchemy deploys a
+// Worker (spa: true in alchemy.run.ts); do not add Pages _redirects (CF 10021).
 //
 // The active prerender config is the top-level `prerender` (not
 // `spa.prerender`, which only governs the SPA shell). `crawlLinks: false`
@@ -45,6 +46,7 @@ export default defineConfig({
   plugins: [
     mdx(),
     tailwindcss(),
+    alchemy(),
     tanstackStart({
       spa: {
         enabled: true,

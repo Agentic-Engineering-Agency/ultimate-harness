@@ -1,6 +1,11 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { baseOptions } from '@/lib/layout.shared';
+import rootPackage from '../../../../package.json';
+
+const UH_VERSION = rootPackage.version;
+const UH_PACKAGE = rootPackage.name;
+const UH_LICENSE = rootPackage.license;
 
 export const Route = createFileRoute('/')({
   component: Home,
@@ -86,7 +91,7 @@ export default function Home() {
 
         <section className="mx-auto max-w-5xl px-6 pt-20 pb-16 sm:pt-28 sm:pb-24 text-center">
           <p className="uh-mono mb-4 text-xs uppercase tracking-[0.2em] text-fd-muted-foreground">
-            v0.x · MIT · Bun + Node + TypeScript
+            v{UH_VERSION} · {UH_LICENSE} · Bun + Node + TypeScript
           </p>
           <h1 className="text-4xl sm:text-6xl font-semibold tracking-tight leading-[1.05]">
             One harness. Every coding agent.
@@ -132,7 +137,7 @@ export default function Home() {
             </div>
             <pre className="uh-mono text-sm leading-6 px-5 py-4 overflow-x-auto">
               <code>{`# install
-$ bun add -g @agentic-engineering/ultimate-harness
+$ bun add -g ${UH_PACKAGE}
 
 # initialize a project
 $ uh init
