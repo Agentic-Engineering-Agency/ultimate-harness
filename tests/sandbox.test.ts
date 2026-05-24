@@ -544,16 +544,41 @@ describe("sandbox backends (S3 #136)", () => {
   });
 });
 
-describe("container backend (S4 #137)", () => {
-  test("is registered but fails fast with actionable guidance", async () => {
+describe("container backend (#155 OpenSandbox)", () => {
+  test("is registered but fails fast when OpenSandbox is not configured", async () => {
     expect(listSandboxBackends()).toContain("container");
     expect(getSandboxBackend("container").name).toBe("container");
 
     await expect(
       createSandbox(TEST_ROOT, { id: "ctr", missionId: "demo", backend: "container" }),
-    ).rejects.toThrow(/container sandbox backend is not yet available/);
+    ).rejects.toThrow(/OpenSandbox container backend is not configured/);
 
     // A failed materialize must leave nothing behind (no index entry, no dir).
     expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
+  });
+
+  test("materializes with mocked OpenSandbox, detects dirt, and discards", async () => {
+    process.env.UH_OPENSANDBOX_MODE = "mock";
+    try {
+      const record = await createSandbox(TEST_ROOT, { id: "ctr-mock", missionId: "demo", backend: "container" });
+      expect(record).toMatchObject({ id: "ctr-mock", backend: "container", branch: "sandbox/ctr-mock" });
+
+      const worktreeAbs = join(TEST_ROOT, record.path);
+      await expect(stat(join(worktreeAbs, ".git"))).resolves.toBeTruthy();
+      expect(await readFile(join(worktreeAbs, ".uh-opensandbox.json"), "utf-8")).toContain("opensandbox");
+
+      await writeFile(join(worktreeAbs, "container-change.txt"), "dirty\n", "utf-8");
+      const info = await getSandboxStatus(TEST_ROOT, "ctr-mock");
+      expect(info.dirty).toBe(true);
+      expect(info.changes.some((c) => c.includes("container-change.txt"))).toBe(true);
+
+      await expect(discardSandbox(TEST_ROOT, "ctr-mock")).rejects.toThrow(/uncommitted change/i);
+      const discarded = await discardSandbox(TEST_ROOT, "ctr-mock", { force: true });
+      expect(discarded.branch_removed).toBe(false);
+      await expect(stat(worktreeAbs)).rejects.toThrow();
+      expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
+    } finally {
+      delete process.env.UH_OPENSANDBOX_MODE;
+    }
   });
 });

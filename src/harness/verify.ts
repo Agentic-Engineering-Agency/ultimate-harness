@@ -9,6 +9,7 @@ import { harnessDir, missionsDir, projectYaml, sandboxesDir, sandboxesIndex } fr
 import { validateFile } from "./validate.js";
 import { SandboxesIndexSchema } from "../schema/artifacts.js";
 import { classifyDiff } from "./diff-classifier.js";
+import { runOpenSandboxCommand, type SandboxCommandRunResult } from "./sandbox-backends.js";
 
 const SNIPPET_LIMIT = 800;
 const TIMEOUT_KILL_GRACE_MS = 100;
@@ -42,7 +43,7 @@ export type VerifyMissionResult = {
    * Populated when verify auto-routed into a bound sandbox worktree. Undefined
    * when checks ran in the harness root.
    */
-  sandbox?: { id: string; path: string };
+  sandbox?: { id: string; path: string; backend: string };
   /**
    * S6 (#139): populated when a passed verification auto-triggered promotion
    * because the mission's `sandbox.promotion_policy` is "auto-on-verify".
@@ -62,6 +63,9 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   const useSandbox = options.useSandbox !== false;
   const boundSandbox = useSandbox ? await findBoundSandbox(projectRoot, missionId) : null;
   const effectiveRoot = boundSandbox ? boundSandbox.path : projectRoot;
+  const sandboxRunner = boundSandbox?.backend === "container"
+    ? (command: string, timeoutMs: number) => runOpenSandboxCommand(effectiveRoot, command, timeoutMs)
+    : undefined;
   if (boundSandbox) {
     await rejectSymlinkIfExists(path.resolve(harnessDir(effectiveRoot)), "Harness directory");
     await requireInitializedProject(effectiveRoot);
@@ -115,7 +119,7 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     }
 
     executableChecks += 1;
-    const executed = await runCheck(effectiveRoot, check.name, check.command, commandTimeoutMs);
+    const executed = await runCheck(effectiveRoot, check.name, check.command, commandTimeoutMs, sandboxRunner);
     checks.push(executed.check);
     if (executed.finding) {
       findings.push(executed.finding);
@@ -148,7 +152,9 @@ export async function verifyMission(root: string, missionId: string, options: Ve
       });
       continue;
     }
-    const metrics = await runCommand(effectiveRoot, ac.check_command, commandTimeoutMs);
+    const metrics = sandboxRunner
+      ? await sandboxRunner(ac.check_command, commandTimeoutMs)
+      : await runCommand(effectiveRoot, ac.check_command, commandTimeoutMs);
     const acStatus: VerificationResultDocument["status"] = metrics.timedOut || metrics.spawnError || metrics.exitCode !== 0 ? "failed" : "passed";
     acceptanceResults.push({
       id: ac.id,
@@ -340,7 +346,7 @@ export async function verifyMission(root: string, missionId: string, options: Ve
 export async function findBoundSandbox(
   projectRoot: string,
   missionId: string,
-): Promise<{ id: string; path: string } | null> {
+): Promise<{ id: string; path: string; backend: string } | null> {
   const indexPath = sandboxesIndex(projectRoot);
   if (!(await fileExists(indexPath))) {
     return null;
@@ -370,7 +376,7 @@ export async function findBoundSandbox(
     const abs = path.resolve(projectRoot, candidate.path);
     if (!isPathWithin(abs, sandboxesRoot)) continue;
     if (!(await fileExists(abs))) continue;
-    return { id: candidate.id, path: abs };
+    return { id: candidate.id, path: abs, backend: candidate.backend };
   }
   return null;
 }
@@ -386,7 +392,9 @@ async function readMissionAtLocation(missionPath: string): Promise<MissionDocume
   return validateMission(parse(await readFile(missionPath, "utf-8")));
 }
 
-interface CommandRunMetrics {
+type CommandRunMetrics = SandboxCommandRunResult;
+
+interface HostCommandRunMetrics {
   exitCode: number;
   stdout: string;
   stderr: string;
@@ -460,11 +468,13 @@ async function runCommand(root: string, command: string, commandTimeoutMs: numbe
   });
 }
 
-async function runCheck(root: string, name: string, command: string, commandTimeoutMs: number): Promise<{
+async function runCheck(root: string, name: string, command: string, commandTimeoutMs: number, sandboxRunner?: (command: string, timeoutMs: number) => Promise<CommandRunMetrics>): Promise<{
   check: VerificationResultDocument["checks"][number];
   finding?: NonNullable<VerificationResultDocument["findings"]>[number];
 }> {
-  const metrics = await runCommand(root, command, commandTimeoutMs);
+  const metrics = sandboxRunner
+    ? await sandboxRunner(command, commandTimeoutMs)
+    : await runCommand(root, command, commandTimeoutMs);
   if (metrics.spawnError) {
     return {
       check: { name, type: "command", status: "failed", command, notes: buildNotes(1, metrics.stdout, metrics.stderr) },

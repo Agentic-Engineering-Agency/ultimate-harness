@@ -251,6 +251,42 @@ describe("uh verify", () => {
     const verification = await readVerification("sandboxed", sandboxPath);
     expect(verification.checks[0].notes).toContain("found-in-sandbox");
   });
+  test("container sandbox verification uses OpenSandbox runner instead of host cwd", async () => {
+    process.env.UH_OPENSANDBOX_MODE = "mock";
+    try {
+      await writeMission("container-verify", [{ name: "mocked command", command: "cat marker.txt" }]);
+
+      const sandboxPath = join(TEST_ROOT, ".harness", "sandboxes", "ctr-verify", "worktree");
+      await mkdir(sandboxPath, { recursive: true });
+      await mkdir(join(sandboxPath, ".harness"), { recursive: true });
+      await writeFile(join(sandboxPath, ".harness", "project.yaml"), await readFile(join(TEST_ROOT, ".harness", "project.yaml"), "utf-8"), "utf-8");
+      await mkdir(join(sandboxPath, ".harness", "missions", "container-verify"), { recursive: true });
+      await writeFile(join(sandboxPath, ".harness", "missions", "container-verify", "mission.yaml"), await readFile(join(TEST_ROOT, ".harness", "missions", "container-verify", "mission.yaml"), "utf-8"), "utf-8");
+
+      const indexPath = join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+      await writeFile(indexPath, stringify({
+        schema_version: "uh.sandboxes-index.v0",
+        sandboxes: [{
+          id: "ctr-verify",
+          mission_id: "container-verify",
+          backend: "container",
+          status: "created",
+          path: ".harness/sandboxes/ctr-verify/worktree",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }],
+      }), "utf-8");
+
+      const result = await verifyMission(TEST_ROOT, "container-verify");
+      expect(result.status).toBe("passed");
+      expect(result.sandbox).toMatchObject({ id: "ctr-verify", backend: "container" });
+      const verification = await readVerification("container-verify", sandboxPath);
+      expect(verification.checks[0].notes).toContain("[opensandbox mock] cat marker.txt");
+    } finally {
+      delete process.env.UH_OPENSANDBOX_MODE;
+    }
+  });
+
   test("useSandbox: false forces parent-root execution", async () => {
     await writeMission("no-sandbox", [{ name: "cat marker", command: "cat marker.txt" }]);
 
