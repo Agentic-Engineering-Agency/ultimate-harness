@@ -7,7 +7,7 @@ import { parseIssueRef, parseRequiredCheck, proposeMission, proposeMissionFromSp
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
-import { resolveRoot } from "./harness/paths.js";
+import { resolveRoot, missionDir } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
 import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
@@ -16,7 +16,8 @@ import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
 import { chooseAdapter, formatAutoRouteExplain } from "./harness/auto-route.js";
-import { CAPABILITIES, type AdapterId } from "./adapters/capabilities/index.js";
+import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabilities/index.js";
+import { forecastCost } from "./harness/cost-forecast.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
@@ -630,6 +631,69 @@ adapterCmd
     } catch (err) {
       console.error(`[FAIL] adapter add error:`);
       console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+adapterCmd
+  .command("capabilities")
+  .description("Show adapter capability manifests (tools, sandbox, cost class, context window)")
+  .option("--json", "Emit a JSON array for tooling")
+  .action((opts: { json?: boolean }) => {
+    const caps = listAdapterIds().map((id) => CAPABILITIES[id]);
+    if (opts.json) {
+      console.log(JSON.stringify({ adapters: caps }, null, 2));
+      return;
+    }
+    for (const c of caps) {
+      console.log(`${c.id} — ${c.display_name}`);
+      console.log(`  cost_class: ${c.cost_class}  max_context_tokens: ${c.max_context_tokens}  sandbox: ${c.sandbox}`);
+      console.log(`  tools: shell=${c.tools.shell} fs_read=${c.tools.fs_read} fs_write=${c.tools.fs_write} network=${c.tools.network}`);
+    }
+  });
+
+adapterCmd
+  .command("cost-forecast")
+  .description("Forecast token cost for a mission from its run history (heuristic fallback)")
+  .requiredOption("--mission <id>", "Mission id")
+  .option("--adapter <adapter>", "Adapter id or 'auto'", "auto")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit JSON")
+  .action(async (opts: { mission: string; adapter: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      let adapterId: AdapterId;
+      if (opts.adapter === "auto") {
+        const installed = (await runtimeRegistry.list(root))
+          .map((entry) => entry.id)
+          .filter((id): id is AdapterId => id in CAPABILITIES);
+        const mission = await loadMissionFile(path.join(missionDir(root, opts.mission), "mission.yaml"));
+        const decision = chooseAdapter(mission, installed);
+        if (!decision.adapter) {
+          console.error(`[FAIL] cost-forecast auto-route: ${decision.reason}`);
+          process.exit(1);
+          return;
+        }
+        adapterId = decision.adapter;
+      } else if (opts.adapter in CAPABILITIES) {
+        adapterId = opts.adapter as AdapterId;
+      } else {
+        console.error(`[FAIL] unknown adapter: ${opts.adapter}`);
+        process.exit(1);
+        return;
+      }
+      const forecast = await forecastCost(root, opts.mission, adapterId);
+      if (opts.json) {
+        console.log(JSON.stringify(forecast, null, 2));
+        return;
+      }
+      console.log(`Cost forecast for ${opts.mission} on ${forecast.adapter} (${forecast.cost_class}):`);
+      console.log(`  est_input_tokens:  ${forecast.est_input_tokens}`);
+      console.log(`  est_output_tokens: ${forecast.est_output_tokens}`);
+      console.log(`  est_cost_usd:      $${forecast.est_cost_usd}`);
+      console.log(`  basis:             ${forecast.basis} (${forecast.runs_sampled} run(s) sampled)`);
+    } catch (err) {
+      console.error(`[FAIL] cost-forecast error: ${(err as Error).message}`);
       process.exit(1);
     }
   });
