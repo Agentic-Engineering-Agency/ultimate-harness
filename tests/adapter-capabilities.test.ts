@@ -12,6 +12,7 @@ import {
   hermesProxyCapabilities,
   listAdapterIds,
   ohMyPiCapabilities,
+  openRouterCapabilities,
   parseCapabilitiesManifest,
 } from "../src/adapters/capabilities/index.js";
 import {
@@ -28,6 +29,7 @@ describe("AdapterCapabilitiesSchema", () => {
     ["hermes-proxy", hermesProxyCapabilities],
     ["codex", codexCapabilities],
     ["oh-my-pi", ohMyPiCapabilities],
+    ["openrouter", openRouterCapabilities],
   ] as const)("parses %s manifest", (id, manifest) => {
     const parsed = validateAdapterCapabilities(manifest);
     expect(parsed.id).toBe(id);
@@ -35,7 +37,7 @@ describe("AdapterCapabilitiesSchema", () => {
   });
 
   test("registry exposes every team adapter id", () => {
-    expect(listAdapterIds()).toEqual(["hermes", "codex", "oh-my-pi", "hermes-proxy"]);
+    expect(listAdapterIds()).toEqual(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter"]);
     for (const id of listAdapterIds()) {
       expect(getCapabilities(id).id).toBe(id);
       expect(CAPABILITIES[id]).toEqual(getCapabilities(id));
