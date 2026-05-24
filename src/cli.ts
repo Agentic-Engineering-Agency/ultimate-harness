@@ -30,7 +30,8 @@ import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFile as readFileAsync } from "node:fs/promises";
+import { readFile as readFileAsync, writeFile as writeFileAsync } from "node:fs/promises";
+import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js";
 
 import {
   createSandbox,
@@ -541,6 +542,33 @@ specCmd
       console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }
+  });
+
+specCmd
+  .command("template")
+  .description("Print a starter uh.spec.v0 spec template (feature | epic)")
+  .argument("[name]", "Template name; omit (or --list) to list available templates")
+  .option("--out <path>", "Write the template to a file instead of stdout")
+  .option("--list", "List available templates")
+  .action(async (name: string | undefined, opts: { out?: string; list?: boolean }) => {
+    if (opts.list || !name) {
+      console.log(listSpecTemplates().join("\n"));
+      return;
+    }
+    let content: string;
+    try {
+      content = getSpecTemplate(name);
+    } catch (err) {
+      console.error(`[FAIL] ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (opts.out) {
+      await writeFileAsync(opts.out, content, "utf-8");
+      console.log(`Wrote ${name} template: ${opts.out}`);
+      return;
+    }
+    process.stdout.write(content);
   });
 
 // uh adapter
