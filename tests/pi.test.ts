@@ -265,6 +265,23 @@ describe("pi output parsing", () => {
     expect(result.finalMessage).toBe("done");
   });
 
+  test("extracts assistant text from pi's native event shape (message_end / agent_end + content blocks)", () => {
+    // Real pi (v0.73.1) nests the assistant turn under `message` with content
+    // as an array of typed blocks — not the flat string shape omp mocks used.
+    const stdout = [
+      JSON.stringify({ type: "session", version: 3, id: "abc" }),
+      JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "OK" }] } }),
+      JSON.stringify({ type: "agent_end", messages: [
+        { role: "user", content: [{ type: "text", text: "respond with OK" }] },
+        { role: "assistant", content: [{ type: "text", text: "OK" }] },
+      ], willRetry: false }),
+    ].join("\n");
+    const result = parsePiOutput(stdout);
+    expect(result.parseErrors).toEqual([]);
+    expect(result.events).toHaveLength(3);
+    expect(result.finalMessage).toBe("OK");
+  });
+
   test("detects quota and auth failures", () => {
     expect(detectPiQuotaError("", "401 Unauthorized")).toContain("pi auth or quota error");
     expect(detectPiQuotaError("rate limit exceeded", "")).toContain("pi auth or quota error");

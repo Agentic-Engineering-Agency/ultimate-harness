@@ -800,6 +800,14 @@ function extractAssistantText(event: Record<string, unknown>): string {
     if (direct.length > 0) return direct;
   }
 
+  // pi nests the assistant turn under `message` (e.g. type: "message_end",
+  // message: { role: "assistant", content: [...] }). Unwrap and recurse.
+  const message = event.message;
+  if (message && typeof message === "object" && !Array.isArray(message)) {
+    const extracted = extractAssistantText(message as Record<string, unknown>);
+    if (extracted.length > 0) return extracted;
+  }
+
   const messages = event.messages;
   if (Array.isArray(messages)) {
     const extracted = extractLastAssistantFromArray(messages);
@@ -841,6 +849,14 @@ function extractStringBody(event: Record<string, unknown>): string {
   for (const key of ["content", "text", "message", "body", "output"]) {
     const value = event[key];
     if (typeof value === "string") return value;
+    // pi/omp content blocks: [{ type: "text", text: "..." }, ...] — concatenate text parts.
+    if (Array.isArray(value)) {
+      const text = value
+        .filter((b): b is Record<string, unknown> => !!b && typeof b === "object" && !Array.isArray(b))
+        .map((b) => (typeof b.text === "string" ? b.text : ""))
+        .join("");
+      if (text.length > 0) return text;
+    }
   }
   return "";
 }
