@@ -119,7 +119,6 @@ describe("uh mission dry-run --runtime pi", () => {
       "--no-session",
       "--no-extensions",
       "--no-skills",
-      "--no-title",
       result.prompt,
     ]);
     const sessionPath = join(runDir, "runtime-session.yaml");
@@ -176,7 +175,6 @@ runtime_config_overrides:
       "--no-session",
       "--no-extensions",
       "--no-skills",
-      "--no-title",
       result.prompt,
     ]);
     expect(missionDir).toContain("override-model");

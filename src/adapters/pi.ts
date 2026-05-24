@@ -369,7 +369,9 @@ export async function planPiRun(root: string, missionPath: string, options: Plan
   if (!allowSkills) {
     args.push("--no-skills");
   }
-  args.push("--no-title", prompt);
+  // Vanilla pi takes the prompt as a positional arg; it has no `--no-title`
+  // flag (that is an oh-my-pi/omp extension). Verified against `pi --help` (v0.73.1).
+  args.push(prompt);
 
   return {
     command: cliCommand,

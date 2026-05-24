@@ -24,13 +24,13 @@ uh adapter check pi    # runs `pi --version`
 | `allow_skills` | `false` | enable pi skills |
 | `model` | — | model override |
 
-The adapter invokes: `pi --print --mode <mode> --no-session [--no-extensions] [--no-skills] --no-title <prompt>`.
+The adapter invokes: `pi --print --mode <mode> --no-session [--no-extensions] [--no-skills] <prompt>` (the prompt is a positional arg). Verified against `pi --help` (v0.73.1).
 
-> **Flag-surface note.** This adapter mirrors `oh-my-pi`'s non-interactive
-> contract. If your `pi` build's flags differ (e.g. a different version probe or
-> output mode), adjust `config.cli_command` / `runtime_config` or open an issue —
-> the v0.7.0 adapter was unit-tested against the mocked contract; confirm one
-> live `uh mission run --runtime pi` before relying on it.
+> **Provider/auth note.** `pi` defaults to the `google` provider and reads API
+> keys from env vars; set `--provider`/`--model` via `runtime_config_overrides`
+> and export the matching key before a live run. The v0.7.0 adapter is
+> unit-tested with a mocked runner; confirm one live `uh mission run --runtime
+> pi` against your provider before relying on it.
 
 ## 2. Run
 
