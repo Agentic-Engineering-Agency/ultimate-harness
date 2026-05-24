@@ -68,4 +68,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ALCHEMY_PASSWORD: ${{ secrets.ALCHEMY_PASSWORD }}
+          # uh-docs is a single fixed-name Worker, so ephemeral CI state just
+          # re-deploys/updates it by name — no orphan risk. Opt out of Alchemy's
+          # CI local-state guard. (Future hardening: a CloudflareStateStore.)
+          ALCHEMY_CI_STATE_STORE_CHECK: "false"
         run: bash scripts/alchemy-deploy.sh prod
