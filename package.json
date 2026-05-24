@@ -1,6 +1,6 @@
 {
   "name": "@agenticengineeringagency/ultimate-harness",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Runtime-agnostic software-development harness for agentic engineering work.",
   "type": "module",
   "bin": {

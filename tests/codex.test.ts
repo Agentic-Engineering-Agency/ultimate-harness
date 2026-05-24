@@ -157,6 +157,8 @@ config:
 
     const result = await planCodexRun(TEST_ROOT, missionPath);
 
+    // UH-59 parity: memory-free basePrompt captured for recordMissionExchange.
+    expect(result.basePrompt.length).toBeGreaterThan(0);
     expect(result.session_id_passthrough).toBe(false);
     expect(result.errors).toContain("Codex assigns its own thread id; set pass_session_id: false");
   });
@@ -251,6 +253,7 @@ describe("uh mission run --runtime codex", () => {
       "codex.thread.started",
       "codex.turn.completed",
       "runtime.finished",
+      "runtime.usage",
     ]);
     // runtime-result.yaml is mirrored from runDir up to missionDir.
     const runtimeResultPath = join(missionDir, "runtime-result.yaml");

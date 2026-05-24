@@ -225,13 +225,17 @@ config:
 });
 
 describe("uh adapter check hermes", () => {
+  // Probes the real local `hermes` binary, so spawn latency is environment
+  // dependent. Give it a generous timeout — on a machine where hermes is
+  // installed but slow to start, the 5s default would flake. CI has no hermes
+  // (found: false) so this returns immediately there.
   test("returns valid check result when hermes is installed", async () => {
     const result = await checkHermes();
     expect(result.runtime).toBe("hermes");
     if (result.found) {
       expect(result.version.length).toBeGreaterThan(0);
     }
-  });
+  }, 30_000);
 
   test("validates the selected root adapter manifest", async () => {
     await rm(join(TEST_ROOT, ".harness", "adapters", "hermes.yaml"));
@@ -542,9 +546,11 @@ config:
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(events.map((event) => event.event)).toEqual(["runtime.started", "runtime.finished"]);
+    expect(events.map((event) => event.event)).toEqual(["runtime.started", "runtime.finished", "runtime.usage"]);
     expect(events[0]).toMatchObject({ mission_id: "run-artifacts", runtime: "hermes" });
     expect(events[1]).toMatchObject({ mission_id: "run-artifacts", runtime: "hermes", exit_code: 0, status: "succeeded" });
+    expect(events[2]).toMatchObject({ event: "runtime.usage", runtime: "hermes", source: "estimated" });
+    expect(events[2].total_tokens).toBeGreaterThanOrEqual(0);
   });
 
   test("nonexistent cli_command returns spawn error and finalizes failed runtime session", async () => {

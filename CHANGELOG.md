@@ -4,6 +4,30 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
+## [0.6.0] — 2026-05-23
+
+Epic 7 (adapter capability routing + cost) and Epic 8 (SDD hardening) completed, plus a suite-health pass and CI/release hygiene. Several v0.5.0 gaps were corrected: the UH-101 auto-router (claimed shipped but absent) was implemented, and token-usage capture (assumed by the cost features) was added.
+
+### Added
+
+- **Honcho memory for `codex` + `hermes`** ([UH-59](https://linear.app/agentic-eng/issue/UH-59) follow-up): both adapters now enrich the dispatched prompt with persistent memory and record the exchange after a run (mirroring `oh-my-pi`); env-gated and a no-op when Honcho is disabled. Adds `basePrompt` to their run plans.
+- **Spec-adherence judge** (Epic 8 / [UH-110](https://linear.app/agentic-eng/issue/UH-110)): `uh validate --judge --spec <path>` grades whether the diff (`<base>...HEAD`) satisfies a spec's acceptance criteria via an LLM, returning a structured `{adherence, missing_ac, evidence}` verdict (exit 1 on `fail`). Opt-in; dispatches a one-shot through a configured hermes-proxy runtime. New `src/harness/spec-judge.ts` (pure prompt/verdict, injectable runner).
+- **Spec template library** (Epic 8 / [UH-111](https://linear.app/agentic-eng/issue/UH-111)): `uh spec template [feature|epic] [--out <path>] [--list]` emits starter `uh.spec.v0` documents. Templates are source-of-truth TS constants (ship in the package) mirrored to `docs/specs/templates/`, with a drift-guard test. New `src/harness/spec-templates.ts`.
+- **Running-now grid** (Epic 6 / [UH-97](https://linear.app/agentic-eng/issue/UH-97)): `GET /api/uh/runs/active` scans each mission's `latest.json` for in-flight runs; the dashboard Overview shows a "Running now (N)" card (auto-hidden when idle) linking into each live run.
+- **Per-run cost gauge** (Epic 6 / [UH-96](https://linear.app/agentic-eng/issue/UH-96)): the dashboard `LiveEventsPane` header shows live token totals (↑input ↓output) and estimated USD, aggregated from `runtime.usage` events. `$/Mtok` rates are sourced from the harness via `GET /api/uh/adapters/capabilities` (new `cost_classes` field) — no duplicated rate constants in the frontend. New `apps/hermes-plugin/dashboard/src/cost-gauge.ts`.
+- **hermes-proxy live capability probe** (Epic 7 / [UH-103](https://linear.app/agentic-eng/issue/UH-103)): `uh adapter capabilities --probe` fetches `<endpoint>/capabilities` and merges a (partial) capability document over the static manifest, falling back to static on 404/error/malformed. Forward-looking — proxies don't serve this yet, so it's a safe no-op today. New `src/adapters/capabilities/hermes-proxy-probe.ts`.
+- **Cost forecast** (Epic 7 / [UH-104](https://linear.app/agentic-eng/issue/UH-104)): `uh adapter cost-forecast --mission <id> [--adapter auto|<id>]` averages a mission's past-run `runtime.usage` tokens (heuristic fallback when no history) and prices them by the adapter's cost class. New `uh adapter capabilities --json`. Plugin endpoints `GET /api/uh/adapters/capabilities` + `POST /api/uh/missions/{id}/cost-forecast` shell the CLI so cost math stays single-sourced. New `src/harness/cost-forecast.ts`.
+- **Token-usage capture**: adapters now emit a `runtime.usage` event per run (prerequisite for cost-forecast + the dashboard cost gauge). hermes-proxy records **real** tokens from the OpenAI-style `usage` field; codex / hermes / oh-my-pi emit a deterministic estimate (chars/4) tagged `source: "estimated"`. New `src/harness/usage.ts`.
+- **Adapter auto-routing** (Epic 7 / [UH-101](https://linear.app/agentic-eng/issue/UH-101)): `uh mission run --auto` selects the cheapest installed adapter whose capability manifest satisfies the mission's `runtime_requirements`; `--auto --explain` prints the decision matrix. New `src/harness/auto-route.ts` (`chooseAdapter`), reusing `evaluateAdapterEligibility` (UH-102) and `compareCostClass`. Closes a gap where v0.5.0 listed UH-101 as shipped but the routing code was never landed.
+
+### Fixed
+
+- `Publish package` workflow re-ran on every push to `main`, failing with `403 cannot publish over the previously published versions`; now gated to `v*` tags / releases / manual dispatch with an idempotency guard that skips when the version already exists ([UH-91](https://linear.app/agentic-eng/issue/UH-91), [#112](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/112)). npm publish was never actually blocked — 0.3.0/0.4.0/0.5.0 are all live.
+
+### Changed
+
+- Test suite is hermetic and deterministic ([#113](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/113)): Honcho memory forced off by default in tests (the suite was hitting the live Honcho API via a developer's `HONCHO_API_KEY`), wall-clock assertions gated behind `UH_PERF=1`, and generous timeouts for real-subprocess tests.
+
 ## [0.5.0] — 2026-05-20
 
 Epics 6–8 integrated on `dev` from feature branches (live observability, adapter auto-routing, SDD hardening). Execution spec: [`docs/specs/epics-6-7-8.md`](docs/specs/epics-6-7-8.md).
@@ -120,6 +144,8 @@ Two epics shipped end-to-end plus a deep discipline-layer pass distilled from [G
 
 Initial public release. Adapter framework (`hermes`, `codex`, `oh-my-pi`), mission schema, runtime-result artifact contract, verification + promotion pipeline.
 
+[0.6.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.1.0...v0.2.0

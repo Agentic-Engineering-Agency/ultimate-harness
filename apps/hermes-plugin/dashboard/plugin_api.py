@@ -649,6 +649,32 @@ def _scan_runs(root: Path, limit: int = 20) -> list[dict[str, Any]]:
     return rows[:limit]
 
 
+def _scan_active_runs(root: Path) -> list[dict[str, Any]]:
+    """UH-97: scan each mission's ``latest.json`` for in-flight runs.
+
+    ``latest.json`` (uh.latest-run.v0) carries run_id/started_at/status but no
+    mission_id, so the mission id is taken from the directory name. JSON parses
+    cleanly via the YAML loader (JSON is a YAML subset)."""
+    missions_dir = _harness(root) / "missions"
+    rows: list[dict[str, Any]] = []
+    if not missions_dir.is_dir():
+        return rows
+    for entry in sorted(missions_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        pointer = _read_yaml(entry / "latest.json")
+        if not isinstance(pointer, dict) or pointer.get("status") != "running":
+            continue
+        rows.append({
+            "missionId": entry.name,
+            "runId": str(pointer.get("run_id") or ""),
+            "status": "running",
+            "startedAt": str(pointer.get("started_at") or ""),
+        })
+    rows.sort(key=lambda r: r.get("startedAt") or "", reverse=True)
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Router.
 # ---------------------------------------------------------------------------
@@ -690,6 +716,53 @@ async def get_status() -> dict[str, Any]:
         "sandboxes": {"total": len(sandbox_entries), "by_status": by_status},
         "recent_audit_events": audit_lines,
     }
+
+
+@router.get("/adapters/capabilities")
+async def get_adapter_capabilities() -> dict[str, Any]:
+    """UH-104: typed adapter capability manifests (tools, sandbox, cost class)."""
+    root = _project_root()
+    try:
+        proc = _runner.run_sync(["adapter", "capabilities", "--json"], cwd=root, timeout=_READ_TIMEOUT_S)
+    except FileNotFoundError as exc:
+        raise _err(500, "uh_cli_missing", "uh CLI not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _err(504, "uh_cli_timeout", "uh adapter capabilities timed out") from exc
+    if proc.returncode != 0:
+        raise _err(500, "uh_cli_error", "uh adapter capabilities failed", details=(proc.stderr or "").strip())
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise _err(500, "bad_json", "invalid JSON from uh adapter capabilities", details=str(exc)) from exc
+
+
+@router.post("/missions/{mission_id}/cost-forecast")
+async def post_cost_forecast(mission_id: str, request: Request) -> dict[str, Any]:
+    """UH-104: forecast token cost for a mission via ``uh adapter cost-forecast``."""
+    _safe_id(mission_id, "mission_id")
+    body = await _json_body(request)
+    adapter = body.get("adapter") or "auto"
+    if not isinstance(adapter, str):
+        raise _err(400, "invalid_adapter", "adapter must be a string")
+    if adapter != "auto" and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", adapter):
+        raise _err(400, "invalid_adapter", "adapter must be 'auto' or an adapter id")
+    root = _project_root()
+    try:
+        proc = _runner.run_sync(
+            ["adapter", "cost-forecast", "--mission", mission_id, "--adapter", adapter, "--json"],
+            cwd=root,
+            timeout=_READ_TIMEOUT_S,
+        )
+    except FileNotFoundError as exc:
+        raise _err(500, "uh_cli_missing", "uh CLI not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _err(504, "uh_cli_timeout", "cost-forecast timed out") from exc
+    if proc.returncode != 0:
+        raise _err(400, "forecast_failed", "cost-forecast failed", details=(proc.stderr or proc.stdout or "").strip())
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise _err(500, "bad_json", "invalid JSON from cost-forecast", details=str(exc)) from exc
 
 
 @router.get("/missions")
@@ -825,6 +898,12 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
 async def list_runs(limit: int = 20) -> dict[str, list[dict[str, Any]]]:
     limit = max(1, min(int(limit), 200))
     return {"runs": _scan_runs(_project_root(), limit=limit)}
+
+
+@router.get("/runs/active")
+async def list_active_runs() -> dict[str, list[dict[str, Any]]]:
+    """UH-97: missions with an in-flight run (latest.json status == running)."""
+    return {"runs": _scan_active_runs(_project_root())}
 
 
 # ---------------------------------------------------------------------------

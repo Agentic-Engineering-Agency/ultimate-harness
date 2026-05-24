@@ -7,7 +7,7 @@ import { parseIssueRef, parseRequiredCheck, proposeMission, proposeMissionFromSp
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
 import { validateFile, validateRootProject, validateAllWorkflows, validateAllMissions } from "./harness/validate.js";
-import { resolveRoot } from "./harness/paths.js";
+import { resolveRoot, missionDir } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
 import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
@@ -15,6 +15,11 @@ import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
+import { chooseAdapter, formatAutoRouteExplain } from "./harness/auto-route.js";
+import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabilities/index.js";
+import { forecastCost } from "./harness/cost-forecast.js";
+import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
+import { COST_CLASSES } from "./schema/adapter-capabilities.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
@@ -25,7 +30,9 @@ import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFile as readFileAsync } from "node:fs/promises";
+import { readFile as readFileAsync, writeFile as writeFileAsync } from "node:fs/promises";
+import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js";
+import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 
 import {
   createSandbox,
@@ -197,8 +204,68 @@ program
   .option("--repair", "Run drift detection with auto-repair (idempotent)")
   .option("--strict-spec", "Run drift detection; spec-stale issues are errors (default: warn)")
   .option("--json", "Emit drift detection output as JSON instead of human text")
-  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; strictSpec?: boolean; json?: boolean }) => {
+  .option("--judge", "Grade spec adherence with an LLM (requires --spec + a hermes-proxy runtime)")
+  .option("--spec <path>", "Spec file to judge (with --judge)")
+  .option("--base <ref>", "Base ref for the judge diff (default: dev)")
+  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; strictSpec?: boolean; json?: boolean; judge?: boolean; spec?: string; base?: string }) => {
     const root = resolveRoot(opts.root);
+    if (opts.judge) {
+      try {
+        if (!opts.spec) {
+          console.error("[FAIL] --judge requires --spec <path>");
+          process.exit(1);
+          return;
+        }
+        const { loadSpecFile } = await import("./harness/spec-loader.js");
+        const spec = await loadSpecFile(opts.spec);
+        const base = opts.base || "dev";
+        const { execFile } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const execFileP = promisify(execFile);
+        let diff = "";
+        try {
+          const { stdout } = await execFileP("git", ["diff", "--no-color", `${base}...HEAD`], {
+            cwd: root,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+          diff = stdout;
+        } catch {
+          diff = "";
+        }
+        const entry = (await runtimeRegistry.list(root)).find((e) => e.id === "hermes-proxy");
+        const rc = (entry?.document.config as Record<string, unknown> | undefined)?.runtime_config as
+          | Record<string, unknown>
+          | undefined;
+        const endpoint = typeof rc?.endpoint === "string" ? rc.endpoint : undefined;
+        const model = typeof rc?.model === "string" ? rc.model : undefined;
+        if (!endpoint || !model) {
+          console.error("[FAIL] --judge requires a configured hermes-proxy runtime (runtime_config.endpoint + model)");
+          process.exit(1);
+          return;
+        }
+        const verdict = await judgeSpecAdherence({
+          spec,
+          diff,
+          runner: (prompt) => oneShotOpenAI({ endpoint, model, prompt }),
+        });
+        if (opts.json) {
+          console.log(JSON.stringify(verdict, null, 2));
+        } else {
+          console.log(`Spec adherence (${spec.frontMatter.id}): ${verdict.adherence.toUpperCase()}`);
+          if (verdict.missing_ac.length > 0) {
+            console.log("Missing acceptance criteria:");
+            for (const m of verdict.missing_ac) console.log(`  - ${m}`);
+          }
+          if (verdict.evidence) console.log(`Evidence: ${verdict.evidence}`);
+        }
+        process.exit(verdict.adherence === "fail" ? 1 : 0);
+        return;
+      } catch (err) {
+        console.error(`[FAIL] spec judge error: ${(err as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
     if (opts.json || opts.repair || opts.strictSpec) {
       const { runDrift, groupByKind, DRIFT_KINDS } = await import("./harness/validate/drift/registry.js");
       const outcome = await runDrift(root, {
@@ -538,6 +605,33 @@ specCmd
     }
   });
 
+specCmd
+  .command("template")
+  .description("Print a starter uh.spec.v0 spec template (feature | epic)")
+  .argument("[name]", "Template name; omit (or --list) to list available templates")
+  .option("--out <path>", "Write the template to a file instead of stdout")
+  .option("--list", "List available templates")
+  .action(async (name: string | undefined, opts: { out?: string; list?: boolean }) => {
+    if (opts.list || !name) {
+      console.log(listSpecTemplates().join("\n"));
+      return;
+    }
+    let content: string;
+    try {
+      content = getSpecTemplate(name);
+    } catch (err) {
+      console.error(`[FAIL] ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (opts.out) {
+      await writeFileAsync(opts.out, content, "utf-8");
+      console.log(`Wrote ${name} template: ${opts.out}`);
+      return;
+    }
+    process.stdout.write(content);
+  });
+
 // uh adapter
 const adapterCmd = program
   .command("adapter")
@@ -628,6 +722,97 @@ adapterCmd
     } catch (err) {
       console.error(`[FAIL] adapter add error:`);
       console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+adapterCmd
+  .command("capabilities")
+  .description("Show adapter capability manifests (tools, sandbox, cost class, context window)")
+  .option("--json", "Emit a JSON array for tooling")
+  .option("--probe", "Live-probe hermes-proxy /capabilities and merge over the static manifest")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { json?: boolean; probe?: boolean; root?: string }) => {
+    const caps = listAdapterIds().map((id) => ({ ...CAPABILITIES[id] }));
+    const probed: Record<string, "probe" | "static"> = {};
+    if (opts.probe) {
+      const root = resolveRoot(opts.root);
+      try {
+        const entry = (await runtimeRegistry.list(root)).find((e) => e.id === "hermes-proxy");
+        const rc = (entry?.document.config as Record<string, unknown> | undefined)?.runtime_config as
+          | Record<string, unknown>
+          | undefined;
+        const endpoint = typeof rc?.endpoint === "string" ? rc.endpoint : undefined;
+        if (endpoint) {
+          const result = await probeHermesProxyCapabilities(endpoint);
+          const idx = caps.findIndex((c) => c.id === "hermes-proxy");
+          if (idx >= 0) caps[idx] = { ...result.capabilities };
+          probed["hermes-proxy"] = result.source;
+        }
+      } catch {
+        // best-effort — leave the static manifest in place on any failure
+      }
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(
+        opts.probe
+          ? { adapters: caps, cost_classes: COST_CLASSES, probed }
+          : { adapters: caps, cost_classes: COST_CLASSES },
+        null,
+        2,
+      ));
+      return;
+    }
+    for (const c of caps) {
+      const tag = probed[c.id] ? ` (${probed[c.id]})` : "";
+      console.log(`${c.id} — ${c.display_name}${tag}`);
+      console.log(`  cost_class: ${c.cost_class}  max_context_tokens: ${c.max_context_tokens}  sandbox: ${c.sandbox}`);
+      console.log(`  tools: shell=${c.tools.shell} fs_read=${c.tools.fs_read} fs_write=${c.tools.fs_write} network=${c.tools.network}`);
+    }
+  });
+
+adapterCmd
+  .command("cost-forecast")
+  .description("Forecast token cost for a mission from its run history (heuristic fallback)")
+  .requiredOption("--mission <id>", "Mission id")
+  .option("--adapter <adapter>", "Adapter id or 'auto'", "auto")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit JSON")
+  .action(async (opts: { mission: string; adapter: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      let adapterId: AdapterId;
+      if (opts.adapter === "auto") {
+        const installed = (await runtimeRegistry.list(root))
+          .map((entry) => entry.id)
+          .filter((id): id is AdapterId => id in CAPABILITIES);
+        const mission = await loadMissionFile(path.join(missionDir(root, opts.mission), "mission.yaml"));
+        const decision = chooseAdapter(mission, installed);
+        if (!decision.adapter) {
+          console.error(`[FAIL] cost-forecast auto-route: ${decision.reason}`);
+          process.exit(1);
+          return;
+        }
+        adapterId = decision.adapter;
+      } else if (opts.adapter in CAPABILITIES) {
+        adapterId = opts.adapter as AdapterId;
+      } else {
+        console.error(`[FAIL] unknown adapter: ${opts.adapter}`);
+        process.exit(1);
+        return;
+      }
+      const forecast = await forecastCost(root, opts.mission, adapterId);
+      if (opts.json) {
+        console.log(JSON.stringify(forecast, null, 2));
+        return;
+      }
+      console.log(`Cost forecast for ${opts.mission} on ${forecast.adapter} (${forecast.cost_class}):`);
+      console.log(`  est_input_tokens:  ${forecast.est_input_tokens}`);
+      console.log(`  est_output_tokens: ${forecast.est_output_tokens}`);
+      console.log(`  est_cost_usd:      $${forecast.est_cost_usd}`);
+      console.log(`  basis:             ${forecast.basis} (${forecast.runs_sampled} run(s) sampled)`);
+    } catch (err) {
+      console.error(`[FAIL] cost-forecast error: ${(err as Error).message}`);
       process.exit(1);
     }
   });
@@ -843,10 +1028,42 @@ missionCmd
     "JSON object of runtime_config overrides applied on top of the mission file (e.g. '{\"model\":\"gpt-5\"}')",
   )
   .option("--run-id <id>", "Explicit run id; auto-generated if omitted")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string }) => {
+  .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
+  .option("--explain", "With --auto, print the adapter decision matrix")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string; auto?: boolean; explain?: boolean }) => {
     const root = resolveRoot(opts.root);
-    const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
+
+    if (opts.auto && opts.runtime) {
+      console.error("[FAIL] --auto and --runtime are mutually exclusive");
+      process.exit(1);
+      return;
+    }
+    let runtime = opts.runtime || "hermes";
+    if (opts.auto) {
+      try {
+        const installed = (await runtimeRegistry.list(root))
+          .map((entry) => entry.id)
+          .filter((id): id is AdapterId => id in CAPABILITIES);
+        const mission = await loadMissionFile(filePath);
+        const decision = chooseAdapter(mission, installed);
+        if (opts.explain) {
+          console.log(formatAutoRouteExplain(decision));
+          console.log("");
+        }
+        if (!decision.adapter) {
+          console.error(`[BLOCKED] auto-route: ${decision.reason}`);
+          process.exit(1);
+          return;
+        }
+        runtime = decision.adapter;
+        console.log(`Auto-routed to: ${runtime} — ${decision.reason}`);
+      } catch (err) {
+        console.error(`[FAIL] auto-route error: ${(err as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
 
     if (opts.runId !== undefined) {
       try {

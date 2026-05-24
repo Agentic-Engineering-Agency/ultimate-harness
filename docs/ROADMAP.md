@@ -163,8 +163,7 @@ These are tracked in narrative form until they earn the priority to be filed:
 - **Cross-runtime QA harness** — `uh mission run-all --runtimes hermes,codex,oh-my-pi,hermes-proxy <file>` with side-by-side diff/sentinel comparison.
 - **Sandbox backend abstraction** — `directory` and `container` backends alongside `git-worktree`.
 - **Verify-then-promote auto-trigger** — opt-in workflow-driven auto-promote gate.
-- **Cleanup design-only `claude-code` stub** — redundant after UH-27 + UH-32.
-- **Honcho-memory follow-ups** — wire `codex` and `hermes` adapters into `enrichMissionPrompt` / `recordMissionExchange`; expose `honcho_search` and `honcho_remember` to missions as MCP tools; add `runtime_config.honcho_memory` opt-out per mission.
+- **Honcho-memory follow-ups** — `codex` and `hermes` adapters are now wired into memory enrichment + `recordMissionExchange` (v0.6.0, [UH-110 follow-up]); remaining: expose `honcho_search` and `honcho_remember` to missions as MCP tools; add `runtime_config.honcho_memory` opt-out per mission.
 - **Filed follow-ups (Epic 2 polish):**
   - [UH-48](https://linear.app/agentic-eng/issue/UH-48) — `UH_TUI_THEME` + palette-driven dark/light.
   - [UH-49](https://linear.app/agentic-eng/issue/UH-49) — `e` open manifest in `$EDITOR` (requires renderer suspend/resume).

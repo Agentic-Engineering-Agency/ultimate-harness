@@ -10,6 +10,8 @@ import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
 import { auditLog, workflowsDir } from "../harness/paths.js";
+import { buildUsageEvent, estimateUsage } from "../harness/usage.js";
+import { loadHonchoMemoryBlock, recordMissionExchange } from "../extensions/honcho-memory/index.js";
 import {
   appendRunsIndexEntry,
   ensureRunDir,
@@ -68,6 +70,8 @@ export type HermesRunPlan = {
   command: string;
   args: string[];
   prompt: string;
+  /** Memory-free prompt, recorded to Honcho after the run (UH-59 parity). */
+  basePrompt: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -384,7 +388,10 @@ export async function planHermesRun(root: string, missionPath: string, options: 
     ? config.default_toolsets.join(",")
     : "terminal,file,web";
 
-  const prompt = renderPrompt(buildDispatchContext(mission, workflow));
+  const ctx = buildDispatchContext(mission, workflow);
+  const basePrompt = renderPrompt(ctx);
+  ctx.memoryBlock = (await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id })) ?? undefined;
+  const prompt = renderPrompt(ctx);
   const args = [
     "chat",
     "-q",
@@ -404,6 +411,7 @@ export async function planHermesRun(root: string, missionPath: string, options: 
     command: config.cli_command || "hermes",
     args,
     prompt,
+    basePrompt,
     worktree: config.worktree_mode,
     session_id_passthrough: config.pass_session_id,
     errors,
@@ -724,6 +732,18 @@ export async function collectHermesSession(
       exitCode,
       exitCode === 0 ? "succeeded" : "failed",
     );
+
+    await appendMissionEvent(
+      artifacts,
+      buildUsageEvent("hermes", plan.mission.id, estimateUsage(plan.prompt, hermesSentinel ?? ""), finishedAt),
+    );
+
+    if (hermesSentinel) {
+      await recordMissionExchange(plan.basePrompt, hermesSentinel, {
+        cwd: root,
+        missionId: plan.mission.id,
+      });
+    }
   } catch (err) {
     const message = (err as Error).message;
     const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";
