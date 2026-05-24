@@ -9,6 +9,9 @@ export const website = await TanStackStart('uh-docs', {
   // pre-existing `uh-docs` Worker isn't tracked and a plain create fails
   // ("already exists"). Adopt it and update in place (forwarded to the Worker).
   adopt: true,
+  // Bind the public custom domain in IaC so every deploy re-asserts it (no
+  // drift back to the old Pages deploy). adopt takes over an existing record.
+  domains: [{ domainName: 'uh.agenticengineering.lat', adopt: true }],
   // Worker assets: Pages-style _redirects (/* /index.html 200) is rejected (CF 10021).
   spa: true,
   wrangler: {
