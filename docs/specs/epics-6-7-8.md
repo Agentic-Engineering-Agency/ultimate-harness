@@ -3,7 +3,7 @@
 **Status:** DRAFT — ready for Cursor agent to execute.
 **Audience:** A Cursor IDE agent (**Composer 2.5** as primary implementer, **Gemini Flash 3.5** as fast worker / adversarial reviewer) acting as Ultrawork orchestrator, spawning subagents in parallel worktrees.
 **Repo:** `git@github.com:Agentic-Engineering-Agency/ultimate-harness.git` @ `dev` (currently `1515e36`).
-**Package:** `@agenticengineeringagency/ultimate-harness` (CLI `uh`), v0.4.0 (npm publish blocked on UH-91 token rotation; does not block these epics).
+**Package:** `@agenticengineeringagency/ultimate-harness` (CLI `uh`). These epics shipped in v0.6.0 (live on npm). _(Historical note: this spec was authored at v0.4.0, when UH-91 npm publishing was thought blocked; that turned out to be a `bun publish` quirk, since resolved.)_
 
 ---
 
