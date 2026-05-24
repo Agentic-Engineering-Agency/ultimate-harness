@@ -8,6 +8,7 @@ Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [Git
 
 ### Added
 
+- **Honcho memory for `codex` + `hermes`** ([UH-59](https://linear.app/agentic-eng/issue/UH-59) follow-up): both adapters now enrich the dispatched prompt with persistent memory and record the exchange after a run (mirroring `oh-my-pi`); env-gated and a no-op when Honcho is disabled. Adds `basePrompt` to their run plans.
 - **Spec-adherence judge** (Epic 8 / [UH-110](https://linear.app/agentic-eng/issue/UH-110)): `uh validate --judge --spec <path>` grades whether the diff (`<base>...HEAD`) satisfies a spec's acceptance criteria via an LLM, returning a structured `{adherence, missing_ac, evidence}` verdict (exit 1 on `fail`). Opt-in; dispatches a one-shot through a configured hermes-proxy runtime. New `src/harness/spec-judge.ts` (pure prompt/verdict, injectable runner).
 - **Spec template library** (Epic 8 / [UH-111](https://linear.app/agentic-eng/issue/UH-111)): `uh spec template [feature|epic] [--out <path>] [--list]` emits starter `uh.spec.v0` documents. Templates are source-of-truth TS constants (ship in the package) mirrored to `docs/specs/templates/`, with a drift-guard test. New `src/harness/spec-templates.ts`.
 - **Running-now grid** (Epic 6 / [UH-97](https://linear.app/agentic-eng/issue/UH-97)): `GET /api/uh/runs/active` scans each mission's `latest.json` for in-flight runs; the dashboard Overview shows a "Running now (N)" card (auto-hidden when idle) linking into each live run.

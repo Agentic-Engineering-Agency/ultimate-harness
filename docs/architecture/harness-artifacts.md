@@ -12,7 +12,6 @@
   adapters/
     hermes.yaml
     codex.yaml
-    claude-code.yaml
     pi.yaml
   workflows/
     research-docs.yaml

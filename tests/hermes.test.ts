@@ -105,6 +105,8 @@ describe("planHermesRun", () => {
 
     const plan: HermesRunPlan = await planHermesRun(TEST_ROOT, missionPath);
 
+    // UH-59 parity: memory-free basePrompt captured for recordMissionExchange.
+    expect(plan.basePrompt.length).toBeGreaterThan(0);
     expect(plan.command).toBe("hermes");
     expect(plan.args.slice(0, 2)).toEqual(["chat", "-q"]);
     // mission prompt is positional after -q.
@@ -465,6 +467,7 @@ describe("collectHermesSession", () => {
       command: "hermes",
       args: [],
       prompt: "test",
+      basePrompt: "test",
       worktree: false,
       session_id_passthrough: false,
       errors: [],
@@ -520,6 +523,7 @@ describe("collectHermesSession", () => {
       command: "hermes",
       args: [],
       prompt: "test",
+      basePrompt: "test",
       worktree: false,
       session_id_passthrough: false,
       errors: [],
