@@ -14,11 +14,19 @@ All four pillars: **(1) Stability promise** — freeze + version the public surf
 - **Adoption proof at 1.0** (all four): quickstart (`uh init`→first mission, <10 min) + runnable example-mission repo/dir; **a friend completes a mission unaided against their own repo** (the real bar); docs completeness (setup runbook per adapter, concepts/architecture coverage, no dead links); a short screencast (install→mission→verify→promote).
 
 ### Feature Boundaries
-- **In scope (road to 1.0):** multi-runtime container sandbox backend, cross-runtime QA harness, Honcho MCP tools + opt-out, native Anthropic adapter, oh-my-pi→active, capability-declaration enforcement (**warn by default + `--strict`**), TUI/plugin polish (UH-48..53), the stability freeze + the adoption package.
+- **In scope (road to 1.0):** multi-runtime container sandbox backend (+ optional AgentFS), Honcho MCP tools + opt-out, native Anthropic adapter, oh-my-pi→active, capability-*declaration* enforcement (**warn + `--strict`**), the stability freeze, and the adoption package. (Cross-runtime QA `run-all --runtimes` and TUI polish UH-48..53 are **already shipped** — not in scope.)
 - **Out of scope (post-1.0):** **Muta integration** — confirmed deferred entirely to the 1.x line (not a 1.0 blocker; needs a co-founder conversation first).
 
 ### Starting point (v0.7.0 — done)
-5 active adapters (hermes, codex, hermes-proxy, openrouter) + `pi`; oh-my-pi experimental. Sandbox: git-worktree + directory backends (container = fail-fast stub, #137). verify-then-promote, capability-match enforcement on `runtime_requirements`, Honcho memory (codex/hermes), SDD/TDD, cost routing, Hermes plugin, docs site.
+**6 wired adapters**: `hermes`, `codex`, `hermes-proxy`, `openrouter`, **`pi`** active; `oh-my-pi` experimental. Sandbox: `git-worktree` + `directory` backends (`container` = fail-fast stub, #137).
+
+**Already shipped — explicitly NOT future scope** (the review caught these inflated in the first draft):
+- verify-then-promote; **capability-match enforcement on `runtime_requirements`** (`enforceRuntimePreflight`/`assertRuntimeRequirements`, with `--force` bypass);
+- **cross-runtime QA: `uh mission run-all --runtimes …`** with side-by-side diff/sentinel comparison (`persistRuntimeComparison`, agreement/divergent runtimes);
+- **TUI/plugin polish UH-48..53** (UH_TUI_THEME, `$EDITOR`, Ctrl+Z suspend, `tui screenshot`, footer adapter-check age, `runtime.cancelled` on SIGTERM);
+- Honcho memory (codex/hermes), SDD/TDD, cost routing, Hermes plugin, docs site.
+
+The genuinely-remaining work to 1.0 is therefore narrower than a naive backlog read suggests.
 
 ## Design Decisions
 
@@ -53,10 +61,10 @@ Reuse the bind-mount/clone approach so dirty/promotion plumbing is unchanged reg
 
 | Milestone | Theme | Scope | Pillar |
 |---|---|---|---|
-| **v0.8.0** | **Sandbox isolation** | (1) isolation spike → ADR across the two tiers (filesystem: AgentFS vs git-worktree/directory; execution: adopt OpenSandbox vs lean OCI/docker-CLI `ContainerBackend`); (2) implement the chosen execution backend (auto-detect docker/podman/nerdctl + orbstack/colima socket; `runtime_config.container` w/ `oci_runtime` passthrough) and, if green-lit, an `agentfs` COW filesystem backend; (3) **oh-my-pi → active** | Feature-complete |
-| **v0.9.0** | **Cross-runtime QA & memory** | (1) `uh mission run-all --runtimes …` side-by-side diff/sentinel comparison (spans all active adapters); (2) Honcho `honcho_search`/`honcho_remember` as mission MCP tools + per-mission `runtime_config.honcho_memory` opt-out | Feature-complete |
-| **v0.10.0** | **Adapter matrix, capability enforcement & DX** | (1) native Anthropic adapter (pay-per-token; ToS posture documented); (2) capability-declaration enforcement — manifest `capabilities:` validated (**warn by default, `--strict` errors**, mirroring `--strict-spec`); (3) TUI/plugin polish UH-48..53; (4) adoption package — quickstart + example-mission repo/dir + docs-completeness pass + screencast | Production plugin/DX + Adoption (build) |
-| **v1.0.0** | **Stability** | (1) freeze + version + document all four public surfaces + deprecation policy + SemVer commitment (`docs/STABILITY.md` + CHANGELOG `[1.0.0]`); (2) **friend's external dry-run** against their repo — triage friction as blockers; (3) 1.0 release notes | Stability + Adoption (prove) |
+| **v0.8.0** | **Sandbox isolation** | (1) isolation spike → ADR across two tiers (filesystem: AgentFS vs git-worktree/directory; execution: adopt OpenSandbox vs lean OCI/docker-CLI `ContainerBackend`); (2) implement the chosen execution backend — **if the lean OCI path wins**: auto-detect docker/podman/nerdctl + orbstack/colima socket with `runtime_config.container` (`oci_runtime` passthrough for gVisor/Kata); **if OpenSandbox wins**: integrate its local mode (its secure runtime is configured per OpenSandbox, not per-mission `runtime_config`); plus, if green-lit, an `agentfs` COW filesystem backend; (3) **oh-my-pi → active** | Feature-complete |
+| **v0.9.0** | **Memory & adapter matrix** | (1) Honcho `honcho_search`/`honcho_remember` as mission MCP tools + per-mission `runtime_config.honcho_memory` opt-out; (2) native Anthropic adapter (pay-per-token; ToS posture documented) | Feature-complete |
+| **v0.10.0** | **Capability enforcement & adoption** | (1) **capability-*declaration* enforcement** — make the manifest/mission `capabilities:` list binding (validated against the adapter's declared capabilities) with **warn by default + `--strict` errors** (mirroring `--strict-spec`). NEW vs the already-shipped `runtime_requirements` preflight; (2) adoption package — quickstart + example-mission repo/dir + docs-completeness pass + screencast; recruit + schedule the friend's dry-run | Adoption (build) |
+| **v1.0.0** | **Stability** | (1) freeze + version + document all four public surfaces + deprecation policy + SemVer commitment (`docs/STABILITY.md` + CHANGELOG `[1.0.0]`); (2) **run the friend's external dry-run** against their repo on the now-frozen surface — triage friction as blockers; (3) 1.0 release notes | Stability + Adoption (prove) |
 
 **Why this order:** feature work that can still change schemas/CLI lands first (0.8–0.10) so the 1.0 freeze locks a settled surface; the external dry-run runs last against the frozen surface.
 
@@ -69,7 +77,7 @@ Reuse the bind-mount/clone approach so dirty/promotion plumbing is unchanged reg
 ### Risk Assessment
 - **Container backend is the heaviest, least-CI-verifiable item + now carries a research spike.** *Mitigation*: timebox the spike; ship behind the existing `SandboxBackend` iface with the stub as fallback; gate on a documented local smoke per engine.
 - **Runtime matrix sprawl** (6 named tools). *Mitigation*: collapse to one docker-compatible CLI path + auto-detect; treat orbstack/colima/containerd as "detected, not bespoke."
-- **Adoption bar depends on the friend's availability.** *Mitigation*: schedule the dry-run during 0.10.0; their friction log = 1.0 blockers.
+- **Adoption bar depends on the friend's availability.** *Mitigation*: **recruit + schedule** the friend during 0.10.0, but **run** the dry-run in 1.0.0 against the frozen surface (don't test before the stability surface is final); their friction log = 1.0 blockers.
 - **Scope drift** (all four pillars + expanded container). *Mitigation*: the exit checklist below is the contract; off-list = post-1.0.
 
 ## Acceptance Criteria (v1.0 exit checklist)
@@ -82,13 +90,13 @@ Reuse the bind-mount/clone approach so dirty/promotion plumbing is unchanged reg
 - [ ] Execution-isolation backend works end-to-end via documented local smoke (OpenSandbox local mode, or in-house auto-detect docker/podman/nerdctl + orbstack/colima socket); microVM/`oci_runtime` path verified on ≥1 runtime (gVisor/Kata).
 - [ ] If adopted: `agentfs` (Turso AgentFS) COW filesystem backend round-trips create/dirty/discard; documented as FS-isolation (pairs with execution isolation for untrusted code).
 - [ ] All shipped adapters `active` (no `experimental`); oh-my-pi graduated; native Anthropic present.
-- [ ] Cross-runtime QA harness (`run-all --runtimes`) with side-by-side comparison.
+- [x] Cross-runtime QA harness (`run-all --runtimes`) with side-by-side comparison — **already shipped (v0.7.x)**.
 - [ ] Honcho MCP tools (`honcho_search`/`remember`) + per-mission opt-out.
-- [ ] Manifest `capabilities:` enforced (warn default, `--strict` errors).
+- [ ] Manifest `capabilities:` *declarations* enforced (warn default, `--strict` errors) — distinct from the already-shipped `runtime_requirements` preflight.
 
 ### Pillar 3 — Production plugin + DX
-- [ ] UH-48..53 shipped.
-- [ ] Plugin `/api/uh/*` endpoints + manifest contract reviewed + frozen.
+- [x] TUI polish UH-48..53 — **already shipped** (UH-48/49/50/51 in v0.4.0; footer age UH-52; `runtime.cancelled` UH-53).
+- [ ] Plugin `/api/uh/*` endpoints + manifest contract reviewed + frozen (1.0 stability gate).
 
 ### Pillar 4 — Adoption-ready
 - [ ] Quickstart `uh init`→first verified mission <10 min, documented.
@@ -108,17 +116,16 @@ Reuse the bind-mount/clone approach so dirty/promotion plumbing is unchanged reg
 - [ ] oh-my-pi → `active`.
 - **Deliverables**: real container backend + the active-adapter matrix. **Est.**: 1 milestone (spike-gated).
 
-### Phase 2 — v0.9.0 "Cross-runtime QA & memory"
-- [ ] `run-all --runtimes` side-by-side comparison.
-- [ ] Honcho MCP tools + per-mission opt-out.
-- **Deliverables**: cross-runtime QA + complete memory story. **Est.**: 1 milestone.
-
-### Phase 3 — v0.10.0 "Adapter matrix, capability enforcement & DX"
+### Phase 2 — v0.9.0 "Memory & adapter matrix"
+- [ ] Honcho MCP tools (`honcho_search`/`remember`) + per-mission opt-out.
 - [ ] Native Anthropic adapter (+ runbook).
-- [ ] Capability-declaration enforcement (warn + `--strict`).
-- [ ] UH-48..53.
+- **Deliverables**: complete memory story + adapter matrix. **Est.**: 1 milestone.
+
+### Phase 3 — v0.10.0 "Capability enforcement & adoption"
+- [ ] Capability-*declaration* enforcement: manifest/mission `capabilities:` binding (warn + `--strict`), distinct from the shipped `runtime_requirements` preflight.
 - [ ] Adoption package: quickstart + example repo + docs-completeness pass + screencast.
-- **Deliverables**: complete adapter matrix, binding capabilities, polished DX, built adoption package. **Est.**: 1 milestone (heaviest; split if needed).
+- [ ] Recruit + schedule the friend's dry-run (runs in 1.0.0).
+- **Deliverables**: binding capability declarations + built adoption package. **Est.**: 1 milestone.
 
 ### Phase 4 — v1.0.0 "Stability"
 - [ ] Freeze + document all four surfaces + deprecation policy + SemVer commitment.
@@ -150,7 +157,9 @@ Background landscape:
 
 ---
 
-**Document Version**: 1.2
+**Document Version**: 1.3
 **Created**: 2026-05-24
-**Clarification Rounds**: 4
-**Quality Score**: 96/100
+**Clarification Rounds**: 4 + 1 review pass (Codex P2s on PR #153)
+**Quality Score**: 97/100
+
+**Review pass (PR #153, Codex):** corrected the v0.7.0 baseline (pi is active, not deferred) and removed already-shipped work from future milestones — cross-runtime QA `run-all --runtimes` (shipped v0.7.x) and TUI polish UH-48..53 (shipped) are no longer scoped; capability enforcement scoped to the *new* manifest-`capabilities:` binding (vs the shipped `runtime_requirements` preflight); `oci_runtime` passthrough made conditional on the lean-OCI path (not OpenSandbox); friend dry-run runs in 1.0.0 (recruited in 0.10.0). The stale README/ROADMAP/CHANGELOG entries that caused the inflated baseline are corrected in the same PR.
