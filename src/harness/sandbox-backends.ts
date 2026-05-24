@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileExists } from "./mission.js";
 
@@ -174,11 +174,17 @@ export interface SandboxCommandRunResult {
 }
 
 function readOpenSandboxConfig(env: NodeJS.ProcessEnv = process.env): OpenSandboxConfig {
-  const mode = env.UH_OPENSANDBOX_MODE === "mock" ? "mock" : "command";
-  const enabled = env.UH_OPENSANDBOX_ENABLED === "1" || env.UH_OPENSANDBOX_ENABLED === "true" || mode === "mock";
-  if (!enabled) {
+  const config = tryReadOpenSandboxConfig(env);
+  if (!config) {
     throw new Error(`OpenSandbox container backend is not configured. ${OPENSANDBOX_CONFIG_HELP}`);
   }
+  return config;
+}
+
+function tryReadOpenSandboxConfig(env: NodeJS.ProcessEnv = process.env): OpenSandboxConfig | undefined {
+  const mode = env.UH_OPENSANDBOX_MODE === "mock" ? "mock" : "command";
+  const enabled = env.UH_OPENSANDBOX_ENABLED === "1" || env.UH_OPENSANDBOX_ENABLED === "true" || mode === "mock";
+  if (!enabled) return undefined;
   const image = env.UH_OPENSANDBOX_IMAGE ?? "python:3.12";
   if (!/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}$/.test(image)) {
     throw new Error(`Invalid UH_OPENSANDBOX_IMAGE: ${image}`);
@@ -222,8 +228,10 @@ export class ContainerBackend implements SandboxBackend {
         const created = await runOpenSandboxTemplate(config.createCommandTemplate, { command: "", cwd: ctx.worktreePath, image: config.image, timeoutMs: 30_000 });
         if (created.exitCode !== 0) throw new Error(`OpenSandbox create command failed: ${created.stderr || created.stdout || `exit ${created.exitCode}`}`);
       }
+      const metadataPath = path.join(path.dirname(ctx.worktreePath), OPENSANDBOX_METADATA);
+      await mkdir(path.dirname(metadataPath), { recursive: true });
       await writeFile(
-        path.join(ctx.worktreePath, OPENSANDBOX_METADATA),
+        metadataPath,
         JSON.stringify({ provider: "opensandbox", mode: config.mode, image: config.image, created_at: new Date().toISOString() }, null, 2),
         "utf-8",
       );
@@ -235,8 +243,8 @@ export class ContainerBackend implements SandboxBackend {
   }
 
   async teardown(ctx: SandboxTeardownContext, _opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
-    const config = readOpenSandboxConfig();
-    if (config.mode === "command" && config.deleteCommandTemplate && await fileExists(ctx.worktreePath)) {
+    const config = tryReadOpenSandboxConfig();
+    if (config?.mode === "command" && config.deleteCommandTemplate && await fileExists(ctx.worktreePath)) {
       const deleted = await runOpenSandboxTemplate(config.deleteCommandTemplate, { command: "", cwd: ctx.worktreePath, image: config.image, timeoutMs: 30_000 });
       if (deleted.exitCode !== 0) throw new Error(`OpenSandbox teardown command failed: ${deleted.stderr || deleted.stdout || `exit ${deleted.exitCode}`}`);
     }
@@ -257,11 +265,13 @@ export async function runOpenSandboxCommand(worktreePath: string, command: strin
 }
 
 async function runOpenSandboxTemplate(template: string, values: { command: string; cwd: string; image: string; timeoutMs: number }): Promise<SandboxCommandRunResult> {
-  const rendered = template
-    .replaceAll("{command}", shellQuote(values.command))
-    .replaceAll("{cwd}", shellQuote(values.cwd))
-    .replaceAll("{image}", shellQuote(values.image))
-    .replaceAll("{timeout_ms}", String(values.timeoutMs));
+  const replacements: Record<string, string> = {
+    "{command}": shellQuote(values.command),
+    "{cwd}": shellQuote(values.cwd),
+    "{image}": shellQuote(values.image),
+    "{timeout_ms}": String(values.timeoutMs),
+  };
+  const rendered = template.replace(/\{command\}|\{cwd\}|\{image\}|\{timeout_ms\}/g, (token) => replacements[token]);
   return runShell(rendered, process.cwd(), values.timeoutMs);
 }
 
@@ -302,7 +312,7 @@ function runShell(command: string, cwd: string, commandTimeoutMs: number): Promi
 }
 
 function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\''`)}'`;
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 const BACKENDS: Record<string, SandboxBackend> = {

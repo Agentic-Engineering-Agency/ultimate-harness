@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
-import { getSandboxBackend, listSandboxBackends } from "../src/harness/sandbox-backends.js";
+import { getSandboxBackend, listSandboxBackends, runOpenSandboxCommand } from "../src/harness/sandbox-backends.js";
 import {
   assertSafeSandboxId,
   createSandbox,
@@ -557,7 +557,7 @@ describe("container backend (#155 OpenSandbox)", () => {
     expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
   });
 
-  test("materializes with mocked OpenSandbox, detects dirt, and discards", async () => {
+  test("materializes with mocked OpenSandbox without dirtying the worktree, then discards without env", async () => {
     process.env.UH_OPENSANDBOX_MODE = "mock";
     try {
       const record = await createSandbox(TEST_ROOT, { id: "ctr-mock", missionId: "demo", backend: "container" });
@@ -565,13 +565,19 @@ describe("container backend (#155 OpenSandbox)", () => {
 
       const worktreeAbs = join(TEST_ROOT, record.path);
       await expect(stat(join(worktreeAbs, ".git"))).resolves.toBeTruthy();
-      expect(await readFile(join(worktreeAbs, ".uh-opensandbox.json"), "utf-8")).toContain("opensandbox");
+      expect(await readFile(join(worktreeAbs, "..", ".uh-opensandbox.json"), "utf-8")).toContain("opensandbox");
+      await expect(stat(join(worktreeAbs, ".uh-opensandbox.json"))).rejects.toThrow();
+
+      let info = await getSandboxStatus(TEST_ROOT, "ctr-mock");
+      expect(info.dirty).toBe(false);
+      expect(info.changes).toEqual([]);
 
       await writeFile(join(worktreeAbs, "container-change.txt"), "dirty\n", "utf-8");
-      const info = await getSandboxStatus(TEST_ROOT, "ctr-mock");
+      info = await getSandboxStatus(TEST_ROOT, "ctr-mock");
       expect(info.dirty).toBe(true);
       expect(info.changes.some((c) => c.includes("container-change.txt"))).toBe(true);
 
+      delete process.env.UH_OPENSANDBOX_MODE;
       await expect(discardSandbox(TEST_ROOT, "ctr-mock")).rejects.toThrow(/uncommitted change/i);
       const discarded = await discardSandbox(TEST_ROOT, "ctr-mock", { force: true });
       expect(discarded.branch_removed).toBe(false);
@@ -579,6 +585,23 @@ describe("container backend (#155 OpenSandbox)", () => {
       expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
     } finally {
       delete process.env.UH_OPENSANDBOX_MODE;
+    }
+  });
+
+  test("OpenSandbox templates quote commands and avoid second-pass placeholder replacement", async () => {
+    process.env.UH_OPENSANDBOX_ENABLED = "1";
+    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "printf '%s' {command}";
+    try {
+      const quoted = await runOpenSandboxCommand(TEST_ROOT, "python -c 'print(1)'", 1_000);
+      expect(quoted.exitCode).toBe(0);
+      expect(quoted.stdout).toBe("python -c 'print(1)'");
+
+      const literalPlaceholder = await runOpenSandboxCommand(TEST_ROOT, "printf '{cwd} {image} {timeout_ms}'", 1_000);
+      expect(literalPlaceholder.exitCode).toBe(0);
+      expect(literalPlaceholder.stdout).toBe("printf '{cwd} {image} {timeout_ms}'");
+    } finally {
+      delete process.env.UH_OPENSANDBOX_ENABLED;
+      delete process.env.UH_OPENSANDBOX_EXEC_COMMAND;
     }
   });
 });
