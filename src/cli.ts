@@ -1411,7 +1411,7 @@ sandboxCmd
   .argument("<id>", "Sandbox id")
   .requiredOption("--mission <id>", "Mission id this sandbox belongs to")
   .option("--base <ref>", "Base git ref to branch from (default: HEAD)")
-  .option("--backend <name>", "Sandbox backend: git-worktree (default) or directory")
+  .option("--backend <name>", "Sandbox backend: git-worktree (default), directory, or container (planned — see docs/architecture/sandbox-backends.md)")
   .option("--root <path>", "Root directory (default: cwd)")
   .action(async (id: string, opts: { mission: string; base?: string; backend?: string; root?: string }) => {
     const root = resolveRoot(opts.root);

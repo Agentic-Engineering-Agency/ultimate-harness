@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
+import { getSandboxBackend, listSandboxBackends } from "../src/harness/sandbox-backends.js";
 import {
   assertSafeSandboxId,
   createSandbox,
@@ -540,5 +541,19 @@ describe("sandbox backends (S3 #136)", () => {
     expect(created.stdout).toContain("backend: directory");
     const list = await listSandboxes(TEST_ROOT);
     expect(list.find((s) => s.id === "cli-dir")?.backend).toBe("directory");
+  });
+});
+
+describe("container backend (S4 #137)", () => {
+  test("is registered but fails fast with actionable guidance", async () => {
+    expect(listSandboxBackends()).toContain("container");
+    expect(getSandboxBackend("container").name).toBe("container");
+
+    await expect(
+      createSandbox(TEST_ROOT, { id: "ctr", missionId: "demo", backend: "container" }),
+    ).rejects.toThrow(/container sandbox backend is not yet available/);
+
+    // A failed materialize must leave nothing behind (no index entry, no dir).
+    expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
   });
 });

@@ -147,9 +147,43 @@ export class DirectoryBackend implements SandboxBackend {
   }
 }
 
+/** Clear, single-source message for the not-yet-wired container backend. */
+const CONTAINER_NOT_AVAILABLE =
+  "container sandbox backend is not yet available: it requires a container " +
+  "runtime (Docker/Podman) integration that is not wired in this build. Use " +
+  "--backend git-worktree (default) or --backend directory. Design + plan: " +
+  "docs/architecture/sandbox-backends.md.";
+
+/**
+ * Container backend (S4 #137) — registered but intentionally a fail-fast stub.
+ *
+ * The design (image, bind-mount vs copy, diff/dirty strategy, no container
+ * runtime in CI) is captured in docs/architecture/sandbox-backends.md. Until a
+ * runtime is wired, every operation throws a clear, actionable error rather
+ * than silently degrading — selecting `--backend container` fails immediately
+ * with guidance instead of pretending to work.
+ */
+export class ContainerBackend implements SandboxBackend {
+  readonly name = "container";
+
+  async materialize(_ctx: SandboxMaterializeContext): Promise<SandboxMaterializeResult> {
+    throw new Error(CONTAINER_NOT_AVAILABLE);
+  }
+
+  async teardown(_ctx: SandboxTeardownContext, _opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
+    // Nothing is ever materialized, so there is nothing to tear down.
+    return { branch_removed: false };
+  }
+
+  async collectDirtyChanges(_worktreePath: string): Promise<string[]> {
+    throw new Error(CONTAINER_NOT_AVAILABLE);
+  }
+}
+
 const BACKENDS: Record<string, SandboxBackend> = {
   "git-worktree": new GitWorktreeBackend(),
   directory: new DirectoryBackend(),
+  container: new ContainerBackend(),
 };
 
 /** Resolve a backend by name, fail-fast on an unknown id. */
