@@ -8,6 +8,7 @@ import { hermesCapabilities } from "./hermes.js";
 import { hermesProxyCapabilities } from "./hermes-proxy.js";
 import { ohMyPiCapabilities } from "./oh-my-pi.js";
 import { openRouterCapabilities } from "./openrouter.js";
+import { piCapabilities } from "./pi.js";
 
 export type AdapterId = (typeof TEAM_ADAPTER_IDS)[number];
 
@@ -17,6 +18,7 @@ export const CAPABILITIES: Record<AdapterId, AdapterCapabilities> = {
   codex: codexCapabilities,
   "oh-my-pi": ohMyPiCapabilities,
   openrouter: openRouterCapabilities,
+  pi: piCapabilities,
 };
 
 export function getCapabilities(id: AdapterId): AdapterCapabilities {
@@ -32,4 +34,4 @@ export function parseCapabilitiesManifest(data: unknown): AdapterCapabilities {
   return AdapterCapabilitiesSchema.parse(data);
 }
 
-export { codexCapabilities, hermesCapabilities, hermesProxyCapabilities, ohMyPiCapabilities, openRouterCapabilities };
+export { codexCapabilities, hermesCapabilities, hermesProxyCapabilities, ohMyPiCapabilities, openRouterCapabilities, piCapabilities };

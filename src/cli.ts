@@ -13,6 +13,7 @@ import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
 import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { dryRunOpenRouter, runOpenRouter } from "./adapters/openrouter.js";
+import { dryRunPi, runPi } from "./adapters/pi.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
@@ -93,6 +94,7 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
   "oh-my-pi": { dryRun: dryRunOhMyPi, run: (root, missionPath, opts) => runOhMyPi(root, missionPath, opts), surfaceBlocked: true },
   "hermes-proxy": { dryRun: dryRunHermesProxy, run: (root, missionPath, opts) => runHermesProxy(root, missionPath, opts), surfaceBlocked: true },
   openrouter: { dryRun: dryRunOpenRouter, run: (root, missionPath, opts) => runOpenRouter(root, missionPath, opts), surfaceBlocked: true },
+  pi: { dryRun: dryRunPi, run: (root, missionPath, opts) => runPi(root, missionPath, opts), surfaceBlocked: true },
 };
 
 /**
