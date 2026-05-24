@@ -111,4 +111,12 @@ jobs:
           # cleanly. The dry-run job above still uses `bun publish
           # --dry-run` so we keep the bun parity check.
           echo "//registry.npmjs.org/:_authToken=$NODE_AUTH_TOKEN" > ~/.npmrc
+          # Idempotency guard: skip when this version is already on npm so
+          # backfill tags and re-runs are no-ops instead of a 403 failure.
+          PKG=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+            echo "::notice::$PKG@$VER already published; skipping."
+            exit 0
+          fi
           npm publish --access public
