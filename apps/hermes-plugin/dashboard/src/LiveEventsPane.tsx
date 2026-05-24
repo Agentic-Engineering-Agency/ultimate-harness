@@ -13,6 +13,7 @@ import {
   shouldAutoScrollTop,
   type LiveEventRow,
 } from "./live-events-utils";
+import { computeGauge, formatUsd, type CapabilitiesResponse } from "./cost-gauge";
 
 function formatEventSummary(row: LiveEventRow): string {
   const label = row.raw ? (row.raw.event ?? row.raw.kind ?? row.raw.type) : undefined;
@@ -34,6 +35,17 @@ export function LiveEventsPane({
   const [error, setError] = React.useState<string | null>(null);
   const logRef = React.useRef<HTMLDivElement | null>(null);
   const scrollLockedRef = React.useRef(false);
+  const [caps, setCaps] = React.useState<CapabilitiesResponse | null>(null);
+
+  React.useEffect(() => {
+    let live = true;
+    pluginFetch<CapabilitiesResponse>("/adapters/capabilities")
+      .then((c) => { if (live) setCaps(c); })
+      .catch(() => { /* gauge degrades to tokens-only without rates */ });
+    return () => { live = false; };
+  }, []);
+
+  const gauge = React.useMemo(() => computeGauge(events, caps), [events, caps]);
 
   const visibleEvents = React.useMemo(() => {
     const filtered = showUsage ? events : events.filter((e) => !e.isUsage);
@@ -86,6 +98,12 @@ export function LiveEventsPane({
       <div className="uh-row-between">
         <span className="uh-mono">run: {runId}</span>
         <div className="uh-row" style={{ gap: 8 }}>
+          {gauge.totals.samples > 0 ? (
+            <span className="uh-muted uh-mono" title="tokens in / out (estimated cost)">
+              ↑{gauge.totals.input_tokens} ↓{gauge.totals.output_tokens}
+              {gauge.costUsd !== undefined ? ` · ${formatUsd(gauge.costUsd)}` : ""}
+            </span>
+          ) : null}
           <label className="uh-muted" style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <input
               type="checkbox"
