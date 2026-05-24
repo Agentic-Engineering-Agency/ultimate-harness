@@ -128,6 +128,10 @@ const MissionInputSchema = z.object({
   expected_artifacts: z.array(ExpectedArtifactSchema).optional(),
   sandbox: z.object({
     backend: z.string().optional().default("directory"),
+    // Recognized values: "human-approved" (default behaviour — a manual
+    // `uh mission promote` is required) and "auto-on-verify" (S6 #139 — a
+    // passed `uh verify` auto-promotes). Any other/typo'd value is treated as
+    // human-approved (never auto-promotes), so a typo cannot trigger promotion.
     promotion_policy: z.string().optional(),
     config: z.record(z.string(), z.unknown()).optional().default({}),
   }).optional().default({ backend: "directory", config: {} }),
