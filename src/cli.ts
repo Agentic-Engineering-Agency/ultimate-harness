@@ -32,6 +32,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile as readFileAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js";
+import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 
 import {
   createSandbox,
@@ -203,8 +204,68 @@ program
   .option("--repair", "Run drift detection with auto-repair (idempotent)")
   .option("--strict-spec", "Run drift detection; spec-stale issues are errors (default: warn)")
   .option("--json", "Emit drift detection output as JSON instead of human text")
-  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; strictSpec?: boolean; json?: boolean }) => {
+  .option("--judge", "Grade spec adherence with an LLM (requires --spec + a hermes-proxy runtime)")
+  .option("--spec <path>", "Spec file to judge (with --judge)")
+  .option("--base <ref>", "Base ref for the judge diff (default: dev)")
+  .action(async (file: string | undefined, opts: { root?: string; allWorkflows?: boolean; allMissions?: boolean; repair?: boolean; strictSpec?: boolean; json?: boolean; judge?: boolean; spec?: string; base?: string }) => {
     const root = resolveRoot(opts.root);
+    if (opts.judge) {
+      try {
+        if (!opts.spec) {
+          console.error("[FAIL] --judge requires --spec <path>");
+          process.exit(1);
+          return;
+        }
+        const { loadSpecFile } = await import("./harness/spec-loader.js");
+        const spec = await loadSpecFile(opts.spec);
+        const base = opts.base || "dev";
+        const { execFile } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const execFileP = promisify(execFile);
+        let diff = "";
+        try {
+          const { stdout } = await execFileP("git", ["diff", "--no-color", `${base}...HEAD`], {
+            cwd: root,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+          diff = stdout;
+        } catch {
+          diff = "";
+        }
+        const entry = (await runtimeRegistry.list(root)).find((e) => e.id === "hermes-proxy");
+        const rc = (entry?.document.config as Record<string, unknown> | undefined)?.runtime_config as
+          | Record<string, unknown>
+          | undefined;
+        const endpoint = typeof rc?.endpoint === "string" ? rc.endpoint : undefined;
+        const model = typeof rc?.model === "string" ? rc.model : undefined;
+        if (!endpoint || !model) {
+          console.error("[FAIL] --judge requires a configured hermes-proxy runtime (runtime_config.endpoint + model)");
+          process.exit(1);
+          return;
+        }
+        const verdict = await judgeSpecAdherence({
+          spec,
+          diff,
+          runner: (prompt) => oneShotOpenAI({ endpoint, model, prompt }),
+        });
+        if (opts.json) {
+          console.log(JSON.stringify(verdict, null, 2));
+        } else {
+          console.log(`Spec adherence (${spec.frontMatter.id}): ${verdict.adherence.toUpperCase()}`);
+          if (verdict.missing_ac.length > 0) {
+            console.log("Missing acceptance criteria:");
+            for (const m of verdict.missing_ac) console.log(`  - ${m}`);
+          }
+          if (verdict.evidence) console.log(`Evidence: ${verdict.evidence}`);
+        }
+        process.exit(verdict.adherence === "fail" ? 1 : 0);
+        return;
+      } catch (err) {
+        console.error(`[FAIL] spec judge error: ${(err as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
     if (opts.json || opts.repair || opts.strictSpec) {
       const { runDrift, groupByKind, DRIFT_KINDS } = await import("./harness/validate/drift/registry.js");
       const outcome = await runDrift(root, {
