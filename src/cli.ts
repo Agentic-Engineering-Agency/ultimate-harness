@@ -1397,25 +1397,28 @@ async function resolveActiveRuntimes(root: string): Promise<string[]> {
 // uh sandbox
 const sandboxCmd = program
   .command("sandbox")
-  .description("Manage git worktree sandboxes");
+  .description("Manage mission sandboxes");
 
 sandboxCmd
   .command("create")
-  .description("Create a new git worktree sandbox bound to a mission")
+  .description("Create a new sandbox bound to a mission")
   .argument("<id>", "Sandbox id")
   .requiredOption("--mission <id>", "Mission id this sandbox belongs to")
   .option("--base <ref>", "Base git ref to branch from (default: HEAD)")
+  .option("--backend <name>", "Sandbox backend: git-worktree (default) or directory")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (id: string, opts: { mission: string; base?: string; root?: string }) => {
+  .action(async (id: string, opts: { mission: string; base?: string; backend?: string; root?: string }) => {
     const root = resolveRoot(opts.root);
     try {
       const record = await createSandbox(root, {
         id,
         missionId: opts.mission,
         baseRef: opts.base,
+        backend: opts.backend,
       });
       console.log(`[CREATED] ${record.id}`);
       console.log(`  mission: ${record.mission_id}`);
+      console.log(`  backend: ${record.backend}`);
       console.log(`  branch: ${record.branch}`);
       console.log(`  base: ${record.base_ref}`);
       console.log(`  path: ${record.path}`);
