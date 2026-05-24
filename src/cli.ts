@@ -15,6 +15,8 @@ import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
+import { chooseAdapter, formatAutoRouteExplain } from "./harness/auto-route.js";
+import { CAPABILITIES, type AdapterId } from "./adapters/capabilities/index.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
@@ -843,10 +845,42 @@ missionCmd
     "JSON object of runtime_config overrides applied on top of the mission file (e.g. '{\"model\":\"gpt-5\"}')",
   )
   .option("--run-id <id>", "Explicit run id; auto-generated if omitted")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string }) => {
+  .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
+  .option("--explain", "With --auto, print the adapter decision matrix")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string; auto?: boolean; explain?: boolean }) => {
     const root = resolveRoot(opts.root);
-    const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
+
+    if (opts.auto && opts.runtime) {
+      console.error("[FAIL] --auto and --runtime are mutually exclusive");
+      process.exit(1);
+      return;
+    }
+    let runtime = opts.runtime || "hermes";
+    if (opts.auto) {
+      try {
+        const installed = (await runtimeRegistry.list(root))
+          .map((entry) => entry.id)
+          .filter((id): id is AdapterId => id in CAPABILITIES);
+        const mission = await loadMissionFile(filePath);
+        const decision = chooseAdapter(mission, installed);
+        if (opts.explain) {
+          console.log(formatAutoRouteExplain(decision));
+          console.log("");
+        }
+        if (!decision.adapter) {
+          console.error(`[BLOCKED] auto-route: ${decision.reason}`);
+          process.exit(1);
+          return;
+        }
+        runtime = decision.adapter;
+        console.log(`Auto-routed to: ${runtime} — ${decision.reason}`);
+      } catch (err) {
+        console.error(`[FAIL] auto-route error: ${(err as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
 
     if (opts.runId !== undefined) {
       try {
