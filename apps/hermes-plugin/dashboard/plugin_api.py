@@ -692,6 +692,53 @@ async def get_status() -> dict[str, Any]:
     }
 
 
+@router.get("/adapters/capabilities")
+async def get_adapter_capabilities() -> dict[str, Any]:
+    """UH-104: typed adapter capability manifests (tools, sandbox, cost class)."""
+    root = _project_root()
+    try:
+        proc = _runner.run_sync(["adapter", "capabilities", "--json"], cwd=root, timeout=_READ_TIMEOUT_S)
+    except FileNotFoundError as exc:
+        raise _err(500, "uh_cli_missing", "uh CLI not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _err(504, "uh_cli_timeout", "uh adapter capabilities timed out") from exc
+    if proc.returncode != 0:
+        raise _err(500, "uh_cli_error", "uh adapter capabilities failed", details=(proc.stderr or "").strip())
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise _err(500, "bad_json", "invalid JSON from uh adapter capabilities", details=str(exc)) from exc
+
+
+@router.post("/missions/{mission_id}/cost-forecast")
+async def post_cost_forecast(mission_id: str, request: Request) -> dict[str, Any]:
+    """UH-104: forecast token cost for a mission via ``uh adapter cost-forecast``."""
+    _safe_id(mission_id, "mission_id")
+    body = await _json_body(request)
+    adapter = body.get("adapter") or "auto"
+    if not isinstance(adapter, str):
+        raise _err(400, "invalid_adapter", "adapter must be a string")
+    if adapter != "auto" and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", adapter):
+        raise _err(400, "invalid_adapter", "adapter must be 'auto' or an adapter id")
+    root = _project_root()
+    try:
+        proc = _runner.run_sync(
+            ["adapter", "cost-forecast", "--mission", mission_id, "--adapter", adapter, "--json"],
+            cwd=root,
+            timeout=_READ_TIMEOUT_S,
+        )
+    except FileNotFoundError as exc:
+        raise _err(500, "uh_cli_missing", "uh CLI not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _err(504, "uh_cli_timeout", "cost-forecast timed out") from exc
+    if proc.returncode != 0:
+        raise _err(400, "forecast_failed", "cost-forecast failed", details=(proc.stderr or proc.stdout or "").strip())
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise _err(500, "bad_json", "invalid JSON from cost-forecast", details=str(exc)) from exc
+
+
 @router.get("/missions")
 async def list_missions() -> dict[str, list[dict[str, Any]]]:
     return {"missions": _scan_missions(_project_root())}
