@@ -10,6 +10,7 @@ import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
 import { auditLog, workflowsDir } from "../harness/paths.js";
+import { buildUsageEvent, estimateUsage } from "../harness/usage.js";
 import {
   appendRunsIndexEntry,
   ensureRunDir,
@@ -723,6 +724,11 @@ export async function collectHermesSession(
       finishedAt,
       exitCode,
       exitCode === 0 ? "succeeded" : "failed",
+    );
+
+    await appendMissionEvent(
+      artifacts,
+      buildUsageEvent("hermes", plan.mission.id, estimateUsage(plan.prompt, hermesSentinel ?? ""), finishedAt),
     );
   } catch (err) {
     const message = (err as Error).message;

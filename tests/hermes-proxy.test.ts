@@ -569,6 +569,38 @@ describe("runHermesProxy (orchestrator)", () => {
     await cleanup();
   });
 
+  test("emits a runtime.usage event with real tokens from the proxy response", async () => {
+    const { missionPath } = await setupHarness();
+    const runId = "test-proxy-usage";
+    await runHermesProxy(TEST_ROOT, missionPath, {
+      runner: async (): Promise<HermesProxyRunnerOutput> => ({
+        stdout: "ok\n```uh-runtime-final-message\nDone.\n```",
+        stderr: "",
+        exitCode: 0,
+        httpStatus: 200,
+        timedOut: false,
+        events: [],
+        usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+        usageModel: "nousresearch/hermes-4-405b",
+      }),
+      collectDiff: async () => ({ patch: "" }),
+      runId,
+    });
+    const eventsPath = join(TEST_ROOT, ".harness", "missions", "test-uh39", "runs", runId, "events.ndjson");
+    const events = (await readFile(eventsPath, "utf-8")).trim().split("\n").map((l) => JSON.parse(l));
+    const usage = events.find((e) => e.event === "runtime.usage");
+    expect(usage).toMatchObject({
+      event: "runtime.usage",
+      runtime: "hermes-proxy",
+      source: "runtime",
+      input_tokens: 100,
+      output_tokens: 50,
+      total_tokens: 150,
+      model: "nousresearch/hermes-4-405b",
+    });
+    await cleanup();
+  });
+
   test("blocked on ECONNREFUSED with remediation hint", async () => {
     const { missionPath } = await setupHarness();
     const result = await runHermesProxy(TEST_ROOT, missionPath, {

@@ -546,9 +546,11 @@ config:
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(events.map((event) => event.event)).toEqual(["runtime.started", "runtime.finished"]);
+    expect(events.map((event) => event.event)).toEqual(["runtime.started", "runtime.finished", "runtime.usage"]);
     expect(events[0]).toMatchObject({ mission_id: "run-artifacts", runtime: "hermes" });
     expect(events[1]).toMatchObject({ mission_id: "run-artifacts", runtime: "hermes", exit_code: 0, status: "succeeded" });
+    expect(events[2]).toMatchObject({ event: "runtime.usage", runtime: "hermes", source: "estimated" });
+    expect(events[2].total_tokens).toBeGreaterThanOrEqual(0);
   });
 
   test("nonexistent cli_command returns spawn error and finalizes failed runtime session", async () => {

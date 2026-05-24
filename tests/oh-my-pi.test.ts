@@ -300,6 +300,7 @@ describe("uh mission run --runtime oh-my-pi", () => {
       "runtime.started",
       "oh-my-pi.message",
       "runtime.finished",
+      "runtime.usage",
     ]);
     const runtimeResultPath = join(missionDir, "runtime-result.yaml");
     expect(await validateFile(runtimeResultPath)).toMatchObject({ valid: true, schema_version: "uh.runtime-result.v0" });
