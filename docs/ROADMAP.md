@@ -171,9 +171,9 @@ Road to v1.0 is planned in [`docs/prds/uh-roadmap-to-1.0-v1.0-prd.md`](./prds/uh
 
 ## Strategic (decisions needed)
 
-- **Pi adapter implementation** — design-only stub today; tied to OMP cadence.
-- **Mission capability declarations + adapter matching enforcement** — manifest `capabilities:` is advisory-only today.
-- **Muta integration** — UH-as-consumer, UH-as-component, or independent? Needs a co-founder conversation.
+- **Muta integration** — UH-as-consumer, UH-as-component, or independent? Needs a co-founder conversation. **Deferred entirely to post-1.0** (see the road-to-1.0 PRD).
+
+_Resolved since: the **Pi adapter** shipped active in v0.7.0 (#135/#150); **mission capability-declaration enforcement** is planned for v0.10.0 (manifest `capabilities:` binding, warn + `--strict`) and `runtime_requirements` preflight already enforces compatibility today._
 
 ## References
 

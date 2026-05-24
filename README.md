@@ -81,7 +81,7 @@ bun run build
 # Initialize .harness/ project state.
 uh init
 
-# Confirm a runtime is available (one of: hermes, codex, oh-my-pi).
+# Confirm a runtime is available (active: hermes, codex, hermes-proxy, openrouter, pi; oh-my-pi experimental).
 uh adapter check hermes
 
 # Create and validate a mission packet.
@@ -94,7 +94,7 @@ uh validate --all-missions
 # Render the runtime invocation without launching.
 uh mission dry-run .harness/missions/m1-example/mission.yaml --runtime hermes
 
-# Execute the mission. --runtime accepts: hermes | codex | oh-my-pi.
+# Execute the mission. --runtime accepts: hermes | codex | hermes-proxy | openrouter | pi | oh-my-pi.
 uh mission run .harness/missions/m1-example/mission.yaml --runtime hermes
 
 # Run the mission's declared verification checks.
@@ -171,7 +171,7 @@ Ultimate Harness studies and selectively integrates ideas from:
 - [OpenSpec](https://github.com/Fission-AI/OpenSpec) — artifact-guided specification workflows.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) — wired as the reference adapter.
 - [Codex CLI](https://github.com/openai/codex) — wired adapter for OpenAI's coding agent.
-- [oh-my-pi](https://github.com/can1357/oh-my-pi) and [Pi](https://pi.dev/) — wired oh-my-pi adapter; Pi tracked as a future addition.
+- [oh-my-pi](https://github.com/can1357/oh-my-pi) and [Pi](https://pi.dev/) — both wired: `oh-my-pi` (experimental) and the vanilla `pi` adapter (active, v0.7.0).
 - [AgentFS](https://github.com/tursodatabase/agentfs/blob/main/MANUAL.md) — copy-on-write sandboxing patterns (design at [`docs/architecture/sandbox-agentfs.md`](./docs/architecture/sandbox-agentfs.md)).
 
 See the [comparison matrix](./docs/research/comparison-matrix.md) and [adopt/reject/defer log](./docs/research/adopt-reject-defer.md) for the current design position.

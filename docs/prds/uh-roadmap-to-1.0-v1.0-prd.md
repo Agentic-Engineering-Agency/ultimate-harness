@@ -112,7 +112,7 @@ Reuse the bind-mount/clone approach so dirty/promotion plumbing is unchanged reg
 
 ### Phase 1 — v0.8.0 "Sandbox isolation"
 - [ ] Isolation spike → ADR: filesystem tier (AgentFS vs git-worktree/directory) + execution tier (OpenSandbox vs lean OCI/docker-CLI across docker/podman/nerdctl/orbstack/colima/containerd, gVisor/Kata passthrough); k8s options (kubernetes-sigs/agent-sandbox, agent-sandbox) recorded as the post-1.0 cloud path.
-- [ ] Multi-runtime `ContainerBackend` (auto-detect + `runtime_config.container`) + local smoke per available engine.
+- [ ] Implement the ADR-chosen execution backend: **lean OCI path** → multi-runtime `ContainerBackend` (auto-detect + `runtime_config.container`); **OpenSandbox path** → integrate its local mode (runtime configured in OpenSandbox, not per-mission). Local smoke per available engine.
 - [ ] oh-my-pi → `active`.
 - **Deliverables**: real container backend + the active-adapter matrix. **Est.**: 1 milestone (spike-gated).
 
