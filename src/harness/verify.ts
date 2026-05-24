@@ -4,6 +4,7 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 import { validateMission, type MissionDocument } from "../schema/mission.js";
 import { validateVerificationResult, type VerificationResultDocument } from "../schema/artifacts.js";
+import { promoteMission } from "./promote.js";
 import { harnessDir, missionsDir, projectYaml, sandboxesDir, sandboxesIndex } from "./paths.js";
 import { validateFile } from "./validate.js";
 import { SandboxesIndexSchema } from "../schema/artifacts.js";
@@ -42,6 +43,13 @@ export type VerifyMissionResult = {
    * when checks ran in the harness root.
    */
   sandbox?: { id: string; path: string };
+  /**
+   * S6 (#139): populated when a passed verification auto-triggered promotion
+   * because the mission's `sandbox.promotion_policy` is "auto-on-verify".
+   */
+  promotion?: { decision: string; path: string };
+  /** Set when an auto-promote was attempted but failed (verification still passed). */
+  promotion_error?: string;
 };
 
 export async function verifyMission(root: string, missionId: string, options: VerifyMissionOptions = {}): Promise<VerifyMissionResult> {
@@ -276,6 +284,40 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     ...(boundSandbox ? { sandbox_id: boundSandbox.id } : {}),
   });
 
+  // S6 (#139): verify-then-promote auto-trigger. Opt-in via the mission's
+  // sandbox.promotion_policy = "auto-on-verify". Fires only on a passed
+  // verification; any other policy (incl. the default "human-approved") still
+  // requires a manual `uh mission promote`. Promote against effectiveRoot so
+  // the promotion.yaml lands beside the verification.yaml just written.
+  let promotion: { decision: string; path: string } | undefined;
+  let promotionError: string | undefined;
+  if (status === "passed" && mission.sandbox?.promotion_policy === "auto-on-verify") {
+    try {
+      const promoted = await promoteMission(effectiveRoot, missionId, {
+        approvedBy: "auto-on-verify",
+        decision: "promoted",
+        ...(boundSandbox ? { sandboxId: boundSandbox.id } : {}),
+      });
+      promotion = { decision: promoted.decision, path: promoted.path };
+      await appendMissionEvent(eventsPath, {
+        type: "promotion.auto-triggered",
+        mission_id: missionId,
+        timestamp: new Date().toISOString(),
+        decision: promoted.decision,
+        ...(boundSandbox ? { sandbox_id: boundSandbox.id } : {}),
+      });
+    } catch (err) {
+      promotionError = (err as Error).message;
+      await appendMissionEvent(eventsPath, {
+        type: "promotion.auto-failed",
+        mission_id: missionId,
+        timestamp: new Date().toISOString(),
+        error: promotionError,
+        ...(boundSandbox ? { sandbox_id: boundSandbox.id } : {}),
+      });
+    }
+  }
+
   return {
     mission_id: missionId,
     status,
@@ -290,6 +332,8 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     acceptance_warn_failed: acceptanceResults.filter((r) => r.severity === "warn" && r.status === "failed").length,
     acceptance_blocked: acceptanceResults.filter((r) => r.status === "blocked").length,
     ...(boundSandbox ? { sandbox: boundSandbox } : {}),
+    ...(promotion ? { promotion } : {}),
+    ...(promotionError ? { promotion_error: promotionError } : {}),
   };
 }
 

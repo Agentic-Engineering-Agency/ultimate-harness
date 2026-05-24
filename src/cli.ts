@@ -401,6 +401,12 @@ program
         console.log(`sandbox: ${result.sandbox.id} (${result.sandbox.path})`);
       }
       console.log(`artifact: ${result.path}`);
+      if (result.promotion) {
+        console.log(`promoted: auto-on-verify -> ${result.promotion.path}`);
+      }
+      if (result.promotion_error) {
+        console.error(`auto-promote failed: ${result.promotion_error}`);
+      }
       process.exit(result.status === "passed" ? 0 : 1);
     } catch (err) {
       console.error(`[BLOCKED] ${missionId}`);
