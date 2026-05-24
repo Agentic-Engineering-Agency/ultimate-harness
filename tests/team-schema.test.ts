@@ -115,7 +115,7 @@ describe("mission shape: team", () => {
 
   test("TEAM_ADAPTER_IDS exposes the registered runtimes", () => {
     expect(new Set(TEAM_ADAPTER_IDS)).toEqual(
-      new Set(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter"]),
+      new Set(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "pi"]),
     );
   });
 });
