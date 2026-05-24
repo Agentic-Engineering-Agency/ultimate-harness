@@ -18,6 +18,7 @@ import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
 import { chooseAdapter, formatAutoRouteExplain } from "./harness/auto-route.js";
 import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabilities/index.js";
 import { forecastCost } from "./harness/cost-forecast.js";
+import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
 import { findBoundSandbox } from "./harness/verify.js";
 import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
 import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
@@ -639,14 +640,36 @@ adapterCmd
   .command("capabilities")
   .description("Show adapter capability manifests (tools, sandbox, cost class, context window)")
   .option("--json", "Emit a JSON array for tooling")
-  .action((opts: { json?: boolean }) => {
-    const caps = listAdapterIds().map((id) => CAPABILITIES[id]);
+  .option("--probe", "Live-probe hermes-proxy /capabilities and merge over the static manifest")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { json?: boolean; probe?: boolean; root?: string }) => {
+    const caps = listAdapterIds().map((id) => ({ ...CAPABILITIES[id] }));
+    const probed: Record<string, "probe" | "static"> = {};
+    if (opts.probe) {
+      const root = resolveRoot(opts.root);
+      try {
+        const entry = (await runtimeRegistry.list(root)).find((e) => e.id === "hermes-proxy");
+        const rc = (entry?.document.config as Record<string, unknown> | undefined)?.runtime_config as
+          | Record<string, unknown>
+          | undefined;
+        const endpoint = typeof rc?.endpoint === "string" ? rc.endpoint : undefined;
+        if (endpoint) {
+          const result = await probeHermesProxyCapabilities(endpoint);
+          const idx = caps.findIndex((c) => c.id === "hermes-proxy");
+          if (idx >= 0) caps[idx] = { ...result.capabilities };
+          probed["hermes-proxy"] = result.source;
+        }
+      } catch {
+        // best-effort — leave the static manifest in place on any failure
+      }
+    }
     if (opts.json) {
-      console.log(JSON.stringify({ adapters: caps }, null, 2));
+      console.log(JSON.stringify(opts.probe ? { adapters: caps, probed } : { adapters: caps }, null, 2));
       return;
     }
     for (const c of caps) {
-      console.log(`${c.id} — ${c.display_name}`);
+      const tag = probed[c.id] ? ` (${probed[c.id]})` : "";
+      console.log(`${c.id} — ${c.display_name}${tag}`);
       console.log(`  cost_class: ${c.cost_class}  max_context_tokens: ${c.max_context_tokens}  sandbox: ${c.sandbox}`);
       console.log(`  tools: shell=${c.tools.shell} fs_read=${c.tools.fs_read} fs_write=${c.tools.fs_write} network=${c.tools.network}`);
     }
