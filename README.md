@@ -58,6 +58,7 @@ Runbooks:
 - [Hermes Proxy E2E smoke (UH-38 promotion record)](./docs/runbooks/hermes-proxy-e2e-smoke.md)
 - [OpenRouter setup](./docs/runbooks/openrouter-setup.md)
 - [Sandbox backends](./docs/architecture/sandbox-backends.md)
+- [Container sandbox / OpenSandbox smoke](./docs/runbooks/container-sandbox.md)
 - [Publishing](./docs/runbooks/publishing.md)
 - [Honcho persistent memory (oh-my-pi)](./docs/runbooks/honcho-memory.md)
 
