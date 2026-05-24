@@ -4,7 +4,9 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
-## [Unreleased]
+## [0.6.0] — 2026-05-23
+
+Epic 7 (adapter capability routing + cost) and Epic 8 (SDD hardening) completed, plus a suite-health pass and CI/release hygiene. Several v0.5.0 gaps were corrected: the UH-101 auto-router (claimed shipped but absent) was implemented, and token-usage capture (assumed by the cost features) was added.
 
 ### Added
 
@@ -142,6 +144,8 @@ Two epics shipped end-to-end plus a deep discipline-layer pass distilled from [G
 
 Initial public release. Adapter framework (`hermes`, `codex`, `oh-my-pi`), mission schema, runtime-result artifact contract, verification + promotion pipeline.
 
+[0.6.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.1.0...v0.2.0
