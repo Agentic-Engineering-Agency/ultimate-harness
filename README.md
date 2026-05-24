@@ -19,7 +19,7 @@ The goal is to combine proven patterns from specification-driven development, ag
 
 ## Current status
 
-UH ships an end-to-end CLI with a schema-backed artifact lifecycle and four wired adapters (`hermes`, `codex`, `hermes-proxy` active; `oh-my-pi` experimental). Latest release: **v0.6.0** on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness). See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
+UH ships an end-to-end CLI with a schema-backed artifact lifecycle and five wired adapters (`hermes`, `codex`, `hermes-proxy`, `openrouter` active; `oh-my-pi` experimental). Sandboxes support `git-worktree` (default) and `directory` backends (`container` planned). See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 | Adapter | Status | Notes |
 |---|---|---|
@@ -27,6 +27,7 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and four wire
 | `codex` | active | Drives `codex exec --sandbox workspace-write --json --output-last-message` against `codex-cli ≥ 0.130.0`. Verified end-to-end against the live ChatGPT backend. |
 | `oh-my-pi` | experimental | Drives `omp --print --mode json`. Missions can route to any OMP-supported model (including Anthropic-tier via OMP's stealth surface) by setting `runtime_config_overrides.model:`. **Read [`docs/runbooks/anthropic-via-omp.md`](./docs/runbooks/anthropic-via-omp.md) before routing Claude through OMP** — the ToS posture is documented there. |
 | `hermes-proxy` | active | HTTP client targeting a local `hermes proxy` instance (Hermes Agent ≥ 0.14.0). Officially sanctioned OAuth-backed subscription routing — replaces the OMP stealth path. See [`docs/architecture/adapter-hermes-proxy.md`](./docs/architecture/adapter-hermes-proxy.md) and [`docs/runbooks/hermes-proxy-setup.md`](./docs/runbooks/hermes-proxy-setup.md). |
+| `openrouter` | active | OpenAI-compat HTTP client for [openrouter.ai](https://openrouter.ai) — the cheapest pay-per-token routing target. API key via `OPENROUTER_API_KEY` (never the manifest); a missing key makes `uh adapter check openrouter` degrade gracefully. See [`docs/runbooks/openrouter-setup.md`](./docs/runbooks/openrouter-setup.md). |
 
 Cross-cutting protocols every adapter participates in:
 
@@ -54,6 +55,8 @@ Runbooks:
 - [Anthropic via oh-my-pi](./docs/runbooks/anthropic-via-omp.md)
 - [Hermes Proxy setup](./docs/runbooks/hermes-proxy-setup.md)
 - [Hermes Proxy E2E smoke (UH-38 promotion record)](./docs/runbooks/hermes-proxy-e2e-smoke.md)
+- [OpenRouter setup](./docs/runbooks/openrouter-setup.md)
+- [Sandbox backends](./docs/architecture/sandbox-backends.md)
 - [Publishing](./docs/runbooks/publishing.md)
 - [Honcho persistent memory (oh-my-pi)](./docs/runbooks/honcho-memory.md)
 
