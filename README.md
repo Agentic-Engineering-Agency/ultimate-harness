@@ -19,7 +19,7 @@ The goal is to combine proven patterns from specification-driven development, ag
 
 ## Current status
 
-UH ships an end-to-end CLI with a schema-backed artifact lifecycle and five wired adapters (`hermes`, `codex`, `hermes-proxy`, `openrouter` active; `oh-my-pi` experimental). Sandboxes support `git-worktree` (default) and `directory` backends (`container` planned). See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
+UH ships an end-to-end CLI with a schema-backed artifact lifecycle and five wired adapters (`hermes`, `codex`, `hermes-proxy`, `openrouter` active; `oh-my-pi` experimental). Sandboxes support `git-worktree` (default) and `directory` backends (`container` planned). Latest release: **v0.7.0** on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness). See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 | Adapter | Status | Notes |
 |---|---|---|
