@@ -139,6 +139,33 @@ config:
     request_timeout_ms: 120000
     extra_headers: {}
 `,
+  openrouter: `schema_version: uh.adapter.v0
+id: openrouter
+name: OpenRouter
+description: >-
+  OpenAI-compatible HTTP client for https://openrouter.ai/api/v1 — the cheapest
+  pay-per-token routing target, complementary to the subscription-backed
+  hermes-proxy. The API key is read from the OPENROUTER_API_KEY environment
+  variable and never stored here. See docs/runbooks/openrouter-setup.md.
+runtime: openrouter
+capabilities:
+  - oai-compat
+  - http-transport
+  - sentinel-protocol
+  - pay-per-token
+status: active
+config:
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    endpoint: "https://openrouter.ai/api/v1"
+    model: "openai/gpt-4o-mini"
+    request_timeout_ms: 120000
+    extra_headers: {}
+`,
 };
 
 export type AddAdapterResult = {
