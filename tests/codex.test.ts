@@ -251,6 +251,7 @@ describe("uh mission run --runtime codex", () => {
       "codex.thread.started",
       "codex.turn.completed",
       "runtime.finished",
+      "runtime.usage",
     ]);
     // runtime-result.yaml is mirrored from runDir up to missionDir.
     const runtimeResultPath = join(missionDir, "runtime-result.yaml");

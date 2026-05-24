@@ -8,6 +8,7 @@ Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [Git
 
 ### Added
 
+- **Token-usage capture**: adapters now emit a `runtime.usage` event per run (prerequisite for cost-forecast + the dashboard cost gauge). hermes-proxy records **real** tokens from the OpenAI-style `usage` field; codex / hermes / oh-my-pi emit a deterministic estimate (chars/4) tagged `source: "estimated"`. New `src/harness/usage.ts`.
 - **Adapter auto-routing** (Epic 7 / [UH-101](https://linear.app/agentic-eng/issue/UH-101)): `uh mission run --auto` selects the cheapest installed adapter whose capability manifest satisfies the mission's `runtime_requirements`; `--auto --explain` prints the decision matrix. New `src/harness/auto-route.ts` (`chooseAdapter`), reusing `evaluateAdapterEligibility` (UH-102) and `compareCostClass`. Closes a gap where v0.5.0 listed UH-101 as shipped but the routing code was never landed.
 
 ### Fixed

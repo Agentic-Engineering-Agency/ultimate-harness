@@ -6,6 +6,7 @@ import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.
 import { MissionDocument, validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
 import { auditLog, workflowsDir } from "../harness/paths.js";
+import { buildUsageEvent, estimateUsage, usageFromOpenAI } from "../harness/usage.js";
 import {
   appendRunsIndexEntry,
   ensureRunDir,
@@ -277,6 +278,10 @@ export interface HermesProxyRunnerOutput {
   networkError?: string;
   timedOut: boolean;
   events: Array<Record<string, unknown>>;
+  /** OpenAI-style `usage` object from the response, when the proxy returns one. */
+  usage?: unknown;
+  /** Model id reported by the response, used to tag the usage event. */
+  usageModel?: string;
 }
 
 export type HermesProxyRunner = (input: HermesProxyRunnerInput) => Promise<HermesProxyRunnerOutput>;
@@ -536,6 +541,8 @@ export const defaultHermesProxyRunner: HermesProxyRunner = async (input) => {
       if (response.ok) {
         // OpenAI non-streaming success: extract choices[0].message.content.
         out.stdout = extractMessageContent(parsed);
+        if (parsed.usage !== undefined) out.usage = parsed.usage;
+        if (typeof parsed.model === "string") out.usageModel = parsed.model;
         if (out.stdout.length === 0) {
           out.stderr = "hermes-proxy: empty assistant message\n";
           out.exitCode = 1;
@@ -569,6 +576,10 @@ function handleSseFrame(rawFrame: string, out: HermesProxyRunnerOutput): "DONE" 
     try {
       const parsed = JSON.parse(data) as Record<string, unknown>;
       out.events.push(parsed);
+      // OpenAI streaming usage arrives in a trailing frame (stream_options:
+      // {include_usage:true}); capture it when present.
+      if (parsed.usage !== undefined && parsed.usage !== null) out.usage = parsed.usage;
+      if (typeof parsed.model === "string") out.usageModel = parsed.model;
       // Error events: surface envelope, append to stderr, abort the stream.
       const envelope = extractErrorEnvelope(parsed);
       if (envelope) {
@@ -934,6 +945,14 @@ export async function collectHermesProxySession(
       finishedAt,
       exitCode,
       exitCode === 0 ? "succeeded" : "failed",
+    );
+
+    const proxyUsage =
+      usageFromOpenAI(runnerResult.usage, runnerResult.usageModel) ??
+      estimateUsage(plan.prompt, sentinel);
+    await appendMissionEvent(
+      artifacts,
+      buildUsageEvent("hermes-proxy", plan.mission.id, proxyUsage, finishedAt),
     );
   } catch (err) {
     const message = (err as Error).message;
