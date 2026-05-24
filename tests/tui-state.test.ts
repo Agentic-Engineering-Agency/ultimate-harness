@@ -45,6 +45,18 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Poll until a condition holds instead of guessing a fixed delay — the initial
+// async load can take longer than a few ms on a loaded/parallel test runner.
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    }
+    await delay(2);
+  }
+}
+
 describe("tui/state createDashboardState — snapshot lifecycle", () => {
   test("loads an initial snapshot", async () => {
     let calls = 0;
@@ -56,7 +68,7 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
       },
       debounceMs: 10,
     });
-    await delay(5);
+    await waitFor(() => !state.isLoading() && state.snapshot().capturedAt === "call-1");
     expect(state.snapshot().capturedAt).toBe("call-1");
     expect(state.isLoading()).toBe(false);
     expect(state.error()).toBeNull();
