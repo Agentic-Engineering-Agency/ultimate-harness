@@ -225,13 +225,17 @@ config:
 });
 
 describe("uh adapter check hermes", () => {
+  // Probes the real local `hermes` binary, so spawn latency is environment
+  // dependent. Give it a generous timeout — on a machine where hermes is
+  // installed but slow to start, the 5s default would flake. CI has no hermes
+  // (found: false) so this returns immediately there.
   test("returns valid check result when hermes is installed", async () => {
     const result = await checkHermes();
     expect(result.runtime).toBe("hermes");
     if (result.found) {
       expect(result.version.length).toBeGreaterThan(0);
     }
-  });
+  }, 30_000);
 
   test("validates the selected root adapter manifest", async () => {
     await rm(join(TEST_ROOT, ".harness", "adapters", "hermes.yaml"));
