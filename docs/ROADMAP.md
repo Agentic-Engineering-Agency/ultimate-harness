@@ -1,62 +1,62 @@
 # Ultimate Harness — Roadmap
 
-Last updated: 2026-05-25. Source of truth for issue state is [Linear](https://linear.app/agentic-eng); this file is a human-readable index.
+Last updated: 2026-05-25. Source of truth for issue state is [Linear](https://linear.app/agenticengineering-agency/team/UH/active) (the canonical UH team); GitHub mirrors via the native 2-way integration. This file is a human-readable index.
 
 ## Now
 
-**v0.8.0 (current release, GitHub milestone v0.8.0 — issues #154 / #155 / #156):** the **"Sandbox isolation"** milestone promotes the `container` sandbox backend from a fail-fast stub to a real OpenSandbox-gated execution-isolation tier (#155, with #154 spike + ADR and #157 lifecycle hardening) and graduates `oh-my-pi` to `status: active` (#156, ToS posture inherited from `docs/runbooks/anthropic-via-omp.md`; users opt in). Will be published as `@agenticengineeringagency/ultimate-harness@0.8.0` once the `v0.8.0` tag lands on `main`; plugin manifest version is `0.8.0` in the release-prep PR. See [`CHANGELOG.md`](../CHANGELOG.md) `[0.8.0]`.
+**v0.8.0 (current release, GitHub milestone v0.8.0 — issues #154 / #155 / #156):** the **"Sandbox isolation"** milestone promotes the `container` sandbox backend from a fail-fast stub to a real OpenSandbox-gated execution-isolation tier (#155, with #154 spike + ADR and #157 lifecycle hardening) and graduates `oh-my-pi` to `status: active` (#156, ToS posture inherited from `docs/runbooks/anthropic-via-omp.md`; users opt in). Published as `@agenticengineeringagency/ultimate-harness@0.8.0` on npm `latest` (tagged `v0.8.0` + `plugin-v0.8.0` on `main`). See [`CHANGELOG.md`](../CHANGELOG.md) `[0.8.0]`.
 
-Epics 2–5 plus **Epics 6–8** (live SSE tail + cancel, adapter capability routing + cost, SDD hardening) shipped and were **released as v0.6.0** — published to npm as `@agenticengineeringagency/ultimate-harness@0.6.0`. v0.6.0 also corrected two v0.5.0 gaps: the auto-router `uh mission run --auto` (UH-101, claimed shipped but never built) and `runtime.usage` token capture (which the cost features assumed). The Epics 6–8 execution spec is [`docs/specs/epics-6-7-8.md`](./specs/epics-6-7-8.md); per-slice detail is in the [CHANGELOG](../CHANGELOG.md) `[0.6.0]`. **v0.7.0:** OpenRouter adapter ([#134]), **vanilla `pi` adapter ([#135], shipped active)**, sandbox backend abstraction + `directory` backend ([#136]) and a `container` stub ([#137]), verify-then-promote auto-trigger ([#139]), capability-match enforcement ([#138], already shipped), and a shared adapter-artifact-helper refactor ([#133]). **v0.8.0 (current release, see Now above):** OpenSandbox-gated `container` execution backend ([#155]/[#157]) with ADR + runbook ([#154]), and `oh-my-pi` graduated to active ([#156]). **v0.8.0 will be tagged on `main` and pushed to npm as `latest` via the `dev → main` release PR.** **npm publish is no longer blocked** — the prior 404 was a `bun publish` quirk, fixed by switching to `npm publish`; the workflow is now tag-gated + idempotent. **Linear note:** records for UH-92..UH-111 are pending a workspace upgrade — until then those slices are tracked here + in the CHANGELOG + the spec, not as individual Linear issues.
+Epics 2–5 plus **Epics 6–8** (live SSE tail + cancel, adapter capability routing + cost, SDD hardening) shipped and were **released as v0.6.0** — published to npm as `@agenticengineeringagency/ultimate-harness@0.6.0`. v0.6.0 also corrected two v0.5.0 gaps: the auto-router `uh mission run --auto` (UH-101, claimed shipped but never built) and `runtime.usage` token capture (which the cost features assumed). The Epics 6–8 execution spec is [`docs/specs/epics-6-7-8.md`](./specs/epics-6-7-8.md); per-slice detail is in the [CHANGELOG](../CHANGELOG.md) `[0.6.0]`. **v0.7.0:** OpenRouter adapter ([#134]), **vanilla `pi` adapter ([#135], shipped active)**, sandbox backend abstraction + `directory` backend ([#136]) and a `container` stub ([#137]), verify-then-promote auto-trigger ([#139]), capability-match enforcement ([#138], already shipped), and a shared adapter-artifact-helper refactor ([#133]). **v0.8.0 (current release, see Now above):** OpenSandbox-gated `container` execution backend ([#155]/[#157]) with ADR + runbook ([#154]), and `oh-my-pi` graduated to active ([#156]). **v0.8.0 is the current `latest` on npm** (`@agenticengineeringagency/ultimate-harness@0.8.0`, tagged on `main` via the dev→main release PR). **Issue tracking:** [Linear](https://linear.app/agenticengineering-agency/team/UH/active) is the canonical source of truth for the UH team; GitHub issues mirror Linear via the native 2-way integration (per-issue auto-creation + state/title/body sync). Cite Linear IDs (UH-NNN) in commits, PRs, and docs — the GitHub mirror picks up the back-link automatically. The v0.5.0/v0.6.0 epic records (UH-92..UH-111) and the v0.7.0/v0.8.0 milestone slices (UH-112..UH-125) were backfilled to Linear post-workspace-upgrade so the history matches the CHANGELOG.
 
-### Epic 5 — Hermes Dashboard plugin v2: multi-run history + replay + observability ([UH-84](https://linear.app/agentic-eng/issue/UH-84))
+### Epic 5 — Hermes Dashboard plugin v2: multi-run history + replay + observability ([UH-84](https://linear.app/agenticengineering-agency/issue/UH-84))
 
-Surface the per-run artifact backend ([UH-82](https://linear.app/agentic-eng/issue/UH-82), shipped in v0.4.0-prep) in the dashboard UI. Today's plugin shows one mission ↔ one "latest result"; v2 turns the dashboard into a triage surface for missions with dozens of runs.
+Surface the per-run artifact backend ([UH-82](https://linear.app/agenticengineering-agency/issue/UH-82), shipped in v0.4.0-prep) in the dashboard UI. Today's plugin shows one mission ↔ one "latest result"; v2 turns the dashboard into a triage surface for missions with dozens of runs.
 
 | Phase | Issue | Slice | Size | Status |
 |---|---|---|---|---|
-| Core | [UH-85](https://linear.app/agentic-eng/issue/UH-85) | Recent runs pane on Mission detail | S | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
-| Core | [UH-86](https://linear.app/agentic-eng/issue/UH-86) | Per-run drilldown (`?run_id=` param) | M | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
-| Core | [UH-88](https://linear.app/agentic-eng/issue/UH-88) | Filter + search runs in the pane | S | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
-| Later | [UH-89](https://linear.app/agentic-eng/issue/UH-89) | Compare two runs side-by-side | M | **shipped** — [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101) |
-| Later | [UH-87](https://linear.app/agentic-eng/issue/UH-87) | Replay a run with same/modified overrides | M | **shipped** — [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101) |
-| Optional | [UH-90](https://linear.app/agentic-eng/issue/UH-90) | Run history retention policy | S | **shipped** — [#100](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/100) |
+| Core | [UH-85](https://linear.app/agenticengineering-agency/issue/UH-85) | Recent runs pane on Mission detail | S | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
+| Core | [UH-86](https://linear.app/agenticengineering-agency/issue/UH-86) | Per-run drilldown (`?run_id=` param) | M | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
+| Core | [UH-88](https://linear.app/agenticengineering-agency/issue/UH-88) | Filter + search runs in the pane | S | **shipped** — [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) |
+| Later | [UH-89](https://linear.app/agenticengineering-agency/issue/UH-89) | Compare two runs side-by-side | M | **shipped** — [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101) |
+| Later | [UH-87](https://linear.app/agenticengineering-agency/issue/UH-87) | Replay a run with same/modified overrides | M | **shipped** — [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101) |
+| Optional | [UH-90](https://linear.app/agenticengineering-agency/issue/UH-90) | Run history retention policy | S | **shipped** — [#100](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/100) |
 
-Epic 5 shipped end-to-end across [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) + [#100](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/100) + [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101). Backend foundation shipped earlier in PR [#96](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/96) (UH-82): `runs/<run_id>/` per-run dirs, `runs/index.json` history, `latest.json` pointer, per-run artifact route honoring `run_id`, `get_mission` returns `runs[]`. TUI polish slices ([UH-48](https://linear.app/agentic-eng/issue/UH-48) / [UH-49](https://linear.app/agentic-eng/issue/UH-49) / [UH-50](https://linear.app/agentic-eng/issue/UH-50) / [UH-51](https://linear.app/agentic-eng/issue/UH-51)) shipped in [#99](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/99). Cut as v0.4.0 ([#103](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/103) + [#105](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/105) + [#107](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/107)); superseded by v0.5.0 and v0.6.0, all live on npm.
+Epic 5 shipped end-to-end across [#98](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/98) + [#100](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/100) + [#101](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/101). Backend foundation shipped earlier in PR [#96](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/96) (UH-82): `runs/<run_id>/` per-run dirs, `runs/index.json` history, `latest.json` pointer, per-run artifact route honoring `run_id`, `get_mission` returns `runs[]`. TUI polish slices ([UH-48](https://linear.app/agenticengineering-agency/issue/UH-48) / [UH-49](https://linear.app/agenticengineering-agency/issue/UH-49) / [UH-50](https://linear.app/agenticengineering-agency/issue/UH-50) / [UH-51](https://linear.app/agenticengineering-agency/issue/UH-51)) shipped in [#99](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/99). Cut as v0.4.0 ([#103](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/103) + [#105](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/105) + [#107](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/107)); superseded by v0.5.0 and v0.6.0, all live on npm.
 
-### Epic 3 — Hermes Dashboard plugin for UH ([UH-60](https://linear.app/agentic-eng/issue/UH-60))
+### Epic 3 — Hermes Dashboard plugin for UH ([UH-60](https://linear.app/agenticengineering-agency/issue/UH-60))
 
 Ship a [Hermes dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) plugin that exposes UH end-to-end from the Hermes web UI — adapter health, mission list, mission run trigger, artifact drilldown, and theme integration. The plugin is a drop-in at `~/.hermes/plugins/uh/dashboard/`: `manifest.json` + IIFE JS bundle (using `window.__HERMES_PLUGIN_SDK__`) + Python FastAPI router that shells out to the `uh` CLI. No daemon, no FFI, no Hermes fork.
 
 | Phase | Issue | Slice | Size | Status |
 |---|---|---|---|---|
-| Core | [UH-61](https://linear.app/agentic-eng/issue/UH-61) | Plugin scaffold + dev workflow | S | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
-| Core | [UH-62](https://linear.app/agentic-eng/issue/UH-62) | Python ⇄ `uh` CLI FastAPI backend bridge | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
-| Core | [UH-65](https://linear.app/agentic-eng/issue/UH-65) | UH overview tab (adapters + missions + recent runs) | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
-| Core | [UH-64](https://linear.app/agentic-eng/issue/UH-64) | Mission run trigger + live event-stream tail | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
-| Later | [UH-63](https://linear.app/agentic-eng/issue/UH-63) | Mission drilldown viewers (prompt / final-message / diff / runtime-result) | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
-| Later | [UH-66](https://linear.app/agentic-eng/issue/UH-66) | Workflow profile viewer + verification report viewer | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
-| Later | [UH-69](https://linear.app/agentic-eng/issue/UH-69) | UH theme YAML + `sessions:bottom` slot cross-link | S | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
-| Optional | [UH-67](https://linear.app/agentic-eng/issue/UH-67) | New-mission wizard + workflow editor | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
-| Optional | [UH-68](https://linear.app/agentic-eng/issue/UH-68) | Plugin packaging, install runbook, and distribution repo | S | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Core | [UH-61](https://linear.app/agenticengineering-agency/issue/UH-61) | Plugin scaffold + dev workflow | S | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Core | [UH-62](https://linear.app/agenticengineering-agency/issue/UH-62) | Python ⇄ `uh` CLI FastAPI backend bridge | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Core | [UH-65](https://linear.app/agenticengineering-agency/issue/UH-65) | UH overview tab (adapters + missions + recent runs) | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Core | [UH-64](https://linear.app/agenticengineering-agency/issue/UH-64) | Mission run trigger + live event-stream tail | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Later | [UH-63](https://linear.app/agenticengineering-agency/issue/UH-63) | Mission drilldown viewers (prompt / final-message / diff / runtime-result) | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Later | [UH-66](https://linear.app/agenticengineering-agency/issue/UH-66) | Workflow profile viewer + verification report viewer | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Later | [UH-69](https://linear.app/agenticengineering-agency/issue/UH-69) | UH theme YAML + `sessions:bottom` slot cross-link | S | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Optional | [UH-67](https://linear.app/agenticengineering-agency/issue/UH-67) | New-mission wizard + workflow editor | M | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
+| Optional | [UH-68](https://linear.app/agenticengineering-agency/issue/UH-68) | Plugin packaging, install runbook, and distribution repo | S | **shipped** — [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) |
 
-All Core + Later + Optional slices shipped in [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) after 13 rounds of [Codex](https://github.com/apps/chatgpt-codex-connector) adversarial review — 26+ documented correctness findings (race conditions, silent failure modes, security gaps, schema drift, response shape inconsistencies) all addressed before merge. See the Linear issues for per-slice detail; follow-ups [UH-81](https://linear.app/agentic-eng/issue/UH-81) / [UH-82](https://linear.app/agentic-eng/issue/UH-82) / [UH-83](https://linear.app/agentic-eng/issue/UH-83) track the deferred items.
+All Core + Later + Optional slices shipped in [#89](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/89) after 13 rounds of [Codex](https://github.com/apps/chatgpt-codex-connector) adversarial review — 26+ documented correctness findings (race conditions, silent failure modes, security gaps, schema drift, response shape inconsistencies) all addressed before merge. See the Linear issues for per-slice detail; follow-ups [UH-81](https://linear.app/agenticengineering-agency/issue/UH-81) / [UH-82](https://linear.app/agenticengineering-agency/issue/UH-82) / [UH-83](https://linear.app/agenticengineering-agency/issue/UH-83) track the deferred items.
 
-### Epic 4 — Team mission shape ([UH-70](https://linear.app/agentic-eng/issue/UH-70))
+### Epic 4 — Team mission shape ([UH-70](https://linear.app/agenticengineering-agency/issue/UH-70))
 
-Distill the convergent learning from [oh-my-claudecode](https://oh-my-claudecode.dev/) and [oh-my-codex](https://oh-my-codex.dev/) into a UH-native mission shape: a single mission that fans out across **multiple adapters in parallel** as workers, each in its own worktree, with a leader/integrator role that merges their work and runs the existing verification pipeline over the integrated result. Extends [UH-56](https://linear.app/agentic-eng/issue/UH-56) `mission run-all` from comparison to collaboration.
+Distill the convergent learning from [oh-my-claudecode](https://oh-my-claudecode.dev/) and [oh-my-codex](https://oh-my-codex.dev/) into a UH-native mission shape: a single mission that fans out across **multiple adapters in parallel** as workers, each in its own worktree, with a leader/integrator role that merges their work and runs the existing verification pipeline over the integrated result. Extends [UH-56](https://linear.app/agenticengineering-agency/issue/UH-56) `mission run-all` from comparison to collaboration.
 
 | Phase | Issue | Slice | Size | Status |
 |---|---|---|---|---|
-| Core | [UH-71](https://linear.app/agentic-eng/issue/UH-71) | Mission schema for `team` shape with adapter-bound workers | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
-| Core | [UH-72](https://linear.app/agentic-eng/issue/UH-72) | Per-worker worktree auto-isolation + leader merge / `integration-report.md` | M | **shipped** — [#87](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/87) + [#90](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/90) |
-| Core | [UH-73](https://linear.app/agentic-eng/issue/UH-73) | Staged workflow profile family (`plan → prd → exec → verify → fix`) | M | **shipped** — [#87](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/87) |
+| Core | [UH-71](https://linear.app/agenticengineering-agency/issue/UH-71) | Mission schema for `team` shape with adapter-bound workers | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
+| Core | [UH-72](https://linear.app/agenticengineering-agency/issue/UH-72) | Per-worker worktree auto-isolation + leader merge / `integration-report.md` | M | **shipped** — [#87](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/87) + [#90](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/90) |
+| Core | [UH-73](https://linear.app/agenticengineering-agency/issue/UH-73) | Staged workflow profile family (`plan → prd → exec → verify → fix`) | M | **shipped** — [#87](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/87) |
 
 Standalone discipline-layer slices inspired by the same research (not part of Epic 4 but sequenced after it):
 
 | Phase | Issue | Slice | Size | Status |
 |---|---|---|---|---|
-| Later | [UH-74](https://linear.app/agentic-eng/issue/UH-74) | Adversarial QA workflow profile (`adversarial-qa`) — OMX `$ultraqa` analog | M | **shipped** — [#87](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/87) + [#90](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/90) |
-| Later | [UH-75](https://linear.app/agentic-eng/issue/UH-75) | Companion `design.md` artifact alongside `mission.yaml` — OMX `$design` analog | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
+| Later | [UH-74](https://linear.app/agenticengineering-agency/issue/UH-74) | Adversarial QA workflow profile (`adversarial-qa`) — OMX `$ultraqa` analog | M | **shipped** — [#87](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/87) + [#90](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/90) |
+| Later | [UH-75](https://linear.app/agenticengineering-agency/issue/UH-75) | Companion `design.md` artifact alongside `mission.yaml` — OMX `$design` analog | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
 
 Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"oh-my-claudecode (OMC)", §"oh-my-codex (OMX)", §"Combined OMC/OMX takeaways"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer.md); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix.md).
 
@@ -66,68 +66,68 @@ Standalone slices distilled from the [GSD-2 / gsd-pi](https://github.com/gsd-bui
 
 | Phase | Issue | Slice | Size | Status |
 |---|---|---|---|---|
-| Core | [UH-76](https://linear.app/agentic-eng/issue/UH-76) | Three-verdict runtime-result status (`pass / needs-attention / needs-remediation`) + `uh mission verdict` manual override — GSD-2 `/gsd verdict` analog | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
-| Core | [UH-77](https://linear.app/agentic-eng/issue/UH-77) | Drift detection + idempotent repair registry for `uh validate` — GSD-2 ADR-017 analog | M | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
-| Core | [UH-78](https://linear.app/agentic-eng/issue/UH-78) | `uh status --json` LLM-less query mode — GSD-2 `gsd headless query` analog; feeds Hermes Dashboard (UH-62) | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
-| Later | [UH-79](https://linear.app/agentic-eng/issue/UH-79) | Canonical `docs/VISION.md` with explicit "what we won't accept" — GSD-2 VISION.md analog | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
-| Later | [UH-80](https://linear.app/agentic-eng/issue/UH-80) | Pre-inlined dispatch context contract — formalize the existing `buildMissionPrompt` shape across all four adapters | M | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
+| Core | [UH-76](https://linear.app/agenticengineering-agency/issue/UH-76) | Three-verdict runtime-result status (`pass / needs-attention / needs-remediation`) + `uh mission verdict` manual override — GSD-2 `/gsd verdict` analog | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
+| Core | [UH-77](https://linear.app/agenticengineering-agency/issue/UH-77) | Drift detection + idempotent repair registry for `uh validate` — GSD-2 ADR-017 analog | M | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
+| Core | [UH-78](https://linear.app/agenticengineering-agency/issue/UH-78) | `uh status --json` LLM-less query mode — GSD-2 `gsd headless query` analog; feeds Hermes Dashboard (UH-62) | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
+| Later | [UH-79](https://linear.app/agenticengineering-agency/issue/UH-79) | Canonical `docs/VISION.md` with explicit "what we won't accept" — GSD-2 VISION.md analog | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
+| Later | [UH-80](https://linear.app/agenticengineering-agency/issue/UH-80) | Pre-inlined dispatch context contract — formalize the existing `buildMissionPrompt` shape across all four adapters | M | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
 
 Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"GSD 2 (`gsd-pi`)"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer.md); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix.md).
 
-### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agentic-eng/issue/UH-41))
+### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agenticengineering-agency/issue/UH-41))
 
 Build `uh tui` on [OpenTUI](https://opentui.com) — the same engine OpenCode uses in production (native Zig core, TypeScript bindings, Bun-first, MIT-licensed). Replaces today's `cat`-driven mission review with a navigable live terminal app using OpenTUI's `Diff`, `Code` (tree-sitter), `ScrollBox`, `Select`, and `Input` components.
 
 | Step | Issue | Slice | Size | Status |
 |---|---|---|---|---|
-| 1 | [UH-45](https://linear.app/agentic-eng/issue/UH-45) | Spike: install opentui, framework choice (vanilla / React / Solid), hello-world bound to UH state | S | **shipped** — Solid won; see [`docs/research/tui-framework.md`](./research/tui-framework.md) |
-| 2 | [UH-46](https://linear.app/agentic-eng/issue/UH-46) | Dashboard: live adapters + missions + sandboxes (three-pane) | M | **shipped** — Mission Control dashboard; see [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) + [`docs/architecture/tui.md`](./architecture/tui.md) |
-| 3 | [UH-47](https://linear.app/agentic-eng/issue/UH-47) | Mission browser: drilldown with `Code` + `Diff` viewers | M | **shipped** — read-only mission artifact drilldown; see [#59](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/59) |
-| 4 | [UH-44](https://linear.app/agentic-eng/issue/UH-44) | Mission run flow: trigger from TUI, stream events live | M | **shipped** — `R` opens a run dialog, live tail of `events.ndjson`, `S` stops via SIGTERM; see [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
-| 5 | [UH-43](https://linear.app/agentic-eng/issue/UH-43) | Adapter + sandbox manager: live checks, create/discard from inside | M | **shipped** — `c` re-check, `n` create-sandbox dialog, `d` discard with `F` force toggle; see [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
-| 6 | [UH-42](https://linear.app/agentic-eng/issue/UH-42) | Polish: keymap overlay, theming, error states, exit handling, Agent Skill install | S | **shipped** — `?` overlay, per-project state persistence, operator runbook; see [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65). Theming / `$EDITOR` / Ctrl+Z spun out as UH-48 / UH-49 / UH-50. |
+| 1 | [UH-45](https://linear.app/agenticengineering-agency/issue/UH-45) | Spike: install opentui, framework choice (vanilla / React / Solid), hello-world bound to UH state | S | **shipped** — Solid won; see [`docs/research/tui-framework.md`](./research/tui-framework.md) |
+| 2 | [UH-46](https://linear.app/agenticengineering-agency/issue/UH-46) | Dashboard: live adapters + missions + sandboxes (three-pane) | M | **shipped** — Mission Control dashboard; see [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) + [`docs/architecture/tui.md`](./architecture/tui.md) |
+| 3 | [UH-47](https://linear.app/agenticengineering-agency/issue/UH-47) | Mission browser: drilldown with `Code` + `Diff` viewers | M | **shipped** — read-only mission artifact drilldown; see [#59](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/59) |
+| 4 | [UH-44](https://linear.app/agenticengineering-agency/issue/UH-44) | Mission run flow: trigger from TUI, stream events live | M | **shipped** — `R` opens a run dialog, live tail of `events.ndjson`, `S` stops via SIGTERM; see [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
+| 5 | [UH-43](https://linear.app/agenticengineering-agency/issue/UH-43) | Adapter + sandbox manager: live checks, create/discard from inside | M | **shipped** — `c` re-check, `n` create-sandbox dialog, `d` discard with `F` force toggle; see [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
+| 6 | [UH-42](https://linear.app/agenticengineering-agency/issue/UH-42) | Polish: keymap overlay, theming, error states, exit handling, Agent Skill install | S | **shipped** — `?` overlay, per-project state persistence, operator runbook; see [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65). Theming / `$EDITOR` / Ctrl+Z spun out as UH-48 / UH-49 / UH-50. |
 
 ## Shipped this cycle (2026-05-17 → 2026-05-19)
 
-### Epic 1 — Hermes proxy adapter ([UH-32](https://linear.app/agentic-eng/issue/UH-32)) — **DONE**
+### Epic 1 — Hermes proxy adapter ([UH-32](https://linear.app/agenticengineering-agency/issue/UH-32)) — **DONE**
 
 Adapter promoted to `status: active` on 2026-05-18 after live E2E smoke against `hermes proxy start --provider nous`. ToS-positioned subscription routing now first-class alongside hermes / codex / oh-my-pi.
 
 | Step | Issue | Slice | PR |
 |---|---|---|---|
-| 1 | [UH-36](https://linear.app/agentic-eng/issue/UH-36) | Wire-format spike + recommendation | [#49](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/49) |
-| 2 | [UH-35](https://linear.app/agentic-eng/issue/UH-35) | Schema + manifest + template + dispatch stub | [#50](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/50) |
-| 3 | [UH-39](https://linear.app/agentic-eng/issue/UH-39) | Adapter impl: planner, runner, SSE parser, sentinel, blocked classification | [#51](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/51) |
-| 4 | [UH-37](https://linear.app/agentic-eng/issue/UH-37) | Live HTTP `adapter check` probe | [#53](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/53) |
-| 5 | [UH-40](https://linear.app/agentic-eng/issue/UH-40) | Architecture doc + setup runbook | [#54](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/54) |
-| 6 | [UH-38](https://linear.app/agentic-eng/issue/UH-38) | E2E smoke + promote to `status: active` | [#55](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/55) |
+| 1 | [UH-36](https://linear.app/agenticengineering-agency/issue/UH-36) | Wire-format spike + recommendation | [#49](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/49) |
+| 2 | [UH-35](https://linear.app/agenticengineering-agency/issue/UH-35) | Schema + manifest + template + dispatch stub | [#50](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/50) |
+| 3 | [UH-39](https://linear.app/agenticengineering-agency/issue/UH-39) | Adapter impl: planner, runner, SSE parser, sentinel, blocked classification | [#51](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/51) |
+| 4 | [UH-37](https://linear.app/agenticengineering-agency/issue/UH-37) | Live HTTP `adapter check` probe | [#53](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/53) |
+| 5 | [UH-40](https://linear.app/agenticengineering-agency/issue/UH-40) | Architecture doc + setup runbook | [#54](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/54) |
+| 6 | [UH-38](https://linear.app/agenticengineering-agency/issue/UH-38) | E2E smoke + promote to `status: active` | [#55](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/55) |
 
 ### Other slices this cycle
 
 | Issue | Title | PR |
 |---|---|---|
-| [UH-45](https://linear.app/agentic-eng/issue/UH-45) | TUI spike: opentui framework selection + hello-world | [#52](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/52) |
-| [UH-46](https://linear.app/agentic-eng/issue/UH-46) | TUI dashboard: live adapters + missions + sandboxes | [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) |
-| [UH-47](https://linear.app/agentic-eng/issue/UH-47) | TUI mission browser: drilldown with Code + Diff viewers | [#59](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/59) |
-| [UH-44](https://linear.app/agentic-eng/issue/UH-44) | TUI mission run flow with live `events.ndjson` tail | [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
-| [UH-43](https://linear.app/agentic-eng/issue/UH-43) | TUI adapter + sandbox manager (create/discard/recheck) | [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
-| [UH-42](https://linear.app/agentic-eng/issue/UH-42) | TUI polish: keymap overlay (`?`) + per-project persistence + runbook | [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65) |
+| [UH-45](https://linear.app/agenticengineering-agency/issue/UH-45) | TUI spike: opentui framework selection + hello-world | [#52](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/52) |
+| [UH-46](https://linear.app/agenticengineering-agency/issue/UH-46) | TUI dashboard: live adapters + missions + sandboxes | [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) |
+| [UH-47](https://linear.app/agenticengineering-agency/issue/UH-47) | TUI mission browser: drilldown with Code + Diff viewers | [#59](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/59) |
+| [UH-44](https://linear.app/agenticengineering-agency/issue/UH-44) | TUI mission run flow with live `events.ndjson` tail | [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
+| [UH-43](https://linear.app/agenticengineering-agency/issue/UH-43) | TUI adapter + sandbox manager (create/discard/recheck) | [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
+| [UH-42](https://linear.app/agenticengineering-agency/issue/UH-42) | TUI polish: keymap overlay (`?`) + per-project persistence + runbook | [#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61) + [#65](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/65) |
 
 ### Runtime intelligence + operator polish + npm publish automation + Honcho memory (2026-05-19)
 
 | Issue | Slice | PR |
 |---|---|---|
-| [UH-57](https://linear.app/agentic-eng/issue/UH-57) | Runtime intelligence + operator polish: TUI screenshot capture, adapter-check age footer, `runtime.cancelled` event, mission capability enforcement | [#77](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/77) |
-| [UH-58](https://linear.app/agentic-eng/issue/UH-58) | Package renamed `@agenticengineeringagency/ultimate-harness`, `publishConfig.access=public`, CI dry-run + release publish workflow | [#79](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/79) |
-| [UH-59](https://linear.app/agentic-eng/issue/UH-59) | Honcho persistent-memory extension for the `oh-my-pi` adapter — env-driven enrich/record at the harness layer with fail-fast misconfig and graceful network degradation | [#83](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/83) |
+| [UH-57](https://linear.app/agenticengineering-agency/issue/UH-57) | Runtime intelligence + operator polish: TUI screenshot capture, adapter-check age footer, `runtime.cancelled` event, mission capability enforcement | [#77](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/77) |
+| [UH-58](https://linear.app/agenticengineering-agency/issue/UH-58) | Package renamed `@agenticengineeringagency/ultimate-harness`, `publishConfig.access=public`, CI dry-run + release publish workflow | [#79](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/79) |
+| [UH-59](https://linear.app/agenticengineering-agency/issue/UH-59) | Honcho persistent-memory extension for the `oh-my-pi` adapter — env-driven enrich/record at the harness layer with fail-fast misconfig and graceful network degradation | [#83](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/83) |
 
 ### Discipline layers — Spec-Driven, Test-Driven, Cross-runtime QA (shipped)
 
 | Issue | Slice | PR |
 |---|---|---|
-| [UH-54](https://linear.app/agentic-eng/issue/UH-54) | SDD: structured `acceptance_criteria` with per-AC verify | [#68](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/68) |
-| [UH-55](https://linear.app/agentic-eng/issue/UH-55) | TDD: `tdd` workflow profile + test-first verify gate | [#69](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/69) |
-| [UH-56](https://linear.app/agentic-eng/issue/UH-56) | Cross-runtime QA: `uh mission run-all` + side-by-side comparison | [#70](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/70) |
+| [UH-54](https://linear.app/agenticengineering-agency/issue/UH-54) | SDD: structured `acceptance_criteria` with per-AC verify | [#68](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/68) |
+| [UH-55](https://linear.app/agenticengineering-agency/issue/UH-55) | TDD: `tdd` workflow profile + test-first verify gate | [#69](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/69) |
+| [UH-56](https://linear.app/agenticengineering-agency/issue/UH-56) | Cross-runtime QA: `uh mission run-all` + side-by-side comparison | [#70](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/70) |
 
 All three layers compose: see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md).
 

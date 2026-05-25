@@ -1,6 +1,6 @@
 # Hermes dashboard plugin runbook
 
-Status: merged for downstream integration testing 2026-05-19 (Wave 3, [UH-60](https://linear.app/agentic-eng/issue/UH-60) epic); live dashboard smoke pending [UH-68](https://linear.app/agentic-eng/issue/UH-68).
+Status: merged for downstream integration testing 2026-05-19 (Wave 3, [UH-60](https://linear.app/agenticengineering-agency/issue/UH-60) epic); live dashboard smoke pending [UH-68](https://linear.app/agenticengineering-agency/issue/UH-68).
 
 The `uh` plugin makes Ultimate Harness drivable from the Hermes web dashboard: live adapter health, mission list, mission run trigger with live event tail, artifact drilldown (prompt, final-message, diff, runtime-result, events, verification), workflow viewer + editor, mission wizard, and a Sessions-page deep-link slot.
 
@@ -8,7 +8,7 @@ This runbook covers install, day-1 sanity checks, common failure modes, and the 
 
 ## Install
 
-The plugin is a drop-in directory under `~/.hermes/plugins/`. Until a release tarball lands ([UH-68](https://linear.app/agentic-eng/issue/UH-68)), the canonical path is a symlink from your UH worktree.
+The plugin is a drop-in directory under `~/.hermes/plugins/`. Until a release tarball lands ([UH-68](https://linear.app/agenticengineering-agency/issue/UH-68)), the canonical path is a symlink from your UH worktree.
 
 ### From source (dev / pre-release)
 
@@ -152,10 +152,10 @@ If `rescan` returns 200 but the tab still doesn't appear, open DevTools → Cons
 
 ## Screenshots
 
-_[screenshot TBD]_ — the dev environment for this slice doesn't include a live Hermes dashboard, so screenshots will land with the [UH-68 release PR](https://linear.app/agentic-eng/issue/UH-68) once we can drive the real UI.
+_[screenshot TBD]_ — the dev environment for this slice doesn't include a live Hermes dashboard, so screenshots will land with the [UH-68 release PR](https://linear.app/agenticengineering-agency/issue/UH-68) once we can drive the real UI.
 
 ## See also
 
 - [Hermes dashboard extension docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard)
 - [`apps/hermes-plugin/README.md`](../../apps/hermes-plugin/README.md)
-- Issue links: [UH-60](https://linear.app/agentic-eng/issue/UH-60) (epic), [UH-61](https://linear.app/agentic-eng/issue/UH-61) (scaffold), [UH-62](https://linear.app/agentic-eng/issue/UH-62) (FastAPI backend), [UH-63](https://linear.app/agentic-eng/issue/UH-63) (drilldown), [UH-64](https://linear.app/agentic-eng/issue/UH-64) (run modal), [UH-65](https://linear.app/agentic-eng/issue/UH-65) (overview), [UH-66](https://linear.app/agentic-eng/issue/UH-66) (workflow + verification viewers), [UH-67](https://linear.app/agentic-eng/issue/UH-67) (wizard + editor), [UH-68](https://linear.app/agentic-eng/issue/UH-68) (packaging), [UH-69](https://linear.app/agentic-eng/issue/UH-69) (theme + slot).
+- Issue links: [UH-60](https://linear.app/agenticengineering-agency/issue/UH-60) (epic), [UH-61](https://linear.app/agenticengineering-agency/issue/UH-61) (scaffold), [UH-62](https://linear.app/agenticengineering-agency/issue/UH-62) (FastAPI backend), [UH-63](https://linear.app/agenticengineering-agency/issue/UH-63) (drilldown), [UH-64](https://linear.app/agenticengineering-agency/issue/UH-64) (run modal), [UH-65](https://linear.app/agenticengineering-agency/issue/UH-65) (overview), [UH-66](https://linear.app/agenticengineering-agency/issue/UH-66) (workflow + verification viewers), [UH-67](https://linear.app/agenticengineering-agency/issue/UH-67) (wizard + editor), [UH-68](https://linear.app/agenticengineering-agency/issue/UH-68) (packaging), [UH-69](https://linear.app/agenticengineering-agency/issue/UH-69) (theme + slot).

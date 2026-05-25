@@ -10,7 +10,7 @@ description: >-
 issues:
   - source: linear
     reference: UH-23
-    url: https://linear.app/agentic-eng/issue/UH-23
+    url: https://linear.app/agenticengineering-agency/issue/UH-23
 read_first:
   - docs/architecture/adapter-codex.md
 expected_artifacts:

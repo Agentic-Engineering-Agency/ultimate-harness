@@ -9,8 +9,8 @@ objective: >-
 context:
   read_first: []
   source_links:
-    - https://linear.app/agentic-eng/issue/UH-38
-    - https://linear.app/agentic-eng/issue/UH-32
+    - https://linear.app/agenticengineering-agency/issue/UH-38
+    - https://linear.app/agenticengineering-agency/issue/UH-32
 expected_outputs:
   files:
     - docs/hermes-proxy-smoke.txt

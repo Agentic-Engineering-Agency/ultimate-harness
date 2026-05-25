@@ -294,7 +294,7 @@ issue_sources:
   - provider: github
     url: https://github.com/Agentic-Engineering-Agency/ultimate-harness
   - provider: linear
-    url: https://linear.app/agentic-eng/project/ultimate-harness-6928debf7da2
+    url: https://linear.app/agenticengineering-agency/project/ultimate-harness-6928debf7da2
 default_workflow_profiles:
   - research-docs
   - spec-first-feature

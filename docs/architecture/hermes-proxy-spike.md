@@ -1,18 +1,18 @@
 # hermes-proxy wire-format spike (UH-36)
 
-Closes the discovery phase of [UH-32](https://linear.app/agentic-eng/issue/UH-32). Findings feed:
+Closes the discovery phase of [UH-32](https://linear.app/agenticengineering-agency/issue/UH-32). Findings feed:
 
-* [UH-35](https://linear.app/agentic-eng/issue/UH-35) — schema + manifest fields for `runtime_config`.
-* [UH-39](https://linear.app/agentic-eng/issue/UH-39) — adapter implementation: planner / runner / parser / sentinel / blocked classification.
-* [UH-37](https://linear.app/agentic-eng/issue/UH-37) — CLI dispatch + sandbox routing parity.
-* [UH-40](https://linear.app/agentic-eng/issue/UH-40) — operator runbook.
-* [UH-38](https://linear.app/agentic-eng/issue/UH-38) — E2E smoke + promotion criteria.
+* [UH-35](https://linear.app/agenticengineering-agency/issue/UH-35) — schema + manifest fields for `runtime_config`.
+* [UH-39](https://linear.app/agenticengineering-agency/issue/UH-39) — adapter implementation: planner / runner / parser / sentinel / blocked classification.
+* [UH-37](https://linear.app/agenticengineering-agency/issue/UH-37) — CLI dispatch + sandbox routing parity.
+* [UH-40](https://linear.app/agenticengineering-agency/issue/UH-40) — operator runbook.
+* [UH-38](https://linear.app/agenticengineering-agency/issue/UH-38) — E2E smoke + promotion criteria.
 
 > **Scope:** read-only research. No production code changed in this slice.
 
 ## 1. Environment
 
-* Hermes Agent **`v0.14.0 (2026.5.16)`** — installed at `/Users/eduardojaviergarcialopez/.hermes/hermes-agent`, Python 3.11.14, OpenAI SDK 2.24.0. Confirmed minimum version per [UH-31](https://linear.app/agentic-eng/issue/UH-31) (`MINIMUM_HERMES_VERSION = 0.14.0`).
+* Hermes Agent **`v0.14.0 (2026.5.16)`** — installed at `/Users/eduardojaviergarcialopez/.hermes/hermes-agent`, Python 3.11.14, OpenAI SDK 2.24.0. Confirmed minimum version per [UH-31](https://linear.app/agenticengineering-agency/issue/UH-31) (`MINIMUM_HERMES_VERSION = 0.14.0`).
 * Proxy launched on the workstation with:
   ```
   hermes proxy start --provider nous
@@ -166,7 +166,7 @@ export const HermesProxyRuntimeConfigSchema = z.object({
 }).strict();
 ```
 
-All keys above are validated through the existing `registerRuntimeConfigSchema("hermes-proxy", …)` plumbing established in [UH-26](https://linear.app/agentic-eng/issue/UH-26).
+All keys above are validated through the existing `registerRuntimeConfigSchema("hermes-proxy", …)` plumbing established in [UH-26](https://linear.app/agenticengineering-agency/issue/UH-26).
 
 ## 8. Recommendations for UH-39 (adapter shape)
 
@@ -174,9 +174,9 @@ Hermes-proxy is fundamentally different from `hermes` / `codex` / `oh-my-pi`: **
 
 1. **No `command` / `args`.** The dry-run record's `command` field should be set to `"POST <endpoint>/chat/completions"` for human readability and the `args` array should contain the JSON request body (pretty-printed) for parity with `dryRunHermes`.
 2. **stdout = the model's assistant message content** (or, for streaming, the concatenated `delta.content` chunks). Stderr remains a real string but typically empty; non-200 bodies are appended to stderr for forensics.
-3. **Final-message sentinel ([UH-28](https://linear.app/agentic-eng/issue/UH-28)).** The mission prompt MUST include `runtimeFinalMessageInstruction()`. The assistant's final message is scanned with `extractRuntimeFinalMessageSentinel(content)`. `runtime-final.txt` is written exactly as in hermes/codex/oh-my-pi.
-4. **Diff capture ([UH-34](https://linear.app/agentic-eng/issue/UH-34)).** Delegate to `captureDiffWithUntracked(cwd)`. Note: the model itself does **not** mutate the working tree in v1 — it returns proposed changes in its message body and the harness applies them in a future slice. For UH-32's v1, the adapter produces an empty diff in the common case (the assistant's message content becomes the artifact). This matches the [UH-27 / UH-33](https://linear.app/agentic-eng/issue/UH-33) "model emits assistant message + harness applies" pattern already supported elsewhere.
-5. **Sandbox seed ([UH-29](https://linear.app/agentic-eng/issue/UH-29)).** Free — `createSandbox` already copies the bound mission dir.
+3. **Final-message sentinel ([UH-28](https://linear.app/agenticengineering-agency/issue/UH-28)).** The mission prompt MUST include `runtimeFinalMessageInstruction()`. The assistant's final message is scanned with `extractRuntimeFinalMessageSentinel(content)`. `runtime-final.txt` is written exactly as in hermes/codex/oh-my-pi.
+4. **Diff capture ([UH-34](https://linear.app/agenticengineering-agency/issue/UH-34)).** Delegate to `captureDiffWithUntracked(cwd)`. Note: the model itself does **not** mutate the working tree in v1 — it returns proposed changes in its message body and the harness applies them in a future slice. For UH-32's v1, the adapter produces an empty diff in the common case (the assistant's message content becomes the artifact). This matches the [UH-27 / UH-33](https://linear.app/agenticengineering-agency/issue/UH-33) "model emits assistant message + harness applies" pattern already supported elsewhere.
+5. **Sandbox seed ([UH-29](https://linear.app/agenticengineering-agency/issue/UH-29)).** Free — `createSandbox` already copies the bound mission dir.
 6. **Blocked classification (the key spike output):**
    * `upstream_auth_failed` → `runtime-result.status: blocked`, `errors: ["hermes-proxy: upstream auth invalid; run `hermes auth status <provider>`"]`.
    * HTTP 429 with any code → `blocked` with the upstream `Retry-After` header surfaced if present.
@@ -228,7 +228,7 @@ capabilities:
 ## 11. Known gotchas
 
 * **No upstream model list without auth.** `GET /v1/models` requires valid upstream creds. So `adapter check` cannot enumerate models when the user is logged out — the check must report "configured but locked" rather than "broken".
-* **No `--ask-for-approval`-style flag drift surface.** HTTP wire is contractually stable across hermes versions (OAI-compat is the contract). Version skew should be invisible. [UH-30](https://linear.app/agentic-eng/issue/UH-30) doesn't recur.
+* **No `--ask-for-approval`-style flag drift surface.** HTTP wire is contractually stable across hermes versions (OAI-compat is the contract). Version skew should be invisible. [UH-30](https://linear.app/agenticengineering-agency/issue/UH-30) doesn't recur.
 * **Streaming + error mix.** A request with `stream: true` that fails at the proxy returns one JSON body (not SSE). Parser MUST sniff `content-type` before assuming SSE.
 * **No file mutation channel in v1.** The model returns its full deliverable in the assistant message content; the harness applies. If we later wire OAI-compat **tool use**, that's a separate epic — not in UH-32 scope.
 * **Provider expansion is out-of-band.** When Hermes adds a `claude` provider, it ships as a new `--provider claude` startup flag — no UH change required, since UH only talks to `localhost:8645/v1`.
