@@ -1,6 +1,6 @@
 # UH-41 — Interactive TUI architecture
 
-Epic-level architecture document for the `uh tui` Mission Control interface. Captures the load-bearing decisions from the [UH-46 grill](https://linear.app/agentic-eng/issue/UH-46) so downstream slices (UH-47 mission browser, UH-44 mission run flow, UH-43 adapter/sandbox manager, UH-42 polish) inherit a stable contract.
+Epic-level architecture document for the `uh tui` Mission Control interface. Captures the load-bearing decisions from the [UH-46 grill](https://linear.app/agenticengineering-agency/issue/UH-46) so downstream slices (UH-47 mission browser, UH-44 mission run flow, UH-43 adapter/sandbox manager, UH-42 polish) inherit a stable contract.
 
 Last updated: 2026-05-18. UH-46 shipped.
 
