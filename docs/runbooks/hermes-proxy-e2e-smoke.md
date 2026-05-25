@@ -94,10 +94,10 @@ cat .harness/missions/hermes-proxy-smoke/runtime-final.txt     # sentinel summar
 
 The adapter was already verified at every internal layer:
 
-- Schema strictness — [UH-35](https://linear.app/agentic-eng/issue/UH-35).
-- SSE parser pure-function — [UH-39](https://linear.app/agentic-eng/issue/UH-39).
-- Status classification — [UH-39](https://linear.app/agentic-eng/issue/UH-39).
-- Live `adapter check` HTTP probe — [UH-37](https://linear.app/agentic-eng/issue/UH-37).
+- Schema strictness — [UH-35](https://linear.app/agenticengineering-agency/issue/UH-35).
+- SSE parser pure-function — [UH-39](https://linear.app/agenticengineering-agency/issue/UH-39).
+- Status classification — [UH-39](https://linear.app/agenticengineering-agency/issue/UH-39).
+- Live `adapter check` HTTP probe — [UH-37](https://linear.app/agenticengineering-agency/issue/UH-37).
 
 What UH-38 added: **a real request hit a real upstream subscription, returned a real model response, and the harness classified the result correctly with zero errors.** That is what `status: active` claims. The change set:
 

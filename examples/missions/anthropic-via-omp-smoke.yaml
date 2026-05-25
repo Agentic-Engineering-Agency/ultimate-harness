@@ -17,7 +17,7 @@ description: >-
 issues:
   - source: linear
     reference: UH-27
-    url: https://linear.app/agentic-eng/issue/UH-27
+    url: https://linear.app/agenticengineering-agency/issue/UH-27
 read_first:
   - docs/runbooks/anthropic-via-omp.md
 expected_artifacts:
