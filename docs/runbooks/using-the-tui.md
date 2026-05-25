@@ -380,10 +380,10 @@ write failure. The orchestration lives in
 |-----------------------------------|----------|------------------------------------------------------------------|
 | `?` keymap overlay                | shipped  | UH-42 ([#61](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/61)) |
 | State persistence                 | shipped  | UH-42                                                            |
-| `UH_TUI_THEME` env var + palette  | shipped  | [UH-48](https://linear.app/agentic-eng/issue/UH-48)              |
-| `$EDITOR` open (`e`)              | shipped  | [UH-49](https://linear.app/agentic-eng/issue/UH-49)              |
-| Ctrl+Z / `fg` suspend             | shipped  | [UH-50](https://linear.app/agentic-eng/issue/UH-50)              |
-| `uh tui screenshot` pipeline      | shipped  | [UH-51](https://linear.app/agentic-eng/issue/UH-51)              |
+| `UH_TUI_THEME` env var + palette  | shipped  | [UH-48](https://linear.app/agenticengineering-agency/issue/UH-48)              |
+| `$EDITOR` open (`e`)              | shipped  | [UH-49](https://linear.app/agenticengineering-agency/issue/UH-49)              |
+| Ctrl+Z / `fg` suspend             | shipped  | [UH-50](https://linear.app/agenticengineering-agency/issue/UH-50)              |
+| `uh tui screenshot` pipeline      | shipped  | [UH-51](https://linear.app/agenticengineering-agency/issue/UH-51)              |
 
 OpenTUI 0.2.13 exposes the full suspend/resume API surface
 (`renderer.suspend()`, `renderer.resume()`, plus terminal-mode helpers

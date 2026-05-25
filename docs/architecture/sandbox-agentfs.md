@@ -1,6 +1,6 @@
 # AgentFS Sandbox Backend
 
-> Status: **design** — no runtime wiring yet. Tracked by [UH-8](https://linear.app/agentic-eng/issue/UH-8/design-agentfs-sandbox-backend) / [GH #14](https://github.com/Agentic-Engineering-Agency/ultimate-harness/issues/14). The git-worktree backend in `src/harness/sandbox.ts` is the reference implementation this design must reach parity with.
+> Status: **design** — no runtime wiring yet. Tracked by [UH-8](https://linear.app/agenticengineering-agency/issue/UH-8/design-agentfs-sandbox-backend) / [GH #14](https://github.com/Agentic-Engineering-Agency/ultimate-harness/issues/14). The git-worktree backend in `src/harness/sandbox.ts` is the reference implementation this design must reach parity with.
 
 This document specifies how an [AgentFS](https://github.com/tursodatabase/agentfs)-backed sandbox plugs into the existing sandbox manager without disturbing the contract that `git-worktree` already satisfies. It is intentionally interface-level: no Zod schemas, no TypeScript modules, no `.harness/` layout changes.
 
