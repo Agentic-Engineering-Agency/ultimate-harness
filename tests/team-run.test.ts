@@ -125,6 +125,16 @@ describe("planTeamRun", () => {
     expect(plan.integrationReportPath).toBe("/tmp/repo/custom/place.md");
   });
 
+  test("bare integration_report_path filename resolves under team root", () => {
+    const plan = planTeamRun(
+      { ...mission("m1"), integration_report_path: "integration-report.md" },
+      "/tmp/repo",
+    );
+    expect(plan.integrationReportPath).toBe(
+      "/tmp/repo/.harness/missions/m1/team/integration-report.md",
+    );
+  });
+
   test("rejects unsafe adapter ids", () => {
     expect(() => planTeamRun(
       mission("m1", { workers: [{ role: "x", adapter: "../sneaky" }] }),

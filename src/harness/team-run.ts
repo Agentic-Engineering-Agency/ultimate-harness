@@ -262,9 +262,11 @@ export function planTeamRun(
     branch: `uh/team/${mission.id}/leader`,
   };
 
-  const integrationReportPath = mission.integration_report_path
-    ? assertWithinRoot(mission.integration_report_path, root, "integration_report_path")
-    : path.join(teamRoot, "integration-report.md");
+  const integrationReportPath = resolveIntegrationReportPath(
+    mission.integration_report_path,
+    root,
+    teamRoot,
+  );
 
   return {
     missionId: mission.id,
@@ -273,6 +275,27 @@ export function planTeamRun(
     leader,
     integrationReportPath,
   };
+}
+
+/**
+ * Bare filenames (no path separator) anchor under the team directory so
+ * `integration_report_path: integration-report.md` matches the layout
+ * documented above. Paths with a directory component stay repo-root-relative.
+ */
+function resolveIntegrationReportPath(
+  integrationReportPath: string | undefined,
+  root: string,
+  teamRoot: string,
+): string {
+  if (!integrationReportPath) {
+    return path.join(teamRoot, "integration-report.md");
+  }
+  const isBareFilename =
+    !path.isAbsolute(integrationReportPath) &&
+    !integrationReportPath.includes("/") &&
+    !integrationReportPath.includes("\\");
+  const base = isBareFilename ? teamRoot : root;
+  return assertWithinRoot(integrationReportPath, base, "integration_report_path");
 }
 
 function isSafeSegment(value: string): boolean {
