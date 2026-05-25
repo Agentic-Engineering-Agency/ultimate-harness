@@ -1,0 +1,142 @@
+schema_version: uh.runtime-session.v0
+mission_id: implement-uh-slice-template
+runtime: codex
+status: succeeded
+command: codex
+args:
+  - exec
+  - --cd
+  - /Users/eduardojaviergarcialopez/AgenticEngineering/ultimate-harness/.harness/missions/implement-uh-slice-template/team/workers/template-author
+  - --sandbox
+  - workspace-write
+  - --json
+  - --output-last-message
+  - /Users/eduardojaviergarcialopez/AgenticEngineering/ultimate-harness/.harness/missions/implement-uh-slice-template/team/workers/template-author/.harness/missions/implement-uh-slice-template/runs/20260525T073520Z-59a335/runtime-final.txt
+  - --skip-git-repo-check
+  - >
+    # Mission: Dogfood: canonical implement-uh-slice mission template
+
+
+    Create the canonical mission template that UH itself will use to implement
+    any future UH slice (one Linear UH-NNN ticket = one mission). This is the
+    first dogfood-mode mission: UH-on-UH. Success here proves the team mission
+    shape (UH-72) + staged workflow profile (UH-73) can produce a usable
+    artifact end-to-end without a human in the implementation loop. Failure here
+    is itself the most diagnostic information available — it tells us which of
+    the six gaps documented in the v0.8.0 post-mortem actually bite.
+
+    Deliverables:
+      1. examples/missions/templates/implement-uh-slice.yaml — a parameterized
+         canonical mission packet that another mission author can copy and
+         fill in for any UH-NNN slice. MUST use `shape: team`,
+         `workflow_profile: staged`, complete `acceptance_criteria[]` block,
+         and `verification.required_checks[]` that enforce typecheck + tests
+         at minimum.
+      2. examples/missions/templates/README.md — one-page operator guide:
+         "Copy this when implementing a UH-NNN Linear slice. Substitute the
+         <ALL_CAPS> placeholders. Then `uh mission run-team <id>`."
+
+    Non-goals:
+      - Implementing any real UH-NNN slice via the template (that's the next
+        mission, not this one).
+      - Adding `uh mission promote --pr` or Linear-state-flip (those are
+        separate slices flagged in the post-mortem).
+      - Changing the mission schema, staged workflow profile, or team-run.ts
+        runtime. The template MUST be expressible under today's schema.
+
+    ## Workflow: Staged (Plan → PRD → Execute → Verify → Fix)
+
+
+    ### plan (architect)
+
+    Produce a plan.md outlining the approach before any code lands.
+
+
+    ### prd (product-manager)
+
+    Capture the contract / scope / acceptance in prd.md.
+
+
+    ### execute (developer)
+
+    Implement the change. For team missions, workers fan out in parallel.
+
+
+    ### verify (reviewer)
+
+    Run mission verification against the executed result.
+
+
+    ### fix (developer)
+
+    Address verification findings. Loops back into verify up to
+    mission.verification.max_iterations times.
+
+
+    ## Related Issues
+
+    - [linear] UH-126
+    (https://linear.app/agenticengineering-agency/team/UH/active)
+
+
+    ## Read First
+
+    - src/schema/mission.ts
+
+    - src/harness/team-run.ts
+
+    - .harness/workflows/staged.yaml
+
+    - examples/missions/documentation-spine.yaml
+
+    - examples/missions/codex-e2e-smoke.yaml
+
+    - tests/team-schema.test.ts
+
+    - docs/ROADMAP.md
+
+    - docs/prds/uh-roadmap-to-1.0-v1.0-prd.md
+
+
+    ## Expected Artifacts
+
+    - examples/missions/templates/implement-uh-slice.yaml
+
+    - examples/missions/templates/README.md
+
+
+    ## Verification Checks
+
+    - bun run typecheck
+
+    - bun -e 'import("./src/schema/mission.ts").then(async m => { const yaml =
+    await import("yaml"); const fs = await import("node:fs/promises"); const doc
+    = yaml.parse(await
+    fs.readFile("examples/missions/templates/implement-uh-slice.yaml", "utf8"));
+    m.validateMission(doc); console.log("OK"); })'
+
+    - test -f examples/missions/templates/README.md
+
+
+    Execute this mission and produce the expected artifacts.
+
+
+    ## Runtime final message
+
+
+    At the very end of your response, emit your one-paragraph summary inside a
+    fenced code block tagged `uh-runtime-final-message`:
+
+
+    ```uh-runtime-final-message
+
+    <one-paragraph summary of what you did, what changed, and any caveats>
+
+    ```
+
+
+    This fenced block MUST be the last block in your output. The harness
+    extracts its content verbatim into `runtime-final.txt`.
+exit_code: 0
+started_at: 2026-05-25T07:35:21.205Z
+finished_at: 2026-05-25T07:42:40.935Z

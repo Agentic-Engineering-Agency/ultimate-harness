@@ -1,0 +1,105 @@
+schema_version: uh.mission.v0
+id: <UH-NNN>-implement-slice
+title: <UH-NNN> Implement <SLICE_NAME>
+workflow_profile: staged
+priority: high
+objective: >-
+  Implement the <UH-NNN> Linear slice end-to-end under the staged workflow.
+  Produce a plan and PRD first, execute the scoped change in a team mission,
+  verify with required checks, and address verification findings within the
+  bounded fix loop.
+issue_refs:
+  - provider: linear
+    id: <UH-NNN>
+    url: https://linear.app/agenticengineering-agency/issue/<UH-NNN>
+context:
+  repo_root: .
+  read_first:
+    - src/schema/mission.ts
+    - src/harness/team-run.ts
+    - .harness/workflows/staged.yaml
+    - <PRIMARY_CODE_OR_DOC_PATH>
+    - <SECONDARY_CODE_OR_DOC_PATH>
+  source_links:
+    - https://linear.app/agenticengineering-agency/issue/<UH-NNN>
+constraints:
+  - Keep the change expressible under today's mission schema and runtime.
+  - Keep diffs small, reviewable, and scoped to <UH-NNN>.
+  - Do not implement unrelated slices or change Linear promotion behavior.
+  - Preserve existing public contracts unless the PRD explicitly narrows the change.
+skills:
+  suggested:
+    - debug-like-expert
+    - lint
+shape: team
+team:
+  leader:
+    adapter: codex
+    role: integrator
+  workers:
+    - adapter: codex
+      role: implementation
+      count: 1
+    - adapter: codex
+      role: verification
+      count: 1
+integration_report_path: .harness/missions/<UH-NNN>-implement-slice/team/integration-report.md
+expected_outputs:
+  files:
+    - <EXPECTED_ARTIFACT_PATH>
+    - <EXPECTED_TEST_PATH>
+completion_criteria:
+  - "plan.md exists and explains the implementation approach before code changes."
+  - "prd.md captures scope, non-goals, acceptance criteria, and verification contract."
+  - "<EXPECTED_ARTIFACT_PATH> implements the <UH-NNN> slice."
+  - "<EXPECTED_TEST_PATH> covers the changed behavior."
+  - "All required verification checks pass."
+acceptance_criteria:
+  - id: plan-artifact
+    description: "The staged plan phase produced plan.md before implementation work."
+    check_command: "test -f .harness/missions/<UH-NNN>-implement-slice/plan.md"
+    severity: block
+  - id: prd-artifact
+    description: "The staged PRD phase produced prd.md with scope, non-goals, and acceptance criteria."
+    check_command: "test -f .harness/missions/<UH-NNN>-implement-slice/prd.md"
+    severity: block
+  - id: expected-artifact
+    description: "The slice's primary expected artifact exists and is ready for review."
+    check_command: "test -f <EXPECTED_ARTIFACT_PATH>"
+    severity: block
+  - id: regression-coverage
+    description: "The slice includes targeted regression coverage for the changed behavior."
+    check_command: "test -f <EXPECTED_TEST_PATH>"
+    severity: block
+  - id: required-checks-pass
+    description: "Typecheck and test commands pass before the mission is complete."
+    check_command: "bun run typecheck && bun run test"
+    severity: block
+tdd:
+  enforce_tests_first: true
+  test_paths:
+    - tests/**
+    - "**/*.test.ts"
+    - "**/*.spec.ts"
+  source_paths:
+    - src/**
+    - examples/**
+runtime_requirements:
+  needs_network: false
+  needs_shell: true
+  needs_fs_write: true
+  max_cost_class: premium
+verification:
+  max_iterations: 2
+  required_checks:
+    - name: typecheck
+      command: bun run typecheck
+    - name: tests
+      command: bun run test
+    - name: expected artifact exists
+      command: test -f <EXPECTED_ARTIFACT_PATH>
+    - name: expected test exists
+      command: test -f <EXPECTED_TEST_PATH>
+  review_gates:
+    - "Reviewer confirms the PRD contract and implementation diff match <UH-NNN>."
+    - "Reviewer confirms no non-goal slice or promotion behavior was implemented."

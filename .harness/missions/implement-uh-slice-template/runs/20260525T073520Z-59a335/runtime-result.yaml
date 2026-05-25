@@ -1,0 +1,12 @@
+schema_version: uh.runtime-result.v0
+mission_id: implement-uh-slice-template
+runtime: codex
+status: passed
+started_at: 2026-05-25T07:35:21.205Z
+finished_at: 2026-05-25T07:42:40.935Z
+exit_code: 0
+prompt_path: .harness/missions/implement-uh-slice-template/runs/20260525T073520Z-59a335/prompt.md
+stdout_path: .harness/missions/implement-uh-slice-template/runs/20260525T073520Z-59a335/runtime.stdout.log
+stderr_path: .harness/missions/implement-uh-slice-template/runs/20260525T073520Z-59a335/runtime.stderr.log
+diff_path: .harness/missions/implement-uh-slice-template/runs/20260525T073520Z-59a335/diff.patch
+errors: []
