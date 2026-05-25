@@ -1,8 +1,12 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { fileExists } from "./mission.js";
 
 const execFileP = promisify(execFile);
+const OPENSANDBOX_METADATA = ".uh-opensandbox.json";
+const COMMAND_OUTPUT_LIMIT = 4000;
 
 /**
  * Sandbox backend abstraction (S3 #136).
@@ -147,37 +151,192 @@ export class DirectoryBackend implements SandboxBackend {
   }
 }
 
-/** Clear, single-source message for the not-yet-wired container backend. */
-const CONTAINER_NOT_AVAILABLE =
-  "container sandbox backend is not yet available: it requires a container " +
-  "runtime (Docker/Podman) integration that is not wired in this build. Use " +
-  "--backend git-worktree (default) or --backend directory. Design + plan: " +
-  "docs/architecture/sandbox-backends.md.";
+const OPENSANDBOX_CONFIG_HELP =
+  "Configure OpenSandbox with UH_OPENSANDBOX_MODE=mock for tests, or " +
+  "UH_OPENSANDBOX_ENABLED=1 plus UH_OPENSANDBOX_EXEC_COMMAND for local smoke. " +
+  "See docs/runbooks/container-sandbox.md.";
+
+type OpenSandboxConfig = {
+  mode: "mock" | "command";
+  image: string;
+  execCommandTemplate?: string;
+  createCommandTemplate?: string;
+  deleteCommandTemplate?: string;
+  lifecycleTimeoutMs: number;
+};
+
+export interface SandboxCommandRunResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  timedOut: boolean;
+  spawnError?: Error;
+}
+
+function readOpenSandboxConfig(env: NodeJS.ProcessEnv = process.env): OpenSandboxConfig {
+  const config = tryReadOpenSandboxConfig(env);
+  if (!config) {
+    throw new Error(`OpenSandbox container backend is not configured. ${OPENSANDBOX_CONFIG_HELP}`);
+  }
+  return config;
+}
+
+function tryReadOpenSandboxConfig(env: NodeJS.ProcessEnv = process.env): OpenSandboxConfig | undefined {
+  const mode = env.UH_OPENSANDBOX_MODE === "mock" ? "mock" : "command";
+  const enabled = env.UH_OPENSANDBOX_ENABLED === "1" || env.UH_OPENSANDBOX_ENABLED === "true" || mode === "mock";
+  if (!enabled) return undefined;
+  const image = env.UH_OPENSANDBOX_IMAGE ?? "python:3.12";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}$/.test(image)) {
+    throw new Error(`Invalid UH_OPENSANDBOX_IMAGE: ${image}`);
+  }
+  const lifecycleTimeoutMs = parseLifecycleTimeoutMs(env.UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS);
+  if (mode === "mock") return { mode, image, lifecycleTimeoutMs };
+
+  const execCommandTemplate = env.UH_OPENSANDBOX_EXEC_COMMAND;
+  if (!execCommandTemplate || !execCommandTemplate.includes("{command}")) {
+    throw new Error(
+      "UH_OPENSANDBOX_EXEC_COMMAND is required and must include {command}; " +
+      "available placeholders: {command}, {cwd}, {image}, {timeout_ms}.",
+    );
+  }
+  return {
+    mode,
+    image,
+    execCommandTemplate,
+    createCommandTemplate: env.UH_OPENSANDBOX_CREATE_COMMAND,
+    deleteCommandTemplate: env.UH_OPENSANDBOX_DELETE_COMMAND,
+    lifecycleTimeoutMs,
+  };
+}
+
+function parseLifecycleTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 30_000;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS: ${raw}. Expected a positive integer (milliseconds).`,
+    );
+  }
+  return parsed;
+}
 
 /**
- * Container backend (S4 #137) — registered but intentionally a fail-fast stub.
+ * OpenSandbox-backed execution backend (#155).
  *
- * The design (image, bind-mount vs copy, diff/dirty strategy, no container
- * runtime in CI) is captured in docs/architecture/sandbox-backends.md. Until a
- * runtime is wired, every operation throws a clear, actionable error rather
- * than silently degrading — selecting `--backend container` fails immediately
- * with guidance instead of pretending to work.
+ * The host working copy is still a self-contained directory clone so dirty
+ * detection and promotion remain compatible. Execution isolation is represented
+ * by the separate OpenSandbox command seam below; callers must use that seam for
+ * mission/verification commands and must not treat the host clone alone as a
+ * container sandbox.
  */
 export class ContainerBackend implements SandboxBackend {
   readonly name = "container";
+  private readonly directory = new DirectoryBackend();
 
-  async materialize(_ctx: SandboxMaterializeContext): Promise<SandboxMaterializeResult> {
-    throw new Error(CONTAINER_NOT_AVAILABLE);
+  async materialize(ctx: SandboxMaterializeContext): Promise<SandboxMaterializeResult> {
+    const config = readOpenSandboxConfig();
+    const result = await this.directory.materialize(ctx);
+    try {
+      if (config.mode === "command" && config.createCommandTemplate) {
+        const created = await runOpenSandboxTemplate(config.createCommandTemplate, { command: "", cwd: ctx.worktreePath, image: config.image, timeoutMs: config.lifecycleTimeoutMs });
+        if (created.exitCode !== 0) throw new Error(`OpenSandbox create command failed: ${created.stderr || created.stdout || `exit ${created.exitCode}`}`);
+      }
+      const metadataPath = path.join(path.dirname(ctx.worktreePath), OPENSANDBOX_METADATA);
+      await mkdir(path.dirname(metadataPath), { recursive: true });
+      await writeFile(
+        metadataPath,
+        JSON.stringify({ provider: "opensandbox", mode: config.mode, image: config.image, created_at: new Date().toISOString() }, null, 2),
+        "utf-8",
+      );
+      return result;
+    } catch (err) {
+      await this.directory.teardown({ root: ctx.root, worktreePath: ctx.worktreePath, branch: result.branch }, { force: true, keepBranch: false });
+      throw err;
+    }
   }
 
-  async teardown(_ctx: SandboxTeardownContext, _opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
-    // Nothing is ever materialized, so there is nothing to tear down.
-    return { branch_removed: false };
+  async teardown(ctx: SandboxTeardownContext, _opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
+    const config = tryReadOpenSandboxConfig();
+    if (config?.mode === "command" && config.deleteCommandTemplate) {
+      // Force/orphan discards must still call the provider so external sandbox
+      // resources don't leak when the local worktree has already been removed.
+      const worktreeExists = await fileExists(ctx.worktreePath);
+      const spawnCwd = worktreeExists ? ctx.worktreePath : ctx.root;
+      const deleted = await runOpenSandboxTemplate(
+        config.deleteCommandTemplate,
+        { command: "", cwd: ctx.worktreePath, image: config.image, timeoutMs: config.lifecycleTimeoutMs, spawnCwd },
+      );
+      if (deleted.exitCode !== 0) throw new Error(`OpenSandbox teardown command failed: ${deleted.stderr || deleted.stdout || `exit ${deleted.exitCode}`}`);
+    }
+    return this.directory.teardown(ctx, { force: true, keepBranch: false });
   }
 
-  async collectDirtyChanges(_worktreePath: string): Promise<string[]> {
-    throw new Error(CONTAINER_NOT_AVAILABLE);
+  collectDirtyChanges(worktreePath: string): Promise<string[]> {
+    return gitStatusPorcelain(worktreePath);
   }
+}
+
+export async function runOpenSandboxCommand(worktreePath: string, command: string, commandTimeoutMs: number): Promise<SandboxCommandRunResult> {
+  const config = readOpenSandboxConfig();
+  if (config.mode === "mock") {
+    return { exitCode: 0, stdout: `[opensandbox mock] ${command}\n`, stderr: "", durationMs: 0, timedOut: false };
+  }
+  return runOpenSandboxTemplate(config.execCommandTemplate!, { command, cwd: worktreePath, image: config.image, timeoutMs: commandTimeoutMs });
+}
+
+async function runOpenSandboxTemplate(
+  template: string,
+  values: { command: string; cwd: string; image: string; timeoutMs: number; spawnCwd?: string },
+): Promise<SandboxCommandRunResult> {
+  const replacements: Record<string, string> = {
+    "{command}": shellQuote(values.command),
+    "{cwd}": shellQuote(values.cwd),
+    "{image}": shellQuote(values.image),
+    "{timeout_ms}": String(values.timeoutMs),
+  };
+  const rendered = template.replace(/\{command\}|\{cwd\}|\{image\}|\{timeout_ms\}/g, (token) => replacements[token]);
+  return runShell(rendered, values.spawnCwd ?? values.cwd, values.timeoutMs);
+}
+
+function runShell(command: string, cwd: string, commandTimeoutMs: number): Promise<SandboxCommandRunResult> {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const child = spawn(command, { cwd, detached: true, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    const append = (current: string, chunk: unknown) => (current + (typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf-8") : String(chunk))).slice(0, COMMAND_OUTPUT_LIMIT);
+    const finish = (metrics: Omit<SandboxCommandRunResult, "durationMs">) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ ...metrics, durationMs: Date.now() - startedAt });
+    };
+    const killChild = (signal: NodeJS.Signals) => {
+      if (child.pid === undefined) return;
+      try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { /* best effort */ } }
+    };
+    child.stdout?.setEncoding("utf-8");
+    child.stderr?.setEncoding("utf-8");
+    child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
+    child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    child.on("error", (err) => finish({ exitCode: 1, stdout, stderr: stderr || err.message, timedOut: false, spawnError: err }));
+    child.on("close", (code) => finish({ exitCode: code ?? 1, stdout, stderr, timedOut }));
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      killChild("SIGTERM");
+      killTimer = setTimeout(() => { killChild("SIGKILL"); finish({ exitCode: 124, stdout, stderr, timedOut: true }); }, 100);
+    }, commandTimeoutMs);
+  });
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 const BACKENDS: Record<string, SandboxBackend> = {

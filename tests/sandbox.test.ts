@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
-import { getSandboxBackend, listSandboxBackends } from "../src/harness/sandbox-backends.js";
+import { getSandboxBackend, listSandboxBackends, runOpenSandboxCommand } from "../src/harness/sandbox-backends.js";
 import {
   assertSafeSandboxId,
   createSandbox,
@@ -544,16 +544,127 @@ describe("sandbox backends (S3 #136)", () => {
   });
 });
 
-describe("container backend (S4 #137)", () => {
-  test("is registered but fails fast with actionable guidance", async () => {
+describe("container backend (#155 OpenSandbox)", () => {
+  test("is registered but fails fast when OpenSandbox is not configured", async () => {
     expect(listSandboxBackends()).toContain("container");
     expect(getSandboxBackend("container").name).toBe("container");
 
     await expect(
       createSandbox(TEST_ROOT, { id: "ctr", missionId: "demo", backend: "container" }),
-    ).rejects.toThrow(/container sandbox backend is not yet available/);
+    ).rejects.toThrow(/OpenSandbox container backend is not configured/);
 
     // A failed materialize must leave nothing behind (no index entry, no dir).
     expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
+  });
+
+  test("materializes with mocked OpenSandbox without dirtying the worktree, then discards without env", async () => {
+    process.env.UH_OPENSANDBOX_MODE = "mock";
+    try {
+      const record = await createSandbox(TEST_ROOT, { id: "ctr-mock", missionId: "demo", backend: "container" });
+      expect(record).toMatchObject({ id: "ctr-mock", backend: "container", branch: "sandbox/ctr-mock" });
+
+      const worktreeAbs = join(TEST_ROOT, record.path);
+      await expect(stat(join(worktreeAbs, ".git"))).resolves.toBeTruthy();
+      expect(await readFile(join(worktreeAbs, "..", ".uh-opensandbox.json"), "utf-8")).toContain("opensandbox");
+      await expect(stat(join(worktreeAbs, ".uh-opensandbox.json"))).rejects.toThrow();
+
+      let info = await getSandboxStatus(TEST_ROOT, "ctr-mock");
+      expect(info.dirty).toBe(false);
+      expect(info.changes).toEqual([]);
+
+      await writeFile(join(worktreeAbs, "container-change.txt"), "dirty\n", "utf-8");
+      info = await getSandboxStatus(TEST_ROOT, "ctr-mock");
+      expect(info.dirty).toBe(true);
+      expect(info.changes.some((c) => c.includes("container-change.txt"))).toBe(true);
+
+      delete process.env.UH_OPENSANDBOX_MODE;
+      await expect(discardSandbox(TEST_ROOT, "ctr-mock")).rejects.toThrow(/uncommitted change/i);
+      const discarded = await discardSandbox(TEST_ROOT, "ctr-mock", { force: true });
+      expect(discarded.branch_removed).toBe(false);
+      await expect(stat(worktreeAbs)).rejects.toThrow();
+      expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
+    } finally {
+      delete process.env.UH_OPENSANDBOX_MODE;
+    }
+  });
+
+  test("OpenSandbox templates quote commands and avoid second-pass placeholder replacement", async () => {
+    process.env.UH_OPENSANDBOX_ENABLED = "1";
+    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "printf '%s' {command}";
+    try {
+      const quoted = await runOpenSandboxCommand(TEST_ROOT, "python -c 'print(1)'", 1_000);
+      expect(quoted.exitCode).toBe(0);
+      expect(quoted.stdout).toBe("python -c 'print(1)'");
+
+      const literalPlaceholder = await runOpenSandboxCommand(TEST_ROOT, "printf '{cwd} {image} {timeout_ms}'", 1_000);
+      expect(literalPlaceholder.exitCode).toBe(0);
+      expect(literalPlaceholder.stdout).toBe("printf '{cwd} {image} {timeout_ms}'");
+    } finally {
+      delete process.env.UH_OPENSANDBOX_ENABLED;
+      delete process.env.UH_OPENSANDBOX_EXEC_COMMAND;
+    }
+  });
+
+  test("OpenSandbox templates spawn in the requested sandbox cwd (#157)", async () => {
+    process.env.UH_OPENSANDBOX_ENABLED = "1";
+    // Template ignores {command} via the shell `:` no-op so we only observe the spawn cwd.
+    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "pwd; : {command}";
+    try {
+      const observed = await runOpenSandboxCommand(TEST_ROOT, "noop", 5_000);
+      expect(observed.exitCode).toBe(0);
+      expect(observed.stdout.trim()).toBe(TEST_ROOT);
+    } finally {
+      delete process.env.UH_OPENSANDBOX_ENABLED;
+      delete process.env.UH_OPENSANDBOX_EXEC_COMMAND;
+    }
+  });
+
+  test("force discard runs the OpenSandbox delete template even when the worktree is gone (#157)", async () => {
+    const sentinel = join(TEST_ROOT, "uh-delete-ran.txt");
+    process.env.UH_OPENSANDBOX_ENABLED = "1";
+    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "true {command}";
+    process.env.UH_OPENSANDBOX_DELETE_COMMAND = `printf orphan > ${JSON.stringify(sentinel)}`;
+    try {
+      const record = await createSandbox(TEST_ROOT, { id: "ctr-orphan", missionId: "demo", backend: "container" });
+      const worktreeAbs = join(TEST_ROOT, record.path);
+      // Simulate an orphaned sandbox: index entry survives but the on-disk worktree is gone.
+      await rm(worktreeAbs, { recursive: true, force: true });
+      await expect(stat(worktreeAbs)).rejects.toThrow();
+
+      const discarded = await discardSandbox(TEST_ROOT, "ctr-orphan", { force: true });
+      expect(discarded.branch_removed).toBe(false);
+      expect(await readFile(sentinel, "utf-8")).toBe("orphan");
+      expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
+    } finally {
+      delete process.env.UH_OPENSANDBOX_ENABLED;
+      delete process.env.UH_OPENSANDBOX_EXEC_COMMAND;
+      delete process.env.UH_OPENSANDBOX_DELETE_COMMAND;
+    }
+  });
+
+  test("UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS bounds lifecycle commands and rejects invalid values (#157)", async () => {
+    process.env.UH_OPENSANDBOX_ENABLED = "1";
+    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "true {command}";
+    process.env.UH_OPENSANDBOX_CREATE_COMMAND = "sleep 5";
+    process.env.UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS = "150";
+    try {
+      const startedAt = Date.now();
+      await expect(
+        createSandbox(TEST_ROOT, { id: "ctr-slow", missionId: "demo", backend: "container" }),
+      ).rejects.toThrow(/OpenSandbox create command failed/);
+      // Must exit well before the 5s sleep would naturally finish.
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      expect(await listSandboxes(TEST_ROOT)).toHaveLength(0);
+
+      process.env.UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS = "not-a-number";
+      await expect(
+        createSandbox(TEST_ROOT, { id: "ctr-bad", missionId: "demo", backend: "container" }),
+      ).rejects.toThrow(/UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS/);
+    } finally {
+      delete process.env.UH_OPENSANDBOX_ENABLED;
+      delete process.env.UH_OPENSANDBOX_EXEC_COMMAND;
+      delete process.env.UH_OPENSANDBOX_CREATE_COMMAND;
+      delete process.env.UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS;
+    }
   });
 });

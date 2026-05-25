@@ -110,7 +110,7 @@ async function resolveMissionRoot(
   root: string,
   missionPath: string,
   useSandbox: boolean,
-): Promise<{ effectiveRoot: string; sandbox?: { id: string; path: string } }> {
+): Promise<{ effectiveRoot: string; sandbox?: { id: string; path: string; backend: string } }> {
   if (!useSandbox) return { effectiveRoot: root };
   let missionId: string;
   try {
@@ -1005,6 +1005,11 @@ missionCmd
       return;
     }
     const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    if (routing.sandbox?.backend === "container") {
+      console.error(`[BLOCKED] container sandbox mission dry-run requires an OpenSandbox adapter-execution bridge; refusing host execution for sandbox ${routing.sandbox.id}`);
+      process.exit(1);
+      return;
+    }
     if (routing.sandbox) {
       console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
     }
@@ -1101,6 +1106,11 @@ missionCmd
       return;
     }
     const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    if (routing.sandbox?.backend === "container") {
+      console.error(`[BLOCKED] container sandbox mission run requires an OpenSandbox adapter-execution bridge; refusing host execution for sandbox ${routing.sandbox.id}`);
+      process.exit(1);
+      return;
+    }
     let extraRuntimeConfigOverrides: Record<string, unknown> | undefined;
     if (opts.runtimeConfigOverrides !== undefined) {
       try {
@@ -1415,7 +1425,7 @@ sandboxCmd
   .argument("<id>", "Sandbox id")
   .requiredOption("--mission <id>", "Mission id this sandbox belongs to")
   .option("--base <ref>", "Base git ref to branch from (default: HEAD)")
-  .option("--backend <name>", "Sandbox backend: git-worktree (default), directory, or container (planned — see docs/architecture/sandbox-backends.md)")
+  .option("--backend <name>", "Sandbox backend: git-worktree (default), directory, or container (OpenSandbox-configured; see docs/runbooks/container-sandbox.md)")
   .option("--root <path>", "Root directory (default: cwd)")
   .action(async (id: string, opts: { mission: string; base?: string; backend?: string; root?: string }) => {
     const root = resolveRoot(opts.root);
