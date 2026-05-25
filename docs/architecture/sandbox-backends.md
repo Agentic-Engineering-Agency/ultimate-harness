@@ -91,3 +91,9 @@ See [`docs/runbooks/container-sandbox.md`](../runbooks/container-sandbox.md) for
 ### Consequence
 
 #155 may proceed on the OpenSandbox-first path. No lean OCI/docker-CLI pivot is authorized by this ADR update.
+
+## #157 lifecycle hardening
+
+- `runOpenSandboxTemplate` spawns each command in the sandbox-bound `cwd` (the host worktree) rather than `process.cwd()` so `verify`/create/delete templates with relative paths resolve against the sandbox, not the caller's shell.
+- `ContainerBackend.teardown` runs `UH_OPENSANDBOX_DELETE_COMMAND` unconditionally when configured; forced/orphan discards spawn from `ctx.root` when the worktree has already been removed so external sandbox resources cannot leak.
+- Lifecycle timeouts (create/delete) are configurable via `UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS` (positive integer, milliseconds). Default is `30000`. Per-command `verify` timeouts continue to come from the mission spec.

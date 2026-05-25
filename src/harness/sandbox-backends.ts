@@ -162,6 +162,7 @@ type OpenSandboxConfig = {
   execCommandTemplate?: string;
   createCommandTemplate?: string;
   deleteCommandTemplate?: string;
+  lifecycleTimeoutMs: number;
 };
 
 export interface SandboxCommandRunResult {
@@ -189,7 +190,8 @@ function tryReadOpenSandboxConfig(env: NodeJS.ProcessEnv = process.env): OpenSan
   if (!/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}$/.test(image)) {
     throw new Error(`Invalid UH_OPENSANDBOX_IMAGE: ${image}`);
   }
-  if (mode === "mock") return { mode, image };
+  const lifecycleTimeoutMs = parseLifecycleTimeoutMs(env.UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS);
+  if (mode === "mock") return { mode, image, lifecycleTimeoutMs };
 
   const execCommandTemplate = env.UH_OPENSANDBOX_EXEC_COMMAND;
   if (!execCommandTemplate || !execCommandTemplate.includes("{command}")) {
@@ -204,7 +206,19 @@ function tryReadOpenSandboxConfig(env: NodeJS.ProcessEnv = process.env): OpenSan
     execCommandTemplate,
     createCommandTemplate: env.UH_OPENSANDBOX_CREATE_COMMAND,
     deleteCommandTemplate: env.UH_OPENSANDBOX_DELETE_COMMAND,
+    lifecycleTimeoutMs,
   };
+}
+
+function parseLifecycleTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 30_000;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS: ${raw}. Expected a positive integer (milliseconds).`,
+    );
+  }
+  return parsed;
 }
 
 /**
@@ -225,7 +239,7 @@ export class ContainerBackend implements SandboxBackend {
     const result = await this.directory.materialize(ctx);
     try {
       if (config.mode === "command" && config.createCommandTemplate) {
-        const created = await runOpenSandboxTemplate(config.createCommandTemplate, { command: "", cwd: ctx.worktreePath, image: config.image, timeoutMs: 30_000 });
+        const created = await runOpenSandboxTemplate(config.createCommandTemplate, { command: "", cwd: ctx.worktreePath, image: config.image, timeoutMs: config.lifecycleTimeoutMs });
         if (created.exitCode !== 0) throw new Error(`OpenSandbox create command failed: ${created.stderr || created.stdout || `exit ${created.exitCode}`}`);
       }
       const metadataPath = path.join(path.dirname(ctx.worktreePath), OPENSANDBOX_METADATA);
@@ -244,8 +258,15 @@ export class ContainerBackend implements SandboxBackend {
 
   async teardown(ctx: SandboxTeardownContext, _opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
     const config = tryReadOpenSandboxConfig();
-    if (config?.mode === "command" && config.deleteCommandTemplate && await fileExists(ctx.worktreePath)) {
-      const deleted = await runOpenSandboxTemplate(config.deleteCommandTemplate, { command: "", cwd: ctx.worktreePath, image: config.image, timeoutMs: 30_000 });
+    if (config?.mode === "command" && config.deleteCommandTemplate) {
+      // Force/orphan discards must still call the provider so external sandbox
+      // resources don't leak when the local worktree has already been removed.
+      const worktreeExists = await fileExists(ctx.worktreePath);
+      const spawnCwd = worktreeExists ? ctx.worktreePath : ctx.root;
+      const deleted = await runOpenSandboxTemplate(
+        config.deleteCommandTemplate,
+        { command: "", cwd: ctx.worktreePath, image: config.image, timeoutMs: config.lifecycleTimeoutMs, spawnCwd },
+      );
       if (deleted.exitCode !== 0) throw new Error(`OpenSandbox teardown command failed: ${deleted.stderr || deleted.stdout || `exit ${deleted.exitCode}`}`);
     }
     return this.directory.teardown(ctx, { force: true, keepBranch: false });
@@ -264,7 +285,10 @@ export async function runOpenSandboxCommand(worktreePath: string, command: strin
   return runOpenSandboxTemplate(config.execCommandTemplate!, { command, cwd: worktreePath, image: config.image, timeoutMs: commandTimeoutMs });
 }
 
-async function runOpenSandboxTemplate(template: string, values: { command: string; cwd: string; image: string; timeoutMs: number }): Promise<SandboxCommandRunResult> {
+async function runOpenSandboxTemplate(
+  template: string,
+  values: { command: string; cwd: string; image: string; timeoutMs: number; spawnCwd?: string },
+): Promise<SandboxCommandRunResult> {
   const replacements: Record<string, string> = {
     "{command}": shellQuote(values.command),
     "{cwd}": shellQuote(values.cwd),
@@ -272,7 +296,7 @@ async function runOpenSandboxTemplate(template: string, values: { command: strin
     "{timeout_ms}": String(values.timeoutMs),
   };
   const rendered = template.replace(/\{command\}|\{cwd\}|\{image\}|\{timeout_ms\}/g, (token) => replacements[token]);
-  return runShell(rendered, process.cwd(), values.timeoutMs);
+  return runShell(rendered, values.spawnCwd ?? values.cwd, values.timeoutMs);
 }
 
 function runShell(command: string, cwd: string, commandTimeoutMs: number): Promise<SandboxCommandRunResult> {
