@@ -12,3 +12,7 @@ apps/docs/node_modules/
 # Python bytecode + pytest cache for the Hermes plugin backend tests.
 __pycache__/
 .pytest_cache/
+
+# Team-mission worktrees (kept for forensics, never committed)
+.harness/missions/*/team/leader/
+.harness/missions/*/team/workers/

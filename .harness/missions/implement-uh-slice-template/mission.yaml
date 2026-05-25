@@ -8,7 +8,7 @@ shape: team
 issue_refs:
   - provider: linear
     id: UH-126
-    url: https://linear.app/agenticengineering-agency/team/UH/active
+    url: https://linear.app/agenticengineering-agency/issue/UH-126
 
 objective: >-
   Create the canonical mission template that UH itself will use to implement
@@ -120,4 +120,4 @@ team:
     adapter: hermes
     role: integrator
 
-integration_report_path: integration-report.md
+integration_report_path: .harness/missions/implement-uh-slice-template/team/integration-report.md

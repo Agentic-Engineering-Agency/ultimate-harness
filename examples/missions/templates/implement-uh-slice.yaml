@@ -1,3 +1,14 @@
+# Canonical mission template for implementing a UH-NNN Linear slice.
+# Copy this file, then substitute every <ALL_CAPS> placeholder before
+# running `uh mission run-team <id>`. See README.md alongside this file.
+#
+# Placeholders:
+#   <UH-NNN>                       Linear issue id (e.g. UH-130)
+#   <SLICE_NAME>                   short human-readable slice name
+#   <PRIMARY_CODE_OR_DOC_PATH>     most important file to read first
+#   <SECONDARY_CODE_OR_DOC_PATH>   second most important file
+#   <EXPECTED_ARTIFACT_PATH>       primary file the slice must create/modify
+#   <EXPECTED_TEST_PATH>           targeted regression test for the slice
 schema_version: uh.mission.v0
 id: <UH-NNN>-implement-slice
 title: <UH-NNN> Implement <SLICE_NAME>
