@@ -15,6 +15,7 @@ import { promisify } from "node:util";
 import {
   planTeamRun,
   runTeamMission,
+  seedWorkerRuntimeGitignore,
   type GitOps,
   type MergeOutcome,
   type TeamMission,
@@ -68,6 +69,31 @@ beforeEach(async () => {
 
 afterEach(async () => {
   if (ROOT) await rm(ROOT, { recursive: true, force: true });
+});
+
+/* ------------------------------------------------------ worker gitignore  */
+
+describe("seedWorkerRuntimeGitignore", () => {
+  test("creates scoped ignore rules for audit and mission runs", async () => {
+    const wt = join(ROOT, "worker-wt");
+    await mkdir(wt, { recursive: true });
+    await seedWorkerRuntimeGitignore(wt, "m1");
+    const text = await readFile(join(wt, ".gitignore"), "utf-8");
+    expect(text).toContain(".harness/audit/");
+    expect(text).toContain(".harness/missions/m1/runs/");
+  });
+
+  test("appends to an existing .gitignore without duplicating the marker", async () => {
+    const wt = join(ROOT, "worker-wt-2");
+    await mkdir(wt, { recursive: true });
+    await writeFile(join(wt, ".gitignore"), "node_modules/\n", "utf-8");
+    await seedWorkerRuntimeGitignore(wt, "m2");
+    await seedWorkerRuntimeGitignore(wt, "m2");
+    const text = await readFile(join(wt, ".gitignore"), "utf-8");
+    expect(text.match(/# uh team-run worker runtime \(UH-128\)/g)).toHaveLength(1);
+    expect(text).toContain("node_modules/");
+    expect(text).toContain(".harness/missions/m2/runs/");
+  });
 });
 
 /* ---------------------------------------------------------------- planning  */
@@ -633,6 +659,12 @@ describe("runTeamMission — real git (smoke)", () => {
       verifier,
       retainOnSuccess: true,
     });
+
+    for (const w of result.plan.workers) {
+      const gi = await readFile(join(w.worktreePath, ".gitignore"), "utf-8");
+      expect(gi).toContain(".harness/audit/");
+      expect(gi).toContain(".harness/missions/team-mission/runs/");
+    }
 
     expect(result.status).toBe("passed");
     expect(result.workers).toHaveLength(2);

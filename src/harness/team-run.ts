@@ -394,6 +394,7 @@ export async function runTeamMission(
     try {
       await gitOps.addWorktree(root, wp.branch, wp.worktreePath, baseRef);
       await seedMissionPacket(canonicalMissionDir, wp.worktreePath, mission.id);
+      await seedWorkerRuntimeGitignore(wp.worktreePath, mission.id);
       workerSetup.push({ plan: wp });
     } catch (err) {
       workerSetup.push({ plan: wp, setupError: err instanceof Error ? err : new Error(String(err)) });
@@ -614,15 +615,38 @@ async function readSentinel(worktreePath: string, missionId: string): Promise<st
   try { return await readFile(legacy, "utf-8"); } catch { return ""; }
 }
 
+/** Marker block appended to worker worktree `.gitignore` (UH-128). */
+const WORKER_RUNTIME_GITIGNORE_MARKER = "# uh team-run worker runtime (UH-128)";
+
 /**
- * UH-82: per-run subdirectories under `.harness/missions/<id>/runs/<run_id>/`
- * are unique-per-worker, so they don't conflict on the leader merge.
- * The mission-level mirror `runtime-result.yaml` and the `latest.json`
- * pointer DO conflict (every worker rewrites them), so those are the
- * files we strip before handing the branch to the leader. The legacy
- * mission-level artifacts (runtime-final.txt / events.ndjson / etc) are
- * stripped too so older runners — and tests that mock the runner without
- * going through `runHermes` — don't trigger a leader-merge conflict.
+ * UH-128: worker-local audit + per-run dirs must never land on the worker
+ * branch. `commitAll` runs `git add -A`; without these rules the leader
+ * merge pulls in artifacts that PR #199 had to hand-strip.
+ */
+export async function seedWorkerRuntimeGitignore(worktreePath: string, missionId: string): Promise<void> {
+  const gitignorePath = path.join(worktreePath, ".gitignore");
+  const block = [
+    WORKER_RUNTIME_GITIGNORE_MARKER,
+    ".harness/audit/",
+    `.harness/missions/${missionId}/runs/`,
+    "",
+  ].join("\n");
+  if (await fileExists(gitignorePath)) {
+    const existing = await readFile(gitignorePath, "utf-8");
+    if (existing.includes(WORKER_RUNTIME_GITIGNORE_MARKER)) return;
+    const suffix = existing.endsWith("\n") ? "" : "\n";
+    await writeFile(gitignorePath, `${existing}${suffix}\n${block}`, "utf-8");
+    return;
+  }
+  await writeFile(gitignorePath, block, "utf-8");
+}
+
+/**
+ * UH-82: mission-level mirror `runtime-result.yaml` and `latest.json`
+ * conflict (every worker rewrites them), so those are stripped before the
+ * leader merge. Per-run subdirs under `runs/<run_id>/` are gitignored on
+ * worker branches (UH-128) so they are not committed. Legacy mission-level
+ * artifacts are stripped too for older runners and test mocks.
  */
 async function stripWorkerSessionArtifacts(worktreePath: string, missionId: string): Promise<void> {
   const dir = path.join(worktreePath, ".harness", "missions", missionId);
