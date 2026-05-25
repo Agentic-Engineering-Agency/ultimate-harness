@@ -4,6 +4,28 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
+## [0.8.0] — 2026-05-25
+
+Milestone **"Sandbox isolation"** (GitHub milestone v0.8.0, issues #154 / #155 / #156). Promotes the `container` sandbox backend from a fail-fast stub to a real OpenSandbox-gated execution-isolation tier and graduates `oh-my-pi` to `active`.
+
+### Added
+
+- **`container` sandbox backend — OpenSandbox-gated execution isolation** (#155): replaces the #137 stub. `ContainerBackend` reuses `DirectoryBackend` for host-side materialization (so porcelain dirty detection + promotion are unchanged) and routes mission/verification commands through the OpenSandbox seam (`runOpenSandboxCommand` → `runOpenSandboxTemplate`). Env contract: `UH_OPENSANDBOX_ENABLED=1` + `UH_OPENSANDBOX_EXEC_COMMAND` (must contain `{command}`; optional `{cwd}`, `{image}`, `{timeout_ms}` placeholders); optional `UH_OPENSANDBOX_CREATE_COMMAND`, `UH_OPENSANDBOX_DELETE_COMMAND`, `UH_OPENSANDBOX_IMAGE` (default `python:3.12`), `UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS` (positive int ms, default 30000). Mock mode (`UH_OPENSANDBOX_MODE=mock`) for CI / dirty-roundtrip tests. Local smoke + claim-boundary table: [`docs/runbooks/container-sandbox.md`](docs/runbooks/container-sandbox.md). ADR: [`docs/architecture/sandbox-backends.md`](docs/architecture/sandbox-backends.md) (includes #154 spike + #157 lifecycle hardening sections).
+- **`oh-my-pi` graduated to `status: active`** (#156): after the ToS posture documented in [`docs/runbooks/anthropic-via-omp.md`](docs/runbooks/anthropic-via-omp.md) and an `uh adapter check oh-my-pi` PASS against `omp/15.2.4`. The adapter manifest, scaffold template (`uh adapter add oh-my-pi`), README adapter table + capability summary, ROADMAP, and the docs-site mirror all reflect `active`. Mirrors the v0.7.0 vanilla `pi` graduation — same surface, same posture, same opt-in responsibility model. The runbook gained a dated v0.8.0 graduation subsection; the ToS-clean alternative (native `ANTHROPIC_API_KEY` adapter) is still planned for v0.9.0.
+
+### Changed
+
+- `runOpenSandboxTemplate` spawns commands in the sandbox-bound `cwd` (the host worktree) rather than `process.cwd()` so `verify` / create / delete templates with relative paths resolve against the sandbox (#157).
+- `ContainerBackend.teardown` runs `UH_OPENSANDBOX_DELETE_COMMAND` unconditionally when configured; forced / orphan discards spawn from `ctx.root` when the worktree has already been removed so external sandbox resources cannot leak (#157).
+- Lifecycle timeouts are configurable via `UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS` (positive int ms, default 30000), with fail-fast validation surfacing the variable name on bad input (#157).
+
+### Notes
+
+- **No fallback to a lean in-house OCI/docker-CLI backend is authorized by this release** — the ADR pivot rule stands. The container path is OpenSandbox-only unless the lead approves a pivot.
+- **CI does not exercise live container execution** — Depot runners have no container runtime. The OpenSandbox mock mode covers schema + lifecycle plumbing in CI; live evidence is in [`docs/runbooks/container-sandbox.md`](docs/runbooks/container-sandbox.md).
+- **macOS isolation reality** — on macOS the boundary is the host's Linux VM (Docker Desktop / OrbStack / Colima). Firecracker / KVM / gVisor / Kata claims require a Linux host with a configured secure runtime, per the ADR per-OS table.
+- **Deferred to v0.9.0+**: AgentFS as a filesystem backend (FS-only, not execution); native Anthropic adapter; Honcho MCP tools + opt-out; capability-declaration enforcement (`--strict`).
+
 ## [0.7.0] — 2026-05-24
 
 Milestone **"Adapter expansion & sandbox backends"** (tracked as GitHub issues #133–#141 under the `v0.7.0` milestone; Linear UH-92.. remain pending a workspace upgrade). Builds on v0.6.0's cost-aware routing by adding cheaper routing targets and broader sandbox isolation.

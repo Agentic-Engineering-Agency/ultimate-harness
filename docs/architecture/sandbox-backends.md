@@ -1,6 +1,6 @@
 # Sandbox backends (ADR)
 
-Status: accepted for v0.7.0 (`git-worktree` + `directory` shipped; `container` registered as a fail-fast stub) and updated for the v0.8.0 sandbox-isolation spike (#154).
+Status: shipped in v0.8.0 — `git-worktree` (default) and `directory` filesystem backends from v0.7.0; `container` execution-isolation backend implemented behind the OpenSandbox seam (#155) with the #154 spike + ADR and #157 lifecycle hardening sections below.
 
 ## Decision summary
 

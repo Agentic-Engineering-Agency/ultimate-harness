@@ -172,7 +172,7 @@ Ultimate Harness studies and selectively integrates ideas from:
 - [OpenSpec](https://github.com/Fission-AI/OpenSpec) — artifact-guided specification workflows.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) — wired as the reference adapter.
 - [Codex CLI](https://github.com/openai/codex) — wired adapter for OpenAI's coding agent.
-- [oh-my-pi](https://github.com/can1357/oh-my-pi) and [Pi](https://pi.dev/) — both wired: `oh-my-pi` (experimental) and the vanilla `pi` adapter (active, v0.7.0).
+- [oh-my-pi](https://github.com/can1357/oh-my-pi) and [Pi](https://pi.dev/) — both wired and active: `oh-my-pi` graduated to `active` in v0.8.0 (#156); the vanilla `pi` adapter graduated in v0.7.0 (#135/#150).
 - [AgentFS](https://github.com/tursodatabase/agentfs/blob/main/MANUAL.md) — copy-on-write sandboxing patterns (design at [`docs/architecture/sandbox-agentfs.md`](./docs/architecture/sandbox-agentfs.md)).
 
 See the [comparison matrix](./docs/research/comparison-matrix.md) and [adopt/reject/defer log](./docs/research/adopt-reject-defer.md) for the current design position.
