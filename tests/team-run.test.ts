@@ -373,7 +373,7 @@ describe("runTeamMission — fake gitOps", () => {
     expect(result.verification?.status).toBe("passed");
   });
 
-  test("single-worker failure: leader skips that worker's merge and overall is blocked", async () => {
+  test("single-worker failure: verifier passes on surviving worker -> overall passed (UH-127)", async () => {
     const repo: FakeRepo = {
       branches: new Set(["HEAD"]),
       contents: new Map([["HEAD", new Map()]]),
@@ -400,13 +400,81 @@ describe("runTeamMission — fake gitOps", () => {
       retainOnSuccess: true,
     });
 
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("passed");
+    expect(result.hadWorkerIssues).toBe(true);
+    expect(result.hadMergeProblems).toBe(false);
     expect(result.hadConflicts).toBe(true);
     const frontend = result.workers.find((w) => w.plan.id === "frontend")!;
     expect(frontend.status).toBe("failed");
     expect(frontend.merge?.note).toMatch(/skipped: worker status=failed/);
     // Verifier runs on the partial integration so reviewers can see leader-side health.
     expect(result.leaderRanVerification).toBe(true);
+  });
+
+  test("UH-127: blocked worker + clean surviving merge + verification passed -> passed", async () => {
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async () => { /* no-op */ } };
+    const runner = makeRunner({
+      writes: {
+        backend: { files: { "src/a.ts": "a\n" }, sentinel: "ok" },
+        frontend: { files: {}, status: "blocked", sentinel: "" },
+      },
+    }, repo);
+    const verifier = async (): Promise<VerifyMissionLike> => ({
+      status: "passed",
+      path: "/fake/verification.yaml",
+      checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+      acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+    });
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      runnerFor: runner,
+      gitOps: fakeGitOps(repo, fs),
+      verifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.hadWorkerIssues).toBe(true);
+    expect(result.hadMergeProblems).toBe(false);
+    const frontend = result.workers.find((w) => w.plan.id === "frontend")!;
+    expect(frontend.status).toBe("blocked");
+    expect(frontend.filesTouched).toEqual([]);
+  });
+
+  test("no deliverables from any worker: blocked even when verification passes", async () => {
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async () => { /* no-op */ } };
+    const runner = makeRunner({
+      writes: {
+        backend: { files: {}, status: "blocked", sentinel: "" },
+        frontend: { files: {}, status: "blocked", sentinel: "" },
+      },
+    }, repo);
+    const verifier = async (): Promise<VerifyMissionLike> => ({
+      status: "passed",
+      path: "/fake/verification.yaml",
+      checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+      acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+    });
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      runnerFor: runner,
+      gitOps: fakeGitOps(repo, fs),
+      verifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.hadWorkerIssues).toBe(true);
   });
 
   test("leader-verification failure: integration succeeds but verifier returns failed", async () => {

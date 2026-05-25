@@ -187,7 +187,14 @@ export interface TeamRunResult {
   verification: VerifyMissionLike | null;
   integrationReportPath: string;
   status: "passed" | "failed" | "blocked";
-  /** True when at least one worker failed or had a merge conflict. */
+  /** True when at least one worker did not succeed (failed / blocked / error). */
+  hadWorkerIssues: boolean;
+  /** True when leader setup failed or a worker merge conflicted / failed. */
+  hadMergeProblems: boolean;
+  /**
+   * True when `hadWorkerIssues || hadMergeProblems`. Kept for workflow notes;
+   * prefer the specific flags for operator-facing summaries.
+   */
   hadConflicts: boolean;
   retained: boolean;
 }
@@ -473,14 +480,15 @@ export async function runTeamMission(
   // Leader integrates each successful worker. The strategy guard was
   // enforced by `planTeamRun` before any worker dispatch, so by here we
   // know `plan.leader.strategy === "merge"` and can integrate directly.
-  let hadConflicts = false;
+  let hadWorkerIssues = false;
+  let hadMergeProblems = false;
   if (!leaderReady) {
-    hadConflicts = true;
+    hadMergeProblems = true;
   } else {
     for (const outcome of workerOutcomes) {
       if (outcome.status !== "succeeded") {
         outcome.merge = { conflicted: false, conflictPaths: [], note: `skipped: worker status=${outcome.status}` };
-        hadConflicts = true;
+        hadWorkerIssues = true;
         continue;
       }
       const mergeOutcome = await gitOps.merge(plan.leader.worktreePath, outcome.plan.branch);
@@ -489,9 +497,10 @@ export async function runTeamMission(
       // integrated. A non-conflict merge failure must NOT mark the worker
       // integrated just because conflict markers are absent.
       outcome.integrated = !mergeOutcome.conflicted && !mergeOutcome.failed;
-      if (mergeOutcome.conflicted || mergeOutcome.failed) hadConflicts = true;
+      if (mergeOutcome.conflicted || mergeOutcome.failed) hadMergeProblems = true;
     }
   }
+  const hadConflicts = hadWorkerIssues || hadMergeProblems;
 
   // ----------------------------------------------------------- integration md
   const reportPath = await writeIntegrationReport({
@@ -526,15 +535,22 @@ export async function runTeamMission(
 
   // ------------------------------------------------------------------ verdict
   // Catastrophic leader-setup failure or a verifier exception is hard-failed.
-  // Verifier-reported `failed` is also a failure. Otherwise:
-  //   - clean integration + verifier passed  -> passed
-  //   - any conflict / skipped worker        -> blocked (partial integration)
-  //   - verifier blocked or missing          -> blocked
+  // Verifier-reported `failed` is also a failure. A skipped/failed worker
+  // alone does NOT block the headline when surviving workers merged cleanly
+  // and verification passed (UH-127). Reserve `blocked` for merge failures,
+  // missing deliverables, or verification blocked / not satisfiable.
+  const anyDelivered = workerOutcomes.some(
+    (w) => w.status === "succeeded" && w.filesTouched.length > 0,
+  );
   const overallStatus: TeamRunResult["status"] = (() => {
     if (!leaderReady) return "failed";
     if (verificationFailed) return "failed";
     if (verification && verification.status === "failed") return "failed";
-    if (!hadConflicts && verification && verification.status === "passed") return "passed";
+    if (!anyDelivered) return "blocked";
+    if (hadMergeProblems) return "blocked";
+    if (verification && verification.status === "passed") return "passed";
+    if (verification && verification.status === "blocked") return "blocked";
+    if (!hadWorkerIssues && !hadMergeProblems) return "passed";
     return "blocked";
   })();
 
@@ -557,6 +573,8 @@ export async function runTeamMission(
     verification,
     integrationReportPath: reportPath,
     status: overallStatus,
+    hadWorkerIssues,
+    hadMergeProblems,
     hadConflicts,
     retained,
   };

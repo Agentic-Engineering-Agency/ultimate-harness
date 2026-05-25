@@ -231,6 +231,8 @@ describe("runStagedWorkflow — team shape", () => {
           verification: null,
           integrationReportPath: "/fake/integration-report.md",
           status: "passed",
+          hadWorkerIssues: false,
+          hadMergeProblems: false,
           hadConflicts: false,
           retained: true,
         };
@@ -286,6 +288,8 @@ describe("runStagedWorkflow — team shape", () => {
           verification: null,
           integrationReportPath: "/fake/integration-report.md",
           status: "passed",
+          hadWorkerIssues: false,
+          hadMergeProblems: false,
           hadConflicts: false,
           retained: true,
         };
@@ -321,6 +325,8 @@ describe("runStagedWorkflow — team shape", () => {
         verification: null,
         integrationReportPath: "/fake/integration-report.md",
         status: "failed",
+        hadWorkerIssues: false,
+        hadMergeProblems: true,
         hadConflicts: true,
         retained: true,
       }),

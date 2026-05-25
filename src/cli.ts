@@ -1393,8 +1393,16 @@ missionCmd
         strategy: opts.strategy as "merge" | "cherry-pick" | "rebase",
       });
       const label = result.status === "passed" ? "PASS" : result.status === "blocked" ? "BLOCKED" : "FAIL";
+      const blockedWorkers = result.workers.filter((w) => w.status !== "succeeded").length;
       console.log(`[${label}] ${missionId}`);
-      console.log(`workers: ${result.workers.length}, conflicts: ${result.hadConflicts ? "yes" : "no"}, verification: ${result.verification ? result.verification.status : "not-run"}`);
+      console.log(
+        `workers: ${result.workers.length}, worker_issues: ${result.hadWorkerIssues ? "yes" : "no"}, merge_problems: ${result.hadMergeProblems ? "yes" : "no"}, verification: ${result.verification ? result.verification.status : "not-run"}`,
+      );
+      if (result.status === "passed" && blockedWorkers > 0) {
+        console.log(
+          `note: ${blockedWorkers}/${result.workers.length} worker(s) did not succeed; contract satisfied by surviving workers`,
+        );
+      }
       console.log(`integration-report: ${result.integrationReportPath}`);
       console.log(`retained: ${result.retained ? "yes" : "no"}`);
       // Exit codes: passed -> 0, blocked -> 2, failed -> 1 (UH-72 review F1).
