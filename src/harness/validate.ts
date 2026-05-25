@@ -118,6 +118,8 @@ async function collectMissionWarnings(
   const raw = parsed as Record<string, unknown>;
   const acRaw = raw.acceptance_criteria;
   const completionRaw = raw.completion_criteria;
+  collectConstraintsAdvisoryWarning(raw, result);
+
   const acCount = (Array.isArray(acRaw) ? acRaw.length : 0)
     + (Array.isArray(completionRaw) ? completionRaw.length : 0);
   if (acCount === 0) return;
@@ -132,6 +134,52 @@ async function collectMissionWarnings(
     result.warnings.push(
       `Mission declares acceptance criteria but no design.md exists at ${designPathRaw}`,
     );
+  }
+}
+
+const CONSTRAINTS_ADVISORY_WARNING =
+  "Mission declares constraints[] (advisory prompt directives only; not enforced by uh verify). "
+  + "Encode enforceable rules as acceptance_criteria with check_command or verification.required_checks with command.";
+
+/**
+ * UH-130: `constraints[]` are surfaced to runtimes but never executed at verify time.
+ * Warn when authors declare constraints without any runnable enforcement hooks.
+ */
+function collectConstraintsAdvisoryWarning(
+  raw: Record<string, unknown>,
+  result: ValidationResult,
+): void {
+  const constraintsRaw = raw.constraints;
+  const constraintCount = Array.isArray(constraintsRaw)
+    ? constraintsRaw.filter((entry) => typeof entry === "string" && entry.trim().length > 0).length
+    : 0;
+  if (constraintCount === 0) {
+    return;
+  }
+
+  const acList = Array.isArray(raw.acceptance_criteria) ? raw.acceptance_criteria : [];
+  const hasAcCheck = acList.some(
+    (entry) => entry
+      && typeof entry === "object"
+      && typeof (entry as Record<string, unknown>).check_command === "string"
+      && ((entry as Record<string, unknown>).check_command as string).trim().length > 0,
+  );
+
+  const verificationRaw = raw.verification;
+  const requiredChecks = verificationRaw
+    && typeof verificationRaw === "object"
+    && Array.isArray((verificationRaw as Record<string, unknown>).required_checks)
+    ? (verificationRaw as Record<string, unknown>).required_checks as unknown[]
+    : [];
+  const hasRequiredCheckCommand = requiredChecks.some(
+    (entry) => entry
+      && typeof entry === "object"
+      && typeof (entry as Record<string, unknown>).command === "string"
+      && ((entry as Record<string, unknown>).command as string).trim().length > 0,
+  );
+
+  if (!hasAcCheck && !hasRequiredCheckCommand) {
+    result.warnings.push(CONSTRAINTS_ADVISORY_WARNING);
   }
 }
 

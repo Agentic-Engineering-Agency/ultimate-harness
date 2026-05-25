@@ -87,7 +87,7 @@ completion_criteria:
 - `issue_refs` should include all external trackers when available.
 - `workflow_profile` must match a defined profile.
 - `context.read_first` should be ordered.
-- `constraints` are hard limits for the runtime.
+- `constraints` are **advisory** prompt directives for capable runtimes (enumerated in adapter prompts). They are **not** executed by `uh validate` or `uh verify`. Encode enforceable rules as `acceptance_criteria` with `check_command` or `verification.required_checks` with `command`. `uh validate` warns when a packet declares `constraints[]` but has no runnable checks (UH-130).
 - `skills.required` must be loaded/applied by capable runtimes.
 - `expected_outputs` should include paths and artifact kinds where possible.
 - `sandbox.promotion_policy` must be explicit.

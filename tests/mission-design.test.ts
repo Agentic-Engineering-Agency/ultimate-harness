@@ -91,3 +91,54 @@ describe("UH-75 mission design companion", () => {
     expect(validation.warnings).toEqual([]);
   });
 });
+
+const CONSTRAINTS_ADVISORY_WARNING =
+  "Mission declares constraints[] (advisory prompt directives only; not enforced by uh verify). "
+  + "Encode enforceable rules as acceptance_criteria with check_command or verification.required_checks with command.";
+
+describe("UH-130 constraints advisory warning", () => {
+  test("validate warns when mission has constraints but no runnable checks", async () => {
+    const dir = join(TEST_ROOT, ".harness", "missions", "m-constraints");
+    const yaml = [
+      "schema_version: uh.mission.v0",
+      "id: m-constraints",
+      "title: Constraints only",
+      "workflow_profile: spec-first-feature",
+      "constraints:",
+      "  - Template MUST include placeholder comments",
+      "",
+    ].join("\n");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(dir, { recursive: true });
+    const missionPath = join(dir, "mission.yaml");
+    await writeFile(missionPath, yaml, "utf-8");
+    const result = await validateFile(missionPath);
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(CONSTRAINTS_ADVISORY_WARNING);
+  });
+
+  test("validate is warning-free when constraints pair with check_command AC", async () => {
+    const dir = join(TEST_ROOT, ".harness", "missions", "m-constraints-ac");
+    const yaml = [
+      "schema_version: uh.mission.v0",
+      "id: m-constraints-ac",
+      "title: Constraints with enforcement",
+      "workflow_profile: spec-first-feature",
+      "constraints:",
+      "  - Prefer small diffs",
+      "acceptance_criteria:",
+      "  - id: ac-1",
+      "    description: Placeholder comments exist",
+      "    check_command: grep -q SLICE_ID",
+      "    severity: block",
+      "",
+    ].join("\n");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(dir, { recursive: true });
+    const missionPath = join(dir, "mission.yaml");
+    await writeFile(missionPath, yaml, "utf-8");
+    const result = await validateFile(missionPath);
+    expect(result.valid).toBe(true);
+    expect(result.warnings).not.toContain(CONSTRAINTS_ADVISORY_WARNING);
+  });
+});

@@ -106,7 +106,18 @@ const MissionInputSchema = z.object({
     read_first: z.array(z.string()).optional().default([]),
     source_links: z.array(z.string()).optional().default([]),
   }).optional().default({ read_first: [], source_links: [] }),
-  constraints: z.array(z.string()).optional().default([]),
+  /**
+   * Advisory prompt directives for capable runtimes (e.g. a ## Constraints block).
+   * Not executed by `uh verify` — encode hard rules as `acceptance_criteria` with
+   * `check_command` or `verification.required_checks` with `command`.
+   */
+  constraints: z
+    .array(z.string())
+    .optional()
+    .default([])
+    .describe(
+      "Advisory limits for the runtime prompt; not enforced by verify. Use acceptance_criteria for hard gates.",
+    ),
   skills: z.object({
     required: z.array(z.string()).optional().default([]),
     suggested: z.array(z.string()).optional().default([]),
