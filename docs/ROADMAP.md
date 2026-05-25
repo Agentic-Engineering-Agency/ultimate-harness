@@ -145,7 +145,7 @@ All three layers compose: see [`docs/architecture/sdd-tdd-qa.md`](./architecture
 | UH-33 | `runtime_config_overrides` parity for hermes + codex |
 | UH-34 | Diff capture includes untracked new files |
 
-**Adapter status as of 2026-05-24:**
+**Adapter status as of 2026-05-25 (v0.8.0):**
 
 | Adapter | Status |
 |---|---|
@@ -154,7 +154,7 @@ All three layers compose: see [`docs/architecture/sdd-tdd-qa.md`](./architecture
 | hermes-proxy | active (verified against `hermes proxy start --provider nous` in UH-38 smoke; manifest default `nousresearch/hermes-4-405b`) |
 | openrouter | active (OpenAI-compat HTTP to openrouter.ai; `OPENROUTER_API_KEY`; live-smoke verified) |
 | pi | active (vanilla pi agent CLI `pi --print --mode json --no-session`; shipped v0.7.0 #135/#150; live-smoke verified) |
-| oh-my-pi | experimental (graduation pending — ToS posture, road-to-1.0) |
+| oh-my-pi | active (graduated v0.8.0 #156; ToS posture per `docs/runbooks/anthropic-via-omp.md` §Auth & ToS posture; users opt in) |
 
 ## Medium-term proposals (not filed)
 
