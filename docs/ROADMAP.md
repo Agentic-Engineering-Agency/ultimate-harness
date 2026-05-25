@@ -1,10 +1,12 @@
 # Ultimate Harness — Roadmap
 
-Last updated: 2026-05-23. Source of truth for issue state is [Linear](https://linear.app/agentic-eng); this file is a human-readable index.
+Last updated: 2026-05-25. Source of truth for issue state is [Linear](https://linear.app/agentic-eng); this file is a human-readable index.
 
 ## Now
 
-Epics 2–5 plus **Epics 6–8** (live SSE tail + cancel, adapter capability routing + cost, SDD hardening) shipped and were **released as v0.6.0** — published to npm as `@agenticengineeringagency/ultimate-harness@0.6.0` (`latest`). v0.6.0 also corrected two v0.5.0 gaps: the auto-router `uh mission run --auto` (UH-101, claimed shipped but never built) and `runtime.usage` token capture (which the cost features assumed). The Epics 6–8 execution spec is [`docs/specs/epics-6-7-8.md`](./specs/epics-6-7-8.md); per-slice detail is in the [CHANGELOG](../CHANGELOG.md) `[0.6.0]`. **v0.7.0 (milestone, GitHub):** OpenRouter adapter ([#134]), sandbox backend abstraction + `directory` backend ([#136]) and a `container` stub ([#137]), verify-then-promote auto-trigger ([#139]), capability-match enforcement ([#138], already shipped), and a shared adapter-artifact-helper refactor ([#133]). **Remaining (deferred):** Pi adapter — vanilla `pi` + graduate `oh-my-pi` ([#135], blocked on the vanilla-`pi` CLI contract). **npm publish is no longer blocked** — the prior 404 was a `bun publish` quirk, fixed by switching to `npm publish`; the workflow is now tag-gated + idempotent. **Linear note:** records for UH-92..UH-111 are pending a workspace upgrade — until then those slices are tracked here + in the CHANGELOG + the spec, not as individual Linear issues.
+**v0.8.0 (current release, GitHub milestone v0.8.0 — issues #154 / #155 / #156):** the **"Sandbox isolation"** milestone promotes the `container` sandbox backend from a fail-fast stub to a real OpenSandbox-gated execution-isolation tier (#155, with #154 spike + ADR and #157 lifecycle hardening) and graduates `oh-my-pi` to `status: active` (#156, ToS posture inherited from `docs/runbooks/anthropic-via-omp.md`; users opt in). Will be published as `@agenticengineeringagency/ultimate-harness@0.8.0` once the `v0.8.0` tag lands on `main`; plugin manifest version is `0.8.0` in the release-prep PR. See [`CHANGELOG.md`](../CHANGELOG.md) `[0.8.0]`.
+
+Epics 2–5 plus **Epics 6–8** (live SSE tail + cancel, adapter capability routing + cost, SDD hardening) shipped and were **released as v0.6.0** — published to npm as `@agenticengineeringagency/ultimate-harness@0.6.0`. v0.6.0 also corrected two v0.5.0 gaps: the auto-router `uh mission run --auto` (UH-101, claimed shipped but never built) and `runtime.usage` token capture (which the cost features assumed). The Epics 6–8 execution spec is [`docs/specs/epics-6-7-8.md`](./specs/epics-6-7-8.md); per-slice detail is in the [CHANGELOG](../CHANGELOG.md) `[0.6.0]`. **v0.7.0:** OpenRouter adapter ([#134]), **vanilla `pi` adapter ([#135], shipped active)**, sandbox backend abstraction + `directory` backend ([#136]) and a `container` stub ([#137]), verify-then-promote auto-trigger ([#139]), capability-match enforcement ([#138], already shipped), and a shared adapter-artifact-helper refactor ([#133]). **v0.8.0 (current release, see Now above):** OpenSandbox-gated `container` execution backend ([#155]/[#157]) with ADR + runbook ([#154]), and `oh-my-pi` graduated to active ([#156]). **v0.8.0 will be tagged on `main` and pushed to npm as `latest` via the `dev → main` release PR.** **npm publish is no longer blocked** — the prior 404 was a `bun publish` quirk, fixed by switching to `npm publish`; the workflow is now tag-gated + idempotent. **Linear note:** records for UH-92..UH-111 are pending a workspace upgrade — until then those slices are tracked here + in the CHANGELOG + the spec, not as individual Linear issues.
 
 ### Epic 5 — Hermes Dashboard plugin v2: multi-run history + replay + observability ([UH-84](https://linear.app/agentic-eng/issue/UH-84))
 
@@ -145,37 +147,35 @@ All three layers compose: see [`docs/architecture/sdd-tdd-qa.md`](./architecture
 | UH-33 | `runtime_config_overrides` parity for hermes + codex |
 | UH-34 | Diff capture includes untracked new files |
 
-**Adapter status as of 2026-05-24:**
+**Adapter status as of 2026-05-25 (v0.8.0):**
 
 | Adapter | Status |
 |---|---|
 | hermes | active (pinned ≥ 0.14.0) |
 | codex | active (verified against codex-cli 0.130.0 in UH-30 smoke) |
 | hermes-proxy | active (verified against `hermes proxy start --provider nous` in UH-38 smoke; manifest default `nousresearch/hermes-4-405b`) |
-| openrouter | active (OpenAI-compat HTTP to openrouter.ai; `OPENROUTER_API_KEY`; unit-tested, live smoke pending a key) |
-| oh-my-pi | experimental |
+| openrouter | active (OpenAI-compat HTTP to openrouter.ai; `OPENROUTER_API_KEY`; live-smoke verified) |
+| pi | active (vanilla pi agent CLI `pi --print --mode json --no-session`; shipped v0.7.0 #135/#150; live-smoke verified) |
+| oh-my-pi | active (graduated v0.8.0 #156; ToS posture per `docs/runbooks/anthropic-via-omp.md` §Auth & ToS posture; users opt in) |
 
 ## Medium-term proposals (not filed)
 
 These are tracked in narrative form until they earn the priority to be filed:
 
-- **Native ANTHROPIC_API_KEY adapter** — mostly superseded by UH-32 for subscription users; file only if pay-per-token demand surfaces.
-- **Cross-runtime QA harness** — `uh mission run-all --runtimes hermes,codex,oh-my-pi,hermes-proxy <file>` with side-by-side diff/sentinel comparison.
-- **Container sandbox backend** — registered as a fail-fast stub (v0.7.0, [#137]); needs a Docker/Podman runtime wired (no container runtime in CI). Design: [`docs/architecture/sandbox-backends.md`](./architecture/sandbox-backends.md).
-- **Honcho-memory follow-ups** — `codex` and `hermes` adapters are now wired into memory enrichment + `recordMissionExchange` (v0.6.0, [UH-110 follow-up]); remaining: expose `honcho_search` and `honcho_remember` to missions as MCP tools; add `runtime_config.honcho_memory` opt-out per mission.
-- **Filed follow-ups (Epic 2 polish):**
-  - [UH-48](https://linear.app/agentic-eng/issue/UH-48) — `UH_TUI_THEME` + palette-driven dark/light.
-  - [UH-49](https://linear.app/agentic-eng/issue/UH-49) — `e` open manifest in `$EDITOR` (requires renderer suspend/resume).
-  - [UH-50](https://linear.app/agentic-eng/issue/UH-50) — Ctrl+Z suspend / `fg` resume.
-  - [UH-51](https://linear.app/agentic-eng/issue/UH-51) — automated TUI screenshot capture pipeline for docs.
-  - [UH-52](https://linear.app/agentic-eng/issue/UH-52) — surface adapter-check age in the footer.
-  - [UH-53](https://linear.app/agentic-eng/issue/UH-53) — adapters emit `runtime.cancelled` on SIGTERM so disk replay matches the TUI status.
+Road to v1.0 is planned in [`docs/prds/uh-roadmap-to-1.0-v1.0-prd.md`](./prds/uh-roadmap-to-1.0-v1.0-prd.md) (milestones v0.8.0 → v1.0.0). Remaining proposals:
+
+- **Native ANTHROPIC_API_KEY adapter** — pay-per-token Anthropic, complements UH-32; planned v0.9.0.
+- **Container sandbox backend** — **shipped in v0.8.0** ([#155]/[#157]) behind the OpenSandbox seam, with #154 spike + ADR + runbook. Live docker-CLI fallback rejected as default by the ADR pivot rule.
+- **Honcho-memory follow-ups** — `codex`/`hermes` wired into enrichment + `recordMissionExchange` (v0.6.0); remaining (v0.9.0): expose `honcho_search`/`honcho_remember` as mission MCP tools + `runtime_config.honcho_memory` opt-out.
+- **Capability-declaration enforcement** — make manifest/mission `capabilities:` binding (warn + `--strict`); planned v0.10.0. (Distinct from the already-shipped `runtime_requirements` preflight.)
+
+**Shipped (no longer proposals):** cross-runtime QA `uh mission run-all --runtimes` with side-by-side diff/sentinel comparison; the Epic 2 TUI polish UH-48..53 (theme, `$EDITOR`, Ctrl+Z, `tui screenshot`, footer adapter-check age, `runtime.cancelled` on SIGTERM).
 
 ## Strategic (decisions needed)
 
-- **Pi adapter implementation** — design-only stub today; tied to OMP cadence.
-- **Mission capability declarations + adapter matching enforcement** — manifest `capabilities:` is advisory-only today.
-- **Muta integration** — UH-as-consumer, UH-as-component, or independent? Needs a co-founder conversation.
+- **Muta integration** — UH-as-consumer, UH-as-component, or independent? Needs a co-founder conversation. **Deferred entirely to post-1.0** (see the road-to-1.0 PRD).
+
+_Resolved since: the **Pi adapter** shipped active in v0.7.0 (#135/#150); **oh-my-pi** graduated to active in v0.8.0 (#156); **mission capability-declaration enforcement** is planned for v0.10.0 (manifest `capabilities:` binding, warn + `--strict`) and `runtime_requirements` preflight already enforces compatibility today._
 
 ## References
 

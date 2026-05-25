@@ -125,3 +125,46 @@ adapter manifest after UH-26.
 - Native Anthropic adapter using `ANTHROPIC_API_KEY` (the ToS-clean
   alternative; file as UH-29 when desired).
 - OpenRouter/Vercel AI Gateway routing (file as UH-30).
+
+## v0.8.0 graduation (2026-05-25 — #156)
+
+`oh-my-pi` graduated from `status: experimental` to `status: active` in
+Ultimate Harness **v0.8.0** (GitHub issue [#156][gh-156]). The graduation
+inherits the ToS posture documented above (§ "Auth & ToS posture — read
+this before adopting") rather than restating it. Mirrors the v0.7.0
+`pi` adapter graduation: the runbook is authoritative; users opt in.
+
+**Graduation evidence (local, 2026-05-25):**
+
+- Adapter probe: `uh adapter check oh-my-pi` → `[PASS]` against
+  `omp/15.2.4` (the current released OMP build at graduation time).
+- Reference mission `examples/missions/anthropic-via-omp-smoke.yaml`
+  remains the canonical live smoke; running it consumes Anthropic tokens
+  and is left to the operator's local environment, since the smoke
+  outcome reflects the OMP stealth surface plus the operator's
+  Pro/Max subscription status (both outside this repo).
+- No adapter behavior change. The `runtime_config_overrides.model:`
+  override path documented above is unchanged.
+
+**What changed in the repo for graduation:**
+
+- `.harness/adapters/oh-my-pi.yaml` — `status: active`.
+- `src/harness/adapter-add.ts` — `uh adapter add oh-my-pi` scaffold
+  template flipped to `status: active`; header comment in sync.
+- `README.md` — capability summary, adapter table row, and CLI example
+  list reflect `oh-my-pi` as active.
+- `docs/ROADMAP.md` — `Adapters considered` table row updated.
+- `apps/docs/content/docs/index.mdx` — docs-site adapter mirror updated.
+- `CHANGELOG.md` — `[0.8.0]` entry covers the graduation in the v0.8.0
+  release notes.
+
+**If OMP's stealth surface gets tightened** (Anthropic detection adds a
+pattern OMP doesn't yet bypass), every mission using this route fails
+together with `runtime-result.yaml: status: blocked` until OMP catches
+up. Pin a known-good OMP version in your local env (see § "Failure
+modes & what to do" above) or switch to the native ANTHROPIC_API_KEY
+adapter (planned v0.9.0). The graduation does **not** change UH's
+responsibility model: this is still an opt-in route documented for
+adopters who have accepted the ToS posture.
+
+[gh-156]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/issues/156

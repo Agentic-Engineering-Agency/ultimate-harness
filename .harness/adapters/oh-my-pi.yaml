@@ -15,7 +15,7 @@ capabilities:
   - worktree-isolation
   - json-output
   - diff-output
-status: experimental
+status: active
 config:
   cli_command: omp
   default_toolsets: []

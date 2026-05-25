@@ -12,7 +12,7 @@ import { fileExists } from "./mission.js";
  * Wired adapters (post v0.1.0):
  * - `hermes`     — active   (reference adapter)
  * - `codex`      — active   (verified end-to-end against codex-cli 0.130.0)
- * - `oh-my-pi`   — experimental
+ * - `oh-my-pi`   — active
  *
  * Adapters tracked on the roadmap (not yet templated):
  * - `hermes-proxy` — see UH-32 / docs/ROADMAP.md
@@ -94,7 +94,7 @@ capabilities:
   - worktree-isolation
   - json-output
   - diff-output
-status: experimental
+status: active
 config:
   cli_command: omp
   default_toolsets: []
