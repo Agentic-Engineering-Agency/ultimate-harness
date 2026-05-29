@@ -8,16 +8,16 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 
 ## Start here
 
-0. [Vision](./VISION.md) — what UH is, who it's for, and what we won't accept. Read this first.
-1. [Glossary](./glossary.md) — shared terms used across the project.
-2. [Product requirements](./product/prd.md) — what the harness is for and who it serves.
-3. [MVP scope](./product/mvp-scope.md) — what must exist before implementation grows.
-4. [Architecture overview](./architecture/overview.md) — major components and boundaries.
-5. [Core entities](./architecture/entities.md) — canonical vocabulary for data and artifacts.
-6. [Runtime adapter contract](./architecture/runtime-adapter-contract.md) — what every adapter implements (includes the UH-28 runtime-final-message protocol).
-7. [Mission packet schema](./architecture/mission-packet-schema.md) — the portable work-request format.
-8. [Verification and promotion](./architecture/verification-and-promotion.md) — how sandbox work becomes canonical work.
-9. [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md) — the three composable discipline layers (UH-54 / UH-55 / UH-56).
+0. [Quickstart](./quickstart.md) — install, initialize, run, verify, and inspect a mission.
+1. [Configuration](./configuration.md) — project state, env vars, and runtime overrides.
+2. [Runtime targets](./runtime-targets.md) — supported runtimes and adapter boundaries.
+3. [Vision](./VISION.md) — what UH is, who it's for, and what we won't accept.
+4. [Glossary](./glossary.md) — shared terms used across the project.
+5. [Product requirements](./product/prd.md) — what the harness is for and who it serves.
+6. [Architecture overview](./architecture/overview.md) — major components and boundaries.
+7. [Runtime adapter contract](./architecture/runtime-adapter-contract.md) — what every adapter implements.
+8. [Mission packet schema](./architecture/mission-packet-schema.md) — the portable work-request format.
+9. [Verification and promotion](./architecture/verification-and-promotion.md) — how sandbox work becomes canonical work.
 10. [BMAD agent map](./workflows/bmad-agent-map.md) — how BMAD-style roles map into Ultimate Harness.
 
 ## Adapters
@@ -27,7 +27,9 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 | `hermes` | active | [Runtime adapter contract](./architecture/runtime-adapter-contract.md) defines the shape; `src/adapters/hermes.ts` is the reference implementation. |
 | `codex` | active | [Codex adapter design](./architecture/adapter-codex.md), [Codex E2E smoke](./runbooks/codex-e2e-smoke.md) |
 | `hermes-proxy` | active | [Hermes proxy adapter](./architecture/adapter-hermes-proxy.md), [setup](./runbooks/hermes-proxy-setup.md), [E2E smoke](./runbooks/hermes-proxy-e2e-smoke.md) |
-| `oh-my-pi` | experimental | [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md) — covers the OMP routing path and its ToS posture. |
+| `openrouter` | active | [OpenRouter setup](./runbooks/openrouter-setup.md) |
+| `pi` | active | [Pi setup](./runbooks/pi-setup.md) |
+| `oh-my-pi` | active | [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md) — covers the OMP routing path and its ToS posture. |
 
 For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 
@@ -41,6 +43,11 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 
 ### Product
 
+- [Quickstart](./quickstart.md)
+- [Configuration](./configuration.md)
+- [Runtime targets](./runtime-targets.md)
+- [Optional telemetry](./telemetry.md)
+- [Troubleshooting](./troubleshooting.md)
 - [PRD](./product/prd.md)
 - [MVP scope](./product/mvp-scope.md)
 - [Non-goals](./product/non-goals.md)
@@ -54,6 +61,7 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 - [Codex adapter design](./architecture/adapter-codex.md)
 - [Hermes proxy adapter design](./architecture/adapter-hermes-proxy.md)
 - [TUI architecture](./architecture/tui.md)
+- [Plugin development](./plugin-development.md)
 - [Mission packet schema](./architecture/mission-packet-schema.md)
 - [.harness artifacts](./architecture/harness-artifacts.md)
 - [Skill format](./architecture/skill-format.md)

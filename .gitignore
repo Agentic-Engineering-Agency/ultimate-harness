@@ -2,6 +2,7 @@ node_modules
 dist
 .env
 .env.*
+!.env.example
 *.log
 
 # docs build artifacts
@@ -16,3 +17,4 @@ __pycache__/
 # Team-mission worktrees (kept for forensics, never committed)
 .harness/missions/*/team/leader/
 .harness/missions/*/team/workers/
+.gitnexus
