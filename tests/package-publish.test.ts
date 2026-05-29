@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
 
 interface PackageJson {
   name: string;
@@ -29,7 +30,7 @@ describe("npm/Bun publish package metadata", () => {
   test("publishes only runtime assets needed by the CLI and TUI", async () => {
     const pkg = await readPackageJson();
 
-    expect(pkg.files).toEqual(["dist/", "src/", "README.md", "docs/runbooks/", "docs/architecture/"]);
+    expect(pkg.files).toEqual(["dist/", "src/", "README.md", "CHANGELOG.md", "docs/"]);
     expect(pkg.files).not.toContain("tests/");
     expect(pkg.files).not.toContain("examples/");
   });
@@ -38,5 +39,30 @@ describe("npm/Bun publish package metadata", () => {
     const pkg = await readPackageJson();
 
     expect(pkg.scripts?.["publish:dry-run"]).toBe("bun publish --dry-run");
+  });
+
+  test("keeps release, TUI, and plugin validation scripts wired", async () => {
+    const pkg = await readPackageJson();
+
+    expect(pkg.scripts).toMatchObject({
+      dev: "tsx src/cli.ts",
+      build: "rm -rf dist && tsc -p tsconfig.json",
+      test: "vitest run",
+      typecheck: "tsc -p tsconfig.tests.json --noEmit",
+      "tui-spike": "bun bin/uh-tui-spike.tsx",
+      clean: "rm -rf dist",
+      "plugin:build": "bun apps/hermes-plugin/esbuild.config.mjs",
+      "plugin:watch": "bun apps/hermes-plugin/esbuild.config.mjs --watch",
+      "plugin:typecheck": "tsc -p apps/hermes-plugin/dashboard/tsconfig.json --noEmit",
+      "plugin:test": "pytest apps/hermes-plugin/dashboard/tests/",
+    });
+  });
+
+  test("built package exposes the configured bin target", async () => {
+    const pkg = await readPackageJson();
+    const binPath = pkg.bin?.uh;
+
+    expect(binPath).toBe("./dist/cli.js");
+    await expect(access(binPath!, constants.F_OK)).resolves.toBeUndefined();
   });
 });

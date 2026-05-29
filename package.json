@@ -26,8 +26,8 @@
     "dist/",
     "src/",
     "README.md",
-    "docs/runbooks/",
-    "docs/architecture/"
+    "CHANGELOG.md",
+    "docs/"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts",
