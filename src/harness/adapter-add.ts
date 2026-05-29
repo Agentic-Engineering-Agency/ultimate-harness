@@ -13,9 +13,10 @@ import { fileExists } from "./mission.js";
  * - `hermes`     — active   (reference adapter)
  * - `codex`      — active   (verified end-to-end against codex-cli 0.130.0)
  * - `oh-my-pi`   — active
- *
- * Adapters tracked on the roadmap (not yet templated):
- * - `hermes-proxy` — see UH-32 / docs/ROADMAP.md
+ * - `hermes-proxy` — active (HTTP, OpenAI-compat subscription routing)
+ * - `openrouter` — active   (HTTP, OpenAI-compat pay-per-token)
+ * - `anthropic`  — experimental (HTTP, native Anthropic Messages API; UH-136)
+ * - `pi`         — active
  */
 const ADAPTER_TEMPLATES: Record<string, string> = {
   hermes: `schema_version: uh.adapter.v0
@@ -163,6 +164,35 @@ config:
   runtime_config:
     endpoint: "https://openrouter.ai/api/v1"
     model: "openai/gpt-4o-mini"
+    request_timeout_ms: 120000
+    extra_headers: {}
+`,
+  anthropic: `schema_version: uh.adapter.v0
+id: anthropic
+name: Anthropic
+description: >-
+  Native HTTP client for the official pay-per-token Anthropic Messages API
+  (https://api.anthropic.com/v1/messages). The API key is read from the
+  ANTHROPIC_API_KEY environment variable and never stored here. This is the
+  official metered API path — distinct from hermes-proxy (subscription routing)
+  and oh-my-pi (OMP credential store). See docs/runbooks/anthropic-setup.md.
+runtime: anthropic
+capabilities:
+  - messages-api
+  - http-transport
+  - sentinel-protocol
+  - pay-per-token
+status: experimental
+config:
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    base_url: "https://api.anthropic.com/v1"
+    model: "claude-sonnet-4-6"
+    max_tokens: 8192
     request_timeout_ms: 120000
     extra_headers: {}
 `,

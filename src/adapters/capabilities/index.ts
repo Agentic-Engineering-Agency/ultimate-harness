@@ -3,6 +3,7 @@ import {
   AdapterCapabilitiesSchema,
   type AdapterCapabilities,
 } from "../../schema/adapter-capabilities.js";
+import { anthropicCapabilities } from "./anthropic.js";
 import { codexCapabilities } from "./codex.js";
 import { hermesCapabilities } from "./hermes.js";
 import { hermesProxyCapabilities } from "./hermes-proxy.js";
@@ -18,6 +19,7 @@ export const CAPABILITIES: Record<AdapterId, AdapterCapabilities> = {
   codex: codexCapabilities,
   "oh-my-pi": ohMyPiCapabilities,
   openrouter: openRouterCapabilities,
+  anthropic: anthropicCapabilities,
   pi: piCapabilities,
 };
 
@@ -34,4 +36,4 @@ export function parseCapabilitiesManifest(data: unknown): AdapterCapabilities {
   return AdapterCapabilitiesSchema.parse(data);
 }
 
-export { codexCapabilities, hermesCapabilities, hermesProxyCapabilities, ohMyPiCapabilities, openRouterCapabilities, piCapabilities };
+export { anthropicCapabilities, codexCapabilities, hermesCapabilities, hermesProxyCapabilities, ohMyPiCapabilities, openRouterCapabilities, piCapabilities };

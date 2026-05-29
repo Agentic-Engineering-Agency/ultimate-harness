@@ -1,0 +1,22 @@
+schema_version: uh.adapter.v0
+id: anthropic
+name: Anthropic
+runtime: anthropic
+capabilities:
+  - messages-api
+  - http-transport
+  - sentinel-protocol
+  - pay-per-token
+status: experimental
+config:
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    base_url: "https://api.anthropic.com/v1"
+    model: "claude-sonnet-4-6"
+    max_tokens: 8192
+    request_timeout_ms: 120000
+    extra_headers: {}
