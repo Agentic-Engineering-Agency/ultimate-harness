@@ -179,6 +179,19 @@ export interface WorkerOutcome {
   integrated: boolean;
 }
 
+/**
+ * Team-run verdict.
+ *
+ * UH-127: `passed_partial` is a clearly-named NON-blocking status for the case
+ * where M<N workers landed but the integrated subset is shippable — leader
+ * integration is clean for the surviving workers AND verification passed on the
+ * integrated result. It is distinct from `passed` (every worker integrated) and
+ * from `blocked` (genuine verification failure / nothing integrated / no
+ * verifier wired). Callers that gate on success should treat `passed_partial`
+ * as a success-with-caveats, not a hard block.
+ */
+export type TeamRunStatus = "passed" | "passed_partial" | "failed" | "blocked";
+
 export interface TeamRunResult {
   missionId: string;
   plan: TeamPlan;
@@ -186,7 +199,7 @@ export interface TeamRunResult {
   leaderRanVerification: boolean;
   verification: VerifyMissionLike | null;
   integrationReportPath: string;
-  status: "passed" | "failed" | "blocked";
+  status: TeamRunStatus;
   /** True when at least one worker failed or had a merge conflict. */
   hadConflicts: boolean;
   retained: boolean;
@@ -262,8 +275,16 @@ export function planTeamRun(
     branch: `uh/team/${mission.id}/leader`,
   };
 
+  // UH-129: the doc-comment (top of file) documents the report living under
+  // `.harness/missions/<id>/team/`. A RELATIVE `integration_report_path` must
+  // therefore resolve under `teamRoot`, not the repo root — otherwise
+  // `custom/place.md` silently landed at the repo root, contradicting the
+  // documented layout. Absolute paths are honored as-is. Either way the
+  // traversal guard still runs so the path can never escape `root`.
   const integrationReportPath = mission.integration_report_path
-    ? assertWithinRoot(mission.integration_report_path, root, "integration_report_path")
+    ? (path.isAbsolute(mission.integration_report_path)
+        ? assertWithinRoot(mission.integration_report_path, root, "integration_report_path")
+        : assertWithinRoot(path.join(teamRoot, mission.integration_report_path), root, "integration_report_path"))
     : path.join(teamRoot, "integration-report.md");
 
   return {
@@ -394,6 +415,7 @@ export async function runTeamMission(
     try {
       await gitOps.addWorktree(root, wp.branch, wp.worktreePath, baseRef);
       await seedMissionPacket(canonicalMissionDir, wp.worktreePath, mission.id);
+      await writeWorkerArtifactGitignore(wp.worktreePath);
       workerSetup.push({ plan: wp });
     } catch (err) {
       workerSetup.push({ plan: wp, setupError: err instanceof Error ? err : new Error(String(err)) });
@@ -527,14 +549,29 @@ export async function runTeamMission(
   // ------------------------------------------------------------------ verdict
   // Catastrophic leader-setup failure or a verifier exception is hard-failed.
   // Verifier-reported `failed` is also a failure. Otherwise:
-  //   - clean integration + verifier passed  -> passed
-  //   - any conflict / skipped worker        -> blocked (partial integration)
-  //   - verifier blocked or missing          -> blocked
-  const overallStatus: TeamRunResult["status"] = (() => {
+  //   - clean integration + verifier passed            -> passed
+  //   - partial integration + verifier passed + a
+  //     surviving worker actually landed                -> passed_partial (UH-127)
+  //   - partial integration, nothing landed, or no
+  //     verifier wired                                  -> blocked
+  //   - verifier blocked                                -> blocked
+  //
+  // UH-127: do NOT report BLOCKED when M<N workers succeeded but (a) leader
+  // integration is clean for the survivors, (b) verification.required_checks
+  // pass on the integrated result (verifier returns `passed`), and (c) at
+  // least one worker satisfied acceptance and was integrated. That is a
+  // shippable partial result, surfaced as the non-blocking `passed_partial`.
+  // Genuine BLOCKED is preserved for real verification failures, a verifier
+  // that was never run, or a partial run where nothing integrated.
+  const anyWorkerIntegrated = workerOutcomes.some((w) => w.integrated);
+  const overallStatus: TeamRunStatus = (() => {
     if (!leaderReady) return "failed";
     if (verificationFailed) return "failed";
     if (verification && verification.status === "failed") return "failed";
-    if (!hadConflicts && verification && verification.status === "passed") return "passed";
+    if (verification && verification.status === "passed") {
+      if (!hadConflicts) return "passed";
+      return anyWorkerIntegrated ? "passed_partial" : "blocked";
+    }
     return "blocked";
   })();
 
@@ -592,6 +629,37 @@ async function seedMissionPacket(canonicalMissionDir: string, worktreePath: stri
 }
 
 /**
+ * UH-128: keep per-worker runtime artifacts out of the leader merge.
+ *
+ * Each worker run writes session artifacts under `.harness/audit/events.ndjson`
+ * and `.harness/missions/<id>/runs/<ts>/` (diff.patch, events.ndjson, prompt.md,
+ * runtime-final.txt, runtime-result.yaml, runtime-session.yaml). These are
+ * per-worker forensics, not code the worker owns — bleeding them onto the
+ * worker branch makes the leader merge pull (and potentially conflict on)
+ * files no worker actually authored. We write a worktree-local
+ * `.harness/.gitignore` so `commitAll`'s `git add -A` never stages them; the
+ * artifacts stay on disk for forensics but never reach the branch the leader
+ * integrates. This mirrors the existing strip-before-merge isolation in
+ * `stripWorkerSessionArtifacts` (belt-and-suspenders for mission-root files).
+ */
+async function writeWorkerArtifactGitignore(worktreePath: string): Promise<void> {
+  const harness = path.join(worktreePath, ".harness");
+  await mkdir(harness, { recursive: true });
+  const gitignorePath = path.join(harness, ".gitignore");
+  // Patterns are relative to `.harness/` (the .gitignore's directory):
+  //   audit/            -> .harness/audit/ (incl. events.ndjson)
+  //   missions/*/runs/  -> per-run session dirs for every mission
+  const body = [
+    "# UH-128: per-worker runtime artifacts — kept on disk, never committed,",
+    "# so the leader merge cannot bleed forensic files no worker authored.",
+    "audit/",
+    "missions/*/runs/",
+    "",
+  ].join("\n");
+  await writeFile(gitignorePath, body, "utf-8");
+}
+
+/**
  * UH-82: read the runtime sentinel for a worker. First try the active
  * per-run dir via the worktree's `latest.json` pointer; fall back to the
  * legacy mission-level path so tests/fakes that haven't migrated still
@@ -626,6 +694,14 @@ async function readSentinel(worktreePath: string, missionId: string): Promise<st
  */
 async function stripWorkerSessionArtifacts(worktreePath: string, missionId: string): Promise<void> {
   const dir = path.join(worktreePath, ".harness", "missions", missionId);
+  // UH-128: the cross-mission audit log lives OUTSIDE missions/<id>, so the
+  // per-worktree `.gitignore` (audit/) is the primary guard — but strip it
+  // here too for runners/tests that bypass the gitignore (e.g. fake gitOps
+  // whose `commitAll` is a no-op and doesn't honor ignore rules).
+  const auditEvents = path.join(worktreePath, ".harness", "audit", "events.ndjson");
+  if (await fileExists(auditEvents)) {
+    try { await rm(auditEvents, { force: true }); } catch { /* tolerated */ }
+  }
   // Codex P1 (PR #96 round 1): `runs/index.json` MUST be stripped —
   // every worker run writes it, so two workers would otherwise hit a
   // deterministic add/add or modify/modify merge conflict on a

@@ -175,20 +175,24 @@ export async function runStagedWorkflow(
         // Retain worktrees so the Verify→Fix loop below can keep using the
         // leader. Final teardown happens in the `finally` block.
         teamRun = await options.teamRunner(teamMission, root, { retainOnSuccess: true });
+        // UH-127: `passed_partial` is a non-blocking success — the integrated
+        // subset passed verification — so the staged flow treats it like
+        // `passed` and proceeds to Verify→Fix.
+        const teamSucceeded = teamRun.status === "passed" || teamRun.status === "passed_partial";
         phases.push({
           name: "Execute",
           iteration: 1,
-          status: teamRun.status === "passed" ? "passed" : teamRun.status === "blocked" ? "blocked" : "failed",
+          status: teamSucceeded ? "passed" : teamRun.status === "blocked" ? "blocked" : "failed",
           artifactPath: teamRun.integrationReportPath,
-          notes: `${teamRun.workers.length} worker(s); conflicts=${teamRun.hadConflicts ? "yes" : "no"}`,
+          notes: `${teamRun.workers.length} worker(s); conflicts=${teamRun.hadConflicts ? "yes" : "no"}${teamRun.status === "passed_partial" ? "; partial integration" : ""}`,
         });
         artifacts.integrationReport = await safeRead(teamRun.integrationReportPath);
       } catch (err) {
         phases.push({ name: "Execute", iteration: 1, status: "failed", notes: (err as Error).message });
         return finalize(mission.id, shape, phases, 0, teamRun, null, "failed");
       }
-      if (teamRun.status !== "passed") {
-        return finalize(mission.id, shape, phases, 0, teamRun, teamRun.verification, teamRun.status);
+      if (teamRun.status !== "passed" && teamRun.status !== "passed_partial") {
+        return finalize(mission.id, shape, phases, 0, teamRun, teamRun.verification, teamRun.status === "blocked" ? "blocked" : "failed");
       }
     } else {
       const execOutcome = await runSinglePhase("Execute", 1, mission, missionDir, artifacts, options);

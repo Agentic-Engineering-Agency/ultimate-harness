@@ -22,6 +22,7 @@ import {
   type VerifyMissionLike,
   type WorkerOutcome,
 } from "../src/harness/team-run.js";
+import { warnConstraintsAreAdvisory } from "../src/harness/verify.js";
 
 const execFileP = promisify(execFile);
 
@@ -117,12 +118,23 @@ describe("planTeamRun", () => {
     )).toThrow(/no workers/);
   });
 
-  test("uses integration_report_path override when provided", () => {
+  test("uses integration_report_path override when provided (relative resolves under team dir)", () => {
+    // UH-129: a RELATIVE override resolves under .harness/missions/<id>/team/
+    // to match the documented layout, not the repo root.
     const plan = planTeamRun(
       { ...mission("m1"), integration_report_path: "custom/place.md" },
       "/tmp/repo",
     );
-    expect(plan.integrationReportPath).toBe("/tmp/repo/custom/place.md");
+    expect(plan.integrationReportPath).toBe("/tmp/repo/.harness/missions/m1/team/custom/place.md");
+  });
+
+  test("uses integration_report_path override when provided (absolute is honored as-is)", () => {
+    // UH-129: an ABSOLUTE override inside the root is honored unchanged.
+    const plan = planTeamRun(
+      { ...mission("m1"), integration_report_path: "/tmp/repo/elsewhere/report.md" },
+      "/tmp/repo",
+    );
+    expect(plan.integrationReportPath).toBe("/tmp/repo/elsewhere/report.md");
   });
 
   test("rejects unsafe adapter ids", () => {
@@ -142,8 +154,18 @@ describe("planTeamRun", () => {
   });
 
   test("integration_report_path that escapes root is rejected", () => {
+    // UH-129: relative paths now resolve under teamRoot
+    // (.harness/missions/m1/team/), so the traversal fixture must climb far
+    // enough to actually escape the repo root before the guard fires.
     expect(() => planTeamRun(
-      { ...mission("m1"), integration_report_path: "../escape.md" },
+      { ...mission("m1"), integration_report_path: "../../../../../../escape.md" },
+      "/tmp/repo",
+    )).toThrow(/outside of root/);
+  });
+
+  test("absolute integration_report_path outside root is rejected", () => {
+    expect(() => planTeamRun(
+      { ...mission("m1"), integration_report_path: "/etc/escape.md" },
       "/tmp/repo",
     )).toThrow(/outside of root/);
   });
@@ -334,9 +356,11 @@ describe("runTeamMission — fake gitOps", () => {
     expect(report).toMatch(/conflict: `src\/shared\.ts`/);
   });
 
-  test("conflict + verifier passes: status is still blocked (partial integration is not pass)", async () => {
-    // Even when the partial-integration leader worktree passes verification,
-    // a conflicted worker means the overall run cannot be `passed`.
+  test("UH-127 conflict + verifier passes: partial integration is passed_partial (non-blocking), not blocked", async () => {
+    // UH-127: when M<N workers land but the integrated subset is clean and
+    // verification passes, the run is a NON-blocking `passed_partial` rather
+    // than `blocked`. backend integrates clean; frontend conflicts and is
+    // dropped; the verifier passes on the integrated result.
     const repo: FakeRepo = {
       branches: new Set(["HEAD"]),
       contents: new Map([["HEAD", new Map()]]),
@@ -365,15 +389,16 @@ describe("runTeamMission — fake gitOps", () => {
       retainOnSuccess: true,
     });
 
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("passed_partial");
     expect(result.hadConflicts).toBe(true);
-    // Verifier IS called now (was skipped pre-refactor) so reviewers can
-    // see whether the partial integration was at least viable.
     expect(result.leaderRanVerification).toBe(true);
     expect(result.verification?.status).toBe("passed");
+    // The surviving worker is integrated; the conflicted one is not.
+    expect(result.workers.find((w) => w.plan.id === "backend")!.integrated).toBe(true);
+    expect(result.workers.find((w) => w.plan.id === "frontend")!.integrated).toBe(false);
   });
 
-  test("single-worker failure: leader skips that worker's merge and overall is blocked", async () => {
+  test("UH-127 single-worker failure + verifier passes: passed_partial (surviving worker shippable)", async () => {
     const repo: FakeRepo = {
       branches: new Set(["HEAD"]),
       contents: new Map([["HEAD", new Map()]]),
@@ -400,13 +425,48 @@ describe("runTeamMission — fake gitOps", () => {
       retainOnSuccess: true,
     });
 
-    expect(result.status).toBe("blocked");
+    // UH-127: a failed worker no longer forces BLOCKED when the integrated
+    // subset verifies clean — it is a non-blocking partial success.
+    expect(result.status).toBe("passed_partial");
     expect(result.hadConflicts).toBe(true);
     const frontend = result.workers.find((w) => w.plan.id === "frontend")!;
     expect(frontend.status).toBe("failed");
     expect(frontend.merge?.note).toMatch(/skipped: worker status=failed/);
-    // Verifier runs on the partial integration so reviewers can see leader-side health.
+    expect(result.workers.find((w) => w.plan.id === "backend")!.integrated).toBe(true);
     expect(result.leaderRanVerification).toBe(true);
+  });
+
+  test("UH-127 partial integration but verifier blocked stays blocked (no false success)", async () => {
+    // Guard: passed_partial requires verification.status==='passed'. A blocked
+    // verifier on a partial integration is still BLOCKED.
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async () => { /* no-op */ } };
+    const runner = makeRunner({
+      writes: {
+        backend: { files: { "src/a.ts": "a\n" }, sentinel: "ok" },
+        frontend: { files: {}, exitCode: 7, status: "failed", sentinel: "" },
+      },
+    }, repo);
+    const verifier = async (): Promise<VerifyMissionLike> => ({
+      status: "blocked",
+      path: "/fake/verification.yaml",
+      checks_total: 1, checks_passed: 0, checks_failed: 0, checks_blocked: 1,
+      acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+    });
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      runnerFor: runner,
+      gitOps: fakeGitOps(repo, fs),
+      verifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.verification?.status).toBe("blocked");
   });
 
   test("leader-verification failure: integration succeeds but verifier returns failed", async () => {
@@ -599,6 +659,69 @@ describe("runTeamMission — fake gitOps", () => {
     const report = await readFile(result.integrationReportPath, "utf-8");
     expect(report).toMatch(/Leader merge: failed \(non-conflict\)/);
     expect(report).not.toMatch(/frontend[\s\S]*?Leader merge: clean/);
+  });
+
+  test("UH-128: worker worktree gets a .harness/.gitignore excluding audit + per-run dirs", async () => {
+    // UH-128: per-worker runtime artifacts (.harness/audit/, per-run dirs)
+    // must not bleed into the leader merge. The isolation is a worktree-local
+    // .harness/.gitignore so `commitAll`'s `git add -A` never stages them.
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async () => { /* no-op */ } };
+    const runner = makeRunner({
+      writes: {
+        backend: { files: { "src/a.ts": "a\n" }, sentinel: "ok" },
+        frontend: { files: { "src/b.ts": "b\n" }, sentinel: "ok" },
+      },
+    }, repo);
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      runnerFor: runner,
+      gitOps: fakeGitOps(repo, fs),
+      retainOnSuccess: true,
+    });
+
+    for (const w of result.workers) {
+      const gitignore = await readFile(join(w.plan.worktreePath, ".harness", ".gitignore"), "utf-8");
+      expect(gitignore).toMatch(/^audit\/$/m);
+      expect(gitignore).toMatch(/^missions\/\*\/runs\/$/m);
+    }
+  });
+
+});
+
+/* ------------------------------------------------------- constraints (UH-130) */
+
+describe("warnConstraintsAreAdvisory (UH-130)", () => {
+  test("warns once when constraints[] is non-empty", () => {
+    const calls: string[] = [];
+    const original = console.warn;
+    console.warn = (msg?: unknown) => { calls.push(String(msg)); };
+    try {
+      warnConstraintsAreAdvisory(["no new deps", "keep under 200 LoC"]);
+    } finally {
+      console.warn = original;
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatch(/ADVISORY ONLY/);
+    expect(calls[0]).toMatch(/not enforced/i);
+    expect(calls[0]).toMatch(/acceptance_criteria/);
+  });
+
+  test("is silent when constraints[] is empty or undefined", () => {
+    const calls: string[] = [];
+    const original = console.warn;
+    console.warn = (msg?: unknown) => { calls.push(String(msg)); };
+    try {
+      warnConstraintsAreAdvisory([]);
+      warnConstraintsAreAdvisory(undefined);
+    } finally {
+      console.warn = original;
+    }
+    expect(calls).toHaveLength(0);
   });
 });
 

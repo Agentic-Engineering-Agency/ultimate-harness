@@ -1407,13 +1407,27 @@ missionCmd
         retainOnSuccess: opts.retain === true,
         strategy: opts.strategy as "merge" | "cherry-pick" | "rebase",
       });
-      const label = result.status === "passed" ? "PASS" : result.status === "blocked" ? "BLOCKED" : "FAIL";
+      // UH-127: PARTIAL is a non-blocking success — M<N workers landed but the
+      // integrated subset passed verification. Surfaced distinctly from a full
+      // PASS so operators know some workers were dropped.
+      const label = result.status === "passed"
+        ? "PASS"
+        : result.status === "passed_partial"
+          ? "PARTIAL"
+          : result.status === "blocked"
+            ? "BLOCKED"
+            : "FAIL";
       console.log(`[${label}] ${missionId}`);
       console.log(`workers: ${result.workers.length}, conflicts: ${result.hadConflicts ? "yes" : "no"}, verification: ${result.verification ? result.verification.status : "not-run"}`);
       console.log(`integration-report: ${result.integrationReportPath}`);
       console.log(`retained: ${result.retained ? "yes" : "no"}`);
-      // Exit codes: passed -> 0, blocked -> 2, failed -> 1 (UH-72 review F1).
-      const exit = result.status === "passed" ? 0 : result.status === "blocked" ? 2 : 1;
+      // Exit codes: passed/passed_partial -> 0, blocked -> 2, failed -> 1
+      // (UH-72 review F1; UH-127 treats a verified partial as success).
+      const exit = result.status === "passed" || result.status === "passed_partial"
+        ? 0
+        : result.status === "blocked"
+          ? 2
+          : 1;
       process.exit(exit);
     } catch (err) {
       console.error(`[FAIL] mission run-team error:`);
