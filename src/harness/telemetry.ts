@@ -1,9 +1,13 @@
 import type { Command } from "commander";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import { performance } from "node:perf_hooks";
 
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
-const TELEMETRY_FETCH_TIMEOUT_MS = 2_000;
+
+// Telemetry is strictly best-effort: it must never block, slow, or fail a CLI
+// command. Every network path is bounded by this timeout and swallows errors.
+const CAPTURE_TIMEOUT_MS = 2000;
 
 export interface TelemetryConfig {
   enabled: boolean;
@@ -24,7 +28,10 @@ export function loadTelemetryConfig(env: NodeJS.ProcessEnv = process.env): Telem
   const enabled = mode === "posthog" || mode === "1" || mode === "true";
   return {
     enabled,
-    apiKey: env.UH_POSTHOG_API_KEY ?? env.POSTHOG_PROJECT_API_KEY,
+    // Scoped key only — no generic POSTHOG_PROJECT_API_KEY fallback, so an
+    // unrelated PostHog key already in the environment can never silently
+    // activate UH telemetry against the wrong project.
+    apiKey: env.UH_POSTHOG_API_KEY,
     host: env.UH_POSTHOG_HOST ?? DEFAULT_POSTHOG_HOST,
   };
 }
@@ -42,15 +49,12 @@ export function sanitizeCommandPath(command: Command): string {
     .join(" ");
 }
 
-export async function captureCommandOutcome(
-  config: TelemetryConfig,
-  outcome: CommandOutcome,
-  fetchImpl: typeof fetch = fetch,
-): Promise<void> {
-  if (!config.enabled || !config.apiKey) return;
-
-  const url = new URL("/capture/", config.host);
-  const payload = {
+/**
+ * Aggregate-only event body. Deliberately excludes anything identifying or
+ * sensitive: no cwd, no project root, no prompt, no agent output, no argv.
+ */
+export function buildCapturePayload(config: TelemetryConfig, outcome: CommandOutcome) {
+  return {
     api_key: config.apiKey,
     event: "uh_command_outcome",
     distinct_id: "uh-cli",
@@ -66,60 +70,103 @@ export async function captureCommandOutcome(
       os_release: os.release(),
     },
   };
+}
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TELEMETRY_FETCH_TIMEOUT_MS);
+/**
+ * In-process best-effort capture. Bounded by an abort timeout and never throws.
+ * Used directly by tests and by callers that can await a normal async flush.
+ * The CLI itself uses the exit-safe beacon below, because most commands
+ * terminate via process.exit() before an awaited capture could resolve.
+ */
+export async function captureCommandOutcome(
+  config: TelemetryConfig,
+  outcome: CommandOutcome,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (!config.enabled || !config.apiKey) return;
+
   try {
+    // URL construction is inside the try: a malformed UH_POSTHOG_HOST throws
+    // synchronously and must be swallowed like any other telemetry failure.
+    const url = new URL("/capture/", config.host);
     await fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
+      body: JSON.stringify(buildCapturePayload(config, outcome)),
+      signal: AbortSignal.timeout(CAPTURE_TIMEOUT_MS),
+      keepalive: true,
     });
   } catch {
-    // Telemetry is best-effort and must never affect CLI behavior.
-  } finally {
-    clearTimeout(timeout);
+    // best-effort: never surface telemetry failures to the user
+  }
+}
+
+// Minimal POST run in a detached child so it outlives the parent CLI's exit.
+// The URL + body are pre-serialized by the parent and passed via env.
+const BEACON_SOURCE = `
+const u = process.env.UH_BEACON_URL, b = process.env.UH_BEACON_BODY;
+if (u && b) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ${CAPTURE_TIMEOUT_MS});
+  fetch(u, { method: "POST", headers: { "content-type": "application/json" }, body: b, signal: c.signal })
+    .catch(() => {})
+    .finally(() => clearTimeout(t));
+}
+`;
+
+/**
+ * Exit-safe delivery: spawn a detached, unref'd subprocess that performs the
+ * POST after the parent process has exited.
+ *
+ * Why a subprocess and not an awaited fetch: nearly every `uh` command ends in
+ * `process.exit()`, which fires synchronously and aborts an in-flight fetch.
+ * A `process.on("exit")` handler can only run synchronous work. So we initiate
+ * the POST in a detached child (spawn returns synchronously; the child is
+ * unref'd and survives the parent), which avoids both the dropped-event problem
+ * and the process.exit() monkeypatch that would break its `never` return type.
+ */
+function sendBeacon(config: TelemetryConfig, outcome: CommandOutcome): void {
+  if (!config.enabled || !config.apiKey) return;
+  try {
+    const url = new URL("/capture/", config.host).toString();
+    const body = JSON.stringify(buildCapturePayload(config, outcome));
+    const child = spawn(process.execPath, ["-e", BEACON_SOURCE], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, UH_BEACON_URL: url, UH_BEACON_BODY: body },
+    });
+    child.unref();
+  } catch {
+    // best-effort: a spawn failure must never affect the command result
   }
 }
 
 export function installTelemetryHooks(program: Command, version: string): void {
   const config = loadTelemetryConfig();
-  let activeCommand: Command | null = null;
-  let startedAt = 0;
-  let flushPromise: Promise<void> | null = null;
+  if (!config.enabled || !config.apiKey) return;
 
-  const flushOnce = async (exitCode: number): Promise<void> => {
-    if (!activeCommand) return;
-    if (flushPromise) {
-      await flushPromise;
-      return;
-    }
-    const command = activeCommand;
-    flushPromise = captureCommandOutcome(config, {
-      command: sanitizeCommandPath(command),
-      status: exitCode === 0 ? "success" : "failed",
-      exitCode,
+  const startedAt = performance.now();
+  let commandPath = program.name();
+
+  // preAction fires before the action handler runs, so we always know which
+  // command was invoked even when the handler later calls process.exit().
+  program.hook("preAction", (_thisCommand, actionCommand) => {
+    commandPath = sanitizeCommandPath(actionCommand);
+  });
+
+  // 'exit' fires synchronously with the real exit code for BOTH process.exit(n)
+  // and natural completion. Capture the true status here and hand delivery to
+  // the detached beacon (spawn initiates synchronously, so the child survives).
+  let sent = false;
+  process.on("exit", (code) => {
+    if (sent) return;
+    sent = true;
+    sendBeacon(config, {
+      command: commandPath,
+      status: code === 0 ? "success" : "failed",
+      exitCode: code,
       durationMs: performance.now() - startedAt,
       version,
     });
-    await flushPromise;
-  };
-
-  program.hook("preAction", (_root, actionCommand) => {
-    activeCommand = actionCommand;
-    startedAt = performance.now();
-    flushPromise = null;
   });
-
-  program.hook("postAction", async () => {
-    await flushOnce(0);
-  });
-
-  // Most uh handlers call process.exit() directly, which skips Commander postAction.
-  const originalExit = process.exit.bind(process);
-  process.exit = ((code?: number | string | null | undefined) => {
-    const exitCode = typeof code === "number" ? code : 0;
-    void flushOnce(exitCode).finally(() => originalExit(exitCode));
-  }) as typeof process.exit;
 }
