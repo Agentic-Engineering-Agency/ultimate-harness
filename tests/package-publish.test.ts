@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { access, readFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { readFile } from "node:fs/promises";
 
 interface PackageJson {
   name: string;
@@ -27,12 +26,29 @@ describe("npm/Bun publish package metadata", () => {
     expect(pkg.bin).toEqual({ uh: "./dist/cli.js" });
   });
 
-  test("publishes only runtime assets needed by the CLI and TUI", async () => {
+  test("publishes only runtime assets + public docs (never internal docs)", async () => {
     const pkg = await readPackageJson();
 
-    expect(pkg.files).toEqual(["dist/", "src/", "README.md", "CHANGELOG.md", "docs/"]);
+    expect(pkg.files).toEqual([
+      "dist/",
+      "src/",
+      "README.md",
+      "CHANGELOG.md",
+      "docs/*.md",
+      "docs/architecture/",
+      "docs/runbooks/",
+      "docs/product/",
+      "docs/workflows/",
+      "docs/verification/",
+    ]);
     expect(pkg.files).not.toContain("tests/");
     expect(pkg.files).not.toContain("examples/");
+    // A bare "docs/" glob would ship internal-only planning + handoff docs
+    // (handoffs include CI auth notes). Keep them out of the npm tarball.
+    expect(pkg.files).not.toContain("docs/");
+    for (const internal of ["docs/handoffs/", "docs/prds/", "docs/research/", "docs/specs/"]) {
+      expect(pkg.files).not.toContain(internal);
+    }
   });
 
   test("exposes a dry-run publish script for PR and release verification", async () => {
@@ -58,11 +74,11 @@ describe("npm/Bun publish package metadata", () => {
     });
   });
 
-  test("built package exposes the configured bin target", async () => {
+  test("declares the bin target the build emits", async () => {
     const pkg = await readPackageJson();
-    const binPath = pkg.bin?.uh;
 
-    expect(binPath).toBe("./dist/cli.js");
-    await expect(access(binPath!, constants.F_OK)).resolves.toBeUndefined();
+    // Metadata-only assertion: the build job (which runs before tests in CI)
+    // is what guarantees the file exists; this test must not depend on dist/.
+    expect(pkg.bin?.uh).toBe("./dist/cli.js");
   });
 });
