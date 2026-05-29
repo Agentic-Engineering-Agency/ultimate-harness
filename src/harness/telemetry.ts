@@ -3,6 +3,7 @@ import os from "node:os";
 import { performance } from "node:perf_hooks";
 
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
+const TELEMETRY_FETCH_TIMEOUT_MS = 2_000;
 
 export interface TelemetryConfig {
   enabled: boolean;
@@ -66,33 +67,59 @@ export async function captureCommandOutcome(
     },
   };
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TELEMETRY_FETCH_TIMEOUT_MS);
   try {
     await fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
   } catch {
     // Telemetry is best-effort and must never affect CLI behavior.
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
 export function installTelemetryHooks(program: Command, version: string): void {
   const config = loadTelemetryConfig();
-  const startedAt = new WeakMap<Command, number>();
+  let activeCommand: Command | null = null;
+  let startedAt = 0;
+  let flushPromise: Promise<void> | null = null;
 
-  program.hook("preAction", (_root, actionCommand) => {
-    startedAt.set(actionCommand, performance.now());
-  });
-
-  program.hook("postAction", async (_root, actionCommand) => {
-    const start = startedAt.get(actionCommand) ?? performance.now();
-    await captureCommandOutcome(config, {
-      command: sanitizeCommandPath(actionCommand),
-      status: "success",
-      exitCode: 0,
-      durationMs: performance.now() - start,
+  const flushOnce = async (exitCode: number): Promise<void> => {
+    if (!activeCommand) return;
+    if (flushPromise) {
+      await flushPromise;
+      return;
+    }
+    const command = activeCommand;
+    flushPromise = captureCommandOutcome(config, {
+      command: sanitizeCommandPath(command),
+      status: exitCode === 0 ? "success" : "failed",
+      exitCode,
+      durationMs: performance.now() - startedAt,
       version,
     });
+    await flushPromise;
+  };
+
+  program.hook("preAction", (_root, actionCommand) => {
+    activeCommand = actionCommand;
+    startedAt = performance.now();
+    flushPromise = null;
   });
+
+  program.hook("postAction", async () => {
+    await flushOnce(0);
+  });
+
+  // Most uh handlers call process.exit() directly, which skips Commander postAction.
+  const originalExit = process.exit.bind(process);
+  process.exit = ((code?: number | string | null | undefined) => {
+    const exitCode = typeof code === "number" ? code : 0;
+    void flushOnce(exitCode).finally(() => originalExit(exitCode));
+  }) as typeof process.exit;
 }
