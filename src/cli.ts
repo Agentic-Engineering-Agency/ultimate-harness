@@ -32,9 +32,11 @@ import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { readFile as readFileAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js";
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
+import { installTelemetryHooks } from "./harness/telemetry.js";
 
 import {
   createSandbox,
@@ -46,7 +48,18 @@ import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 import { recordManualVerdict } from "./harness/verdict.js";
 import type { VerdictValue } from "./schema/artifacts.js";
-const VERSION = "0.0.0";
+
+function readPackageVersion(): string {
+  try {
+    const packageJsonPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as { version?: unknown };
+    return typeof parsed.version === "string" ? parsed.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+const VERSION = readPackageVersion();
 
 /**
  * Runtime dispatch table for `uh mission dry-run` and `uh mission run`.
@@ -178,6 +191,8 @@ program
   .name("uh")
   .description("Ultimate Harness CLI")
   .version(VERSION);
+
+installTelemetryHooks(program, VERSION);
 
 // uh init
 program
@@ -1734,4 +1749,4 @@ tuiCmd
     });
   });
 
-program.parse();
+await program.parseAsync();

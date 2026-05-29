@@ -26,8 +26,13 @@
     "dist/",
     "src/",
     "README.md",
+    "CHANGELOG.md",
+    "docs/*.md",
+    "docs/architecture/",
     "docs/runbooks/",
-    "docs/architecture/"
+    "docs/product/",
+    "docs/workflows/",
+    "docs/verification/"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts",
