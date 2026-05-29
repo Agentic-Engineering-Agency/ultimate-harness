@@ -1,0 +1,24 @@
+# Runtime Targets
+
+Ultimate Harness is runtime-agnostic: mission packets and verification artifacts stay stable while adapters translate a mission into each agent runtime's command or HTTP call.
+
+| Runtime | Adapter ID | Invocation Shape | Notes |
+| --- | --- | --- | --- |
+| Hermes Agent | `hermes` | Local CLI | Reference adapter. |
+| Codex CLI | `codex` | `codex exec` | Uses workspace-write sandboxing and JSON output. |
+| Hermes Proxy | `hermes-proxy` | Local HTTP endpoint | Subscription-backed OAuth route through Hermes Proxy. |
+| OpenRouter | `openrouter` | OpenAI-compatible HTTP | Requires `OPENROUTER_API_KEY`. |
+| Pi CLI | `pi` | Local CLI | Base Pi command surface. |
+| oh-my-pi | `oh-my-pi` | Local CLI | Opt-in OMP route with documented posture. |
+
+## Adapter Contracts
+
+All adapters should:
+
+- Render the same mission packet into a runtime prompt.
+- Write `runtime-session.yaml`, `events.ndjson`, `runtime-result.yaml`, `runtime-final.txt`, and `diff.patch`.
+- Respect sandbox routing unless explicitly bypassed.
+- Redact or avoid secrets in persisted artifacts.
+- Support `dry-run` where possible so CI and reviewers can inspect command shape safely.
+
+See [`architecture/runtime-adapter-contract.md`](./architecture/runtime-adapter-contract.md) for the detailed protocol.

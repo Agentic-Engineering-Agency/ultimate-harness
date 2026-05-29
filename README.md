@@ -39,8 +39,15 @@ Cross-cutting protocols every adapter participates in:
 
 ## Documentation
 
-Start with the [vision](./docs/VISION.md), the [documentation home](./docs/README.md), and the [roadmap](./docs/ROADMAP.md). Direct links:
+Start with the [quickstart](./docs/quickstart.md), the [configuration guide](./docs/configuration.md), the [vision](./docs/VISION.md), the [documentation home](./docs/README.md), and the [roadmap](./docs/ROADMAP.md). Direct links:
 
+- [Quickstart](./docs/quickstart.md)
+- [Configuration](./docs/configuration.md)
+- [Runtime targets](./docs/runtime-targets.md)
+- [TUI architecture](./docs/architecture/tui.md)
+- [Plugin development](./docs/plugin-development.md)
+- [Optional telemetry](./docs/telemetry.md)
+- [Troubleshooting](./docs/troubleshooting.md)
 - [VISION — what UH is, who it's for, and what we won't accept](./docs/VISION.md)
 - [Glossary](./docs/glossary.md)
 - [Product requirements](./docs/product/prd.md)
@@ -116,7 +123,7 @@ node dist/cli.js --help     # built CLI
 npm link && uh --help       # local bin install after build
 ```
 
-This package is currently private and intended for local development rather than publishing.
+The package is public. Release readiness is checked with `bun run build`, `bun run test`, plugin checks, and `bun run publish:dry-run`.
 
 ## Mission-level runtime overrides
 
