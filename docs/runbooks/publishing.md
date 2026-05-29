@@ -16,6 +16,9 @@ bun install --frozen-lockfile
 bun run typecheck
 bun run build
 bun run test
+python -m pip install -r apps/hermes-plugin/dashboard/requirements-dev.txt
+bun run plugin:typecheck
+bun run plugin:test
 bun run publish:dry-run
 ```
 
@@ -28,7 +31,7 @@ bun run publish:dry-run
 | Job | Trigger | Behavior |
 |---|---|---|
 | `dry-run` | PRs to `dev`/`main`, pushes, releases, manual dispatch | installs, builds, runs package metadata tests, then runs `bun run publish:dry-run` |
-| `publish` | push to `main`, `v*` tag, GitHub release, or manual dispatch with `publish=true` | rebuilds and runs `bun publish --access public --tolerate-republish` |
+| `publish` | `v*` tag, GitHub release, or manual dispatch with `publish=true` | rebuilds and runs `npm publish --access public` after an idempotency check |
 
 The publish job requires a repository secret named `NPM_CONFIG_TOKEN`. Bun respects this env var for automated registry auth.
 
@@ -40,4 +43,4 @@ Create an npm automation token with publish rights for the `@agenticengineeringa
 gh secret set NPM_CONFIG_TOKEN --repo Agentic-Engineering-Agency/ultimate-harness
 ```
 
-Do not commit npm tokens into the repository.
+Do not commit npm tokens into the repository. Do not publish from a local shell unless a maintainer explicitly asks for that release path.
