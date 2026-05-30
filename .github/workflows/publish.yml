@@ -32,7 +32,7 @@ permissions:
 jobs:
   dry-run:
     name: Pack + publish dry-run
-    runs-on: depot-ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -66,7 +66,7 @@ jobs:
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
       github.event_name == 'release' ||
       (github.event_name == 'workflow_dispatch' && inputs.publish)
-    runs-on: depot-ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     env:
       NPM_CONFIG_TOKEN: ${{ secrets.NPM_CONFIG_TOKEN }}
