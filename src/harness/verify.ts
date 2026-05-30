@@ -96,6 +96,12 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     throw new Error(`Mission id mismatch: expected ${missionId}, got ${mission.id}`);
   }
 
+  // UH-130: `constraints[]` is accepted on the mission packet but the harness
+  // never enforces it — only `verification.required_checks[].command` and
+  // `acceptance_criteria[].check_command` are executed. Warn loudly so users
+  // are not misled into believing a stated constraint is being checked.
+  warnConstraintsAreAdvisory(mission.constraints);
+
   await appendMissionEvent(eventsPath, {
     type: "verification.started",
     mission_id: missionId,
@@ -379,6 +385,23 @@ export async function findBoundSandbox(
     return { id: candidate.id, path: abs, backend: candidate.backend };
   }
   return null;
+}
+
+/**
+ * UH-130: surface that mission `constraints[]` are advisory-only. The harness
+ * runs `verification.required_checks` and `acceptance_criteria.check_command`,
+ * but it does NOT enforce free-text `constraints`. Emit a single, clear warning
+ * at verify time when any are declared so operators aren't misled. Exported for
+ * reuse at run time and so tests can assert the wording without spinning up a
+ * full verify.
+ */
+export function warnConstraintsAreAdvisory(constraints: readonly string[] | undefined): void {
+  if (!Array.isArray(constraints) || constraints.length === 0) return;
+  console.warn(
+    `[uh] WARNING: ${constraints.length} mission constraint(s) are ADVISORY ONLY and are NOT enforced by the harness. ` +
+    `Only verification.required_checks[].command and acceptance_criteria[].check_command are executed. ` +
+    `Encode anything you need enforced as an acceptance criterion or required check.`,
+  );
 }
 
 async function readMissionAtLocation(missionPath: string): Promise<MissionDocument> {

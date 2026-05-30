@@ -1,8 +1,10 @@
 # Test-only dependencies for the Hermes dashboard plugin backend.
 # Runtime deps (fastapi, pyyaml) are provided by the Hermes dashboard process
 # that hosts the plugin; tests need them locally too.
-fastapi
-PyYAML
-httpx
-pytest
-pytest-asyncio
+# Pinned to stable versions to keep CI deterministic. pytest-asyncio in
+# particular MUST stay pinned: its asyncio_mode default changed across minors.
+fastapi==0.115.6
+PyYAML==6.0.2
+httpx==0.28.1
+pytest==8.3.4
+pytest-asyncio==0.24.0
