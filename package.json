@@ -1,6 +1,6 @@
 {
   "name": "@agenticengineeringagency/ultimate-harness",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Runtime-agnostic software-development harness for agentic engineering work.",
   "type": "module",
   "bin": {
@@ -26,8 +26,13 @@
     "dist/",
     "src/",
     "README.md",
+    "CHANGELOG.md",
+    "docs/*.md",
+    "docs/architecture/",
     "docs/runbooks/",
-    "docs/architecture/"
+    "docs/product/",
+    "docs/workflows/",
+    "docs/verification/"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts",

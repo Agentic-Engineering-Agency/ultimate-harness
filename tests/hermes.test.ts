@@ -472,6 +472,7 @@ describe("collectHermesSession", () => {
       session_id_passthrough: false,
       errors: [],
       mission: { schema_version: "uh.mission.v0", id: "hermes-sentinel" } as unknown as HermesRunPlan["mission"],
+      honchoMemoryEnabled: true,
     };
 
     const out = await collectHermesSession({
@@ -528,6 +529,7 @@ describe("collectHermesSession", () => {
       session_id_passthrough: false,
       errors: [],
       mission: { schema_version: "uh.mission.v0", id: "hermes-no-sentinel" } as unknown as HermesRunPlan["mission"],
+      honchoMemoryEnabled: true,
     };
 
     await collectHermesSession({

@@ -28,9 +28,11 @@ import {
 import {
   clearCachedMemory,
   enqueueExchangeSave,
+  enqueueMemorySave,
   flushPendingHonchoSaves,
   getCachedMemoryBlock,
   refreshMemoryCache,
+  searchHonchoMemory,
 } from "./memory.js";
 
 export {
@@ -206,5 +208,93 @@ export const recordMissionExchange = async (
     await enqueueExchangeSave(handles, prompt, finalMessage);
   } catch (err) {
     warn(`memory save failed for ${options.missionId ?? "mission"}`, err);
+  }
+};
+
+// --- UH-137: honcho_search / honcho_remember mission-available tools ---
+//
+// MECHANISM (be honest about it): UH spawns each runtime as a subprocess CLI
+// (omp/codex/...) and does NOT expose an MCP tool-calling channel the runtime
+// can invoke mid-mission. So these are NOT model-callable MCP tools — they are
+// HARNESS-SIDE operations built on the same Honcho client as enrich/record,
+// surfaced through this module's memory hook. They share the exact posture as
+// the rest of the surface: disabled config -> no-op; missing key -> throws
+// HonchoConfigError; network failure -> stderr warning + graceful degradation
+// (never fails the mission).
+
+export interface ToolOptions {
+  /** Working directory used to derive the Honcho session key. */
+  cwd: string;
+  /** Stable identifier of the mission run, used in log messages only. */
+  missionId?: string;
+}
+
+/**
+ * `honcho_search(query)` — return relevant prior context/memories.
+ *
+ * Returns an array of text snippets (possibly empty). Returns `[]` when Honcho
+ * is disabled, has nothing relevant, or the network blips. Throws
+ * `HonchoConfigError` only on operator misconfiguration (enabled + no key).
+ */
+export const honchoSearch = async (
+  query: string,
+  options: ToolOptions,
+): Promise<string[]> => {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  let handles: HonchoHandles | null;
+  try {
+    handles = await ensureHandles(options.cwd);
+  } catch (err) {
+    if (err instanceof HonchoConfigError) {
+      throw err;
+    }
+    warn(`bootstrap failed; honcho_search returned no results for ${options.missionId ?? "mission"}`, err);
+    return [];
+  }
+  if (!handles) {
+    return [];
+  }
+
+  try {
+    return await searchHonchoMemory(handles, trimmed);
+  } catch (err) {
+    warn(`honcho_search failed for ${options.missionId ?? "mission"}`, err);
+    return [];
+  }
+};
+
+/**
+ * `honcho_remember(content)` — persist a free-form memory.
+ *
+ * Queued and serialized through the same save chain as
+ * {@link recordMissionExchange}; call {@link flushPendingHonchoSaves} before
+ * process exit to make sure the write lands. No-ops when Honcho is disabled or
+ * the content is empty/oversized. Throws `HonchoConfigError` only on operator
+ * misconfiguration; network failures are logged and swallowed.
+ */
+export const honchoRemember = async (
+  content: string,
+  options: ToolOptions,
+): Promise<void> => {
+  let handles: HonchoHandles | null;
+  try {
+    handles = await ensureHandles(options.cwd);
+  } catch (err) {
+    if (err instanceof HonchoConfigError) {
+      throw err;
+    }
+    warn(`bootstrap failed; honcho_remember dropped for ${options.missionId ?? "mission"}`, err);
+    return;
+  }
+  if (!handles) {
+    return;
+  }
+
+  try {
+    await enqueueMemorySave(handles, content);
+  } catch (err) {
+    warn(`honcho_remember failed for ${options.missionId ?? "mission"}`, err);
   }
 };

@@ -72,6 +72,13 @@ export type HermesRunPlan = {
   session_id_passthrough: boolean;
   errors: string[];
   mission: MissionDocument;
+  /**
+   * UH-137 — resolved Honcho opt-out for this mission. `false` when
+   * `runtime_config.honcho_memory: false`; otherwise `true`. When `false`,
+   * the record path skips `recordMissionExchange` just as the planner skipped
+   * `loadHonchoMemoryBlock`.
+   */
+  honchoMemoryEnabled: boolean;
 };
 
 /**
@@ -265,12 +272,19 @@ const hermesRuntimeChecker: AdapterRuntimeChecker = async (manifest) => {
 runtimeRegistry.register("hermes", hermesRuntimeChecker);
 
 /**
- * Hermes has no runtime-specific runtime_config keys today. Registering a
- * strict empty schema ensures that any future typo or accidental key in
- * `config.runtime_config:` for hermes manifests fails fast instead of being
- * silently dropped.
+ * Hermes has no runtime-specific runtime_config keys today beyond the UH-137
+ * `honcho_memory` opt-out. The strict schema ensures that any other typo or
+ * accidental key in `config.runtime_config:` for hermes manifests fails fast
+ * instead of being silently dropped.
  */
-export const HermesRuntimeConfigSchema = z.object({}).strict();
+export const HermesRuntimeConfigSchema = z
+  .object({
+    // UH-137: per-mission Honcho opt-out. Omitted/true -> Honcho memory
+    // enrich, record, and the honcho_search/honcho_remember tools run when
+    // Honcho env is configured. false -> all Honcho activity is skipped.
+    honcho_memory: z.boolean().optional(),
+  })
+  .strict();
 export type HermesRuntimeConfig = z.infer<typeof HermesRuntimeConfigSchema>;
 registerRuntimeConfigSchema("hermes", HermesRuntimeConfigSchema);
 
@@ -364,11 +378,16 @@ export async function planHermesRun(root: string, missionPath: string, options: 
     ...(adapter.config?.runtime_config ?? {}),
     ...mergeRuntimeConfigOverrides(mission, options.extraRuntimeConfigOverrides),
   };
+  let runtimeConfig: HermesRuntimeConfig;
   try {
-    HermesRuntimeConfigSchema.parse(mergedRuntimeConfig);
+    runtimeConfig = HermesRuntimeConfigSchema.parse(mergedRuntimeConfig);
   } catch (e) {
     throw new Error(`Mission runtime_config_overrides validation failed: ${(e as Error).message}`);
   }
+  // UH-137: `runtime_config.honcho_memory: false` disables ALL Honcho activity
+  // for this mission (enrich here + record later). Default ON; the
+  // honcho-memory extension itself no-ops when Honcho env is not configured.
+  const honchoMemoryEnabled = runtimeConfig.honcho_memory !== false;
 
   const defaultConfig: z.infer<typeof AdapterConfigSchema> = {
     cli_command: "hermes",
@@ -386,7 +405,9 @@ export async function planHermesRun(root: string, missionPath: string, options: 
 
   const ctx = buildDispatchContext(mission, workflow);
   const basePrompt = renderPrompt(ctx);
-  ctx.memoryBlock = (await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id })) ?? undefined;
+  ctx.memoryBlock = honchoMemoryEnabled
+    ? (await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id })) ?? undefined
+    : undefined;
   const prompt = renderPrompt(ctx);
   const args = [
     "chat",
@@ -412,6 +433,7 @@ export async function planHermesRun(root: string, missionPath: string, options: 
     session_id_passthrough: config.pass_session_id,
     errors,
     mission,
+    honchoMemoryEnabled,
   };
 }
 

@@ -10,6 +10,8 @@ import {
   flushPendingHonchoSaves,
   setHonchoClientFactory,
   resetHonchoExtensionForTests,
+  honchoSearch,
+  honchoRemember,
   HonchoConfigError,
 } from "../src/extensions/honcho-memory/index.js";
 import {
@@ -43,6 +45,10 @@ interface StubState {
   contextResponse: HonchoSessionContext;
   contextError?: Error;
   addMessagesError?: Error;
+  // UH-137 — search tool stub state.
+  searchQueries: { query: string; limit?: number }[];
+  searchResponse: { content?: string | null }[];
+  searchError?: Error;
 }
 
 const makeStub = (): { state: StubState; factory: () => HonchoClient } => {
@@ -56,6 +62,8 @@ const makeStub = (): { state: StubState; factory: () => HonchoClient } => {
       peerRepresentation: "user profile content",
       summary: { content: "project summary content" },
     },
+    searchQueries: [],
+    searchResponse: [],
   };
 
   const makePeer = (id: string): HonchoPeer => ({
@@ -79,6 +87,11 @@ const makeStub = (): { state: StubState; factory: () => HonchoClient } => {
         const meta = m as unknown as { __peer: string; __text: string };
         state.messages.push({ peer: meta.__peer, text: meta.__text });
       }
+    },
+    search: async (query, opts) => {
+      state.searchQueries.push({ query, limit: opts?.limit });
+      if (state.searchError) throw state.searchError;
+      return state.searchResponse;
     },
   };
 
@@ -364,6 +377,227 @@ describe("recordMissionExchange", () => {
 
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe("honcho_search / honcho_remember tools (UH-137)", () => {
+  test("honchoSearch returns [] when extension is disabled", async () => {
+    process.env.HONCHO_ENABLED = "false";
+    const out = await honchoSearch("anything", { cwd: process.cwd() });
+    expect(out).toEqual([]);
+  });
+
+  test("honchoSearch returns [] for an empty query without touching the client", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    const { state, factory } = makeStub();
+    setHonchoClientFactory(factory);
+
+    const out = await honchoSearch("   ", { cwd: process.cwd() });
+    expect(out).toEqual([]);
+    expect(state.searchQueries).toHaveLength(0);
+  });
+
+  test("honchoSearch returns trimmed snippets and honors searchLimit", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    process.env.HONCHO_SEARCH_LIMIT = "3";
+    const { state, factory } = makeStub();
+    state.searchResponse = [
+      { content: "  first hit  " },
+      { content: "" },
+      { content: null },
+      { content: "second hit" },
+    ];
+    setHonchoClientFactory(factory);
+
+    const out = await honchoSearch("how does X work", {
+      cwd: process.cwd(),
+      missionId: "M-search",
+    });
+    expect(out).toEqual(["first hit", "second hit"]);
+    expect(state.searchQueries).toEqual([{ query: "how does X work", limit: 3 }]);
+  });
+
+  test("honchoSearch truncates snippets to toolPreviewLength", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    process.env.HONCHO_TOOL_PREVIEW_LENGTH = "5";
+    const { state, factory } = makeStub();
+    state.searchResponse = [{ content: "abcdefghij" }];
+    setHonchoClientFactory(factory);
+
+    const out = await honchoSearch("q", { cwd: process.cwd() });
+    expect(out).toEqual(["abcde"]);
+  });
+
+  test("honchoSearch degrades to [] on network failure and warns", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { state, factory } = makeStub();
+    state.searchError = new Error("search boom");
+    setHonchoClientFactory(factory);
+
+    const out = await honchoSearch("q", { cwd: process.cwd(), missionId: "M-search-fail" });
+    expect(out).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  test("honchoSearch fail-fast surfaces HonchoConfigError when key missing", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    delete process.env.HONCHO_API_KEY;
+    await expect(
+      honchoSearch("q", { cwd: process.cwd() }),
+    ).rejects.toBeInstanceOf(HonchoConfigError);
+  });
+
+  test("honchoRemember no-ops when extension is disabled", async () => {
+    process.env.HONCHO_ENABLED = "false";
+    await honchoRemember("a memory", { cwd: process.cwd() });
+    await flushPendingHonchoSaves();
+    // No throw, no calls — pass.
+  });
+
+  test("honchoRemember persists content attributed to the user peer", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    process.env.HONCHO_PEER_NAME = "alice";
+    const { state, factory } = makeStub();
+    setHonchoClientFactory(factory);
+
+    await honchoRemember("remember this fact", {
+      cwd: process.cwd(),
+      missionId: "M-remember",
+    });
+    await flushPendingHonchoSaves();
+
+    expect(state.messages).toEqual([{ peer: "alice", text: "remember this fact" }]);
+  });
+
+  test("honchoRemember skips empty/oversized content", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    process.env.HONCHO_MAX_MESSAGE_LENGTH = "5";
+    const { state, factory } = makeStub();
+    setHonchoClientFactory(factory);
+
+    await honchoRemember("   ", { cwd: process.cwd() });
+    await honchoRemember("way too long to keep", { cwd: process.cwd() });
+    await flushPendingHonchoSaves();
+
+    expect(state.messages).toEqual([]);
+  });
+
+  test("honchoRemember save failure does not throw and is logged", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { state, factory } = makeStub();
+    state.addMessagesError = new Error("write boom");
+    setHonchoClientFactory(factory);
+
+    await honchoRemember("a memory", { cwd: process.cwd(), missionId: "M-remember-fail" });
+    await flushPendingHonchoSaves();
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe("per-mission opt-out runtime_config.honcho_memory (UH-137)", () => {
+  /**
+   * Build an oh-my-pi adapter + mission fixture, optionally setting
+   * `runtime_config.honcho_memory`. Returns the mission path and root.
+   */
+  const buildFixture = async (honchoMemory: boolean | undefined): Promise<{ root: string; missionPath: string }> => {
+    const root = await mkdtemp(join(tmpdir(), "uh-honcho-optout-"));
+    const adapterDir = join(root, ".harness", "adapters");
+    await mkdir(adapterDir, { recursive: true });
+    const honchoLine =
+      honchoMemory === undefined ? "" : `\n    honcho_memory: ${honchoMemory}`;
+    await writeFile(
+      join(adapterDir, "oh-my-pi.yaml"),
+      `schema_version: uh.adapter.v0\nid: oh-my-pi\nname: oh-my-pi\nruntime: oh-my-pi\ncapabilities:\n  - cli-execution\nstatus: experimental\nconfig:\n  cli_command: omp\n  default_toolsets: []\n  default_provider: ""\n  default_model: ""\n  worktree_mode: false\n  pass_session_id: false\n  runtime_config:\n    mode: json\n    thinking: ""\n    allow_extensions: false\n    allow_skills: false${honchoLine}\n`,
+      "utf-8",
+    );
+    const missionDir = join(root, ".harness", "missions", "M-optout-test");
+    await mkdir(missionDir, { recursive: true });
+    const missionPath = join(missionDir, "mission.yaml");
+    await writeFile(
+      missionPath,
+      `schema_version: uh.mission.v0\nid: M-optout-test\nname: Opt-out test\ndescription: Verify honcho_memory opt-out gating.\nworkflow_profile: default\nissues: []\nread_first: []\nexpected_artifacts: []\nverification:\n  checks: []\n`,
+      "utf-8",
+    );
+    return { root, missionPath };
+  };
+
+  test("honcho_memory:false skips enrich (no [Persistent memory], no client search)", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    const { state, factory } = makeStub();
+    setHonchoClientFactory(factory);
+
+    const { root, missionPath } = await buildFixture(false);
+    try {
+      const plan = await planOhMyPiRun(root, missionPath);
+      expect(plan.honchoMemoryEnabled).toBe(false);
+      expect(plan.prompt).not.toContain("[Persistent memory]");
+      expect(plan.prompt).toBe(plan.basePrompt);
+      // No bootstrap, no context fetch — Honcho was never touched.
+      expect(state.peerIds).toHaveLength(0);
+      expect(state.contextRequests).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("honcho_memory omitted defaults ON (enrich runs)", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    const { state, factory } = makeStub();
+    setHonchoClientFactory(factory);
+
+    const { root, missionPath } = await buildFixture(undefined);
+    try {
+      const plan = await planOhMyPiRun(root, missionPath);
+      expect(plan.honchoMemoryEnabled).toBe(true);
+      expect(plan.prompt).toContain("[Persistent memory]");
+      expect(state.contextRequests).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("honcho_memory:true keeps enrich ON", async () => {
+    process.env.HONCHO_ENABLED = "true";
+    process.env.HONCHO_API_KEY = "hch-test";
+    const { factory } = makeStub();
+    setHonchoClientFactory(factory);
+
+    const { root, missionPath } = await buildFixture(true);
+    try {
+      const plan = await planOhMyPiRun(root, missionPath);
+      expect(plan.honchoMemoryEnabled).toBe(true);
+      expect(plan.prompt).toContain("[Persistent memory]");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-boolean honcho_memory fails strict validation", async () => {
+    // The bad value sits in the adapter manifest's runtime_config, so the
+    // strict per-runtime schema rejects it at manifest-load (fail-fast) with a
+    // message naming the offending key.
+    const { root, missionPath } = await buildFixture("yes" as unknown as boolean);
+    try {
+      await expect(planOhMyPiRun(root, missionPath)).rejects.toThrow(
+        /honcho_memory: Invalid input: expected boolean/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -54,6 +54,24 @@ export function usageFromOpenAI(usage: unknown, model?: string): RuntimeUsage | 
   return result;
 }
 
+/**
+ * Extract real usage from an Anthropic Messages-API `usage` object
+ * (`{ input_tokens, output_tokens }`). Returns null when the shape is absent or
+ * carries no token counts so callers can fall back to {@link estimateUsage}.
+ */
+export function usageFromAnthropic(usage: unknown, model?: string): RuntimeUsage | null {
+  if (!usage || typeof usage !== "object") return null;
+  const u = usage as Record<string, unknown>;
+  const input = typeof u.input_tokens === "number" ? u.input_tokens : undefined;
+  const output = typeof u.output_tokens === "number" ? u.output_tokens : undefined;
+  if (input === undefined && output === undefined) return null;
+  const i = input ?? 0;
+  const o = output ?? 0;
+  const result: RuntimeUsage = { input_tokens: i, output_tokens: o, total_tokens: i + o, source: "runtime" };
+  if (model) result.model = model;
+  return result;
+}
+
 /** Build a `runtime.usage` NDJSON event payload. */
 export function buildUsageEvent(
   runtime: string,

@@ -26,13 +26,58 @@ points in their lifecycle:
 
 ```
 enrichMissionPrompt(prompt, { cwd, missionId }): Promise<string>
+loadHonchoMemoryBlock({ cwd, missionId }): Promise<string | null>
 recordMissionExchange(prompt, finalMessage, { cwd, missionId }): Promise<void>
 flushPendingHonchoSaves(): Promise<void>
 resolveHonchoMemoryConfig(): Promise<HonchoMemoryConfig>
+
+// UH-137 mission-available tools (see "Mission tools" below):
+honchoSearch(query, { cwd, missionId }): Promise<string[]>
+honchoRemember(content, { cwd, missionId }): Promise<void>
 ```
 
-The first cut wires `oh-my-pi`; `codex` and `hermes` follow the same
-contract once smoke-tested.
+All four runtime adapters (`oh-my-pi`, `codex`, `pi`, `hermes`) wire the
+same contract: `loadHonchoMemoryBlock` during plan, `recordMissionExchange`
++ `flushPendingHonchoSaves` after the final message.
+
+## Mission tools: `honcho_search` / `honcho_remember` (UH-137)
+
+> **Mechanism — read this before assuming these are MCP tools.** UH spawns
+> each runtime as a subprocess CLI (`omp`, `codex`, …) and does **not** open
+> an MCP tool-calling channel the runtime can invoke mid-mission. So
+> `honcho_search` and `honcho_remember` are **harness-side operations**, not
+> model-callable MCP tools. They are built on the same Honcho client and
+> surfaced through this module's memory hook — `honchoSearch` performs a
+> semantic `session.search`, `honchoRemember` persists a free-form memory via
+> the same sequenced save queue as `recordMissionExchange`. A true
+> model-invocable tool-calling layer would require UH to expose MCP tools to
+> the spawned runtime; that is out of scope here and remains a follow-up.
+
+`honchoSearch(query)` returns up to `searchLimit` text snippets (each
+truncated to `toolPreviewLength` chars); `honchoRemember(content)` queues a
+single user-peer message (skipping empty / oversized content). Both share the
+extension's posture: disabled config → no-op (`[]` / nothing saved); enabled
+config with a missing key → throws `HonchoConfigError`; network failure →
+stderr warning + graceful degradation (never fails the mission).
+
+## Per-mission opt-out: `runtime_config.honcho_memory` (UH-137)
+
+Each Honcho-aware adapter's strict `*RuntimeConfigSchema` accepts an optional
+`honcho_memory: boolean`:
+
+- **omitted / `true`** — Honcho activity runs when the Honcho env is
+  configured (default ON).
+- **`false`** — the adapter short-circuits **all** Honcho activity for that
+  mission: no enrich (`loadHonchoMemoryBlock` is skipped, so no
+  `[Persistent memory]` block and no client bootstrap), no
+  `recordMissionExchange`, and the `honcho_search` / `honcho_remember` tools
+  return no-ops.
+
+Gating happens at the adapter call sites. The planner resolves
+`honchoMemoryEnabled = runtime_config.honcho_memory !== false` and carries it
+on the run plan; the record path checks `plan.honchoMemoryEnabled` before
+touching Honcho. Because the schemas are strict, a non-boolean value (e.g.
+`honcho_memory: "yes"`) fails fast at validation.
 
 ## Lifecycle mapping (pi -> UH)
 
@@ -136,7 +181,15 @@ no startup cost.
 
 ## Open follow-ups
 
-- `codex` and `hermes` adapter wiring (UH-NN).
-- Runtime-config opt-out per mission (`runtime_config.honcho_memory: false`).
-- `honcho_search` / `honcho_remember` exposed to missions as MCP tools.
+- Expose `honcho_search` / `honcho_remember` as **true model-invocable MCP
+  tools** (today they are harness-side operations — see "Mission tools"
+  above). This needs UH to open an MCP tool-calling channel to the spawned
+  runtime.
 - Replay/recall hooks for the verification phase.
+
+## Done
+
+- `oh-my-pi`, `codex`, `pi`, and `hermes` adapter wiring.
+- Runtime-config opt-out per mission (`runtime_config.honcho_memory: false`) —
+  UH-137.
+- `honcho_search` / `honcho_remember` as harness-side operations — UH-137.

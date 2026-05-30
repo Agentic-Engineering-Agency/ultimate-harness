@@ -2,6 +2,12 @@
   "title": "Ultimate Harness",
   "pages": [
     "index",
+    "quickstart",
+    "configuration",
+    "runtime-targets",
+    "telemetry",
+    "troubleshooting",
+    "plugin-development",
     "roadmap",
     "glossary",
     "---Product---",

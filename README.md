@@ -19,7 +19,7 @@ The goal is to combine proven patterns from specification-driven development, ag
 
 ## Current status
 
-UH ships an end-to-end CLI with a schema-backed artifact lifecycle and six wired adapters (`hermes`, `codex`, `hermes-proxy`, `openrouter`, `pi`, `oh-my-pi` — all active). Sandboxes support `git-worktree` (default) and `directory` backends, plus a `container` execution-isolation backend gated through OpenSandbox (v0.8.0). Latest release: **v0.8.0** on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness). See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
+UH ships an end-to-end CLI with a schema-backed artifact lifecycle and seven wired adapters: `hermes`, `codex`, `hermes-proxy`, `openrouter`, `pi`, `oh-my-pi` (all active) plus a native `anthropic` adapter (experimental, v0.9.0). Sandboxes support `git-worktree` (default) and `directory` backends, plus a `container` execution-isolation backend gated through OpenSandbox (v0.8.0). Latest release: **v0.9.0** on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness). See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 | Adapter | Status | Notes |
 |---|---|---|
@@ -29,6 +29,7 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and six wired
 | `hermes-proxy` | active | HTTP client targeting a local `hermes proxy` instance (Hermes Agent ≥ 0.14.0). Officially sanctioned OAuth-backed subscription routing — replaces the OMP stealth path. See [`docs/architecture/adapter-hermes-proxy.md`](./docs/architecture/adapter-hermes-proxy.md) and [`docs/runbooks/hermes-proxy-setup.md`](./docs/runbooks/hermes-proxy-setup.md). |
 | `openrouter` | active | OpenAI-compat HTTP client for [openrouter.ai](https://openrouter.ai) — the cheapest pay-per-token routing target. API key via `OPENROUTER_API_KEY` (never the manifest); a missing key makes `uh adapter check openrouter` degrade gracefully. See [`docs/runbooks/openrouter-setup.md`](./docs/runbooks/openrouter-setup.md). |
 | `pi` | active | Drives the vanilla `pi` agent CLI (`pi --print --mode json --no-session`) — the base CLI that oh-my-pi extends. `config.cli_command` overridable. See [`docs/runbooks/pi-setup.md`](./docs/runbooks/pi-setup.md). |
+| `anthropic` | experimental | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY` (env-only, never the manifest); a missing key makes `uh adapter check anthropic` degrade gracefully. Shipped v0.9.0 (#214); graduation to `active` pending live-smoke. |
 
 Cross-cutting protocols every adapter participates in:
 
@@ -39,8 +40,15 @@ Cross-cutting protocols every adapter participates in:
 
 ## Documentation
 
-Start with the [vision](./docs/VISION.md), the [documentation home](./docs/README.md), and the [roadmap](./docs/ROADMAP.md). Direct links:
+Start with the [quickstart](./docs/quickstart.md), the [configuration guide](./docs/configuration.md), the [vision](./docs/VISION.md), the [documentation home](./docs/README.md), and the [roadmap](./docs/ROADMAP.md). Direct links:
 
+- [Quickstart](./docs/quickstart.md)
+- [Configuration](./docs/configuration.md)
+- [Runtime targets](./docs/runtime-targets.md)
+- [TUI architecture](./docs/architecture/tui.md)
+- [Plugin development](./docs/plugin-development.md)
+- [Optional telemetry](./docs/telemetry.md)
+- [Troubleshooting](./docs/troubleshooting.md)
 - [VISION — what UH is, who it's for, and what we won't accept](./docs/VISION.md)
 - [Glossary](./docs/glossary.md)
 - [Product requirements](./docs/product/prd.md)
@@ -95,7 +103,7 @@ uh validate --all-missions
 # Render the runtime invocation without launching.
 uh mission dry-run .harness/missions/m1-example/mission.yaml --runtime hermes
 
-# Execute the mission. --runtime accepts: hermes | codex | hermes-proxy | openrouter | pi | oh-my-pi.
+# Execute the mission. --runtime accepts: hermes | codex | hermes-proxy | openrouter | pi | oh-my-pi | anthropic.
 uh mission run .harness/missions/m1-example/mission.yaml --runtime hermes
 
 # Run the mission's declared verification checks.
@@ -116,7 +124,7 @@ node dist/cli.js --help     # built CLI
 npm link && uh --help       # local bin install after build
 ```
 
-This package is currently private and intended for local development rather than publishing.
+The package is public. Release readiness is checked with `bun run build`, `bun run test`, plugin checks, and `bun run publish:dry-run`.
 
 ## Mission-level runtime overrides
 

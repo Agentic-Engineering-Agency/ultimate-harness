@@ -13,6 +13,7 @@ import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
 import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { dryRunOpenRouter, runOpenRouter } from "./adapters/openrouter.js";
+import { dryRunAnthropic, runAnthropic } from "./adapters/anthropic.js";
 import { dryRunPi, runPi } from "./adapters/pi.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
@@ -32,9 +33,11 @@ import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { readFile as readFileAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js";
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
+import { installTelemetryHooks } from "./harness/telemetry.js";
 
 import {
   createSandbox,
@@ -46,7 +49,18 @@ import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 import { recordManualVerdict } from "./harness/verdict.js";
 import type { VerdictValue } from "./schema/artifacts.js";
-const VERSION = "0.0.0";
+
+function readPackageVersion(): string {
+  try {
+    const packageJsonPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as { version?: unknown };
+    return typeof parsed.version === "string" ? parsed.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+const VERSION = readPackageVersion();
 
 /**
  * Runtime dispatch table for `uh mission dry-run` and `uh mission run`.
@@ -94,6 +108,7 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
   "oh-my-pi": { dryRun: dryRunOhMyPi, run: (root, missionPath, opts) => runOhMyPi(root, missionPath, opts), surfaceBlocked: true },
   "hermes-proxy": { dryRun: dryRunHermesProxy, run: (root, missionPath, opts) => runHermesProxy(root, missionPath, opts), surfaceBlocked: true },
   openrouter: { dryRun: dryRunOpenRouter, run: (root, missionPath, opts) => runOpenRouter(root, missionPath, opts), surfaceBlocked: true },
+  anthropic: { dryRun: dryRunAnthropic, run: (root, missionPath, opts) => runAnthropic(root, missionPath, opts), surfaceBlocked: true },
   pi: { dryRun: dryRunPi, run: (root, missionPath, opts) => runPi(root, missionPath, opts), surfaceBlocked: true },
 };
 
@@ -178,6 +193,8 @@ program
   .name("uh")
   .description("Ultimate Harness CLI")
   .version(VERSION);
+
+installTelemetryHooks(program, VERSION);
 
 // uh init
 program
@@ -1392,13 +1409,27 @@ missionCmd
         retainOnSuccess: opts.retain === true,
         strategy: opts.strategy as "merge" | "cherry-pick" | "rebase",
       });
-      const label = result.status === "passed" ? "PASS" : result.status === "blocked" ? "BLOCKED" : "FAIL";
+      // UH-127: PARTIAL is a non-blocking success — M<N workers landed but the
+      // integrated subset passed verification. Surfaced distinctly from a full
+      // PASS so operators know some workers were dropped.
+      const label = result.status === "passed"
+        ? "PASS"
+        : result.status === "passed_partial"
+          ? "PARTIAL"
+          : result.status === "blocked"
+            ? "BLOCKED"
+            : "FAIL";
       console.log(`[${label}] ${missionId}`);
       console.log(`workers: ${result.workers.length}, conflicts: ${result.hadConflicts ? "yes" : "no"}, verification: ${result.verification ? result.verification.status : "not-run"}`);
       console.log(`integration-report: ${result.integrationReportPath}`);
       console.log(`retained: ${result.retained ? "yes" : "no"}`);
-      // Exit codes: passed -> 0, blocked -> 2, failed -> 1 (UH-72 review F1).
-      const exit = result.status === "passed" ? 0 : result.status === "blocked" ? 2 : 1;
+      // Exit codes: passed/passed_partial -> 0, blocked -> 2, failed -> 1
+      // (UH-72 review F1; UH-127 treats a verified partial as success).
+      const exit = result.status === "passed" || result.status === "passed_partial"
+        ? 0
+        : result.status === "blocked"
+          ? 2
+          : 1;
       process.exit(exit);
     } catch (err) {
       console.error(`[FAIL] mission run-team error:`);
@@ -1734,4 +1765,4 @@ tuiCmd
     });
   });
 
-program.parse();
+await program.parseAsync();

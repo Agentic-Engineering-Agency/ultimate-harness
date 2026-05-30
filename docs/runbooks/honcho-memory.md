@@ -111,11 +111,50 @@ in the SDK.
 
 ## Disabling temporarily
 
+Process-wide, via env:
+
 ```bash
 HONCHO_ENABLED=false uh run missions/your-mission.yaml
 ```
 
 Or simply unset `HONCHO_API_KEY` for the call.
+
+### Per-mission opt-out (UH-137)
+
+To disable Honcho for a single mission without touching env, set
+`honcho_memory: false` in the mission's `runtime_config_overrides` (or the
+adapter manifest's `runtime_config`):
+
+```yaml
+runtime_config_overrides:
+  honcho_memory: false
+```
+
+`false` skips **all** Honcho activity for that run — no memory injection, no
+exchange save, and the `honcho_search` / `honcho_remember` tools become
+no-ops. Omitting the key (or `true`) keeps the default-ON behavior. The key is
+validated by each Honcho-aware adapter's strict schema (`oh-my-pi`, `codex`,
+`pi`, `hermes`), so a non-boolean value fails fast.
+
+## Mission memory tools: `honcho_search` / `honcho_remember` (UH-137)
+
+Two memory operations are available alongside the prompt enrichment:
+
+- `honcho_search(query)` — semantic search over the session's memories;
+  returns up to `HONCHO_SEARCH_LIMIT` snippets (each truncated to
+  `HONCHO_TOOL_PREVIEW_LENGTH` chars).
+- `honcho_remember(content)` — persist a free-form memory for later recall.
+
+> **Mechanism (be honest about it):** UH runs each runtime as a subprocess CLI
+> and does **not** expose an MCP tool-calling channel the agent can invoke
+> mid-mission. These two are therefore **harness-side operations** built on
+> the existing Honcho client and surfaced through the same memory hook — they
+> are **not** model-callable MCP tools yet. Exposing them as real MCP tools to
+> the spawned runtime is a tracked follow-up. They honor the same posture as
+> the rest of the extension: disabled config → no-op; missing key → fail-fast;
+> network blip → stderr warning + the mission continues.
+
+Both respect the `honcho_memory: false` opt-out above.
 
 ## Inspecting what was saved
 
@@ -125,11 +164,9 @@ repo's stream of exchanges.
 
 ## Limitations of the current cut
 
-- Only the `oh-my-pi` adapter is wired. `codex` and `hermes` follow the
-  same `enrichMissionPrompt` / `recordMissionExchange` surface and will
-  be plumbed in a follow-up slice.
-- The mission cannot yet call `honcho_search` / `honcho_remember` as
-  agent tools. Those land when the harness exposes MCP tools to the
-  spawned runtime (UH-NN).
+- `honcho_search` / `honcho_remember` are harness-side operations, not yet
+  exposed as model-callable MCP tools to the spawned runtime (see "Mission
+  memory tools" above for the mechanism). True in-mission tool-calling is a
+  tracked follow-up.
 - Memory cache is per-process. A daemon mode could refresh between
   missions; today every `uh run` is its own process.

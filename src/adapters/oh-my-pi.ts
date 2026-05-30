@@ -82,6 +82,13 @@ export type OhMyPiRunPlan = {
   session_id_passthrough: boolean;
   errors: string[];
   mission: MissionDocument;
+  /**
+   * UH-137 — resolved Honcho opt-out for this mission. `false` when
+   * `runtime_config.honcho_memory: false`; otherwise `true`. When `false`,
+   * `runOhMyPi` skips `recordMissionExchange` just as `planOhMyPiRun` skipped
+   * `loadHonchoMemoryBlock`.
+   */
+  honchoMemoryEnabled: boolean;
 };
 
 /**
@@ -222,6 +229,10 @@ export const OhMyPiRuntimeConfigSchema = z.object({
   allow_extensions: z.boolean().optional().default(false),
   allow_skills: z.boolean().optional().default(false),
   model: z.string().optional(),
+  // UH-137: per-mission Honcho opt-out. Omitted/true -> Honcho memory enrich,
+  // record, and the honcho_search/honcho_remember tools run when Honcho env is
+  // configured. false -> all Honcho activity is skipped for this mission.
+  honcho_memory: z.boolean().optional(),
 }).strict();
 
 export type OhMyPiRuntimeConfig = z.infer<typeof OhMyPiRuntimeConfigSchema>;
@@ -348,9 +359,16 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
   // prompt WITHOUT the memory block so it remains the right "user message"
   // to record back into Honcho (otherwise the next run would feed Honcho's
   // own summarized memory back into its own summarizer).
+  // UH-137: `runtime_config.honcho_memory: false` disables ALL Honcho activity
+  // for this mission (enrich here + record in runOhMyPi). Default ON; the
+  // honcho-memory extension itself no-ops when Honcho env is not configured.
+  const honchoMemoryEnabled = runtimeConfig.honcho_memory !== false;
+
   const ctx = buildDispatchContext(mission, workflow);
   const basePrompt = renderPrompt(ctx);
-  const memoryBlock = await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id });
+  const memoryBlock = honchoMemoryEnabled
+    ? await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id })
+    : null;
   ctx.memoryBlock = memoryBlock ?? undefined;
   const prompt = renderPrompt(ctx);
   const args = [
@@ -380,6 +398,7 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     session_id_passthrough: false,
     errors,
     mission,
+    honchoMemoryEnabled,
   };
 }
 
@@ -543,15 +562,18 @@ export async function runOhMyPi(
     }
   }
 
-  try {
-    if (collection.finalMessage) {
-      await recordMissionExchange(plan.basePrompt, collection.finalMessage, {
-        cwd: root,
-        missionId: plan.mission.id,
-      });
+  // UH-137: skip ALL Honcho record activity when the mission opted out.
+  if (plan.honchoMemoryEnabled) {
+    try {
+      if (collection.finalMessage) {
+        await recordMissionExchange(plan.basePrompt, collection.finalMessage, {
+          cwd: root,
+          missionId: plan.mission.id,
+        });
+      }
+    } finally {
+      await flushPendingHonchoSaves();
     }
-  } finally {
-    await flushPendingHonchoSaves();
   }
 
   if (artifacts) {
