@@ -16,7 +16,7 @@ import { dryRunOpenRouter, runOpenRouter } from "./adapters/openrouter.js";
 import { dryRunAnthropic, runAnthropic } from "./adapters/anthropic.js";
 import { dryRunPi, runPi } from "./adapters/pi.js";
 import { runtimeRegistry } from "./harness/registry.js";
-import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
+import { enforceCapabilities, formatCapabilityBypassLine, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
 import { chooseAdapter, formatAutoRouteExplain } from "./harness/auto-route.js";
 import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabilities/index.js";
@@ -143,14 +143,23 @@ async function resolveMissionRoot(
   return { effectiveRoot: sandbox.path, sandbox };
 }
 
+interface PreflightOptions {
+  force: boolean;
+  strict: boolean;
+}
+
 async function enforceRuntimeCapabilities(
   root: string,
   missionPath: string,
   runtime: string,
-  force: boolean,
+  { force, strict }: PreflightOptions,
 ): Promise<void> {
-  if (force) return;
-  await assertRuntimeCapabilities(root, missionPath, runtime);
+  if (force) {
+    const mission = await loadMissionFile(missionPath);
+    console.error(formatCapabilityBypassLine(mission.id, runtime));
+    return;
+  }
+  await enforceCapabilities(root, missionPath, runtime, strict ? "error" : "warn");
 }
 
 /** Preflight after runtime is chosen (`--runtime` or post `--auto` routing). */
@@ -158,10 +167,15 @@ async function enforceRuntimePreflight(
   root: string,
   missionPath: string,
   runtime: string,
-  force: boolean,
+  { force, strict }: PreflightOptions,
 ): Promise<void> {
-  if (force) return;
-  await enforceRuntimeCapabilities(root, missionPath, runtime, false);
+  if (force) {
+    // --force bypasses BOTH the capability check and runtime_requirements.
+    const mission = await loadMissionFile(missionPath);
+    console.error(formatCapabilityBypassLine(mission.id, runtime));
+    return;
+  }
+  await enforceCapabilities(root, missionPath, runtime, strict ? "error" : "warn");
   await assertRuntimeRequirements(missionPath, runtime);
 }
 
@@ -1001,7 +1015,8 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
   .option("--force", "Bypass mission capability matching for this runtime")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean }) => {
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
@@ -1013,7 +1028,7 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, { force: opts.force === true, strict: opts.strict === true });
     } catch (err) {
       console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -1062,7 +1077,8 @@ missionCmd
   .option("--run-id <id>", "Explicit run id; auto-generated if omitted")
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string; auto?: boolean; explain?: boolean }) => {
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string; auto?: boolean; explain?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -1114,7 +1130,7 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, { force: opts.force === true, strict: opts.strict === true });
     } catch (err) {
       console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -1240,7 +1256,8 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--serial", "Run runtimes sequentially instead of in parallel")
   .option("--force", "Bypass mission capability matching for selected runtimes")
-  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean }) => {
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const requested = opts.runtimes ? opts.runtimes.split(",").map((s) => s.trim()).filter(Boolean) : await resolveActiveRuntimes(root);
     if (requested.length === 0) {
@@ -1256,10 +1273,15 @@ missionCmd
       }
     }
     const canonicalMissionPath = path.join(root, ".harness", "missions", missionId, "mission.yaml");
-    if (opts.force !== true) {
+    if (opts.force === true) {
+      const mission = await loadMissionFile(canonicalMissionPath);
+      for (const rt of requested) {
+        console.error(formatCapabilityBypassLine(mission.id, rt));
+      }
+    } else {
       for (const rt of requested) {
         try {
-          await enforceRuntimePreflight(root, canonicalMissionPath, rt, false);
+          await enforceRuntimePreflight(root, canonicalMissionPath, rt, { force: false, strict: opts.strict === true });
         } catch (err) {
           console.error(`[BLOCKED] runtime preflight failed for ${rt}:`);
           console.error(`  error: ${(err as Error).message}`);

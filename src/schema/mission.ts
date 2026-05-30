@@ -45,6 +45,13 @@ const DEFAULT_TEST_PATHS = [
   "**/*.spec.jsx",
   "**/__tests__/**",
 ];
+/**
+ * A single capability tag. Free-form, open string (NOT a closed enum): any
+ * label that matches the regex is accepted, and `:` is permitted so callers can
+ * namespace MCP-style tags (e.g. `mcp:playwright`). Capabilities are matched by
+ * set-containment against the resolved adapter manifest's declared
+ * `capabilities` (`adapter.document.capabilities`, also an open string[]).
+ */
 const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, {
   message: "Capability id must start with [A-Za-z0-9] and use only [A-Za-z0-9._:-]",
 });
@@ -117,6 +124,15 @@ const MissionInputSchema = z.object({
   completion_criteria: z.array(z.string()).optional().default([]),
   acceptance_criteria: z.array(AcceptanceCriterionSchema).optional().default([]),
   tdd: TddOptionsSchema.optional(),
+  /**
+   * Open string[] of free-form capability tags, matched by set-containment
+   * against the resolved adapter manifest's declared capabilities. Enforced
+   * WARN-by-default at `run` / `dry-run` / `run-all` preflight (a `[WARN]` line
+   * per unmet tag, then the run proceeds); `--strict` escalates each mismatch
+   * to a hard error; `--force` bypasses the check entirely. DISTINCT from
+   * `runtime_requirements` below, which are typed, hard preconditions that are
+   * ALWAYS errors (never relaxed by warn mode) and gate `--auto` routing.
+   */
   capabilities: z.array(CapabilitySchema).optional().default([]),
   runtime_requirements: RuntimeRequirementsSchema.optional(),
 

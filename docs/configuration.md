@@ -40,6 +40,39 @@ Use `.env.example` as a placeholder reference only. Real values should come from
 | `HONCHO_SEARCH_LIMIT` | Max snippets returned by `honcho_search`. Defaults to 8. |
 | `HONCHO_TOOL_PREVIEW_LENGTH` | Per-snippet char cap for `honcho_search`. Defaults to 500. |
 
+## Capability vs runtime_requirements enforcement
+
+A mission can constrain which runtime may execute it in two independent, separately-checked ways:
+
+| | `capabilities` | `runtime_requirements` |
+|---|---|---|
+| Shape | open `string[]` of free-form tags (`needs_browser`, `mcp:playwright`, …) | typed object (`needs_network`, `needs_shell`, `needs_fs_write`, `min_context_tokens`, `max_cost_class`) |
+| Matched against | the resolved adapter **manifest**'s declared `capabilities` (set-containment) | the adapter's **typed** capability table |
+| Default severity | **warn** (run proceeds) | **error** (always) |
+| `--strict` | escalates each mismatch to an error | no effect (already always-error) |
+| `--force` | bypassed entirely | bypassed entirely |
+| Also gates | — | `--auto` adapter routing |
+
+Both are checked as a preflight on `uh mission run`, `uh mission dry-run`, and `uh mission run-all`, after the runtime is chosen.
+
+> History: capability enforcement shipped in v0.7.0 as a **hard error**. v0.10.0 (UH-138) inverts the default to **warn** and adds `--strict`. `runtime_requirements` have always been hard errors and are unchanged.
+
+Flag matrix:
+
+| Flags | Missing capability tag | No non-deprecated manifest | `runtime_requirements` unmet |
+|---|---|---|---|
+| (default) | `[WARN]` per tag, proceeds | `[WARN]`, proceeds | **error** |
+| `--strict` | **error** | **error** | **error** |
+| `--force` | bypassed (`[WARN]` bypass line) | bypassed (`[WARN]` bypass line) | bypassed |
+
+Exact `[WARN]` message formats:
+
+```text
+[WARN] mission <id>: capability "<cap>" not declared by runtime "<runtime>" (adapter <adapterId>); proceeding — pass --strict to fail
+[WARN] mission <id>: no non-deprecated adapter manifest for runtime "<runtime>"; capability check skipped — pass --strict to fail
+[WARN] mission <id>: --force bypassed capability check for runtime "<runtime>"
+```
+
 ## Runtime Config Overrides
 
 Missions can override adapter defaults without editing shared manifests:
