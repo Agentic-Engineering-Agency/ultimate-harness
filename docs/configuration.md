@@ -35,6 +35,10 @@ Use `.env.example` as a placeholder reference only. Real values should come from
 | `UH_CLI_BIN` | Hermes plugin path to the `uh` binary. |
 | `UH_READ_TIMEOUT_S` | Hermes plugin read-command timeout. |
 | `UH_RUN_TIMEOUT_S` | Hermes plugin mission-run timeout. |
+| `HONCHO_API_KEY` | Honcho persistent-memory key. Enables the extension when set (unless `HONCHO_ENABLED=false`). See the [Honcho runbook](runbooks/honcho-memory.md). |
+| `HONCHO_ENABLED` | Force the Honcho memory extension on/off (`true`/`false`). Defaults to on when a key is resolvable. |
+| `HONCHO_SEARCH_LIMIT` | Max snippets returned by `honcho_search`. Defaults to 8. |
+| `HONCHO_TOOL_PREVIEW_LENGTH` | Per-snippet char cap for `honcho_search`. Defaults to 500. |
 
 ## Runtime Config Overrides
 
@@ -47,3 +51,9 @@ runtime_config_overrides:
 ```
 
 Overrides are strict-validated for runtimes with registered schemas, so typoed keys fail fast.
+
+### Common `runtime_config` keys
+
+| Key | Runtimes | Purpose |
+| --- | --- | --- |
+| `honcho_memory` | `oh-my-pi`, `codex`, `pi`, `hermes` | Per-mission Honcho opt-out (boolean). Omitted/`true` keeps Honcho memory on (when configured); `false` skips all Honcho enrich/record activity and the `honcho_search` / `honcho_remember` tools for that mission. See the [Honcho runbook](runbooks/honcho-memory.md). |

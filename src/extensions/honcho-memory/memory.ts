@@ -1,4 +1,9 @@
-import type { HonchoHandles, HonchoMessage, HonchoSessionContext } from "./client.js";
+import type {
+  HonchoHandles,
+  HonchoMessage,
+  HonchoSearchResult,
+  HonchoSessionContext,
+} from "./client.js";
 
 /**
  * In-process memory cache + sequenced save queue.
@@ -147,5 +152,55 @@ export const enqueueExchangeSave = (
   return enqueue(async () => {
     const messages: HonchoMessage[] = exchanges.map((e) => e.peer.message(e.text));
     await handles.session.addMessages(messages);
+  });
+};
+
+// --- UH-137: honcho_search / honcho_remember primitives ---
+
+/**
+ * Run a semantic search over the session's messages and return up to
+ * `handles.config.searchLimit` text snippets, each truncated to
+ * `handles.config.toolPreviewLength` chars. Empty/whitespace results are
+ * dropped. Returns `[]` when Honcho has nothing relevant.
+ *
+ * Network failures bubble up to the caller (`honchoSearch` in `index.ts`),
+ * which translates them into a stderr warning and an empty result so a
+ * transient Honcho error never fails the mission.
+ */
+export const searchHonchoMemory = async (
+  handles: HonchoHandles,
+  query: string,
+): Promise<string[]> => {
+  const results: HonchoSearchResult[] = await handles.session.search(query, {
+    limit: handles.config.searchLimit,
+  });
+  const max = handles.config.toolPreviewLength;
+  const snippets: string[] = [];
+  for (const result of results) {
+    const trimmed = (result.content ?? "").trim();
+    if (!trimmed) continue;
+    snippets.push(trimmed.length > max ? trimmed.slice(0, max) : trimmed);
+  }
+  return snippets;
+};
+
+/**
+ * Persist a single free-form memory (`content`) attributed to the user peer.
+ *
+ * Reuses the same sequenced save queue as `enqueueExchangeSave` so a remember
+ * call never races an in-flight exchange save. Skips empty content and content
+ * above `maxMessageLength` (same guard as exchange saves). Failures are
+ * swallowed and surfaced by the caller as a stderr warning.
+ */
+export const enqueueMemorySave = (
+  handles: HonchoHandles,
+  content: string,
+): Promise<void> => {
+  const trimmed = content.trim();
+  if (!trimmed || trimmed.length > handles.config.maxMessageLength) {
+    return Promise.resolve();
+  }
+  return enqueue(async () => {
+    await handles.session.addMessages([handles.userPeer.message(trimmed)]);
   });
 };
