@@ -2,7 +2,7 @@
 # https://alchemy.run/concepts/cli/
 #
 # Runner notes:
-# - depot-ubuntu-24.04 (Linux): `alchemy deploy` (Bun runner is stable on CI).
+# - blacksmith-4vcpu-ubuntu-2404 (Linux): `alchemy deploy` (Bun runner is stable on CI).
 # - macOS self-hosted: Bun crashes running alchemy.run.ts → apps/docs/scripts use tsx.
 name: Deploy docs
 
@@ -24,7 +24,7 @@ permissions:
 jobs:
   deploy:
     name: Alchemy deploy uh-docs (prod)
-    runs-on: depot-ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     defaults:
       run:

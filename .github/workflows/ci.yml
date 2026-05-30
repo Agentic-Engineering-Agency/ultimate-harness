@@ -19,9 +19,9 @@ jobs:
     # Depot-managed GitHub Actions runner. Single-tenant ephemeral EC2
     # per job, up to 3x faster than GitHub-hosted ubuntu-24.04, no
     # concurrency / cache / network caps. To fall back to GitHub-hosted
-    # for any reason, change `depot-ubuntu-24.04` -> `ubuntu-24.04`.
+    # for any reason, change `blacksmith-4vcpu-ubuntu-2404` -> `ubuntu-24.04`.
     # https://depot.dev/docs/github-actions/overview
-    runs-on: depot-ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
 
     steps:
@@ -73,7 +73,7 @@ jobs:
     # OPENROUTER_API_KEY is unset, so the adapter ships unit-tested-only until a
     # key is configured. Set the key with `gh secret set OPENROUTER_API_KEY`.
     if: github.event_name == 'push'
-    runs-on: depot-ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -108,7 +108,7 @@ jobs:
     # ANTHROPIC_API_KEY is unset, so the adapter ships unit-tested-only until a
     # key is configured. Set the key with `gh secret set ANTHROPIC_API_KEY`.
     if: github.event_name == 'push'
-    runs-on: depot-ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - name: Checkout
