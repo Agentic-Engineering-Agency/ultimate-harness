@@ -37,7 +37,7 @@ Open `http://127.0.0.1:9119/`. The **Ultimate Harness** tab appears after **Sess
 ### From a release tarball (post UH-68)
 
 The release tarball is produced by the GitHub Actions workflow staged at
-[`docs/ci/release-plugin.yml.example`](../ci/release-plugin.yml.example).
+`docs/ci/release-plugin.yml.example`.
 Move it to `.github/workflows/release-plugin.yml` (requires a GitHub token
 with the `workflow` scope) and tag with `plugin-v*` to trigger a build —
 the staged path keeps the initial branch importable under OAuth tokens

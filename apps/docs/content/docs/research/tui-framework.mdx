@@ -38,7 +38,7 @@ No native-module load errors on macOS arm64. `node_modules/@opentui/core-darwin-
 | `@opentui/solid` | 0.2.13  | Solid's fine-grained reactivity (`createSignal`, `createMemo`) was the lead bet for the streaming `mission run` view (UH-44). |
 | ~~`@opentui/react`~~ | 0.2.13 | **Skipped.** Same JSX ergonomics story as Solid but pays virtual-DOM diff cost on every event. UH-44's event stream is the hot path; trading off Solid's fine-grained model to gain… nothing else UH wants (no Suspense, no concurrent rendering, no ecosystem libraries we plan to consume) was not defensible. Solid is the only contender at this layer. |
 
-Two prototypes were built at commit [`8adf04b`](../../bin/uh-tui-spike-vanilla.ts) (see git history — `git show 8adf04b -- bin/`):
+Two prototypes were built at commit `8adf04b` (see git history — `git show 8adf04b -- bin/`):
 
 * `bin/uh-tui-spike-vanilla.ts` — raw `@opentui/core`, imperative `BoxRenderable` / `SelectRenderable` / `TextRenderable` construction.
 * `bin/uh-tui-spike-solid.tsx` — `@opentui/solid` JSX with `createSignal`, `useKeyboard`, `useRenderer`.

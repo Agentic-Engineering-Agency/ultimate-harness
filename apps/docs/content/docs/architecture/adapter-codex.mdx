@@ -7,7 +7,7 @@ description: "The Codex adapter maps Ultimate Harness missions onto the OpenAI C
 
 The Codex adapter maps Ultimate Harness missions onto the OpenAI Codex CLI
 (`codex`). It exists alongside the Hermes adapter and shares the same
-[runtime adapter contract](./runtime-adapter-contract.md): mission packets in,
+[runtime adapter contract](./runtime-adapter-contract): mission packets in,
 structured runtime sessions and artifacts out, no implicit promotion.
 
 This document is the design — not the implementation. Wiring lives in a
@@ -284,4 +284,4 @@ The mission prompt is the trailing positional argument.
 
 - Both `NousResearch/hermes-agent` and `can1357/oh-my-pi` treat the Codex backend (`https://chatgpt.com/backend-api`) as a specialized OAuth-backed surface (`OpenAI-Beta: responses=experimental`, `chatgpt-account-id` from a JWT claim, `originator` header). Implementing that wire protocol inside Ultimate Harness would duplicate fragile semi-private behavior and require credential/refresh storage decisions.
 - The official `codex exec` CLI already owns OAuth, account state, session ids, and rate-limit handling, and exposes the exact non-interactive primitives we need. Using it as the transport is the smallest correct slice.
-- Reuse of broker/gateway patterns (oh-my-pi `auth-broker`/`auth-gateway`) is parked as a future option — tracked in the [roadmap](../ROADMAP.md).
+- Reuse of broker/gateway patterns (oh-my-pi `auth-broker`/`auth-gateway`) is parked as a future option — tracked in the [roadmap](../ROADMAP).
