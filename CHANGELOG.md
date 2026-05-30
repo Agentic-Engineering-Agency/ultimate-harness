@@ -4,6 +4,33 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
+## [0.9.0] — 2026-05-29
+
+Milestone **"Memory & adapter matrix"** ([Linear UH-131 / UH-136 / UH-137](https://linear.app/agenticengineering-agency/team/UH/active); GitHub PRs #204–#206 / #214 / #215 / #216). Bundles everything merged to `dev` since v0.8.0: a native pay-per-token Anthropic adapter (experimental), harness-side Honcho memory operations with a per-mission opt-out, the team-run dogfood verdict/artifact fixes, and the Phase-0 DX hardening (real `uh --version`, opt-in telemetry primitive, adoption docs, curated npm allowlist, CI plugin gates).
+
+### Added
+
+- **Native Anthropic adapter** ([UH-136](https://linear.app/agenticengineering-agency/issue/UH-136), [#214](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/214)) — `status: experimental`. The official, ToS-clean pay-per-token path through the Anthropic Messages API, complementing the OAuth-backed `hermes-proxy` and the OMP stealth surface. API key via `ANTHROPIC_API_KEY` (env-only, never the manifest); a missing key degrades `uh adapter check anthropic` gracefully (the CI-skip signal) and makes `mission run` fail fast via a plan error. Blocked-output classification on auth / rate-limit / model-not-found / network failures. Registered as a first-class routable adapter (`anthropic`) with an optional opt-in live-smoke CI job.
+- **Honcho memory operations** ([UH-137](https://linear.app/agenticengineering-agency/issue/UH-137), [#215](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/215)) — `honcho_search` / `honcho_remember` exposed as harness-side memory operations, plus a per-mission `runtime_config.honcho_memory` opt-out honored by every Honcho-aware adapter (`oh-my-pi` / `codex` / `pi` / `hermes`). Builds on the v0.6.0 enrichment + `recordMissionExchange` wiring; memory stays off by default in tests and is a silent no-op when Honcho is unconfigured. Tunable via `HONCHO_SEARCH_LIMIT` (default 8) and `HONCHO_TOOL_PREVIEW_LENGTH` (default 500).
+- **DX hardening (Phase 0)** ([UH-131](https://linear.app/agenticengineering-agency/issue/UH-131), [#204](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/204) / [#205](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/205) / [#206](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/206)) — `uh --version` now reads the real version from `package.json`; an opt-in PostHog telemetry primitive (`UH_TELEMETRY`, unwired pending the [UH-135](https://linear.app/agenticengineering-agency/issue/UH-135) follow-up); adoption docs (`docs/{quickstart,configuration,runtime-targets,telemetry,troubleshooting,plugin-development}.md`); a curated npm `files:` allowlist; and CI plugin gates.
+
+### Changed
+
+- **UH-129 team `integration_report_path` default** ([#216](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/216)) — now defaults under `.harness/missions/<id>/team/` instead of the mission root, keeping team artifacts scoped per mission.
+- Pinned the Hermes plugin test dependencies for deterministic CI ([#216](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/216)).
+
+### Fixed
+
+- **UH-127 verdict reclassification** ([#216](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/216)) — team runs that partially succeed are now classified `passed_partial` instead of a false `BLOCKED`.
+- **UH-128 per-worker artifact bleed** ([#216](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/216)) — fixed cross-worker artifact contamination in team missions; each worker's artifacts stay isolated to its own worktree.
+- **UH-130 constraints-advisory warning** ([#216](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/216)) — surfaces an advisory warning when mission constraints are present but not enforced.
+
+### Notes
+
+- The native Anthropic adapter ships **experimental**: registered and routable, but not yet graduated to `active`. Graduation follows a live-smoke promotion record like the other adapters.
+- The telemetry primitive is **unwired** — no events are emitted yet. It exists as the opt-in seam; instrumentation lands in the [UH-135](https://linear.app/agenticengineering-agency/issue/UH-135) follow-up. UH still ships no telemetry by default.
+- **Deferred to v0.10.0+**: capability-declaration enforcement (manifest/mission `capabilities:` binding, warn + `--strict`); the telemetry instrumentation follow-up (UH-135).
+
 ## [0.8.0] — 2026-05-25
 
 Milestone **"Sandbox isolation"** (GitHub milestone v0.8.0, issues #154 / #155 / #156). Promotes the `container` sandbox backend from a fail-fast stub to a real OpenSandbox-gated execution-isolation tier and graduates `oh-my-pi` to `active`.

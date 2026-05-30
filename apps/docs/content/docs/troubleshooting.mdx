@@ -1,0 +1,70 @@
+---
+title: "Troubleshooting"
+description: "Common Ultimate Harness issues and fixes: missing bin, TUI Bun requirement, adapter checks, plugin tests, and publish dry-runs."
+---
+
+## `uh` is not found
+
+Confirm the global Bun bin directory is on PATH:
+
+```sh
+bun pm bin -g
+bun add -g @agenticengineeringagency/ultimate-harness
+uh --help
+```
+
+For local development, build first:
+
+```sh
+bun run build
+node dist/cli.js --help
+```
+
+## `uh tui` says Bun is required
+
+The CLI is Node-compatible, but the OpenTUI/Solid TUI intentionally runs through Bun so TSX can load with the Solid preload.
+
+```sh
+bun --version
+uh tui --once
+```
+
+## Adapter check fails
+
+Use the runtime-specific runbook in the repo (`docs/runbooks/`):
+
+- Codex E2E smoke
+- Hermes proxy setup
+- OpenRouter setup
+- pi setup
+- Anthropic via oh-my-pi
+
+For the native `anthropic` and `openrouter` adapters, a missing API key is reported as a graceful failure — export `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` and re-run `uh adapter check <id>`.
+
+Do not put provider keys into adapter manifests. Use environment variables or the runtime's own credential store.
+
+## Plugin tests cannot import FastAPI or httpx
+
+Install the plugin test dependencies:
+
+```sh
+python -m pip install -r apps/hermes-plugin/dashboard/requirements-dev.txt
+bun run plugin:test
+```
+
+The tests use fake runners and isolated temp `.harness/` state; failures usually indicate missing Python dependencies or a plugin API regression.
+
+## Publish dry-run requires a token
+
+Scoped package dry-runs expect a token-shaped value. CI uses a dummy value for dry-runs:
+
+```sh
+NPM_CONFIG_TOKEN=dry-run-token bun run publish:dry-run
+```
+
+Real publishing requires the `NPM_CONFIG_TOKEN` repository secret and should only run through the release workflow.
+
+## See also
+
+- [Configuration](./configuration.md)
+- [Quickstart](./quickstart.md)

@@ -9,6 +9,17 @@ The core design goal is **portable discipline**: a project should be able to use
 
 For the active roadmap (epics, in-flight slices, recently shipped), see the [roadmap](./roadmap.md).
 
+## Guides
+
+New to Ultimate Harness? Start with these:
+
+1. [Quickstart](./quickstart.md) — zero to a verified mission in a few minutes.
+2. [Configuration](./configuration.md) — project state, adapters, env vars, per-mission overrides.
+3. [Runtime targets](./runtime-targets.md) — per-adapter invocation shapes.
+4. [Optional telemetry](./telemetry.md) — opt-in, off by default.
+5. [Troubleshooting](./troubleshooting.md) — common issues and fixes.
+6. [Plugin development](./plugin-development.md) — the Hermes dashboard plugin.
+
 ## Start here
 
 1. [Glossary](./glossary.md) — shared terms used across the project.
@@ -32,6 +43,7 @@ For the active roadmap (epics, in-flight slices, recently shipped), see the [roa
 | `openrouter` | active | OpenAI-compat HTTP client for [openrouter.ai](https://openrouter.ai) — cheapest pay-per-token. See [OpenRouter setup runbook](./runbooks/openrouter-setup.md). |
 | `pi` | active | Vanilla `pi` agent CLI (`pi --print --mode json --no-session`). See [pi setup runbook](./runbooks/pi-setup.md). |
 | `oh-my-pi` | active | [Anthropic-via-OMP runbook](./runbooks/anthropic-via-omp.md) — covers the Anthropic-via-OMP routing path and its ToS posture; graduated to `active` in v0.8.0 (#156). |
+| `anthropic` | experimental | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY` (env-only); a missing key degrades `uh adapter check anthropic` gracefully. Shipped v0.9.0 (#214); graduation to `active` pending live-smoke. |
 
 For issue-level state and upcoming epics, see the [roadmap](./roadmap.md).
 
