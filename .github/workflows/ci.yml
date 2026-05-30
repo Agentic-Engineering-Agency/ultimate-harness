@@ -49,6 +49,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Documentation dead-link check
+        run: bun run docs:check-links
+
       - name: Plugin typecheck
         run: bun run plugin:typecheck
 

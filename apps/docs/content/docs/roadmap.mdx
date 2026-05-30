@@ -61,11 +61,11 @@ Standalone discipline-layer slices inspired by the same research (not part of Ep
 | Later | [UH-74](https://linear.app/agenticengineering-agency/issue/UH-74) | Adversarial QA workflow profile (`adversarial-qa`) — OMX `$ultraqa` analog | M | **shipped** — [#87](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/87) + [#90](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/90) |
 | Later | [UH-75](https://linear.app/agenticengineering-agency/issue/UH-75) | Companion `design.md` artifact alongside `mission.yaml` — OMX `$design` analog | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
 
-Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"oh-my-claudecode (OMC)", §"oh-my-codex (OMX)", §"Combined OMC/OMX takeaways"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer.md); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix.md).
+Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems) §"oh-my-claudecode (OMC)", §"oh-my-codex (OMX)", §"Combined OMC/OMX takeaways"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix).
 
 ### Discipline-layer slices from GSD-2 research
 
-Standalone slices distilled from the [GSD-2 / gsd-pi](https://github.com/gsd-build/gsd-2) deep-dive (see [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"GSD 2 (`gsd-pi`)"). They are orthogonal to Epic 3 and Epic 4 — each lands independently.
+Standalone slices distilled from the [GSD-2 / gsd-pi](https://github.com/gsd-build/gsd-2) deep-dive (see [`docs/research/inspiration-systems.md`](./research/inspiration-systems) §"GSD 2 (`gsd-pi`)"). They are orthogonal to Epic 3 and Epic 4 — each lands independently.
 
 | Phase | Issue | Slice | Size | Status |
 |---|---|---|---|---|
@@ -75,7 +75,7 @@ Standalone slices distilled from the [GSD-2 / gsd-pi](https://github.com/gsd-bui
 | Later | [UH-79](https://linear.app/agenticengineering-agency/issue/UH-79) | Canonical `docs/VISION.md` with explicit "what we won't accept" — GSD-2 VISION.md analog | S | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
 | Later | [UH-80](https://linear.app/agenticengineering-agency/issue/UH-80) | Pre-inlined dispatch context contract — formalize the existing `buildMissionPrompt` shape across all four adapters | M | **shipped** — [#88](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/88) |
 
-Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems.md) §"GSD 2 (`gsd-pi`)"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer.md); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix.md).
+Research source: [`docs/research/inspiration-systems.md`](./research/inspiration-systems) §"GSD 2 (`gsd-pi`)"; verdicts in [`docs/research/adopt-reject-defer.md`](./research/adopt-reject-defer); side-by-side row in [`docs/research/comparison-matrix.md`](./research/comparison-matrix).
 
 ### Epic 2 — Interactive TUI for UH ([UH-41](https://linear.app/agenticengineering-agency/issue/UH-41))
 
@@ -83,8 +83,8 @@ Build `uh tui` on [OpenTUI](https://opentui.com) — the same engine OpenCode us
 
 | Step | Issue | Slice | Size | Status |
 |---|---|---|---|---|
-| 1 | [UH-45](https://linear.app/agenticengineering-agency/issue/UH-45) | Spike: install opentui, framework choice (vanilla / React / Solid), hello-world bound to UH state | S | **shipped** — Solid won; see [`docs/research/tui-framework.md`](./research/tui-framework.md) |
-| 2 | [UH-46](https://linear.app/agenticengineering-agency/issue/UH-46) | Dashboard: live adapters + missions + sandboxes (three-pane) | M | **shipped** — Mission Control dashboard; see [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) + [`docs/architecture/tui.md`](./architecture/tui.md) |
+| 1 | [UH-45](https://linear.app/agenticengineering-agency/issue/UH-45) | Spike: install opentui, framework choice (vanilla / React / Solid), hello-world bound to UH state | S | **shipped** — Solid won; see [`docs/research/tui-framework.md`](./research/tui-framework) |
+| 2 | [UH-46](https://linear.app/agenticengineering-agency/issue/UH-46) | Dashboard: live adapters + missions + sandboxes (three-pane) | M | **shipped** — Mission Control dashboard; see [#57](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/57) + [`docs/architecture/tui.md`](./architecture/tui) |
 | 3 | [UH-47](https://linear.app/agenticengineering-agency/issue/UH-47) | Mission browser: drilldown with `Code` + `Diff` viewers | M | **shipped** — read-only mission artifact drilldown; see [#59](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/59) |
 | 4 | [UH-44](https://linear.app/agenticengineering-agency/issue/UH-44) | Mission run flow: trigger from TUI, stream events live | M | **shipped** — `R` opens a run dialog, live tail of `events.ndjson`, `S` stops via SIGTERM; see [#63](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/63) |
 | 5 | [UH-43](https://linear.app/agenticengineering-agency/issue/UH-43) | Adapter + sandbox manager: live checks, create/discard from inside | M | **shipped** — `c` re-check, `n` create-sandbox dialog, `d` discard with `F` force toggle; see [#64](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/64) |
@@ -132,7 +132,7 @@ Adapter promoted to `status: active` on 2026-05-18 after live E2E smoke against 
 | [UH-55](https://linear.app/agenticengineering-agency/issue/UH-55) | TDD: `tdd` workflow profile + test-first verify gate | [#69](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/69) |
 | [UH-56](https://linear.app/agenticengineering-agency/issue/UH-56) | Cross-runtime QA: `uh mission run-all` + side-by-side comparison | [#70](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/70) |
 
-All three layers compose: see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa.md).
+All three layers compose: see [`docs/architecture/sdd-tdd-qa.md`](./architecture/sdd-tdd-qa).
 
 ## Shipped previous cycle (2026-05-13 → 2026-05-17)
 
@@ -166,7 +166,7 @@ All three layers compose: see [`docs/architecture/sdd-tdd-qa.md`](./architecture
 
 These are tracked in narrative form until they earn the priority to be filed:
 
-Road to v1.0 is planned in [`docs/prds/uh-roadmap-to-1.0-v1.0-prd.md`](./prds/uh-roadmap-to-1.0-v1.0-prd.md) (milestones v0.8.0 → v1.0.0). Remaining proposals:
+Road to v1.0 is planned in `docs/prds/uh-roadmap-to-1.0-v1.0-prd.md` (milestones v0.8.0 → v1.0.0). Remaining proposals:
 
 - **Native ANTHROPIC_API_KEY adapter** — **shipped in v0.9.0** ([#214], UH-136) as `anthropic` (`status: experimental`): the ToS-clean pay-per-token Messages-API path that complements UH-32. `ANTHROPIC_API_KEY` env-only, blocked classification, graceful no-key checker, optional live-smoke CI job. Graduation to `active` pending a live-smoke promotion record.
 - **Container sandbox backend** — **shipped in v0.8.0** ([#155]/[#157]) behind the OpenSandbox seam, with #154 spike + ADR + runbook. Live docker-CLI fallback rejected as default by the ADR pivot rule.
@@ -184,11 +184,11 @@ _Resolved since: the **Pi adapter** shipped active in v0.7.0 (#135/#150); **oh-m
 
 ## References
 
-- [Documentation home](./README.md)
-- [Architecture overview](./architecture/overview.md)
-- [Runtime adapter contract](./architecture/runtime-adapter-contract.md) (includes UH-28 sentinel protocol)
-- [Codex E2E smoke runbook](./runbooks/codex-e2e-smoke.md)
-- [Anthropic-via-OMP runbook](./runbooks/anthropic-via-omp.md) (notes the ToS posture that UH-32's hermes-proxy supersedes)
-- [Honcho memory runbook](./runbooks/honcho-memory.md) (UH-59)
-- [Honcho memory design](./architecture/extension-honcho-memory.md) (UH-59)
+- Documentation home
+- [Architecture overview](./architecture/overview)
+- [Runtime adapter contract](./architecture/runtime-adapter-contract) (includes UH-28 sentinel protocol)
+- [Codex E2E smoke runbook](./runbooks/codex-e2e-smoke)
+- [Anthropic-via-OMP runbook](./runbooks/anthropic-via-omp) (notes the ToS posture that UH-32's hermes-proxy supersedes)
+- Honcho memory runbook (UH-59)
+- Honcho memory design (UH-59)
 - [Hermes dashboard extension docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) (Epic 3 reference)

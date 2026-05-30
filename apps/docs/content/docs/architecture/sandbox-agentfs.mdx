@@ -7,7 +7,7 @@ description: "> Status: **design** — no runtime wiring yet. Tracked by [UH-8](
 
 This document specifies how an [AgentFS](https://github.com/tursodatabase/agentfs)-backed sandbox plugs into the existing sandbox manager without disturbing the contract that `git-worktree` already satisfies. It is intentionally interface-level: no Zod schemas, no TypeScript modules, no `.harness/` layout changes.
 
-The companion read is [`sandboxing.md`](./sandboxing.md) (lifecycle + safety rules) and the current git-worktree implementation under `src/harness/sandbox.ts`. The AgentFS backend MUST satisfy the same `SandboxStatus` enum (`created | running | dirty | verified | promoted | discarded`) and the same backend interface so the rest of the harness (CLI, verifier, promoter, audit) does not learn about AgentFS specifics.
+The companion read is [`sandboxing.md`](./sandboxing) (lifecycle + safety rules) and the current git-worktree implementation under `src/harness/sandbox.ts`. The AgentFS backend MUST satisfy the same `SandboxStatus` enum (`created | running | dirty | verified | promoted | discarded`) and the same backend interface so the rest of the harness (CLI, verifier, promoter, audit) does not learn about AgentFS specifics.
 
 ## 1. Goals
 
@@ -84,7 +84,7 @@ uh sandbox discard `sandbox-id` [--force]
 
 ## 3. Lifecycle parity with the git-worktree backend
 
-The backend interface stays the one declared in [`sandboxing.md`](./sandboxing.md) §"Backend interface". AgentFS implementations of each method:
+The backend interface stays the one declared in [`sandboxing.md`](./sandboxing) §"Backend interface". AgentFS implementations of each method:
 
 | Method | git-worktree behavior | AgentFS behavior |
 |---|---|---|
@@ -130,7 +130,7 @@ The AgentFS backend treats every mount as a deny-by-default jail. Permissions ar
 - **Host passthroughs.** Off by default. Each `--allow-host-read `path`` becomes a bind mount in read-only mode. The backend MUST refuse `--allow-host-write` flags in v0; writeable host passthroughs defeat the isolation goal and need a separate design.
 - **Process environment.** The mount provides its own `$HOME`, `$XDG_*`, and shell rc files. Adapters launching processes inside the mount (Hermes, Codex, oh-my-pi, and future adapters) MUST NOT inherit the operator's `$HOME`; the AgentFS backend surfaces a scrubbed env baseline that each adapter extends.
 - **Credential exposure.** Secrets MUST be injected explicitly per mission (e.g. via env passed through `run_check`'s spawn options). The backend never auto-bind-mounts `~/.aws`, `~/.config/gh`, `~/.npmrc`, etc.
-- **Escape detection.** Any write attempt that resolves outside the mount MUST be reported as a security finding per [`sandboxing.md`](./sandboxing.md) §"Required safety rules". AgentFS exposes the namespace boundary cleanly, so the backend MUST log such attempts to `audit/events.ndjson` rather than swallowing them.
+- **Escape detection.** Any write attempt that resolves outside the mount MUST be reported as a security finding per [`sandboxing.md`](./sandboxing) §"Required safety rules". AgentFS exposes the namespace boundary cleanly, so the backend MUST log such attempts to `audit/events.ndjson` rather than swallowing them.
 - **Audit ownership.** The overlay database is the auditable artifact. The backend MUST treat it as append-only during the sandbox's life and MUST preserve it until `discard` succeeds.
 
 ## 6. macOS vs Linux behavior notes

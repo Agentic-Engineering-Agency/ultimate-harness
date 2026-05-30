@@ -1,9 +1,9 @@
 ---
 title: "Hermes Proxy — operator setup runbook"
-description: "Zero-to-`runtime-result.status: passed` for the `hermes-proxy` adapter. Architecture context lives in [`docs/architecture/adapter-hermes-proxy.md`](../architecture/adapter-hermes-proxy.md); wire-format discovery is in [`docs/architecture/he"
+description: "Zero-to-`runtime-result.status: passed` for the `hermes-proxy` adapter. Architecture context lives in [`docs/architecture/adapter-hermes-proxy.md`](../architecture/adapter-hermes-proxy); wire-format discovery is in [`docs/architecture/he"
 ---
 
-Zero-to-`runtime-result.status: passed` for the `hermes-proxy` adapter. Architecture context lives in [`docs/architecture/adapter-hermes-proxy.md`](../architecture/adapter-hermes-proxy.md); wire-format discovery is in [`docs/architecture/hermes-proxy-spike.md`](../architecture/hermes-proxy-spike.md).
+Zero-to-`runtime-result.status: passed` for the `hermes-proxy` adapter. Architecture context lives in [`docs/architecture/adapter-hermes-proxy.md`](../architecture/adapter-hermes-proxy); wire-format discovery is in [`docs/architecture/hermes-proxy-spike.md`](../architecture/hermes-proxy-spike).
 
 ## Prerequisites
 
@@ -151,11 +151,11 @@ rm -rf .harness/missions/hp-smoke   # only if you want to discard the smoke
 
 ## Comparison with `anthropic-via-omp`
 
-If you previously used the `anthropic-via-omp` path (see [`anthropic-via-omp.md`](./anthropic-via-omp.md)), `hermes-proxy` is the ToS-positioned replacement. Both routes can coexist in the same UH project — `oh-my-pi` is unaffected. Prefer `hermes-proxy` for new deployments; the OMP stealth surface remains documented but carries the Feb-2026 Anthropic ToS friction.
+If you previously used the `anthropic-via-omp` path (see [`anthropic-via-omp.md`](./anthropic-via-omp)), `hermes-proxy` is the ToS-positioned replacement. Both routes can coexist in the same UH project — `oh-my-pi` is unaffected. Prefer `hermes-proxy` for new deployments; the OMP stealth surface remains documented but carries the Feb-2026 Anthropic ToS friction.
 
 ## References
 
 - [UH-32 epic](https://linear.app/agenticengineering-agency/issue/UH-32)
-- [Architecture doc](../architecture/adapter-hermes-proxy.md)
-- [Wire-format spike](../architecture/hermes-proxy-spike.md)
+- [Architecture doc](../architecture/adapter-hermes-proxy)
+- [Wire-format spike](../architecture/hermes-proxy-spike)
 - [Hermes Agent 0.14.0 release notes](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.16)
