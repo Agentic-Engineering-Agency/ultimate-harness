@@ -756,7 +756,7 @@ export async function collectHermesSession(
       buildUsageEvent("hermes", plan.mission.id, estimateUsage(plan.prompt, hermesSentinel ?? ""), finishedAt),
     );
 
-    if (hermesSentinel) {
+    if (plan.honchoMemoryEnabled && hermesSentinel) {
       await recordMissionExchange(plan.basePrompt, hermesSentinel, {
         cwd: root,
         missionId: plan.mission.id,

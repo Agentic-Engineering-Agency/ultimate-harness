@@ -12,6 +12,11 @@ import {
   type HermesRunPlan,
   type DiffCollector,
 } from "../src/adapters/hermes.js";
+import {
+  setHonchoClientFactory,
+  resetHonchoExtensionForTests,
+  type HonchoClientFactory,
+} from "../src/extensions/honcho-memory/index.js";
 import { validateFile } from "../src/harness/validate.js";
 import { validateRuntimeResult } from "../src/schema/artifacts.js";
 
@@ -548,6 +553,92 @@ describe("collectHermesSession", () => {
     });
 
     expect(await readFile(fakeArtifacts.finalMessagePath, "utf-8")).toBe("");
+  });
+});
+
+describe("collectHermesSession honcho opt-out", () => {
+  test("skips the Honcho record path when honchoMemoryEnabled is false", async () => {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "hermes-optout");
+    await mkdir(missionDir, { recursive: true });
+    const fakeArtifacts = {
+      missionDir,
+      runDir: missionDir,
+      promptPath: join(missionDir, "prompt.md"),
+      runtimeSessionPath: join(missionDir, "runtime-session.yaml"),
+      eventsPath: join(missionDir, "events.ndjson"),
+      stdoutPath: join(missionDir, "runtime.stdout.log"),
+      stderrPath: join(missionDir, "runtime.stderr.log"),
+      diffPath: join(missionDir, "diff.patch"),
+      runtimeResultPath: join(missionDir, "runtime-result.yaml"),
+      finalMessagePath: join(missionDir, "runtime-final.txt"),
+    };
+
+    // Count addMessages calls on a fake Honcho client (mirrors the
+    // extension-honcho-memory seam: the record path persists via
+    // client.sessions.addMessages).
+    let addMessagesCalls = 0;
+    setHonchoClientFactory(
+      () =>
+        ({
+          workspaces: {
+            getConfiguration: async () => ({}),
+            updateConfiguration: async () => {},
+          },
+          peers: { chat: async () => ({ content: "" }) },
+          sessions: {
+            addMessages: async () => {
+              addMessagesCalls += 1;
+            },
+          },
+        }) as unknown as ReturnType<HonchoClientFactory>,
+    );
+
+    const plan: HermesRunPlan = {
+      command: "hermes",
+      args: [],
+      prompt: "test",
+      basePrompt: "test",
+      worktree: false,
+      session_id_passthrough: false,
+      errors: [],
+      mission: { schema_version: "uh.mission.v0", id: "hermes-optout" } as unknown as HermesRunPlan["mission"],
+      // UH-137: honcho_memory: false resolves to honchoMemoryEnabled: false,
+      // which must suppress the record path just like it suppresses enrich.
+      honchoMemoryEnabled: false,
+    };
+
+    // A valid sentinel block IS present; only the opt-out should stop recording.
+    const out = await collectHermesSession({
+      root: TEST_ROOT,
+      artifacts: fakeArtifacts,
+      plan,
+      startedAt: "2026-05-17T00:00:00Z",
+      finishedAt: "2026-05-17T00:00:01Z",
+      runnerResult: {
+        stdout: [
+          "```yaml",
+          "schema_version: uh.runtime-result.v0",
+          "status: completed",
+          "```",
+          "",
+          "```uh-runtime-final-message",
+          "Bounded Hermes summary.",
+          "```",
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+      },
+      diff: { patch: "" },
+    });
+
+    // The session still completes and persists the sentinel artifact...
+    expect(out.result?.status).toBe("passed");
+    expect(await readFile(fakeArtifacts.finalMessagePath, "utf-8")).toBe("Bounded Hermes summary.");
+    // ...but nothing is recorded to Honcho (parity with oh-my-pi/pi/codex opt-out).
+    expect(addMessagesCalls).toBe(0);
+
+    resetHonchoExtensionForTests();
   });
 });
 
