@@ -3,7 +3,7 @@
   "label": "Ultimate Harness",
   "description": "Drive Ultimate Harness from the Hermes dashboard: adapters, missions, runs, drilldown, workflows.",
   "icon": "Wrench",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "tab": {
     "path": "/uh",
     "position": "after:sessions"
