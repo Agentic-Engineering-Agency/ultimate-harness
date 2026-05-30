@@ -28,6 +28,7 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 | `codex` | active | [Codex adapter design](./architecture/adapter-codex.md), [Codex E2E smoke](./runbooks/codex-e2e-smoke.md) |
 | `hermes-proxy` | active | [Hermes proxy adapter](./architecture/adapter-hermes-proxy.md), [setup](./runbooks/hermes-proxy-setup.md), [E2E smoke](./runbooks/hermes-proxy-e2e-smoke.md) |
 | `openrouter` | active | [OpenRouter setup](./runbooks/openrouter-setup.md) |
+| `anthropic` | experimental | [Anthropic setup](./runbooks/anthropic-setup.md) — native pay-per-token Messages API (UH-136). |
 | `pi` | active | [Pi setup](./runbooks/pi-setup.md) |
 | `oh-my-pi` | active | [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md) — covers the OMP routing path and its ToS posture. |
 

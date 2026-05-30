@@ -4,7 +4,7 @@
 
 - `src/cli.ts` is the `uh` command surface. Keep it as a thin dispatcher over harness modules.
 - `src/harness/` owns project initialization, schemas, runtime dispatch, mission lifecycle, verification, promotion, sandboxes, drift validation, and telemetry helpers.
-- `src/adapters/` owns runtime-specific execution for `hermes`, `codex`, `hermes-proxy`, `openrouter`, `pi`, and `oh-my-pi`.
+- `src/adapters/` owns runtime-specific execution for `hermes`, `codex`, `hermes-proxy`, `openrouter`, `anthropic`, `pi`, and `oh-my-pi`.
 - `src/schema/` owns Zod-backed artifact contracts. Persisted YAML/JSON changes should start here.
 - `src/tui/` owns the OpenTUI/Solid Mission Control surface. It reads harness artifacts and calls CLI-safe primitives; it must not invent separate data contracts.
 - `apps/hermes-plugin/` owns the Hermes dashboard plugin. TypeScript dashboard code bundles through esbuild; `dashboard/plugin_api.py` is tested with isolated pytest fixtures.
@@ -19,6 +19,7 @@
 | Codex CLI | `codex` | active | Codex auth stays outside UH artifacts. |
 | Hermes Proxy | `hermes-proxy` | active | Endpoint/model in manifest; OAuth/session secrets outside repo. |
 | OpenRouter | `openrouter` | active | `OPENROUTER_API_KEY` from environment only. |
+| Anthropic | `anthropic` | experimental | `ANTHROPIC_API_KEY` from environment only. |
 | Pi CLI | `pi` | active | Provider auth outside repo. |
 | oh-my-pi | `oh-my-pi` | active | User opt-in runtime; auth outside repo. |
 

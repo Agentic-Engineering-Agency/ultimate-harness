@@ -55,7 +55,7 @@ const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/
  * adapter modules. Keep in sync with `RUNTIME_WIRINGS` in `src/cli.ts` and the
  * adapter manifests under `.harness/adapters/`.
  */
-export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "pi"] as const;
+export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi"] as const;
 const AdapterIdSchema = z.enum(TEAM_ADAPTER_IDS);
 
 const TeamWorkerSchema = z.object({
