@@ -72,6 +72,13 @@ export type CodexRunPlan = {
   session_id_passthrough: boolean;
   errors: string[];
   mission: MissionDocument;
+  /**
+   * UH-137 — resolved Honcho opt-out for this mission. `false` when
+   * `runtime_config.honcho_memory: false`; otherwise `true`. When `false`,
+   * `collectCodexSession` skips `recordMissionExchange` just as the planner
+   * skipped `loadHonchoMemoryBlock`.
+   */
+  honchoMemoryEnabled: boolean;
 };
 
 /**
@@ -207,6 +214,10 @@ export const CodexRuntimeConfigSchema = z.object({
     .optional()
     .default("never"),
   full_auto_compat: z.boolean().optional().default(false),
+  // UH-137: per-mission Honcho opt-out. Omitted/true -> Honcho memory enrich,
+  // record, and the honcho_search/honcho_remember tools run when Honcho env is
+  // configured. false -> all Honcho activity is skipped for this mission.
+  honcho_memory: z.boolean().optional(),
 }).strict();
 
 export type CodexRuntimeConfig = z.infer<typeof CodexRuntimeConfigSchema>;
@@ -332,9 +343,16 @@ export async function planCodexRun(root: string, missionPath: string, options: P
   // runtimeConfig.full_auto_compat is validated by schema; not yet consumed (reserved for legacy Codex builds).
   const finalMessagePath = await resolveFinalMessagePath(root, missionPath, runId);
 
+  // UH-137: `runtime_config.honcho_memory: false` disables ALL Honcho activity
+  // for this mission (enrich here + record in collectCodexSession). Default ON;
+  // the honcho-memory extension itself no-ops when Honcho env is unconfigured.
+  const honchoMemoryEnabled = runtimeConfig.honcho_memory !== false;
+
   const ctx = buildDispatchContext(mission, workflow);
   const basePrompt = renderPrompt(ctx);
-  ctx.memoryBlock = (await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id })) ?? undefined;
+  ctx.memoryBlock = honchoMemoryEnabled
+    ? (await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id })) ?? undefined
+    : undefined;
   const prompt = renderPrompt(ctx);
   const args = [
     "exec",
@@ -358,6 +376,7 @@ export async function planCodexRun(root: string, missionPath: string, options: P
     session_id_passthrough: false,
     errors,
     mission,
+    honchoMemoryEnabled,
   };
 }
 
@@ -695,7 +714,8 @@ export async function collectCodexSession(
       buildUsageEvent("codex", plan.mission.id, estimateUsage(plan.prompt, finalMessage), finishedAt),
     );
 
-    if (finalMessage) {
+    // UH-137: skip Honcho record activity when the mission opted out.
+    if (plan.honchoMemoryEnabled && finalMessage) {
       await recordMissionExchange(plan.basePrompt, finalMessage, {
         cwd: root,
         missionId: plan.mission.id,

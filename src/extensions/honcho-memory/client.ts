@@ -20,6 +20,12 @@ export interface HonchoSessionContext {
   summary?: { content?: string | null } | null;
 }
 
+export interface HonchoSearchResult {
+  // Opaque to UH except for `content`; the SDK returns richer Message objects
+  // but the harness-side tool only surfaces the text body.
+  content?: string | null;
+}
+
 export interface HonchoSession {
   addPeers: (peers: HonchoPeer[]) => Promise<unknown>;
   context: (opts: {
@@ -29,6 +35,16 @@ export interface HonchoSession {
     tokens?: number;
   }) => Promise<HonchoSessionContext>;
   addMessages: (messages: HonchoMessage[]) => Promise<unknown>;
+  /**
+   * Semantic search over the session's messages. Mirrors
+   * `Session.search(query, { limit })` from `@honcho-ai/sdk`. Declared here so
+   * the harness-side `honcho_search` tool can call it without ambient SDK
+   * types; tests stub it cleanly.
+   */
+  search: (
+    query: string,
+    opts?: { limit?: number },
+  ) => Promise<HonchoSearchResult[]>;
 }
 
 export interface HonchoClient {
