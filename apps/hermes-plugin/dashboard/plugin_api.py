@@ -372,8 +372,18 @@ async def _iter_run_events_sse(
     start_offset: int = 0,
     proc: Any = None,
     active_info: Optional[dict[str, Any]] = None,
+    request: Any = None,
 ) -> AsyncIterator[bytes]:
-    """Tail ``events.ndjson`` for hot (live proc) and cold (finished) runs."""
+    """Tail ``events.ndjson`` for hot (live proc) and cold (finished) runs.
+
+    ``request`` (optional) is the originating Starlette ``Request``. When the
+    client disconnects we stop the tail and fall through to ``finally`` so the
+    ``_active_sse_tails`` counter is released. Under ``httpx.ASGITransport``
+    (used by the test suite) the response generator is *not* promptly
+    ``aclose()``d when the consumer stops reading, so without an explicit
+    ``request.is_disconnected()`` check the generator would stay parked at
+    ``await asyncio.sleep`` and leak a tail — the failure
+    ``test_disconnect_stops_server_generator`` catches (Blacksmith CI)."""
     last_size = start_offset
     started_mono = (
         active_info.get("started_mono") if active_info is not None else time.monotonic()
@@ -428,6 +438,13 @@ async def _iter_run_events_sse(
     _active_sse_tails += 1
     try:
         while True:
+            # Stop tailing as soon as the client goes away. The ``finally``
+            # below then releases the ``_active_sse_tails`` slot. Checked
+            # first so a disconnect that happens while we're parked on the
+            # poll sleep is noticed on the very next iteration.
+            if request is not None and await request.is_disconnected():
+                return
+
             chunk = _drain_chunk()
             for frame in _emit_chunk(chunk):
                 yield frame
@@ -1284,7 +1301,7 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
 
 
 @router.get("/runs/{run_id}/events")
-async def stream_run_events(run_id: str) -> StreamingResponse:
+async def stream_run_events(request: Request, run_id: str) -> StreamingResponse:
     """SSE tail for a run (active or on-disk cold runs)."""
     root = _project_root()
     info = _active_runs.get(run_id)
@@ -1307,6 +1324,7 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
             start_offset=start_offset,
             proc=proc,
             active_info=active_info,
+            request=request,
         ):
             yield frame
 
@@ -1315,6 +1333,7 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
 
 @router.get("/missions/{mission_id}/runs/{run_id}/events")
 async def mission_run_events(
+    request: Request,
     mission_id: str,
     run_id: str,
     stream: int = Query(0, ge=0, le=1, description="1 for SSE tail, 0 for JSON history"),
@@ -1340,6 +1359,7 @@ async def mission_run_events(
                 start_offset=start_offset,
                 proc=proc,
                 active_info=active_info,
+                request=request,
             ):
                 yield frame
 
