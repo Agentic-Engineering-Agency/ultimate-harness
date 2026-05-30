@@ -114,4 +114,4 @@ What UH-38 added: **a real request hit a real upstream subscription, returned a 
 
 1. **Tool-use channel.** Today the model emits deliverable content inside its message body; the harness does not apply structured edits. A follow-up slice can wire OAI-compat tool calls into `runner.events` and feed them through a write-applier (post-diff-capture).
 2. **Model-id correction.** The original UH-35 manifest defaulted to `hermes-4-405b`. The real upstream catalog (Nous Portal → OpenRouter) requires the `nousresearch/` prefix. The default is fixed in this slice; existing manifests of pre-UH-38 vintage need `model: "nousresearch/hermes-4-405b"` (or any other valid OpenRouter id).
-3. **Cross-runtime smoke harness.** Mentioned in [`docs/ROADMAP.md`](../ROADMAP) under medium-term proposals (`uh mission run-all --runtimes hermes,codex,oh-my-pi,hermes-proxy`). Worth filing once the matrix gets unwieldy.
+3. **Cross-runtime smoke harness.** Mentioned in [`docs/ROADMAP.md`](../roadmap) under medium-term proposals (`uh mission run-all --runtimes hermes,codex,oh-my-pi,hermes-proxy`). Worth filing once the matrix gets unwieldy.
