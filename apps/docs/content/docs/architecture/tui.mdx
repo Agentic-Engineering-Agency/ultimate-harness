@@ -116,7 +116,7 @@ If Bun is not on PATH, the CLI exits 1 with an install hint. Node-only deploymen
 
 ## 5. Lifecycle invariants
 
-Carried over from [`docs/research/tui-framework.md §6`](../research/tui-framework.md#6-renderer-lifecycle--cleanup-ordering):
+Carried over from [`docs/research/tui-framework.md §6`](../research/tui-framework#6-renderer-lifecycle--cleanup-ordering):
 
 1. `renderer.destroy()` is the only entry to terminal restoration. Never call `process.exit(0)` without `destroy()` first — the terminal stays in raw mode.
 2. `destroy()` is idempotent on a single instance (`_isDestroyed` guard) but never call `createCliRenderer` twice in one process.

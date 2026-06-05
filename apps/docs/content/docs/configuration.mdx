@@ -39,7 +39,7 @@ Use `.env.example` as a placeholder reference only. Real values should come from
 | `UH_CLI_BIN` | Hermes plugin path to the `uh` binary. |
 | `UH_READ_TIMEOUT_S` | Hermes plugin read-command timeout. |
 | `UH_RUN_TIMEOUT_S` | Hermes plugin mission-run timeout. |
-| `HONCHO_API_KEY` | Honcho persistent-memory key. Enables the extension when set (unless `HONCHO_ENABLED=false`). See the [Optional telemetry](./telemetry.md) page and the Honcho runbook in the repo. |
+| `HONCHO_API_KEY` | Honcho persistent-memory key. Enables the extension when set (unless `HONCHO_ENABLED=false`). See the [Optional telemetry](./telemetry) page and the Honcho runbook in the repo. |
 | `HONCHO_ENABLED` | Force the Honcho memory extension on/off (`true`/`false`). Defaults to on when a key is resolvable. |
 | `HONCHO_SEARCH_LIMIT` | Max snippets returned by `honcho_search`. Defaults to 8. |
 | `HONCHO_TOOL_PREVIEW_LENGTH` | Per-snippet char cap for `honcho_search`. Defaults to 500. |
@@ -64,6 +64,6 @@ Overrides are strict-validated for runtimes with registered schemas, so typoed k
 
 ## See also
 
-- [Runtime targets](./runtime-targets.md)
-- [Optional telemetry](./telemetry.md)
-- [Troubleshooting](./troubleshooting.md)
+- [Runtime targets](./runtime-targets)
+- [Optional telemetry](./telemetry)
+- [Troubleshooting](./troubleshooting)

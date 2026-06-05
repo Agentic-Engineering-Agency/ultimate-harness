@@ -1,0 +1,57 @@
+# hello-uh — the smallest end-to-end mission for first-time adopters.
+#
+# This packet demonstrates the full UH loop (objective -> acceptance criteria
+# with a real check_command -> verification gate) using a trivial shell check
+# that needs NO API keys, so an outsider can reach a verified mission in under
+# ten minutes. See README.md in this directory for the exact commands.
+
+schema_version: uh.mission.v0
+id: hello-uh
+title: "Hello UH: first verified mission"
+workflow_profile: spec-first-feature
+priority: P3
+
+objective: >-
+  Produce a HELLO-UH.txt file containing the marker `hello-uh-ok` so a
+  first-time adopter can watch a mission go from packet to a verified change
+  without needing any runtime credentials.
+
+issue_refs: []
+
+context:
+  repo_root: .
+  read_first:
+    - examples/missions/hello-uh/README.md
+  source_links: []
+
+constraints:
+  - "Create only HELLO-UH.txt at the repo root; touch nothing else."
+  - "Keep the change trivial and reversible."
+
+skills:
+  required: []
+  suggested: []
+
+expected_outputs:
+  files:
+    - HELLO-UH.txt
+
+acceptance_criteria:
+  - id: hello-marker
+    description: "HELLO-UH.txt exists and contains the marker line."
+    check_command: "grep -q 'hello-uh-ok' HELLO-UH.txt"
+    severity: block
+
+verification:
+  required_checks:
+    - name: hello-marker
+      command: "grep -q 'hello-uh-ok' HELLO-UH.txt"
+  review_gates: []
+
+capabilities: []
+
+runtime_requirements:
+  needs_network: false
+  needs_shell: true
+  needs_fs_write: true
+  max_cost_class: cheap

@@ -39,6 +39,7 @@
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.tests.json --noEmit",
+    "docs:check-links": "node scripts/check-doc-links.mjs",
     "tui-spike": "bun bin/uh-tui-spike.tsx",
     "clean": "rm -rf dist",
     "publish:dry-run": "bun publish --dry-run",

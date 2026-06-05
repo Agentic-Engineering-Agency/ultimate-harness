@@ -7,9 +7,9 @@ description: "The `hermes-proxy` adapter maps Ultimate Harness missions onto a l
 
 The `hermes-proxy` adapter maps Ultimate Harness missions onto a local **`hermes proxy`** instance (shipped in [Hermes Agent ≥ 0.14.0](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.16)). The proxy is an OpenAI-compatible local HTTP server that attaches a user's own OAuth-authenticated subscription credentials to outbound requests — UH speaks plain OAI-compat over HTTP and Hermes handles the upstream auth.
 
-It exists alongside the spawn-based adapters (`hermes`, `codex`, `oh-my-pi`) and shares the same [runtime adapter contract](./runtime-adapter-contract.md): mission packets in, structured runtime sessions and artifacts out, no implicit promotion.
+It exists alongside the spawn-based adapters (`hermes`, `codex`, `oh-my-pi`) and shares the same [runtime adapter contract](./runtime-adapter-contract): mission packets in, structured runtime sessions and artifacts out, no implicit promotion.
 
-The wire-format discovery work is captured in [`hermes-proxy-spike.md`](./hermes-proxy-spike.md) (UH-36). This doc focuses on the adapter's design.
+The wire-format discovery work is captured in [`hermes-proxy-spike.md`](./hermes-proxy-spike) (UH-36). This doc focuses on the adapter's design.
 
 ## ToS positioning
 
@@ -165,7 +165,7 @@ capabilities:
 ## Risks / limits (v1)
 
 - **No tool-use channel.** The model returns its full deliverable in the assistant message content; the harness does not apply structured file mutations. Future slice can wire OAI-compat tool calls into the runner's `events` and into the diff-application pipeline.
-- **No proxy lifecycle management.** UH does not start, stop, or supervise the proxy. The operator runs `hermes proxy start` in a separate process (see [runbook](../runbooks/hermes-proxy-setup.md)).
+- **No proxy lifecycle management.** UH does not start, stop, or supervise the proxy. The operator runs `hermes proxy start` in a separate process (see [runbook](../runbooks/hermes-proxy-setup)).
 - **Auth state is opaque to UH.** When the proxy returns `upstream_auth_failed`, UH surfaces a re-auth hint pointing at `hermes auth status `provider``. The actual re-auth flow is provider-specific and lives outside UH.
 - **Model catalog depends on the upstream.** As of Hermes 0.14.0, `hermes proxy start --provider nous` routes via Nous Portal, which itself proxies through OpenRouter. The available model ids are whatever OpenRouter exposes — not the Hermes-native model names. Run `uh adapter check hermes-proxy` to enumerate.
 - **Request body is minimal.** Today only `{ model, messages, stream: true }` is sent. Sampling controls (`temperature`, `max_tokens`) are not in the UH-35 schema; adding them is a future schema bump.
@@ -173,12 +173,12 @@ capabilities:
 ## References
 
 - [UH-32 epic](https://linear.app/agenticengineering-agency/issue/UH-32)
-- [UH-36 spike (wire format)](./hermes-proxy-spike.md)
-- [Operator runbook](../runbooks/hermes-proxy-setup.md)
-- [Runtime adapter contract](./runtime-adapter-contract.md)
-- [Sentinel protocol (UH-28)](../../src/harness/runtime-final-message.ts)
-- [Diff capture helper (UH-34)](../../src/harness/diff-capture.ts)
+- [UH-36 spike (wire format)](./hermes-proxy-spike)
+- [Operator runbook](../runbooks/hermes-proxy-setup)
+- [Runtime adapter contract](./runtime-adapter-contract)
+- Sentinel protocol (UH-28)
+- Diff capture helper (UH-34)
 
 ## Promotion record
 
-Adapter promoted from `experimental` → `active` on **2026-05-18** ([UH-38](https://linear.app/agenticengineering-agency/issue/UH-38)). Smoke evidence + receipts: [`docs/runbooks/hermes-proxy-e2e-smoke.md`](../runbooks/hermes-proxy-e2e-smoke.md).
+Adapter promoted from `experimental` → `active` on **2026-05-18** ([UH-38](https://linear.app/agenticengineering-agency/issue/UH-38)). Smoke evidence + receipts: [`docs/runbooks/hermes-proxy-e2e-smoke.md`](../runbooks/hermes-proxy-e2e-smoke).
