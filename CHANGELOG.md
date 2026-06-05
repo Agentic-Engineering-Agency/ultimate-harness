@@ -4,6 +4,14 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
+## [Unreleased]
+
+### Changed
+
+- **Capability enforcement is now WARN-by-default (UH-138).** Mission `capabilities` mismatches at `run` / `dry-run` / `run-all` preflight previously blocked with a hard error (since v0.7.0). They now emit a `[WARN]` per unmet tag and the run proceeds. Pass `--strict` to restore the hard error. `--force` still bypasses the capability check (and `runtime_requirements`) entirely. `runtime_requirements` remain typed, always-error preconditions.
+
+  Migration: if you relied on a capability mismatch blocking a run, add `--strict` to those invocations (or to CI).
+
 ## [0.9.0] — 2026-05-29
 
 Milestone **"Memory & adapter matrix"** ([Linear UH-131 / UH-136 / UH-137](https://linear.app/agenticengineering-agency/team/UH/active); GitHub PRs #204–#206 / #214 / #215 / #216). Bundles everything merged to `dev` since v0.8.0: a native pay-per-token Anthropic adapter (experimental), harness-side Honcho memory operations with a per-mission opt-out, the team-run dogfood verdict/artifact fixes, and the Phase-0 DX hardening (real `uh --version`, opt-in telemetry primitive, adoption docs, curated npm allowlist, CI plugin gates).
