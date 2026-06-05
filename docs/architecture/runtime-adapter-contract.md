@@ -98,11 +98,14 @@ Adapters should declare capabilities rather than relying on implicit behavior:
 
 
 Mission packets may declare `capabilities: [...]` using the same ids.
-`uh mission dry-run`, `uh mission run`, and `uh mission run-all` now
-enforce the selected runtime adapter's declared capabilities before
-dispatch. A mismatch blocks with a missing-capability error unless the
-operator passes `--force`; missions without `capabilities` preserve the
-legacy no-op behavior.
+`uh mission dry-run`, `uh mission run`, and `uh mission run-all` enforce
+the selected runtime adapter's declared capabilities before dispatch.
+Since v0.10.0 (UH-138) a mismatch emits a `[WARN]` per unmet tag and the
+run proceeds; pass `--strict` to treat mismatches as a hard error, or
+`--force` to bypass the check entirely. Missions without `capabilities`
+preserve the legacy no-op behavior. This is distinct from
+`runtime_requirements`, which are typed preconditions and **always** hard
+errors (never relaxed by warn mode).
 
 ## Adapter responsibilities
 

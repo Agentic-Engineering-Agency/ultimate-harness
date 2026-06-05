@@ -148,20 +148,6 @@ interface PreflightOptions {
   strict: boolean;
 }
 
-async function enforceRuntimeCapabilities(
-  root: string,
-  missionPath: string,
-  runtime: string,
-  { force, strict }: PreflightOptions,
-): Promise<void> {
-  if (force) {
-    const mission = await loadMissionFile(missionPath);
-    console.error(formatCapabilityBypassLine(mission.id, runtime));
-    return;
-  }
-  await enforceCapabilities(root, missionPath, runtime, strict ? "error" : "warn");
-}
-
 /** Preflight after runtime is chosen (`--runtime` or post `--auto` routing). */
 async function enforceRuntimePreflight(
   root: string,
