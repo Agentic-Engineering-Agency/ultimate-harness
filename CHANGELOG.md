@@ -6,11 +6,24 @@ Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [Git
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-06-05
+
+Milestone **"Capabilities & adoption"** ([Linear UH-133](https://linear.app/agenticengineering-agency/issue/UH-133) parent; [UH-138](https://linear.app/agenticengineering-agency/issue/UH-138) / [UH-139](https://linear.app/agenticengineering-agency/issue/UH-139) / [UH-140](https://linear.app/agenticengineering-agency/issue/UH-140); GitHub PRs [#227](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/227)–[#230](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/230)). The v0.10.0 slice batch: inverts mission capability enforcement to warn-by-default, ships a runnable adoption example plus a docs dead-link checker, and fixes the Hermes-plugin pytest suite exposed by the Depot→Blacksmith CI runner swap.
+
+### Added
+
+- **Adoption package** ([UH-139](https://linear.app/agenticengineering-agency/issue/UH-139), [#228](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/228)) — a runnable, credential-free `hello-uh` example mission (`examples/missions/hello-uh/`): a minimal `uh.mission.v0` packet (objective + one acceptance criterion with a real `grep -q 'hello-uh-ok' HELLO-UH.txt` check + matching verification check; `needs_network: false`; cheap cost) plus a README with exact validate/init/run/verify/cleanup commands, targeting <10 min to a first verified mission for an outsider. Adds a zero-dependency docs dead-link checker (`scripts/check-doc-links.mjs`, `bun run docs:check-links`) that scans `docs/` and `apps/docs/content/docs/` and resolves relative links case-sensitively.
+
 ### Changed
 
 - **Capability enforcement is now WARN-by-default (UH-138).** Mission `capabilities` mismatches at `run` / `dry-run` / `run-all` preflight previously blocked with a hard error (since v0.7.0). They now emit a `[WARN]` per unmet tag and the run proceeds. Pass `--strict` to restore the hard error. `--force` still bypasses the capability check (and `runtime_requirements`) entirely. `runtime_requirements` remain typed, always-error preconditions.
 
   Migration: if you relied on a capability mismatch blocking a run, add `--strict` to those invocations (or to CI).
+
+### Fixed
+
+- **Hermes-plugin pytest suite** ([UH-140](https://linear.app/agenticengineering-agency/issue/UH-140), [#227](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/227)) — fixes failures exposed by the Depot→Blacksmith runner swap (the plugin test step never actually executed under Depot). `tests/conftest.py` `_reset_active_runs` called `task.cancel()` on a closed event loop (now guards loop state before cancelling), and `_active_sse_tails` was not decremented on client disconnect (SSE tail-count leak, now released in the disconnect path).
+- **Docs ROADMAP link case** ([#229](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/229)) — corrected a case-mismatched relative doc link that fails on case-sensitive (Linux CI) filesystems, surfaced by the new dead-link checker.
 
 ## [0.9.0] — 2026-05-29
 
