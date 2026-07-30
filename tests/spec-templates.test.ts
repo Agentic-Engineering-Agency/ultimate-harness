@@ -29,10 +29,10 @@ describe("spec templates", () => {
   );
 
   test.each(Object.keys(SPEC_TEMPLATES))(
-    "docs/specs/templates/%s.spec.md matches the source constant (no drift)",
+    "specs/templates/%s.spec.md matches the source constant (no drift)",
     async (name) => {
       const onDisk = await readFile(
-        join(process.cwd(), "docs", "specs", "templates", `${name}.spec.md`),
+        join(process.cwd(), "specs", "templates", `${name}.spec.md`),
         "utf-8",
       );
       expect(onDisk).toBe(SPEC_TEMPLATES[name]);

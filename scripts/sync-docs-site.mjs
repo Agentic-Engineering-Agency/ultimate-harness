@@ -11,8 +11,8 @@ const mdBody = await readFile(mdPath, 'utf8');
 const body = mdBody
   .replace(/^#\s+.+\n+/, '')
   .replace(
-    /\[`docs\/specs\/epics-6-7-8\.md`\]\(\.\/specs\/epics-6-7-8\.md\)/g,
-    '[Epics 6–8 execution spec](https://github.com/Agentic-Engineering-Agency/ultimate-harness/blob/dev/docs/specs/epics-6-7-8.md)',
+    /\[`specs\/epics-6-7-8\.md`\]\(\.\.\/specs\/epics-6-7-8\.md\)/g,
+    '[Epics 6–8 execution spec](https://github.com/Agentic-Engineering-Agency/ultimate-harness/blob/dev/specs/epics-6-7-8.md)',
   )
   // CHANGELOG.md sits at the repo root, not under /docs/, so the relative
   // `../CHANGELOG.md` link is broken on the docs site. Rewrite to the GitHub
