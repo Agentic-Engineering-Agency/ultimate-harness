@@ -2,8 +2,7 @@
 
 Runtime-agnostic CLI and artifact lifecycle for planning, running, verifying, and promoting agentic software work.
 
-Workspace standards apply here: [../docs/standards/README.md](../docs/standards/README.md).
-This file adds only what is specific to this repo. Where they conflict, this file wins, and the conflict is recorded under `## Deviations`.
+This file is the complete agent contract for this repo; there is no external standards document to read alongside it. Repo-specific rules that intentionally diverge from common workspace conventions are recorded under `## Deviations`.
 
 ## Stack
 

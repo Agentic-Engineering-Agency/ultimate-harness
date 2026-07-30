@@ -91,7 +91,21 @@ describe("UH-109 spec-stale drift", () => {
     expect(issues).toEqual([]);
   });
 
-  test("clean when docs/specs is touched for cross-cutting work", async () => {
+  test("clean when specs/ is touched for cross-cutting work", async () => {
+    await seedRepo({
+      "src/feature.ts": "export const v = 1;\n",
+      "specs/epic-8.md": "# epic\n",
+    });
+    await writeFile(join(TEST_ROOT, "src/feature.ts"), "export const v = 2;\n", "utf-8");
+    await writeFile(join(TEST_ROOT, "specs/epic-8.md"), "# epic\n\nupdated\n", "utf-8");
+    await git(["add", "src/feature.ts", "specs/epic-8.md"]);
+    await git(["commit", "-m", "cross-cutting"]);
+
+    const issues = await specStaleKind.detect(TEST_ROOT);
+    expect(issues).toEqual([]);
+  });
+
+  test("clean when the legacy docs/specs/ root is touched for cross-cutting work", async () => {
     await seedRepo({
       "src/feature.ts": "export const v = 1;\n",
       "docs/specs/epic-8.md": "# epic\n",
