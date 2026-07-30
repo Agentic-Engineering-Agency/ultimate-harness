@@ -21,3 +21,4 @@ __pycache__/
 
 # Local Claude Code settings (shared skills are committed; local settings are not)
 .claude/settings.local.json
+/.omp/skills
