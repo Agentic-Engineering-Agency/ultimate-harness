@@ -3,7 +3,7 @@
  *
  * Starter `.spec.md` documents that conform to `uh.spec.v0` (see
  * src/harness/spec-loader.ts). These constants are the source of truth and
- * ship in the package; identical copies live under `docs/specs/templates/`
+ * ship in the package; identical copies live under `specs/templates/`
  * for discoverability, kept in sync by a drift test.
  */
 

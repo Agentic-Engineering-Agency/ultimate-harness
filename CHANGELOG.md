@@ -122,7 +122,7 @@ Epic 7 (adapter capability routing + cost) and Epic 8 (SDD hardening) completed,
 
 ## [0.5.0] — 2026-05-20
 
-Epics 6–8 integrated on `dev` from feature branches (live observability, adapter auto-routing, SDD hardening). Execution spec: [`docs/specs/epics-6-7-8.md`](docs/specs/epics-6-7-8.md).
+Epics 6–8 integrated on `dev` from feature branches (live observability, adapter auto-routing, SDD hardening). Execution spec: [`specs/epics-6-7-8.md`](specs/epics-6-7-8.md).
 
 ### Added
 
