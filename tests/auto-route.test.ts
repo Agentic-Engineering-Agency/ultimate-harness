@@ -112,6 +112,23 @@ describe("UH-101 chooseAdapter", () => {
     expect(d.candidates).toHaveLength(2);
   });
 
+  test("ignoreRequirements (--force) routes despite unmet runtime_requirements", () => {
+    const caps = capsMap({
+      hermes: makeCaps("hermes", { network: false, cost: "premium" }),
+      codex: makeCaps("codex", { network: false, cost: "free" }),
+    });
+    const d = chooseAdapter(mission({ needs_network: true }), ["hermes", "codex"], caps, {
+      ignoreRequirements: true,
+    });
+    expect(d.adapter).toBe("codex");
+    expect(d.reason).toContain("--force");
+    expect(d.reason).toContain("needs_network");
+    // Unmet requirements are still reported per candidate for --explain.
+    expect(d.candidates.every((c) => c.eligible)).toBe(true);
+    expect(d.candidates.find((c) => c.adapter === "codex")?.exclusionReasons).toContain("needs_network");
+    expect(formatAutoRouteExplain(d)).toContain("eligible (forced; waived: needs_network)");
+  });
+
   test("returns null when no adapters are available", () => {
     const d = chooseAdapter(mission(), [], capsMap({}));
     expect(d.adapter).toBeNull();

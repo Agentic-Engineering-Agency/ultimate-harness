@@ -1080,7 +1080,12 @@ missionCmd
           .map((entry) => entry.id)
           .filter((id): id is AdapterId => id in CAPABILITIES);
         const mission = await loadMissionFile(filePath);
-        const decision = chooseAdapter(mission, installed);
+        // --force bypasses runtime_requirements in the preflight below, so it
+        // must also bypass the auto-route requirements filter; otherwise
+        // `--auto --force` would still be blocked here.
+        const decision = chooseAdapter(mission, installed, CAPABILITIES, {
+          ignoreRequirements: opts.force === true,
+        });
         if (opts.explain) {
           console.log(formatAutoRouteExplain(decision));
           console.log("");

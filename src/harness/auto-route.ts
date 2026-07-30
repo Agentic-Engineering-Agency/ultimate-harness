@@ -43,11 +43,22 @@ function rankCandidate(a: AutoRouteCandidate, b: AutoRouteCandidate): number {
   return a.adapter.localeCompare(b.adapter);
 }
 
+export interface ChooseAdapterOptions {
+  /**
+   * `--force`: do not apply `runtime_requirements` as an eligibility filter.
+   * Unmet requirements are still reported on each candidate (so `--explain`
+   * shows what was waived) but no longer exclude an adapter from selection.
+   */
+  ignoreRequirements?: boolean;
+}
+
 export function chooseAdapter(
   mission: MissionDocument,
   available: AdapterId[],
   caps: Record<AdapterId, AdapterCapabilities> = CAPABILITIES,
+  options: ChooseAdapterOptions = {},
 ): AutoRouteDecision {
+  const ignoreRequirements = options.ignoreRequirements === true;
   const requirements = resolveRuntimeRequirements(mission);
 
   // De-dup, drop ids without a capability manifest, then rank for determinism.
@@ -59,7 +70,7 @@ export function chooseAdapter(
       const exclusionReasons = evaluateAdapterEligibility(adapterCaps, requirements);
       return {
         adapter: id,
-        eligible: exclusionReasons.length === 0,
+        eligible: ignoreRequirements || exclusionReasons.length === 0,
         exclusionReasons,
         cost_class: adapterCaps.cost_class,
         max_context_tokens: adapterCaps.max_context_tokens,
@@ -88,9 +99,12 @@ export function chooseAdapter(
   }
 
   const winner = eligible[0];
+  const waived = ignoreRequirements && winner.exclusionReasons.length > 0
+    ? ` — --force: waived runtime_requirements (${winner.exclusionReasons.join("; ")})`
+    : "";
   return {
     adapter: winner.adapter,
-    reason: `cheapest eligible adapter (cost_class=${winner.cost_class}, max_context_tokens=${winner.max_context_tokens})`,
+    reason: `cheapest eligible adapter (cost_class=${winner.cost_class}, max_context_tokens=${winner.max_context_tokens})${waived}`,
     candidates,
   };
 }
@@ -100,7 +114,9 @@ export function formatAutoRouteExplain(decision: AutoRouteDecision): string {
   const lines = ["Auto-route decision matrix:"];
   for (const c of decision.candidates) {
     const verdict = c.eligible
-      ? "eligible"
+      ? (c.exclusionReasons.length > 0
+        ? `eligible (forced; waived: ${c.exclusionReasons.join("; ")})`
+        : "eligible")
       : `excluded: ${c.exclusionReasons.join("; ")}`;
     lines.push(
       `  ${c.adapter.padEnd(14)} cost=${c.cost_class.padEnd(9)} ctx=${String(c.max_context_tokens).padEnd(9)} ${verdict}`,

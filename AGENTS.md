@@ -2,7 +2,7 @@
 
 Runtime-agnostic CLI and artifact lifecycle for planning, running, verifying, and promoting agentic software work.
 
-Workspace standards apply here: [../docs/standards/README.md](../docs/standards/README.md).
+Workspace standards apply here when this repository is checked out inside the AEA workspace, at `../docs/standards/README.md` (outside this repository, so not present in a standalone clone). In a standalone clone this file is the complete, authoritative ruleset.
 This file adds only what is specific to this repo. Where they conflict, this file wins, and the conflict is recorded under `## Deviations`.
 
 ## Stack

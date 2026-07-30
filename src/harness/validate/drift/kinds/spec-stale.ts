@@ -16,9 +16,15 @@ const SOURCE_EXTENSIONS = new Set([
 ]);
 
 /**
+ * Cross-cutting spec homes. `specs/` is canonical; `docs/specs/` is the
+ * pre-relocation path, still accepted so older branches don't report drift.
+ */
+const CROSS_CUTTING_SPEC_PREFIXES = ["specs/", "docs/specs/"];
+
+/**
  * UH-109 spec-stale: `git diff dev...HEAD` touches `src/**` implementation
  * without updating the nearest `.spec.md` (sibling `foo.spec.md` for
- * `foo.ts`, or any `docs/specs/**` change for cross-cutting work).
+ * `foo.ts`, or any `specs/**` change for cross-cutting work).
  */
 export const specStaleKind: DriftKindModule = {
   kind: "spec-stale",
@@ -30,7 +36,9 @@ export const specStaleKind: DriftKindModule = {
     if (changed.length === 0) return [];
 
     const changedSet = new Set(changed);
-    const docsSpecTouched = changed.some((p) => p.startsWith("docs/specs/"));
+    const crossCuttingSpecTouched = changed.some((p) =>
+      CROSS_CUTTING_SPEC_PREFIXES.some((prefix) => p.startsWith(prefix)),
+    );
     const issues: DriftIssue[] = [];
 
     for (const srcPath of changed) {
@@ -38,7 +46,7 @@ export const specStaleKind: DriftKindModule = {
 
       const nearestSpec = neighborSpecPath(srcPath);
       if (changedSet.has(nearestSpec)) continue;
-      if (docsSpecTouched) continue;
+      if (crossCuttingSpecTouched) continue;
 
       issues.push({
         kind: "spec-stale",
@@ -56,7 +64,7 @@ export const specStaleKind: DriftKindModule = {
     return {
       issue,
       outcome: "needs-human",
-      reason: "Update the nearest .spec.md (or a docs/specs/ spec for cross-cutting work) to match the implementation change.",
+      reason: "Update the nearest .spec.md (or a specs/ spec for cross-cutting work) to match the implementation change.",
     };
   },
 };
