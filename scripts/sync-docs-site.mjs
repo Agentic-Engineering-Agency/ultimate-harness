@@ -1,11 +1,28 @@
 #!/usr/bin/env bun
 // Sync docs/ROADMAP.md -> apps/docs/content/docs/roadmap.mdx for the public docs site.
+import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const repoRoot = join(import.meta.dirname, '..');
 const mdPath = join(repoRoot, 'docs/ROADMAP.md');
-const mdxPath = join(repoRoot, 'apps/docs/content/docs/roadmap.mdx');
+const mdxDir = join(repoRoot, 'apps/docs/content/docs');
+const mdxPath = join(mdxDir, 'roadmap.mdx');
+const githubBlob = 'https://github.com/Agentic-Engineering-Agency/ultimate-harness/blob/dev';
+
+// `docs/ROADMAP.md` links siblings as file paths (`./architecture/tui.md`) so
+// they resolve on GitHub and locally. The docs site is fumadocs MDX, where a
+// page is addressed by its extension-less route. Rewrite each sibling link to
+// that route when the page is mirrored on the site, and to the GitHub view when
+// it isn't (internal-only docs like `docs/prds/` are never published).
+function rewriteSiblingLink(_match, target, anchor) {
+  const rel = target.replace(/^\.\//, '');
+  const base = rel.replace(/\.md$/, '');
+  const mirrored = [`${base}.mdx`, `${base}.md`, join(base, 'index.mdx')].some((candidate) =>
+    existsSync(join(mdxDir, candidate)),
+  );
+  return mirrored ? `](./${base}${anchor})` : `](${githubBlob}/docs/${rel}${anchor})`;
+}
 
 const mdBody = await readFile(mdPath, 'utf8');
 const body = mdBody
@@ -20,7 +37,8 @@ const body = mdBody
   .replace(
     /\]\(\.\.\/CHANGELOG\.md\)/g,
     '](https://github.com/Agentic-Engineering-Agency/ultimate-harness/blob/main/CHANGELOG.md)',
-  );
+  )
+  .replace(/\]\((\.\/[^)\s#]+\.md)((?:#[^)\s]*)?)\)/g, rewriteSiblingLink);
 
 // Pull the body's "Last updated: YYYY-MM-DD" so the frontmatter description
 // never drifts from the visible date below.

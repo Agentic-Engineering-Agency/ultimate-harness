@@ -448,7 +448,7 @@ uh adapters list --capabilities --json                # for plugin consumption
 
 ### 4.2 Spec format (the contract)
 
-`.spec.md` lives next to the code it describes (`src/foo/feature.spec.md` for `src/foo/feature.ts`, or at `docs/specs/epic-N.md` for cross-cutting work).
+`.spec.md` lives next to the code it describes (`src/foo/feature.spec.md` for `src/foo/feature.ts`, or at `specs/epic-N.md` for cross-cutting work).
 
 Required front-matter:
 
@@ -483,7 +483,7 @@ The TDD generator (UH-108) reads the `## Acceptance criteria` block and emits on
 **Behavior:**
 
 ```bash
-uh mission propose --from docs/specs/epic-6.md
+uh mission propose --from specs/epic-6.md
 ```
 
 → writes `examples/missions/uh-107.yaml` with:
@@ -505,8 +505,8 @@ uh mission propose --from docs/specs/epic-6.md
 ```ts
 import { describe, it } from "vitest";
 
-// Generated from docs/specs/epic-6.md @ UH-107
-// Re-run: uh spec scaffold --from docs/specs/epic-6.md --lang ts
+// Generated from specs/epic-6.md @ UH-107
+// Re-run: uh spec scaffold --from specs/epic-6.md --lang ts
 describe("UH-107 — uh mission propose", () => {
   it.todo("AC1: parses YAML front-matter from spec");
   it.todo("AC2: rejects spec missing required sections");
@@ -539,7 +539,7 @@ Wire as an opt-in `uh validate --judge` flag. Cost-class gating: only premium wh
 - `tests/spec-loader.test.ts`: parses valid spec, rejects malformed front-matter, rejects missing required sections.
 - `tests/spec-scaffold.test.ts`: generates new file, merges into existing, preserves manual edits.
 - `tests/validate-drift-spec-stale.test.ts`: triggers on src-without-spec change, clean when both touched.
-- End-to-end: this very spec file (`docs/specs/epics-6-7-8.md`) parses cleanly through `uh mission propose`.
+- End-to-end: this very spec file (`specs/epics-6-7-8.md`) parses cleanly through `uh mission propose`.
 
 ---
 
@@ -561,15 +561,15 @@ Wire as an opt-in `uh validate --judge` flag. Cost-class gating: only premium wh
 
 ### Epic 6 kickoff
 
-> You are the Ultrawork orchestrator. Read `docs/specs/epics-6-7-8.md` §2. File Linear issues UH-92..UH-98 via the linear MCP. Spawn three hephaestus subagents in parallel worktrees `/tmp/uh-e6-{93,94,95}` for the three Core slices. Each subagent MUST follow §0 contract. After all three PRs are green and Codex-clean, rebase and merge sequentially. Report a structured status JSON.
+> You are the Ultrawork orchestrator. Read `specs/epics-6-7-8.md` §2. File Linear issues UH-92..UH-98 via the linear MCP. Spawn three hephaestus subagents in parallel worktrees `/tmp/uh-e6-{93,94,95}` for the three Core slices. Each subagent MUST follow §0 contract. After all three PRs are green and Codex-clean, rebase and merge sequentially. Report a structured status JSON.
 
 ### Epic 7 kickoff
 
-> You are the Ultrawork orchestrator. Read `docs/specs/epics-6-7-8.md` §3. File Linear issues UH-99..UH-105. Start with UH-100 (schema) solo since UH-101 and UH-102 both consume it. Once UH-100 lands on dev, spawn UH-101 + UH-102 in parallel worktrees. Use the api-design skill before authoring `src/harness/auto-route.ts`. Report structured status JSON.
+> You are the Ultrawork orchestrator. Read `specs/epics-6-7-8.md` §3. File Linear issues UH-99..UH-105. Start with UH-100 (schema) solo since UH-101 and UH-102 both consume it. Once UH-100 lands on dev, spawn UH-101 + UH-102 in parallel worktrees. Use the api-design skill before authoring `src/harness/auto-route.ts`. Report structured status JSON.
 
 ### Epic 8 kickoff
 
-> You are the Ultrawork orchestrator. Read `docs/specs/epics-6-7-8.md` §4. File Linear issues UH-106..UH-111. Activate the tdd skill. Start with UH-107 (spec loader) since UH-108 (scaffold) and UH-109 (drift) consume it. Validate the loader by parsing this very spec file. Report structured status JSON.
+> You are the Ultrawork orchestrator. Read `specs/epics-6-7-8.md` §4. File Linear issues UH-106..UH-111. Activate the tdd skill. Start with UH-107 (spec loader) since UH-108 (scaffold) and UH-109 (drift) consume it. Validate the loader by parsing this very spec file. Report structured status JSON.
 
 ---
 
