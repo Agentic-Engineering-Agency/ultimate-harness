@@ -1,18 +1,21 @@
 #!/usr/bin/env bun
 // Sync docs/ROADMAP.md -> apps/docs/content/docs/roadmap.mdx for the public docs site.
 import { readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const repoRoot = join(import.meta.dirname, '..');
 const mdPath = join(repoRoot, 'docs/ROADMAP.md');
-const mdxPath = join(repoRoot, 'apps/docs/content/docs/roadmap.mdx');
+const mdxDir = join(repoRoot, 'apps/docs/content/docs');
+const mdxPath = join(mdxDir, 'roadmap.mdx');
+const githubDocsBase = 'https://github.com/Agentic-Engineering-Agency/ultimate-harness/blob/dev/docs';
 
 const mdBody = await readFile(mdPath, 'utf8');
 const body = mdBody
   .replace(/^#\s+.+\n+/, '')
   .replace(
-    /\[`docs\/specs\/epics-6-7-8\.md`\]\(\.\/specs\/epics-6-7-8\.md\)/g,
-    '[Epics 6–8 execution spec](https://github.com/Agentic-Engineering-Agency/ultimate-harness/blob/dev/docs/specs/epics-6-7-8.md)',
+    /\[`specs\/epics-6-7-8\.md`\]\(\.\.\/specs\/epics-6-7-8\.md\)/g,
+    '[Epics 6–8 execution spec](https://github.com/Agentic-Engineering-Agency/ultimate-harness/blob/dev/specs/epics-6-7-8.md)',
   )
   // CHANGELOG.md sits at the repo root, not under /docs/, so the relative
   // `../CHANGELOG.md` link is broken on the docs site. Rewrite to the GitHub
@@ -20,7 +23,17 @@ const body = mdBody
   .replace(
     /\]\(\.\.\/CHANGELOG\.md\)/g,
     '](https://github.com/Agentic-Engineering-Agency/ultimate-harness/blob/main/CHANGELOG.md)',
-  );
+  )
+  // Sibling `docs/` links (`./architecture/tui.md`) are file paths in the
+  // plain-markdown tree but the mirror is a fumadocs route tree: mirrored
+  // pages are addressed without an extension, and docs that have no mirrored
+  // page (docs/README.md, docs/prds/**, ...) have no route at all, so point
+  // those at GitHub instead of emitting a link that 404s on the docs site.
+  .replace(/\]\(\.\/([A-Za-z0-9._/-]+)\.md(#[^)\s]*)?\)/g, (_match, relPath, anchor) => {
+    const suffix = anchor ?? '';
+    const mirrored = ['.mdx', '.md'].some((ext) => existsSync(join(mdxDir, `${relPath}${ext}`)));
+    return mirrored ? `](./${relPath}${suffix})` : `](${githubDocsBase}/${relPath}.md${suffix})`;
+  });
 
 // Pull the body's "Last updated: YYYY-MM-DD" so the frontmatter description
 // never drifts from the visible date below.

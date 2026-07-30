@@ -1,0 +1,45 @@
+disabledProviders:
+- claude
+- claude-plugins
+- codex
+- cursor
+- gemini
+- opencode
+- mcp-json
+skills:
+  enabled: true
+  enableCodexUser: false
+  enableClaudeUser: false
+  enableClaudeProject: false
+  enablePiUser: false
+  enablePiProject: true
+  enableAgentsUser: false
+  enableAgentsProject: false
+  includeSkills:
+  - orca-cli
+  - orca-linear
+  - diagnosing-bugs
+  - verify-before-complete
+  - code-review
+  - refactor-clean
+  - write-tests
+  - write-spec
+  - implement-spec
+  - close-spec
+  - handoff
+  - write-docs
+  - to-tickets
+  - api-design
+  - domain-modeling
+  - tdd
+  - orchestration
+  - herdr
+  - llm-benchmark-with-blind-judge
+  - dependency-upgrade
+  - github-workflows
+  - observability
+  - security-review
+task:
+  maxConcurrency: 4
+  maxRecursionDepth: 1
+  maxRuntimeMs: 1800000
