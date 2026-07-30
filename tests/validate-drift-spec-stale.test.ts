@@ -105,7 +105,7 @@ describe("UH-109 spec-stale drift", () => {
     expect(issues).toEqual([]);
   });
 
-  test("clean when the legacy docs/specs/ root is touched for cross-cutting work", async () => {
+  test("the legacy docs/specs/ root does not satisfy the cross-cutting exception", async () => {
     await seedRepo({
       "src/feature.ts": "export const v = 1;\n",
       "docs/specs/epic-8.md": "# epic\n",
@@ -116,7 +116,11 @@ describe("UH-109 spec-stale drift", () => {
     await git(["commit", "-m", "cross-cutting"]);
 
     const issues = await specStaleKind.detect(TEST_ROOT);
-    expect(issues).toEqual([]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.metadata).toEqual({
+      srcPath: "src/feature.ts",
+      specPath: "src/feature.spec.md",
+    });
   });
 
   test("--strict-spec promotes severity to error", async () => {

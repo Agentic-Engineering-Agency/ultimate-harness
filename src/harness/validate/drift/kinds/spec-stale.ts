@@ -15,8 +15,8 @@ const SOURCE_EXTENSIONS = new Set([
   ".cjs",
 ]);
 
-/** Cross-cutting spec roots: `specs/` is canonical, `docs/specs/` is the pre-relocation path. */
-const CROSS_CUTTING_SPEC_ROOTS = ["specs/", "docs/specs/"];
+/** Canonical cross-cutting spec root; active specs do not live under `docs/`. */
+const CROSS_CUTTING_SPEC_ROOT = "specs/";
 
 /**
  * UH-109 spec-stale: `git diff dev...HEAD` touches `src/**` implementation
@@ -33,9 +33,7 @@ export const specStaleKind: DriftKindModule = {
     if (changed.length === 0) return [];
 
     const changedSet = new Set(changed);
-    const crossCuttingSpecTouched = changed.some((p) =>
-      CROSS_CUTTING_SPEC_ROOTS.some((root) => p.startsWith(root)),
-    );
+    const crossCuttingSpecTouched = changed.some((p) => p.startsWith(CROSS_CUTTING_SPEC_ROOT));
     const issues: DriftIssue[] = [];
 
     for (const srcPath of changed) {
