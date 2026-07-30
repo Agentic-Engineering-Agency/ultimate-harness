@@ -132,9 +132,11 @@ describe("capability enforcement severity", () => {
         "runtime_requirements:",
         "  min_context_tokens: 100000000",
       ]);
-      // Capability check itself passes in warn mode (no throw)...
+      // Capability check itself passes in warn mode (capability is supported; no warnings, no throw)...
       const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-      await expect(enforceCapabilities(root, missionPath, "codex", "warn")).resolves.not.toThrow;
+      const match = await enforceCapabilities(root, missionPath, "codex", "warn");
+      expect(match?.missing).toEqual([]);
+      expect(spy).not.toHaveBeenCalled();
       spy.mockRestore();
       // ...but runtime_requirements is an always-error typed precondition.
       await expect(assertRuntimeRequirements(missionPath, "codex"))

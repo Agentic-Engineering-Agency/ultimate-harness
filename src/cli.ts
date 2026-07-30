@@ -1000,7 +1000,7 @@ missionCmd
   .option("--runtime <runtime>", "Runtime to use (default: hermes)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
-  .option("--force", "Bypass mission capability matching for this runtime")
+  .option("--force", "Bypass mission capability matching and runtime_requirements for this runtime")
   .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
   .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
@@ -1055,7 +1055,7 @@ missionCmd
   .option("--runtime <runtime>", "Runtime to use (default: hermes)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
-  .option("--force", "Bypass mission capability matching for this runtime")
+  .option("--force", "Bypass mission capability matching and runtime_requirements for this runtime")
   .option(
     "--runtime-config-overrides <json>",
     "JSON object of runtime_config overrides applied on top of the mission file (e.g. '{\"model\":\"gpt-5\"}')",
@@ -1241,7 +1241,7 @@ missionCmd
   .option("--runtimes <list>", "Comma-separated runtime list (default: every active adapter)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--serial", "Run runtimes sequentially instead of in parallel")
-  .option("--force", "Bypass mission capability matching for selected runtimes")
+  .option("--force", "Bypass mission capability matching and runtime_requirements for selected runtimes")
   .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
   .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
