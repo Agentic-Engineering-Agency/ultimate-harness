@@ -21,6 +21,7 @@ skills:
   - diagnosing-bugs
   - verify-before-complete
   - code-review
+  - review-budget-guard
   - refactor-clean
   - write-tests
   - write-spec
