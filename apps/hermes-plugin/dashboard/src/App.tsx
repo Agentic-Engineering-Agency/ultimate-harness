@@ -6,9 +6,8 @@
  * workflow, wizard, ...) each own their own loading/empty/error state.
  */
 import { useHashRoute } from "./router";
-import { OverviewTab } from "./OverviewTab";
+import { DeliveryObservatory } from "./DeliveryObservatory";
 import { MissionDrilldown } from "./MissionDrilldown";
-import { MissionCompare } from "./MissionCompare";
 import { WorkflowViewer } from "./WorkflowViewer";
 import { MissionWizard } from "./MissionWizard";
 import { WorkflowEditor } from "./WorkflowEditor";
@@ -18,19 +17,15 @@ export function App() {
   const [route] = useHashRoute();
   switch (route.view) {
     case "overview":
-      return <OverviewTab />;
+      return <DeliveryObservatory />;
     case "mission":
       return <MissionDrilldown missionId={route.missionId ?? ""} />;
     case "missionRun":
       return <MissionDrilldown missionId={route.missionId ?? ""} pinnedRunId={route.runId} />;
     case "missionCompare":
-      return (
-        <MissionCompare
-          missionId={route.missionId ?? ""}
-          runA={route.runA ?? ""}
-          runB={route.runB ?? ""}
-        />
-      );
+      // Legacy compare rendered raw result, diff, and event bodies. Preserve
+      // old deep links without exposing that duplicate/unsafe surface.
+      return <MissionDrilldown missionId={route.missionId ?? ""} pinnedRunId={route.runB} />;
     case "workflow":
       return <WorkflowViewer name={route.workflowName ?? ""} />;
     case "workflowEdit":

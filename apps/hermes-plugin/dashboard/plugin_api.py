@@ -59,6 +59,7 @@ _RUN_TIMEOUT_S = float(os.environ.get("UH_RUN_TIMEOUT_S", "3600"))
 _SSE_KEEPALIVE_S = float(os.environ.get("UH_SSE_KEEPALIVE_S", "15"))
 _MAX_ARTIFACT_BYTES = int(os.environ.get("UH_MAX_ARTIFACT_BYTES", str(5 * 1024 * 1024)))
 _MAX_OVERRIDES_JSON_BYTES = int(os.environ.get("UH_MAX_OVERRIDES_JSON_BYTES", "8192"))
+_MAX_OBSERVATORY_JSON_BYTES = int(os.environ.get("UH_MAX_OBSERVATORY_JSON_BYTES", str(2 * 1024 * 1024)))
 
 # UH-90 — retention. Cap is read once at module import from the plugin's
 # `manifest.json` ("config.max_runs_per_mission"). `None` = unlimited (no
@@ -716,6 +717,40 @@ async def get_status() -> dict[str, Any]:
         "sandboxes": {"total": len(sandbox_entries), "by_status": by_status},
         "recent_audit_events": audit_lines,
     }
+
+
+@router.get("/observatory/snapshot")
+async def get_observatory_snapshot() -> dict[str, Any]:
+    """Return the public CLI's safe-metadata-only Observatory projection.
+
+    This route deliberately does not combine the plugin's legacy mission,
+    prompt, event, or artifact-body endpoints. The TypeScript projector is the
+    only serializer, and malformed or oversized output fails closed.
+    """
+    root = _project_root()
+    try:
+        proc = _runner.run_sync(
+            ["observatory", "snapshot", "--json", "--root", str(root)],
+            cwd=root,
+            timeout=_READ_TIMEOUT_S,
+        )
+    except FileNotFoundError as exc:
+        raise _err(503, "observatory_unavailable", "Delivery Observatory source is unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _err(504, "observatory_timeout", "Delivery Observatory snapshot timed out") from exc
+    if proc.returncode != 0:
+        # stderr may contain local paths or adapter diagnostics. Never echo it.
+        raise _err(503, "observatory_unavailable", "Delivery Observatory snapshot is unavailable")
+    raw = proc.stdout or ""
+    if len(raw.encode("utf-8")) > _MAX_OBSERVATORY_JSON_BYTES:
+        raise _err(413, "observatory_too_large", "Delivery Observatory snapshot exceeds the safe response limit")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise _err(502, "observatory_bad_json", "Delivery Observatory returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("contract_version") != "delivery-observatory.v1":
+        raise _err(502, "observatory_incompatible", "Delivery Observatory contract version is incompatible")
+    return payload
 
 
 @router.get("/adapters/capabilities")

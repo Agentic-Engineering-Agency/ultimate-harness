@@ -70,6 +70,7 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 - [AgentFS sandbox backend (design)](./architecture/sandbox-agentfs.md)
 - [Verification and promotion](./architecture/verification-and-promotion.md)
 - [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md)
+- [Telar planning/governance and UH Run Control boundary](./architecture/telar-integration.md)
 
 ### Runbooks
 

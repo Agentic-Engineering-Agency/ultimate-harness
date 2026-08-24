@@ -2,30 +2,55 @@
 
 Drop-in extension for the [Hermes Agent dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) that exposes UH end-to-end from the web UI: adapter health, mission list, mission run trigger + live event tail, artifact drilldown (prompt / final message / diff / runtime-result / events / verification), a sortable Recent runs pane with status-chip + run_id prefix filters that deep-links into per-run artifacts, workflow viewer + editor, mission wizard, and a `sessions:bottom` slot that deep-links Hermes sessions back to their UH missions.
 
-## Install (one-liner)
+## Install from source
 
 ```bash
-# Latest release tarball will publish to GitHub Releases (UH-68).
-mkdir -p ~/.hermes/plugins/uh && \
-  curl -sSL https://github.com/Agentic-Engineering-Agency/ultimate-harness/releases/latest/download/hermes-plugin.tar.gz \
-  | tar -xz -C ~/.hermes/plugins/uh --strip-components=2
+cd /absolute/path/to/ultimate-harness
+bun run plugin:build
+apps/hermes-plugin/hermes-local.sh enable
 
-# Also install the matching theme:
-mkdir -p ~/.hermes/dashboard-themes && \
-  cp ~/.hermes/plugins/uh/dashboard/../theme/ultimate-harness.yaml ~/.hermes/dashboard-themes/
-
-# Force-rescan so the dashboard picks it up without a restart.
-curl http://127.0.0.1:9119/api/dashboard/plugins/rescan
+# Keep the observed project explicit. This stays in the foreground and does
+# not install a login item or LaunchAgent.
+UH_PROJECT_ROOT=/absolute/path/to/harness-project \
+  apps/hermes-plugin/hermes-local.sh start
 ```
 
-Until UH-68 publishes a tarball, the canonical install path is a symlink from the worktree:
+`enable` links the complete `apps/hermes-plugin/` package at
+`~/.hermes/plugins/uh`, links the theme, and runs
+`hermes plugins enable uh --no-allow-tool-override`. A normal dashboard start
+discovers the UI and mounts the backend together; the old dashboard-only
+symlink plus unauthenticated rescan is not a complete Hermes plugin install.
+
+Useful lifecycle commands:
 
 ```bash
-ln -snf "$PWD/apps/hermes-plugin/dashboard" ~/.hermes/plugins/uh/dashboard
-ln -snf "$PWD/apps/hermes-plugin/theme/ultimate-harness.yaml" ~/.hermes/dashboard-themes/ultimate-harness.yaml
+apps/hermes-plugin/hermes-local.sh status
+apps/hermes-plugin/hermes-local.sh disable
+apps/hermes-plugin/hermes-local.sh enable
+apps/hermes-plugin/hermes-local.sh rollback
 ```
 
-Now refresh the dashboard at `http://127.0.0.1:9119/` — the **Ultimate Harness** tab appears after **Sessions**.
+`disable` preserves the links. `rollback` disables UH and removes only links
+that resolve to this package; it refuses to replace or remove unmanaged paths.
+After `start`, open `http://127.0.0.1:9119/uh` — the **Ultimate Harness** tab
+appears after **Sessions**.
+
+## Hermes 0.20.5 packaging compatibility
+
+Hermes discovers a dashboard-only directory for rendering, but its plugin CLI
+does not consider that directory an installed plugin. With only
+`~/.hermes/plugins/uh/dashboard`, Hermes Agent v0.20.5 reports:
+
+```text
+$ hermes plugins enable uh --no-allow-tool-override
+Plugin 'uh' is not installed or bundled.
+```
+
+The package therefore includes a root `plugin.yaml` plus a no-op
+`__init__.py`. The manifest declares metadata only—no tools, hooks,
+capabilities, environment access, or replacement authority. The Python
+registration seam intentionally registers nothing; dashboard actions continue
+to use the public `uh` CLI and `.harness/` artifacts.
 
 ## Development loop
 
@@ -44,6 +69,9 @@ See [`docs/runbooks/hermes-dashboard-plugin.md`](../../docs/runbooks/hermes-dash
 
 ```
 apps/hermes-plugin/
+├── plugin.yaml             # Hermes package identity; metadata only
+├── __init__.py             # no-op native registration seam
+├── hermes-local.sh         # reversible local link + lifecycle helper
 ├── dashboard/
 │   ├── manifest.json       # tab metadata
 │   ├── src/                # TSX sources (bundled by esbuild)

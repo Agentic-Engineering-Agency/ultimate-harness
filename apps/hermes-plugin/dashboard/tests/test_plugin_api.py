@@ -60,6 +60,45 @@ async def test_status_adapter_check_merges_stdout(client: httpx.AsyncClient, iso
 
 
 @pytest.mark.asyncio
+async def test_observatory_snapshot_uses_safe_public_cli_contract(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    payload = {
+        "contract_version": "delivery-observatory.v1",
+        "snapshot_id": "snapshot-safe",
+        "generated_at": "2026-08-23T12:00:00Z",
+    }
+    fake_cli.stub(
+        ("observatory", "snapshot", "--json", "--root", str(isolated_project)),
+        stdout=json.dumps(payload),
+    )
+    resp = await client.get("/api/plugins/uh/observatory/snapshot")
+    assert resp.status_code == 200
+    assert resp.json() == payload
+
+
+@pytest.mark.asyncio
+async def test_observatory_snapshot_fails_closed_without_leaking_stderr(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    args = ("observatory", "snapshot", "--json", "--root", str(isolated_project))
+    fake_cli.stub(args, stdout="not-json")
+    malformed = await client.get("/api/plugins/uh/observatory/snapshot")
+    assert malformed.status_code == 502
+    assert malformed.json()["code"] == "observatory_bad_json"
+
+    fake_cli.stub(args, stdout=json.dumps({"contract_version": "private.future.v9"}))
+    incompatible = await client.get("/api/plugins/uh/observatory/snapshot")
+    assert incompatible.status_code == 502
+    assert incompatible.json()["code"] == "observatory_incompatible"
+
+    fake_cli.stub(args, returncode=1)
+    unavailable = await client.get("/api/plugins/uh/observatory/snapshot")
+    assert unavailable.status_code == 503
+    assert "stderr" not in unavailable.text.lower()
+
+
+@pytest.mark.asyncio
 async def test_missions_list_and_detail(client: httpx.AsyncClient, isolated_project: Path) -> None:
     resp = await client.get("/api/plugins/uh/missions")
     assert resp.status_code == 200

@@ -54,6 +54,9 @@ jobs:
           set -euo pipefail
           STAGE="$RUNNER_TEMP/hermes-plugin"
           mkdir -p "$STAGE/uh/dashboard" "$STAGE/uh/theme"
+          cp -a apps/hermes-plugin/plugin.yaml "$STAGE/uh/"
+          cp -a apps/hermes-plugin/__init__.py "$STAGE/uh/"
+          cp -a apps/hermes-plugin/hermes-local.sh "$STAGE/uh/"
           cp -a apps/hermes-plugin/dashboard/manifest.json "$STAGE/uh/dashboard/"
           cp -a apps/hermes-plugin/dashboard/plugin_api.py "$STAGE/uh/dashboard/"
           cp -a apps/hermes-plugin/dashboard/dist "$STAGE/uh/dashboard/"

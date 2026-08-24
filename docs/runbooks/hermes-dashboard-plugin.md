@@ -1,38 +1,73 @@
 # Hermes dashboard plugin runbook
 
-Status: merged for downstream integration testing 2026-05-19 (Wave 3, [UH-60](https://linear.app/agenticengineering-agency/issue/UH-60) epic); live dashboard smoke pending [UH-68](https://linear.app/agenticengineering-agency/issue/UH-68).
+Status: complete package workflow validated against Hermes Agent v0.20.5 on 2026-08-24.
 
 The `uh` plugin makes Ultimate Harness drivable from the Hermes web dashboard: live adapter health, mission list, mission run trigger with live event tail, artifact drilldown (prompt, final-message, diff, runtime-result, events, verification), workflow viewer + editor, mission wizard, and a Sessions-page deep-link slot.
 
 This runbook covers install, day-1 sanity checks, common failure modes, and the dev loop. The plugin source lives in [`apps/hermes-plugin/`](../../apps/hermes-plugin/). See the [hermes dashboard extension docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/extending-the-dashboard) for the SDK contract this plugin builds on.
 
-## Install
+## Packaging compatibility
 
-The plugin is a drop-in directory under `~/.hermes/plugins/`. Until a release tarball lands ([UH-68](https://linear.app/agenticengineering-agency/issue/UH-68)), the canonical path is a symlink from your UH worktree.
+Hermes dashboard discovery and Hermes plugin discovery are separate gates. The
+old layout linked only `~/.hermes/plugins/uh/dashboard`; the dashboard could see
+its `manifest.json`, but Hermes Agent v0.20.5 could not enable the package:
+
+```text
+$ hermes plugins enable uh --no-allow-tool-override
+Plugin 'uh' is not installed or bundled.
+```
+
+The complete package has `plugin.yaml`, a no-op `__init__.py`, `dashboard/`, and
+`theme/` under one root. Its native manifest is metadata-only and requests no
+tools, hooks, capabilities, or tool-override authority. Ultimate Harness remains
+the sole Run Control through the public `uh` CLI and `.harness/` artifacts.
+
+## Install
 
 ### From source (dev / pre-release)
 
 ```bash
 # 1) Build the bundle.
-cd ~/AgenticEngineering/ultimate-harness     # your UH worktree
+cd /absolute/path/to/ultimate-harness
 bun run plugin:build
 
-# 2) Link the dashboard directory.
-mkdir -p ~/.hermes/plugins/uh
-ln -snf "$PWD/apps/hermes-plugin/dashboard" ~/.hermes/plugins/uh/dashboard
+# 2) Link the complete package + theme and enable without tool override.
+apps/hermes-plugin/hermes-local.sh enable
 
-# 3) Optional — install the matching theme.
-mkdir -p ~/.hermes/dashboard-themes
-ln -snf "$PWD/apps/hermes-plugin/theme/ultimate-harness.yaml" \
-  ~/.hermes/dashboard-themes/ultimate-harness.yaml
-
-# 4) Tell the dashboard to rescan (no restart needed for the UI bundle).
-curl -s http://127.0.0.1:9119/api/dashboard/plugins/rescan
+# 3) Start normally in the foreground against one explicit harness root.
+UH_PROJECT_ROOT=/absolute/path/to/harness-project \
+  apps/hermes-plugin/hermes-local.sh start
 ```
 
-Open `http://127.0.0.1:9119/`. The **Ultimate Harness** tab appears after **Sessions** in the nav rail. The theme switcher (palette icon) now lists **Ultimate Harness**.
+The helper refuses to replace existing paths. If the obsolete dashboard-only
+directory already exists, stop the dashboard and move that exact directory to a
+backup before `enable`; for example:
 
-> Backend routes (`/api/plugins/uh/*`) are mounted **once at dashboard startup**. If the routes 404, restart `hermes dashboard` after symlinking.
+```bash
+mv ~/.hermes/plugins/uh ~/.hermes/plugins/uh.dashboard-only.backup
+```
+
+Keep that backup until the checks below pass. `start` does not install login
+persistence: it runs Hermes Dashboard in the foreground on `127.0.0.1:9119`.
+Stop it with `Ctrl-C`; restart by running the same explicit
+`UH_PROJECT_ROOT=... hermes-local.sh start` command. Backend routes mount once
+at startup, so a rescan is not a substitute for this normal restart.
+
+Open `http://127.0.0.1:9119/uh`. The **Ultimate Harness** tab appears after
+**Sessions** in the nav rail. The theme switcher lists **Ultimate Harness**.
+
+### Lifecycle and rollback
+
+```bash
+apps/hermes-plugin/hermes-local.sh status
+apps/hermes-plugin/hermes-local.sh disable   # keep links, remove allowlist entry
+apps/hermes-plugin/hermes-local.sh enable    # restore allowlist, no tool override
+apps/hermes-plugin/hermes-local.sh rollback  # disable + remove owned links only
+```
+
+`rollback` preflights both paths and refuses to remove anything it did not
+link to this package. To restore an obsolete layout after rollback, move the
+saved backup back to `~/.hermes/plugins/uh` and restart Hermes explicitly.
 
 ### From a release tarball (post UH-68)
 
@@ -51,23 +86,38 @@ curl -sSL https://github.com/Agentic-Engineering-Agency/ultimate-harness/release
 mkdir -p ~/.hermes/dashboard-themes
 cp ~/.hermes/plugins/uh/theme/ultimate-harness.yaml ~/.hermes/dashboard-themes/
 
-# Restart so plugin_api routes mount.
-launchctl kickstart -k gui/$(id -u)/com.nousresearch.hermes-dashboard   # macOS LaunchAgent
-# or just: pkill -f 'hermes dashboard' && hermes dashboard &
+hermes plugins enable uh --no-allow-tool-override
+
+# Start in the foreground with an explicit project root.
+UH_PROJECT_ROOT=/absolute/path/to/harness-project \
+  ~/.hermes/plugins/uh/hermes-local.sh start
 ```
 
 ## First sanity checks
 
 ```bash
-# 1) Plugin manifest is discovered.
-curl -s http://127.0.0.1:9119/api/dashboard/plugins | jq '.[].name' | grep -F '"uh"'
+# 1) Plugin manifest is discovered and the browser assets are served.
+curl -fsS http://127.0.0.1:9119/api/dashboard/plugins | jq '.[].name' | grep -F '"uh"'
+curl -fsSI http://127.0.0.1:9119/dashboard-plugins/uh/dist/index.js
+curl -fsSI http://127.0.0.1:9119/dashboard-plugins/uh/dist/style.css
 
-# 2) Backend mounted at /api/plugins/uh/.
-curl -s http://127.0.0.1:9119/api/plugins/uh/status | jq '.project_name'
-
-# 3) Bundle loads in the browser without errors.
-# Open DevTools -> Network -> filter "dashboard-plugins/uh/dist/index.js" -> expect 200.
+# 2) CLI package discovery is enabled without override authority.
+hermes plugins list | grep -F 'uh'
 ```
+
+The backend status and Observatory snapshot routes are session-protected. Check
+them from the signed-in dashboard (or an automation tab with its own valid
+session), not with an unauthenticated curl:
+
+```js
+await fetch("/api/plugins/uh/status").then((response) => response.json());
+await fetch("/api/plugins/uh/observatory/snapshot").then((response) => response.json());
+```
+
+Expect the selected project name in status and
+`contract_version: "delivery-observatory.v1"` in the snapshot. In the browser,
+`/uh` must render the Ultimate Harness surface rather than the generic SPA
+fallback, and a refresh must preserve the same project and snapshot counts.
 
 If `/api/plugins/uh/status` returns `{"project_name": "unknown"}`, the dashboard process can't see your `.harness/` directory. Set `UH_PROJECT_ROOT`:
 

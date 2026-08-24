@@ -38,6 +38,7 @@ import { readFile as readFileAsync, writeFile as writeFileAsync } from "node:fs/
 import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js";
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 import { installTelemetryHooks } from "./harness/telemetry.js";
+import { projectDeliveryObservatory } from "./harness/delivery-observatory/project.js";
 
 import {
   createSandbox,
@@ -389,6 +390,35 @@ program
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
+    }
+  });
+
+// uh observatory snapshot --json
+// Read-only, safe-metadata-only projection for local operator surfaces. The
+// projector reads canonical .harness artifacts directly and never spawns a
+// runtime, tails raw events, or serializes prompt/log/path fields.
+const observatoryCmd = program
+  .command("observatory")
+  .description("Read Delivery Observatory projections");
+
+observatoryCmd
+  .command("snapshot")
+  .description("Emit a delivery-observatory.v1 safe local snapshot")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit JSON (required for the v1 contract)")
+  .action(async (opts: { root?: string; json?: boolean }) => {
+    if (!opts.json) {
+      console.error("uh observatory snapshot requires --json");
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const root = resolveRoot(opts.root);
+      const snapshot = await projectDeliveryObservatory(root);
+      console.log(JSON.stringify(snapshot, null, 2));
+    } catch (err) {
+      console.error(`observatory snapshot unavailable: ${(err as Error).message}`);
+      process.exitCode = 1;
     }
   });
 
