@@ -2,6 +2,12 @@
 
 Ultimate Harness is a **runtime-agnostic software-development harness** for agentic engineering work.
 
+In the governed delivery architecture, UH is the sole **Meta Harness / Run
+Control**: Telar owns business intent, policy, stable identity, authority, and
+the normalized ledger; UH resolves and supervises live execution through
+replaceable runtime adapters. See the
+[Telar–UH boundary](./docs/architecture/telar-integration.md).
+
 It sits above coding agents and agent runtimes. Instead of becoming "one more coding agent", it standardizes the durable artifacts and lifecycle around agentic work:
 
 ```text
@@ -57,6 +63,7 @@ Start with the [quickstart](./docs/quickstart.md), the [configuration guide](./d
 - [Runtime adapter contract](./docs/architecture/runtime-adapter-contract.md) — includes the UH-28 sentinel protocol
 - [Mission packet schema](./docs/architecture/mission-packet-schema.md)
 - [Verification and promotion lifecycle](./docs/architecture/verification-and-promotion.md)
+- [Telar governance and UH Run Control boundary](./docs/architecture/telar-integration.md)
 
 Runbooks:
 
