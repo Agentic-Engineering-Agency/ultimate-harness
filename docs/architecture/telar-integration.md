@@ -1,7 +1,7 @@
 # Telar and Ultimate Harness boundary
 
 > **Status:** architecture proposal; no schema or runtime change is authorized by this document.
-> **Evidence basis:** repository state at `74b9ee1` on 2026-08-23. “Implemented” below means a code path and focused tests exist at that revision; documentation-only intent is not counted as implementation.
+> **Evidence basis:** repository state at `9d00c94` on 2026-08-28. “Implemented” below means a code path and focused tests exist at that revision; documentation-only intent is not counted as implementation.
 
 > **Canonical cross-project decision:**
 > `Telar/docs/architecture/adrs/ADR-023-separate-delivery-systems-behind-contracts.md`
@@ -15,11 +15,27 @@ Keep Telar and Ultimate Harness as separate products for now, connected through 
 
 - **Telar should own planning and governance:** scope graphs, independent decisions, design packages, human gates, agent identity, quality policy, Definition of Done, delivery metrics, and the learning loop.
 - **Ultimate Harness should own mission execution:** runtime discovery and dispatch, sandbox lifecycle, attempt records, cancellation, diff and output capture, verification command execution, team integration, and mechanical promotion.
-- **A shared contracts module should own only the wire vocabulary:** execution envelopes, capability snapshots, run/event/evidence references, route explanations, and promotion authorization receipts.
+- **A future shared contracts module may carry only proven wire vocabulary:** execution envelopes, capability snapshots, run/event/evidence references, route explanations, and promotion authorization receipts. It has no semantic authority; Telar and UH retain the producer ownership assigned by ADR-023.
 
 This preserves one execution controller per attempt. Telar can state *what is authorized and what quality bar applies*; UH remains the only component that starts, retries, falls back, cancels, verifies, or promotes that attempt.
 
 The recommendation is intentionally not a merge recommendation. UH already has meaningful execution depth, while Telar's proposed depth is predominantly upstream governance. Folding either domain into the other now would blur ownership before the inter-product contract has been exercised.
+
+### Canonical vocabulary
+
+The cross-project terms map to products as follows:
+
+| Term | Meaning here | Product |
+|---|---|---|
+| Execution Harness | A runtime substrate that hosts provider sessions, tools, and native trajectories. | OMP in the Pantheon lane; other UH adapters target other harnesses or transports. |
+| Meta Harness | The one cross-harness controller that resolves and supervises live attempts. | Ultimate Harness, as sole Run Control. |
+| Orchestrator | Business intent, lifecycle policy, stable identity, normalized ledger, human authority, and governed learning. | Telar; this role never launches or retries a live attempt. |
+| Repo-local Assurance | Readiness, traceability, TDD, verification, QA, and local completion evidence. | SpecSafe. |
+| OMP Execution Adapter | OMP-specific session recovery, delivery, evidence, and effect semantics behind the UH seam. | OMP Pantheon. |
+
+“Cellar” is a transcription error for **Telar**. “Orchestrator” is not a second
+Run Control, and “Meta Harness” is a capability of UH rather than a fifth
+product.
 
 ## Evidence and classification
 
@@ -48,7 +64,7 @@ The principal evidence is the code under [`src/schema/`](../../src/schema/), [`s
 | Multi-runtime execution | `src/harness/run-all.ts`, `team-run.ts`, `workflow.ts` | Cross-runtime fan-out and diff comparison; worker worktrees plus leader merge/integration; staged Plan→PRD→Execute→Verify→Fix with a bounded fix loop. | Injected runner/ops interfaces used primarily inside the process and tests. |
 | Verification and promotion | `src/harness/verify.ts`, `spec-judge.ts`, `verdict.ts`, `promote.ts` | Runs commands and acceptance checks, records one optional LLM adherence judgment, captures manual verdicts, and blocks promotion until verification passes. | CLI and function exports; declared mission `review_gates` are not an executable gate engine. |
 | Isolation and evidence | `src/harness/sandbox.ts`, `sandbox-backends.ts`, `diff-capture.ts`, artifact helpers | Git-worktree/directory/container-backed execution boundaries and per-attempt prompt, logs, events, diff, result, and latest/history pointers. | Sandbox/backend functions and filesystem artifacts under `.harness/`. |
-| Human surfaces | `src/tui/`, `apps/hermes-plugin/` | Reads mission/run state, presents execution status, events, replay/cancel affordances, and plugin views. | Consumers of CLI-safe primitives and `.harness/` artifacts; they do not define new lifecycle contracts. |
+| Human surfaces | `src/tui/`, `apps/hermes-plugin/`, `src/harness/delivery-observatory/` | Reads mission/run state and projects operator work, decisions, safe evidence, replay/cancel affordances, and plugin views. | Consumers of CLI-safe primitives and `.harness/` artifacts; Delivery Observatory is a read-only projection, not a cross-project system of record or second ledger. |
 | Optional memory and telemetry | `src/extensions/honcho-memory/`, `src/harness/telemetry.ts` | Runtime prompt enrichment/exchange memory and opt-in sanitized CLI outcome telemetry. | Optional extension/config seams; neither is a governance learning loop. |
 
 ### Adapter seam
@@ -266,6 +282,38 @@ The shared module is a protocol kernel, not a third controller.
 4. Exercise two end-to-end workflows and measure contract friction, missing lineage, and duplicate state.
 5. Only then introduce a UH JSON/NDJSON Run Control façade and any required persisted-schema additions.
 6. Re-evaluate separate repositories versus a modules-only monorepo using observed change coupling. Do not consider a product merge until the adapter boundary has proven inadequate for reasons other than missing façade ergonomics.
+
+## Future operating plan
+
+UH's future work is limited to making Run Control deeper behind a smaller,
+stable interface. It does not absorb Telar governance, SpecSafe assurance, or
+Pantheon's OMP implementation.
+
+| Area | UH responsibility at the seam | Required interface or adapter | Gate and evidence | Security / deletion test |
+|---|---|---|---|---|
+| Interfaces and seams | Expose asynchronous launch, inspect, control, collect, and mechanically authorized promotion without leaking adapter modules or `.harness/` layout. | Versioned JSON/NDJSON Run Control façade plus conformance fixtures. | Idempotent request digest, ordered cursor, explicit terminal state, and backward-compatibility check. | A caller must not need internal imports or console parsing; if it does, the interface is too shallow. |
+| Adapters | Resolve one permitted adapter and supervise one live attempt. | Internal execution-adapter registry; Pantheon supplies the OMP implementation through the portable seam. | Capability snapshot, actual adapter/version, cancellation, retry/fallback lineage, and native evidence references. | Deleting Pantheon must make OMP recovery complexity reappear, not merely remove a pass-through. A second conforming adapter is required before shared extraction. |
+| Lifecycle gates | Enforce launch and promotion receipts supplied by Telar and execute repo checks requested by SpecSafe without redefining either policy. | Authorization receipt, assurance request/result, integration request/result. | No launch without exact request authorization; no mechanical promotion with stale assurance, ambiguity, or mismatched candidate digest. | UH cannot self-approve, weaken a gate, or treat model agreement as human authority. |
+| Economics | Resolve the cheapest/highest-utility live route only after Telar eligibility, quality, channel, budget, latency, quota, and fallback policy is applied. | Route-policy input, capability/availability snapshot, route-resolution receipt, usage observations. | Requested versus actual model/provider/version/effort/channel, fallback reason, budget decisions, and explicit unknowns. | Unknown rate or subscription allocation stays unknown; cheapest never overrides eligibility or quality. |
+| Observability | Preserve raw mission, attempt, check, diff, usage, and adapter facts; emit allowlisted normalized events for Telar. | Evidence bundle and Delivery Exchange projection. Delivery Observatory remains a read-only local view. | Producer sequence, timestamps, digests, route lineage, freshness, and source coverage. | No cross-project normalized ledger in UH; deleting the Observatory must not delete execution truth. |
+| Identity | Bind a Telar-stable agent and request identity to UH run/attempt IDs and the actual runtime route. | Agent binding and route-resolution shapes. | Every fallback records stable identity unchanged and actual route changed. | Persona or requested model cannot stand in for observed identity; duplicate ID plus different digest is rejected. |
+| Learning | Supply observations and execute only an approved experiment request. | Versioned observation and experiment-execution receipts. | Candidate policy reference, bounded cohort, cost/quality/regression results, stop rule, and rollback receipt. | UH does not publish routing policy, rewrite prompts/memory, or self-modify from run history. |
+| Security | Enforce scope, capabilities, sandbox/effect bounds, data classification, and attributed controls at execution time. | Authorization/control receipts and redacted evidence references. | Actor, scope, exact revision, nonce/expiry, effect allowlist, secret isolation, and `uncertain` handling. | Stale/forged authorization, secret or private-path leakage, hash mismatch, and ambiguous effect replay fail closed. |
+| Evolution | Keep schemas producer-owned until real change coupling proves extraction value. | Golden fixtures and bidirectional conformance tests across Telar, UH, SpecSafe, and two execution adapters. | Two workflows, second executor, and two compatibility cycles before shared-package review. | If deleting the package removes only copied type declarations and no complexity returns, keep schemas in their producers. |
+
+The first authorized vertical must be non-production: one Telar-approved slice,
+one UH run, one SpecSafe assurance chain, and one Pantheon attempt, including a
+negative `uncertain` or stale-evidence case. External deployment, destructive
+effects, and production migration require a separately approved runbook.
+
+## Deletion tests
+
+| Candidate | Complexity that must reappear if it is genuinely deep | Decision |
+|---|---|---|
+| Ultimate Harness Run Control | Live discovery, policy-constrained resolution, sandbox lifecycle, dispatch, fallback, cancellation, integration, verification execution, and evidence collection spread into every caller. | Keep and deepen behind the small interface. |
+| Delivery Observatory | No execution or governance complexity should disappear; only the local read projection is lost. | Keep replaceable and read-only; never make it a system of record. |
+| Shared contracts package before extraction gate | Only copied validators and types disappear because one adapter still defines the shape. | Do not create yet. |
+| Adapter-specific imports in callers | Deleting them should remove coupling rather than behavior. | Replace with the Run Control / Execution Adapter seams. |
 
 ## Open decisions before implementation
 
