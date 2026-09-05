@@ -22,7 +22,9 @@ import {
   type VerifyMissionLike,
   type WorkerOutcome,
 } from "../src/harness/team-run.js";
-import { warnConstraintsAreAdvisory } from "../src/harness/verify.js";
+import { projectDeliveryObservatory } from "../src/harness/delivery-observatory/project.js";
+import { verifyMission, warnConstraintsAreAdvisory } from "../src/harness/verify.js";
+import { initializeHarness } from "../src/harness/init.js";
 
 const execFileP = promisify(execFile);
 
@@ -768,5 +770,112 @@ describe("runTeamMission — real git (smoke)", () => {
     const leaderB = await readFile(join(result.plan.leader.worktreePath, "src/b.ts"), "utf-8");
     expect(leaderA).toBe("// backend\n");
     expect(leaderB).toBe("// frontend\n");
+  });
+
+  test("persists canonical parent and worker facts through non-retained cleanup", async () => {
+    await initGitRepo(ROOT);
+    await initializeHarness(ROOT);
+    await seedMissionPacket(ROOT, "team-mission");
+    await writeFile(join(ROOT, ".harness", "missions", "team-mission", "mission.yaml"), [
+      "schema_version: uh.mission.v0",
+      "id: team-mission",
+      "title: Team Mission",
+      "workflow_profile: staged",
+      "objective: integrate worker fan-out",
+      "verification:",
+      "  required_checks:",
+      "    - name: merged-products",
+      "      command: node -e \"const f=require('node:fs');if(f.readFileSync('src/a.ts','utf8').trim()!=='worker'||f.readFileSync('src/b.ts','utf8').trim()!=='worker')process.exit(1)\"",
+      "shape: team",
+      "team:",
+      "  workers:",
+      "    - role: backend",
+      "      adapter: hermes",
+      "    - role: frontend",
+      "      adapter: codex",
+      "  leader:",
+      "    role: integrator",
+      "    adapter: hermes",
+    ].join("\n") + "\n", "utf-8");
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+    const contexts: Array<{ artifactRoot: string; runId: string }> = [];
+    const runner = (_adapter: string) => async (
+      _a: string,
+      workerRoot: string,
+      _missionPath: string,
+      context: { artifactRoot: string; runId: string },
+    ): Promise<TeamRuntimeRunResult> => {
+      contexts.push(context);
+      const missionDir = join(context.artifactRoot, ".harness", "missions", "team-mission");
+      const runDir = join(missionDir, "runs", context.runId);
+      await mkdir(runDir, { recursive: true });
+      await writeFile(join(runDir, "runtime-final.txt"), "worker complete\n", "utf-8");
+      await writeFile(join(runDir, "runtime-result.yaml"), [
+        "schema_version: uh.runtime-result.v0",
+        "mission_id: team-mission",
+        "runtime: oh-my-pi",
+        "status: passed",
+        "started_at: 2026-01-01T00:00:00.000Z",
+        "finished_at: 2026-01-01T00:00:01.000Z",
+        "exit_code: 0",
+        "prompt_path: prompt.md",
+        "stdout_path: stdout.log",
+        "stderr_path: stderr.log",
+        "diff_path: diff.patch",
+        "errors: []",
+        "provider: openai-codex",
+        "model: gpt-5.6-luna",
+        "usage:",
+        "  input_tokens: 10",
+        "  output_tokens: 2",
+        "  total_tokens: 12",
+        "  source: runtime",
+        "  provider: openai-codex",
+        "  model: gpt-5.6-luna",
+        "  cost_usd: 0.1",
+        "cost_usd: 0.1",
+      ].join("\n"), "utf-8");
+      await mkdir(join(workerRoot, "src"), { recursive: true });
+      await writeFile(join(workerRoot, "src", `${workerRoot.endsWith("backend") ? "a" : "b"}.ts`), "worker\n", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" }, runId: context.runId };
+    };
+    const verifier = (workerRoot: string, missionId: string) =>
+      verifyMission(workerRoot, missionId, { useSandbox: false });
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      runnerFor: runner,
+      verifier,
+      retainOnSuccess: false,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.retained).toBe(false);
+    expect(result.verification).toMatchObject({ status: "passed", checks_total: 1, checks_passed: 1 });
+    expect(result.runId).toBeTypeOf("string");
+    expect(contexts).toHaveLength(2);
+    expect(new Set(contexts.map((context) => context.artifactRoot)).size).toBe(2);
+    for (const context of contexts) {
+      await readFile(join(context.artifactRoot, ".harness", "missions", "team-mission", "runs", context.runId, "runtime-result.yaml"), "utf-8");
+    }
+    const parentRunDir = join(ROOT, ".harness", "missions", "team-mission", "runs", result.runId!);
+    const state = JSON.parse(await readFile(join(parentRunDir, "team-state.json"), "utf-8"));
+    expect(state).toMatchObject({ mission_id: "team-mission", status: "passed", run_id: result.runId });
+    expect(state.workers).toHaveLength(2);
+
+    const latest = JSON.parse(await readFile(join(ROOT, ".harness", "missions", "team-mission", "latest.json"), "utf-8"));
+    expect(latest).toMatchObject({ run_id: result.runId, status: "passed" });
+    const index = JSON.parse(await readFile(join(ROOT, ".harness", "missions", "team-mission", "runs", "index.json"), "utf-8"));
+    expect(index.runs.filter((entry: { run_id: string }) => entry.run_id === result.runId)).toHaveLength(1);
+    const snapshot = await projectDeliveryObservatory(ROOT, { now: "2026-01-01T00:00:02.000Z" });
+    expect(snapshot.work_items[0]).toMatchObject({
+      operation: "succeeded",
+      phase: "verify",
+      resolved_model: { state: "known", value: "gpt-5.6-luna" },
+      provider: { state: "known", value: "openai-codex" },
+      tokens: { state: "known", value: 24 },
+      cost: { state: "known", value: 0.2 },
+    });
+    expect(snapshot.agents.filter((agent) => agent.operation === "succeeded")).toHaveLength(3);
   });
 });

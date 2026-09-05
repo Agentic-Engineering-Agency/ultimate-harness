@@ -1,15 +1,15 @@
 import { access, appendFile, lstat, readFile, realpath, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { parse, stringify } from "yaml";
 import { validateMission, type MissionDocument } from "../schema/mission.js";
 import { validateVerificationResult, type VerificationResultDocument } from "../schema/artifacts.js";
 import { promoteMission } from "./promote.js";
-import { harnessDir, missionsDir, projectYaml, sandboxesDir, sandboxesIndex } from "./paths.js";
+import { harnessDir, missionsDir, projectYaml } from "./paths.js";
 import { validateFile } from "./validate.js";
-import { SandboxesIndexSchema } from "../schema/artifacts.js";
 import { classifyDiff } from "./diff-classifier.js";
 import { runOpenSandboxCommand, type SandboxCommandRunResult } from "./sandbox-backends.js";
+import { findBoundSandbox } from "./sandbox.js";
 
 const SNIPPET_LIMIT = 800;
 const TIMEOUT_KILL_GRACE_MS = 100;
@@ -349,43 +349,6 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   };
 }
 
-export async function findBoundSandbox(
-  projectRoot: string,
-  missionId: string,
-): Promise<{ id: string; path: string; backend: string } | null> {
-  const indexPath = sandboxesIndex(projectRoot);
-  if (!(await fileExists(indexPath))) {
-    return null;
-  }
-  let raw: string;
-  try {
-    raw = await readFile(indexPath, "utf-8");
-  } catch {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = parse(raw);
-  } catch {
-    return null;
-  }
-  const result = SandboxesIndexSchema.safeParse(parsed);
-  if (!result.success) {
-    return null;
-  }
-  const sandboxesRoot = path.resolve(sandboxesDir(projectRoot));
-  const candidates = result.data.sandboxes
-    .filter((entry) => entry.mission_id === missionId && entry.status !== "discarded" && typeof entry.path === "string" && entry.path.length > 0)
-    .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
-  for (const candidate of candidates) {
-    if (!candidate.path) continue;
-    const abs = path.resolve(projectRoot, candidate.path);
-    if (!isPathWithin(abs, sandboxesRoot)) continue;
-    if (!(await fileExists(abs))) continue;
-    return { id: candidate.id, path: abs, backend: candidate.backend };
-  }
-  return null;
-}
 
 /**
  * UH-130: surface that mission `constraints[]` are advisory-only. The harness
@@ -431,7 +394,8 @@ async function runCommand(root: string, command: string, commandTimeoutMs: numbe
     const startedAt = Date.now();
     const child = spawn(command, {
       cwd: root,
-      detached: true,
+      detached: process.platform !== "win32",
+      windowsHide: true,
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -453,6 +417,18 @@ async function runCommand(root: string, command: string, commandTimeoutMs: numbe
     };
     const killChild = (signal: NodeJS.Signals) => {
       if (child.pid === undefined) return;
+      if (process.platform === "win32") {
+        try {
+          execFileSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          return;
+        } catch {
+          try { child.kill(signal); } catch { /* child already exited */ }
+          return;
+        }
+      }
       try { process.kill(-child.pid, signal); } catch {
         try { child.kill(signal); } catch { /* best effort */ }
       }

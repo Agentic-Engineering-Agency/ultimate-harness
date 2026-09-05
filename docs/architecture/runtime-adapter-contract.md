@@ -171,7 +171,7 @@ The extractor:
 | Adapter   | Sentinel scan target                                       | Fallback when sentinel absent                                 |
 |-----------|------------------------------------------------------------|---------------------------------------------------------------|
 | codex     | Content of `--output-last-message` file (raw text)         | Raw file content (Codex's native final message)               |
-| oh-my-pi  | Heuristic-extracted last assistant text (JSON-decoded)     | Heuristic last assistant text (unchanged from pre-UH-28)      |
+| oh-my-pi  | Last assistant text decoded from native messages and typed content arrays | Last decoded assistant text |
 | hermes    | Hermes stdout text                                         | Empty file (Hermes does not produce a native summary today)   |
 
 ### Status semantics
@@ -179,11 +179,35 @@ The extractor:
 - The sentinel does NOT change `runtime-result.status`. Status remains
   driven by exit code, runtime-native signals (Codex's
   `--output-last-message` presence, Hermes' `uh.runtime-result.v0`
-  block, oh-my-pi's heuristic finalMessage non-empty check).
+  block, oh-my-pi's native terminal errors and non-empty final message).
 - A mission may emit a runtime-result `status: passed` even when the
   sentinel is omitted, as long as the runtime-native fallback path
   satisfies the adapter's success criteria. The sentinel is the
   *preferred* summary source, not a *required* one.
+
+### Native OMP facts and sandbox artifacts
+
+Sandbox execution and canonical artifact persistence are separate boundaries.
+OMP runs and product diff capture remain in the selected sandbox; the CLI publishes
+run events and terminal artifacts under the host mission so existing readers can
+observe progress before exit. Publishing those facts does not promote product
+changes. An active run takes precedence over an older terminal result in the
+Observatory.
+
+Cancellation settles the selected run's result, runtime session, and index even
+when its event log cannot be appended. Mission mirrors and the latest pointer
+change only when they still identify that run; cancelling an older run preserves
+newer run facts. Cancelled results use `cancelled`, while runtime sessions use
+`failed` with the signal exit code. Initial OMP event persistence failure likewise
+settles writable terminal artifacts without starting the child.
+
+Usage totals come from completed native assistant messages, not repeated progress
+or final-envelope copies. Explicit message identities take precedence over
+timestamp/content deduplication: distinct identities count independently.
+Missing measurements remain unknown. Reported cost is runtime evidence, not
+proof of an invoice or subscription charge. Structured terminal errors fail the
+run even after assistant output. Public failure summaries and Observatory
+projections must not expose raw prompts, tool payloads, credentials, or transcripts.
 
 ### Why a single shared protocol
 

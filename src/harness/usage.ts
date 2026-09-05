@@ -3,21 +3,15 @@
  * the dashboard cost gauge).
  *
  * Adapters emit a `runtime.usage` event per run. Where the runtime reports real
- * token counts (e.g. hermes-proxy returns OpenAI-style `usage`), `source` is
- * "runtime". Where it does not (codex CLI, hermes CLI, oh-my-pi), we record a
- * deterministic estimate from prompt/output character length tagged
- * `source: "estimated"` so downstream consumers can weight or label it.
+ * token counts, `source` is "runtime". Adapters that cannot report usage may
+ * omit the event; consumers must preserve unknown facts rather than replacing
+ * them with an estimate.
  */
+import { RuntimeUsageSchema } from "../schema/artifacts.js";
+import type { infer as Infer } from "zod";
 
-export type UsageSource = "runtime" | "estimated";
-
-export interface RuntimeUsage {
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  source: UsageSource;
-  model?: string;
-}
+export type RuntimeUsage = Infer<typeof RuntimeUsageSchema>;
+export type UsageSource = RuntimeUsage["source"];
 
 /** ~4 characters per token — the standard rough heuristic for English/code. */
 const CHARS_PER_TOKEN = 4;
@@ -84,11 +78,15 @@ export function buildUsageEvent(
     timestamp,
     runtime,
     mission_id: missionId,
-    input_tokens: usage.input_tokens,
-    output_tokens: usage.output_tokens,
-    total_tokens: usage.total_tokens,
     source: usage.source,
   };
+  if (usage.input_tokens !== undefined) event.input_tokens = usage.input_tokens;
+  if (usage.output_tokens !== undefined) event.output_tokens = usage.output_tokens;
+  if (usage.total_tokens !== undefined) event.total_tokens = usage.total_tokens;
   if (usage.model) event.model = usage.model;
+  if (usage.provider) event.provider = usage.provider;
+  if (usage.cache_read_tokens !== undefined) event.cache_read_tokens = usage.cache_read_tokens;
+  if (usage.cache_write_tokens !== undefined) event.cache_write_tokens = usage.cache_write_tokens;
+  if (usage.cost_usd !== undefined) event.cost_usd = usage.cost_usd;
   return event;
 }
