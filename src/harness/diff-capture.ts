@@ -2,19 +2,16 @@
  * Diff capture helper used by every runtime adapter (UH-34).
  *
  * Replaces the previous per-adapter `git diff --no-color` calls. Plain
- * `git diff` skips untracked new files, which is the most common shape
- * of a mission output (codex/oh-my-pi/hermes writing one or more brand
- * new files). The captured `diff.patch` would then look empty even when
- * the mission produced real artifacts.
+ * `git diff` skips untracked new files, which is the most common shape of a
+ * mission output. Untracked files are rendered with `git diff --no-index`
+ * without mutating the repository index.
  *
- * Strategy: run `git add --intent-to-add` against the untracked-file
- * list (excluding gitignored paths) before `git diff`. `git add -N`
- * does NOT stage blob content; it just marks the path so `git diff`
- * emits a new-file hunk for it. The index mutation is bounded and
- * harmless inside a discardable sandbox worktree.
+ * Generated bookkeeping under sandbox/audit directories and mission run
+ * mirrors is excluded; harness configuration such as adapters, workflows,
+ * project metadata, and mission packets remains diffable.
  *
- * Falls back to an empty patch + an error entry when git is unavailable
- * or `cwd` is not a checkout, matching the prior contract.
+ * Falls back to an empty patch + an error entry when git is unavailable or
+ * `cwd` is not a checkout, matching the prior contract.
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -27,48 +24,70 @@ export interface DiffCaptureResult {
 }
 
 const GIT_MAX_BUFFER = 50 * 1024 * 1024;
+function isGeneratedHarnessPath(filePath: string): boolean {
+  const normalized = filePath.replaceAll("\\", "/");
+  if (normalized.startsWith(".harness/sandboxes/") || normalized.startsWith(".harness/audit/")) return true;
+  const parts = normalized.split("/");
+  if (parts[0] !== ".harness" || parts[1] !== "missions" || parts.length < 4) return false;
+  return parts[3] === "runs" || ["latest.json", "runtime-result.yaml", "verification.yaml", "promotion.yaml"].includes(parts[3]);
+}
 
-/**
- * Capture the working-tree diff at `cwd`, including untracked new files.
- *
- * Steps:
- *   1. `git ls-files --others --exclude-standard -z` to enumerate
- *      untracked (non-ignored) paths.
- *   2. `git add --intent-to-add -- <paths>` to mark them so the next
- *      `git diff` produces a new-file diff for each.
- *   3. `git diff --no-color` to capture both modified-tracked and the
- *      now-intent-to-added untracked files in one unified patch.
- *
- * When step 1 fails (git missing, no repo), returns `{ patch: "",
- * errors }` matching the prior contract. Step 2 is a no-op when there
- * are zero untracked files. Step 3 is the same call the previous
- * implementation made.
- */
+const GENERATED_PATHSPEC_EXCLUDES = [
+  ":(exclude).harness/sandboxes/**",
+  ":(exclude).harness/audit/**",
+  ":(exclude).harness/missions/**/runs/**",
+  ":(exclude).harness/missions/**/latest.json",
+  ":(exclude).harness/missions/**/runtime-result.yaml",
+  ":(exclude).harness/missions/**/verification.yaml",
+  ":(exclude).harness/missions/**/promotion.yaml",
+] as const;
+
+function diffFailure(err: unknown): DiffCaptureResult {
+  return {
+    patch: "",
+    errors: [`Diff capture failed: ${(err as Error).message}`],
+  };
+}
+
 export async function captureDiffWithUntracked(cwd: string): Promise<DiffCaptureResult> {
   try {
+    // A HEAD baseline is required: without one, a successful empty result
+    // would silently discard staged content and cannot be applied to a base.
+    await execFileP("git", ["rev-parse", "--verify", "HEAD"], { cwd, maxBuffer: GIT_MAX_BUFFER });
+
     const { stdout: untrackedRaw } = await execFileP(
       "git",
       ["ls-files", "--others", "--exclude-standard", "-z"],
       { cwd, maxBuffer: GIT_MAX_BUFFER },
     );
-    const untracked = untrackedRaw.split("\0").filter((p) => p.length > 0);
-    if (untracked.length > 0) {
-      // `git add -N` doesn't stage content; the next `git diff` then
-      // includes a /dev/null -> <file> hunk for each path.
-      await execFileP("git", ["add", "--intent-to-add", "--", ...untracked], {
-        cwd,
-        maxBuffer: GIT_MAX_BUFFER,
-      });
+    const untracked = untrackedRaw
+      .split("\0")
+      .filter((p) => p.length > 0 && !isGeneratedHarnessPath(p));
+
+    // Comparing HEAD with the worktree includes both staged and unstaged
+    // changes while leaving the index untouched. --binary is required for
+    // binary changes to remain applicable on a clean base.
+    const { stdout: trackedDiff } = await execFileP(
+      "git",
+      ["diff", "HEAD", "--binary", "--no-color", "--", ".", ...GENERATED_PATHSPEC_EXCLUDES],
+      { cwd, maxBuffer: GIT_MAX_BUFFER },
+    );
+    const patches = trackedDiff.length > 0 ? [trackedDiff] : [];
+    for (const relativePath of untracked) {
+      try {
+        await execFileP(
+          "git",
+          ["diff", "--no-index", "--binary", "--no-color", "--", "/dev/null", relativePath],
+          { cwd, maxBuffer: GIT_MAX_BUFFER },
+        );
+      } catch (err) {
+        const output = err as { stdout?: string; code?: number | string };
+        if (Number(output.code) !== 1 || typeof output.stdout !== "string") throw err;
+        if (output.stdout.length > 0) patches.push(output.stdout);
+      }
     }
-    const { stdout: diff } = await execFileP("git", ["diff", "--no-color"], {
-      cwd,
-      maxBuffer: GIT_MAX_BUFFER,
-    });
-    return { patch: diff };
+    return { patch: patches.join("") };
   } catch (err) {
-    return {
-      patch: "",
-      errors: [`Diff capture failed: ${(err as Error).message}`],
-    };
+    return diffFailure(err);
   }
 }

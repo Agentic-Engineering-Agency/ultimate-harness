@@ -23,12 +23,12 @@ import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabil
 import { forecastCost } from "./harness/cost-forecast.js";
 import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
 import { COST_CLASSES } from "./schema/adapter-capabilities.js";
-import { findBoundSandbox } from "./harness/verify.js";
-import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
+import { resolveSandboxMissionRoot } from "./harness/sandbox.js";
+import { finalizeRuntimeCancelledRun } from "./harness/runtime-events.js";
 import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
 import { parseScaffoldLang, scaffoldTestsFromSpec } from "./harness/test-scaffold.js";
-import { assertValidRunId } from "./harness/run-id.js";
+import { assertValidRunId, generateRunId } from "./harness/run-id.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -49,7 +49,7 @@ import {
 import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 import { recordManualVerdict } from "./harness/verdict.js";
-import type { VerdictValue } from "./schema/artifacts.js";
+import { SandboxesIndexSchema, type VerdictValue } from "./schema/artifacts.js";
 
 function readPackageVersion(): string {
   try {
@@ -95,8 +95,12 @@ type RuntimeDryRunResult = {
 interface RuntimeRunOptions {
   /** UH-81 — CLI-time runtime_config overrides spread on top of the mission's own overrides. */
   extraRuntimeConfigOverrides?: Record<string, unknown>;
-  /** UH-82 — explicit per-run id; generated when absent. */
+  /** Canonical host root for OMP artifacts when execution is sandbox-routed. */
+  artifactRoot?: string;
+  /** UH-82 — explicit per-run id. */
   runId?: string;
+  /** Signal used by the CLI to stop an owned runtime process tree. */
+  cancellationSignal?: AbortSignal;
 }
 interface RuntimeWiring {
   dryRun(root: string, missionPath: string): Promise<RuntimeDryRunResult>;
@@ -113,36 +117,6 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
   pi: { dryRun: dryRunPi, run: (root, missionPath, opts) => runPi(root, missionPath, opts), surfaceBlocked: true },
 };
 
-/**
- * Auto-route a mission invocation into its bound sandbox worktree.
- *
- * Mirrors `verifyMission`'s sandbox-routing: when a mission has an active
- * sandbox entry in `.harness/sandboxes/index.yaml`, the adapter is invoked
- * with the worktree path as `root` so prompts, artifacts, and diff capture
- * all see the worktree, not the canonical repo. Returns the original root
- * untouched when `--no-sandbox` is passed or no bound sandbox exists.
- */
-async function resolveMissionRoot(
-  root: string,
-  missionPath: string,
-  useSandbox: boolean,
-): Promise<{ effectiveRoot: string; sandbox?: { id: string; path: string; backend: string } }> {
-  if (!useSandbox) return { effectiveRoot: root };
-  let missionId: string;
-  try {
-    const raw = await readFileAsync(missionPath, "utf-8");
-    const parsed = parseYaml(raw) as { id?: unknown } | null;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.id !== "string" || parsed.id.length === 0) {
-      return { effectiveRoot: root };
-    }
-    missionId = parsed.id;
-  } catch {
-    return { effectiveRoot: root };
-  }
-  const sandbox = await findBoundSandbox(root, missionId);
-  if (!sandbox) return { effectiveRoot: root };
-  return { effectiveRoot: sandbox.path, sandbox };
-}
 
 async function enforceRuntimeCapabilities(
   root: string,
@@ -167,25 +141,35 @@ async function enforceRuntimePreflight(
 }
 
 async function installRuntimeCancelledEventHandler(
-  root: string,
+  artifactRoot: string,
   missionPath: string,
   runtime: string,
+  runId: string,
+  cancellationController: AbortController,
 ): Promise<() => void> {
   const mission = await loadMissionFile(missionPath);
   let handled = false;
-  const onSigterm = (): void => {
+  const onSignal = (signal: "SIGINT" | "SIGTERM"): void => {
     if (handled) return;
     handled = true;
-    appendRuntimeCancelledEvent({
-      root,
+    cancellationController.abort();
+    finalizeRuntimeCancelledRun({
+      root: artifactRoot,
       missionId: mission.id,
       runtime,
-      signal: "SIGTERM",
+      signal,
+      runId,
     });
     process.exit(143);
   };
+  const onSigint = (): void => onSignal("SIGINT");
+  const onSigterm = (): void => onSignal("SIGTERM");
+  process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
-  return () => process.removeListener("SIGTERM", onSigterm);
+  return () => {
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+  };
 }
 
 const program = new Command();
@@ -1051,7 +1035,13 @@ missionCmd
       process.exit(1);
       return;
     }
-    const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    const routing = await resolveSandboxMissionRoot(root, filePath, opts.sandbox);
+    if (routing.error) {
+      console.error(`[BLOCKED] sandbox routing failed:`);
+      console.error(`  error: ${routing.error}`);
+      process.exit(1);
+      return;
+    }
     if (routing.sandbox?.backend === "container") {
       console.error(`[BLOCKED] container sandbox mission dry-run requires an OpenSandbox adapter-execution bridge; refusing host execution for sandbox ${routing.sandbox.id}`);
       process.exit(1);
@@ -1060,7 +1050,7 @@ missionCmd
     if (routing.sandbox) {
       console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
     }
-    const result = await wiring.dryRun(routing.effectiveRoot, filePath);
+    const result = await wiring.dryRun(routing.effectiveRoot, routing.missionPath);
     if (result.errors.length > 0) {
       console.log("[FAIL] dry-run errors:");
       for (const e of result.errors) {
@@ -1152,7 +1142,13 @@ missionCmd
       process.exit(1);
       return;
     }
-    const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    const routing = await resolveSandboxMissionRoot(root, filePath, opts.sandbox);
+    if (routing.error) {
+      console.error(`[BLOCKED] sandbox routing failed:`);
+      console.error(`  error: ${routing.error}`);
+      process.exit(1);
+      return;
+    }
     if (routing.sandbox?.backend === "container") {
       console.error(`[BLOCKED] container sandbox mission run requires an OpenSandbox adapter-execution bridge; refusing host execution for sandbox ${routing.sandbox.id}`);
       process.exit(1);
@@ -1180,12 +1176,25 @@ missionCmd
       const keys = Object.keys(extraRuntimeConfigOverrides);
       console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
     }
+    const runId = opts.runId ?? generateRunId();
     console.log("");
     let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] }; runId?: string };
     let uninstallCancelHandler: (() => void) | null = null;
+    const cancellationController = new AbortController();
     try {
-      uninstallCancelHandler = await installRuntimeCancelledEventHandler(root, filePath, runtime);
-      result = await wiring.run(routing.effectiveRoot, filePath, { extraRuntimeConfigOverrides, runId: opts.runId });
+      uninstallCancelHandler = await installRuntimeCancelledEventHandler(
+        root,
+        routing.missionPath,
+        runtime,
+        runId,
+        cancellationController,
+      );
+      result = await wiring.run(routing.effectiveRoot, routing.missionPath, {
+        extraRuntimeConfigOverrides,
+        runId,
+        artifactRoot: root,
+        cancellationSignal: cancellationController.signal,
+      });
     } catch (err) {
       console.log("[FAIL] mission run error:");
       console.log(`  error: ${(err as Error).message}`);
@@ -1428,11 +1437,11 @@ missionCmd
     console.log(`Running team mission ${missionId} with ${teamMission.team.workers.length} worker spec(s)`);
     try {
       const result = await runTeamMission(teamMission, root, {
-        runnerFor: (adapter) => async (rt, effectiveRoot, missionPath) => {
+        runnerFor: (adapter) => async (rt, effectiveRoot, missionPath, runtimeOptions) => {
           const wiring = RUNTIME_WIRINGS[adapter];
           if (!wiring) throw new Error(`Unknown adapter: ${adapter}`);
           void rt;
-          return wiring.run(effectiveRoot, missionPath);
+          return wiring.run(effectiveRoot, missionPath, runtimeOptions);
         },
         verifier: async (workRoot, mid) => verifyMission(workRoot, mid, { useSandbox: false }),
         baseRef: opts.baseRef,

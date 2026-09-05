@@ -25,8 +25,26 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { parse, stringify } from "yaml";
 import { promisify } from "node:util";
-import { harnessDir, missionsDir } from "./paths.js";
+import { harnessDir, missionRunDir, missionsDir } from "./paths.js";
+import {
+  appendRunsIndexEntry,
+  generateRunId,
+  readLatestPointer,
+  writeLatestPointer,
+} from "./run-id.js";
+import {
+  RuntimeResultSchema,
+  type RuntimeResultDocument,
+  type RuntimeResultStatus,
+} from "../schema/artifacts.js";
+import {
+  CanonicalTeamStateSchema,
+  type CanonicalTeamState,
+  type CanonicalTeamStatus,
+} from "../schema/team.js";
+import type { RuntimeUsage } from "./usage.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists } from "./mission.js";
 
 const execFileP = promisify(execFile);
@@ -49,6 +67,8 @@ export interface TeamWorker {
 export interface TeamLeader {
   /** Adapter id the leader dispatches against. */
   adapter: string;
+  /** Stable role used by the canonical Observatory agent identity. */
+  role?: string;
 }
 
 export interface TeamMission {
@@ -87,18 +107,35 @@ export interface TeamPlan {
   integrationReportPath: string;
 }
 
+/** Canonical artifact identity supplied to each runtime worker. */
+export interface TeamRuntimeContext {
+  artifactRoot: string;
+  runId: string;
+}
+
 /** Mirror of `RuntimeRunResult` to avoid a circular import with run-all. */
 export interface TeamRuntimeRunResult {
   exitCode: number;
   stdout: string;
   stderr: string;
-  result?: { status?: string; errors?: string[] };
+  result?: {
+    status?: string;
+    errors?: string[];
+    provider?: string;
+    model?: string;
+    usage?: RuntimeUsage;
+    cost_usd?: number;
+    started_at?: string;
+    finished_at?: string;
+  };
+  runId?: string;
 }
 
 export type TeamRuntimeRunner = (
   adapter: string,
   root: string,
   missionPath: string,
+  context: TeamRuntimeContext,
 ) => Promise<TeamRuntimeRunResult>;
 
 export interface VerifyMissionLike {
@@ -177,6 +214,10 @@ export interface WorkerOutcome {
   merge: MergeOutcome | null;
   /** True when the leader successfully integrated this worker's branch. */
   integrated: boolean;
+  /** Canonical native artifact identity retained outside the worktree. */
+  runId?: string;
+  artifactScope?: string;
+  runtimeResult?: RuntimeResultDocument;
 }
 
 /**
@@ -184,9 +225,9 @@ export interface WorkerOutcome {
  *
  * UH-127: `passed_partial` is a clearly-named NON-blocking status for the case
  * where M<N workers landed but the integrated subset is shippable — leader
- * integration is clean for the surviving workers AND verification passed on the
- * integrated result. It is distinct from `passed` (every worker integrated) and
- * from `blocked` (genuine verification failure / nothing integrated / no
+ * integration is clean for the surviving workers AND verification passed on
+ * the integrated result. It is distinct from `passed` (every worker integrated)
+ * and from `blocked` (genuine verification failure / nothing integrated / no
  * verifier wired). Callers that gate on success should treat `passed_partial`
  * as a success-with-caveats, not a hard block.
  */
@@ -203,6 +244,8 @@ export interface TeamRunResult {
   /** True when at least one worker failed or had a merge conflict. */
   hadConflicts: boolean;
   retained: boolean;
+  /** Canonical parent run identity. */
+  runId?: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -388,6 +431,188 @@ export const defaultGitOps: GitOps = {
 /* Run                                                                        */
 /* -------------------------------------------------------------------------- */
 
+let canonicalParentWriteChain = Promise.resolve();
+
+function queueCanonicalParentWrite<T>(operation: () => Promise<T>): Promise<T> {
+  const next = canonicalParentWriteChain.then(operation, operation);
+  canonicalParentWriteChain = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+function parentRunDir(canonicalMissionDir: string, runId: string): string {
+  return path.join(canonicalMissionDir, "runs", runId);
+}
+
+function parentTeamStatePath(canonicalMissionDir: string, runId: string): string {
+  return path.join(parentRunDir(canonicalMissionDir, runId), "team-state.json");
+}
+
+function workerArtifactRoot(teamRoot: string, workerId: string, parentRunId: string): string {
+  return path.join(teamRoot, "artifacts", parentRunId, "workers", workerId);
+}
+
+async function seedCanonicalWorkerScope(
+  canonicalMissionDir: string,
+  artifactRoot: string,
+  missionId: string,
+): Promise<void> {
+  const target = path.join(artifactRoot, ".harness", "missions", missionId);
+  await mkdir(target, { recursive: true });
+  const missionYaml = path.join(canonicalMissionDir, "mission.yaml");
+  if (await fileExists(missionYaml)) {
+    await writeFile(path.join(target, "mission.yaml"), await readFile(missionYaml, "utf-8"), "utf-8");
+  }
+}
+
+async function writeCanonicalTeamState(
+  canonicalMissionDir: string,
+  teamRoot: string,
+  state: CanonicalTeamState,
+): Promise<void> {
+  CanonicalTeamStateSchema.parse(state);
+  await mkdir(parentRunDir(canonicalMissionDir, state.run_id), { recursive: true });
+  await writeFile(parentTeamStatePath(canonicalMissionDir, state.run_id), JSON.stringify(state, null, 2), "utf-8");
+  void teamRoot;
+}
+
+async function readCanonicalRuntimeResult(
+  artifactRoot: string,
+  missionId: string,
+  runId: string,
+): Promise<RuntimeResultDocument | undefined> {
+  const resultPath = path.join(artifactRoot, ".harness", "missions", missionId, "runs", runId, "runtime-result.yaml");
+  try {
+    return RuntimeResultSchema.parse(parse(await readFile(resultPath, "utf-8")));
+  } catch {
+    return undefined;
+  }
+}
+
+function runtimeStatusForTeam(status: CanonicalTeamStatus): RuntimeResultStatus {
+  if (status === "passed" || status === "passed_partial") return "passed";
+  if (status === "blocked") return "blocked";
+  return "failed";
+}
+
+function runStatusForTeam(status: CanonicalTeamStatus): "running" | "passed" | "failed" | "blocked" {
+  if (status === "running") return "running";
+  if (status === "passed" || status === "passed_partial") return "passed";
+  if (status === "blocked") return "blocked";
+  return "failed";
+}
+
+function aggregateWorkerUsage(
+  results: Array<RuntimeResultDocument | undefined>,
+): { provider?: string; model?: string; usage?: RuntimeUsage; cost_usd?: number } {
+  if (results.length === 0 || results.some((result) => !result)) return {};
+  const complete = results as RuntimeResultDocument[];
+  const provider = complete.map((result) => result.provider).filter((value): value is string => Boolean(value));
+  const model = complete.map((result) => result.model).filter((value): value is string => Boolean(value));
+  const allUsage = complete.map((result) => result.usage);
+  if (provider.length !== complete.length || new Set(provider).size !== 1) return {};
+  if (model.length !== complete.length || new Set(model).size !== 1) return {};
+  if (allUsage.some((usage) => !usage)) return { provider: provider[0], model: model[0] };
+  const usages = allUsage as RuntimeUsage[];
+  const fields: Array<keyof RuntimeUsage> = [
+    "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens",
+  ];
+  const usage: RuntimeUsage = { source: "runtime", provider: provider[0], model: model[0] };
+  for (const field of fields) {
+    if (usages.every((item) => typeof item[field] === "number")) {
+      (usage as unknown as Record<string, unknown>)[field] = usages.reduce((sum, item) => sum + (item[field] as number), 0);
+    }
+  }
+  if (usages.every((item) => typeof item.cost_usd === "number")) {
+    usage.cost_usd = usages.reduce((sum, item) => sum + (item.cost_usd as number), 0);
+  }
+  const cost = complete.every((result) => typeof result.cost_usd === "number")
+    ? complete.reduce((sum, result) => sum + (result.cost_usd as number), 0)
+    : usage.cost_usd;
+  return { provider: provider[0], model: model[0], usage, ...(cost !== undefined ? { cost_usd: cost } : {}) };
+}
+
+async function readCanonicalSentinel(
+  artifactRoot: string,
+  missionId: string,
+  runId: string,
+): Promise<string> {
+  try {
+    return await readFile(
+      path.join(artifactRoot, ".harness", "missions", missionId, "runs", runId, "runtime-final.txt"),
+      "utf-8",
+    );
+  } catch {
+    return "";
+  }
+}
+
+async function persistCanonicalParentProjection(
+  root: string,
+  canonicalMissionDir: string,
+  verification: VerifyMissionLike | null,
+  state: CanonicalTeamState,
+  workerResults: Array<RuntimeResultDocument | undefined>,
+): Promise<string | null> {
+  const finishedAt = state.finished_at ?? new Date().toISOString();
+  const aggregate = aggregateWorkerUsage(workerResults);
+  const runDir = parentRunDir(canonicalMissionDir, state.run_id);
+  const relativeState = path.relative(root, parentTeamStatePath(canonicalMissionDir, state.run_id));
+  const runtimeResult: RuntimeResultDocument = {
+    schema_version: "uh.runtime-result.v0",
+    mission_id: state.mission_id,
+    runtime: "ultimate-harness-team",
+    status: runtimeStatusForTeam(state.status),
+    started_at: state.started_at,
+    finished_at: finishedAt,
+    exit_code: runtimeStatusForTeam(state.status) === "passed" ? 0 : 1,
+    prompt_path: relativeState,
+    stdout_path: relativeState,
+    stderr_path: relativeState,
+    diff_path: path.relative(root, state.integration_report_path),
+    errors: [],
+    ...(aggregate.provider ? { provider: aggregate.provider } : {}),
+    ...(aggregate.model ? { model: aggregate.model } : {}),
+    ...(aggregate.usage ? { usage: aggregate.usage } : {}),
+    ...(aggregate.cost_usd !== undefined ? { cost_usd: aggregate.cost_usd } : {}),
+  };
+  await mkdir(runDir, { recursive: true });
+  await writeFile(path.join(runDir, "runtime-result.yaml"), stringify(runtimeResult), "utf-8");
+  let verificationPath: string | null = null;
+  let verificationYaml: string | undefined;
+  if (verification && await fileExists(verification.path)) {
+    verificationYaml = await readFile(verification.path, "utf-8");
+    verificationPath = path.join(runDir, "verification.yaml");
+    await writeFile(verificationPath, verificationYaml, "utf-8");
+  }
+
+  await queueCanonicalParentWrite(async () => {
+    await appendRunsIndexEntry(root, state.mission_id, {
+      run_id: state.run_id,
+      started_at: state.started_at,
+      finished_at: finishedAt,
+      status: runStatusForTeam(state.status),
+      runtime: "ultimate-harness-team",
+    });
+    const current = await readLatestPointer(root, state.mission_id);
+    const currentStarted = current ? Date.parse(current.started_at) : Number.NaN;
+    const selected = !current || current.run_id === state.run_id || !Number.isFinite(currentStarted)
+      || currentStarted <= Date.parse(state.started_at);
+    if (!selected) return;
+    await writeFile(path.join(canonicalMissionDir, "runtime-result.yaml"), stringify(runtimeResult), "utf-8");
+    if (verificationYaml !== undefined) {
+      await writeFile(path.join(canonicalMissionDir, "verification.yaml"), verificationYaml, "utf-8");
+    }
+    await writeLatestPointer(root, state.mission_id, {
+      schema_version: "uh.latest-run.v0",
+      run_id: state.run_id,
+      started_at: state.started_at,
+      finished_at: finishedAt,
+      status: runStatusForTeam(state.status),
+    });
+  });
+  return verificationPath;
+}
+
 export async function runTeamMission(
   mission: TeamMission,
   root: string,
@@ -402,7 +627,61 @@ export async function runTeamMission(
   if (!(await fileExists(missionPath))) {
     throw new Error(`Team mission packet not found at ${missionPath}; create the mission before run-team.`);
   }
-  await mkdir(plan.teamRoot, { recursive: true });
+  const parentRunId = generateRunId();
+  const startedAt = new Date().toISOString();
+  const workerContexts = new Map<string, TeamRuntimeContext>();
+  const canonicalState: CanonicalTeamState = {
+    schema_version: "uh.team-run.v0",
+    mission_id: mission.id,
+    run_id: parentRunId,
+    status: "running",
+    started_at: startedAt,
+    finished_at: null,
+    integration_report_path: plan.integrationReportPath,
+    verification_status: null,
+    leader: { role: mission.team.leader.role ?? "integrator", adapter: plan.leader.adapter, status: "queued" },
+    workers: plan.workers.map((worker) => {
+      const runId = generateRunId();
+      const artifactRoot = workerArtifactRoot(plan.teamRoot, worker.id, parentRunId);
+      workerContexts.set(worker.id, { artifactRoot, runId });
+      return {
+        id: worker.id,
+        role: worker.role,
+        adapter: worker.adapter,
+        run_id: runId,
+        artifact_scope: path.relative(plan.teamRoot, artifactRoot),
+        runtime_result_path: null,
+        status: "running",
+        started_at: startedAt,
+        finished_at: null,
+      };
+    }),
+  };
+  let stateWrite = Promise.resolve();
+  const persistState = async (): Promise<void> => {
+    stateWrite = stateWrite.then(() => writeCanonicalTeamState(canonicalMissionDir, plan.teamRoot, canonicalState));
+    await stateWrite;
+  };
+  await persistState();
+  await queueCanonicalParentWrite(async () => {
+    await appendRunsIndexEntry(root, mission.id, {
+      run_id: parentRunId,
+      started_at: startedAt,
+      status: "running",
+      runtime: "ultimate-harness-team",
+    });
+    const current = await readLatestPointer(root, mission.id);
+    const currentStarted = current ? Date.parse(current.started_at) : Number.NaN;
+    if (!current || current.run_id === parentRunId || !Number.isFinite(currentStarted)
+      || currentStarted <= Date.parse(startedAt)) {
+      await writeLatestPointer(root, mission.id, {
+        schema_version: "uh.latest-run.v0",
+        run_id: parentRunId,
+        started_at: startedAt,
+        status: "running",
+      });
+    }
+  });
 
   // ------------------------------------------------------------------ workers
   // Worktree creation goes through `git worktree add`, which writes to the
@@ -413,39 +692,64 @@ export async function runTeamMission(
   const workerSetup: Array<{ plan: WorkerPlan; setupError?: Error }> = [];
   for (const wp of plan.workers) {
     try {
+      const context = workerContexts.get(wp.id)!;
+      await seedCanonicalWorkerScope(canonicalMissionDir, context.artifactRoot, mission.id);
       await gitOps.addWorktree(root, wp.branch, wp.worktreePath, baseRef);
       await seedMissionPacket(canonicalMissionDir, wp.worktreePath, mission.id);
       await writeWorkerArtifactGitignore(wp.worktreePath);
       workerSetup.push({ plan: wp });
     } catch (err) {
+      const worker = canonicalState.workers.find((item) => item.id === wp.id);
+      if (worker) {
+        worker.status = "error";
+        worker.finished_at = new Date().toISOString();
+      }
+      await persistState();
       workerSetup.push({ plan: wp, setupError: err instanceof Error ? err : new Error(String(err)) });
     }
   }
 
   const workerOutcomes: WorkerOutcome[] = await Promise.all(workerSetup.map(async (slot) => {
+    const context = workerContexts.get(slot.plan.id)!;
+    const canonicalWorker = canonicalState.workers.find((worker) => worker.id === slot.plan.id)!;
     if (slot.setupError) {
+      canonicalWorker.status = "error";
+      canonicalWorker.finished_at = new Date().toISOString();
+      await persistState();
       return {
         plan: slot.plan,
         exitCode: 1,
-        status: "error",
+        status: "error" as const,
         errorMessage: `worktree setup failed: ${slot.setupError.message}`,
         filesTouched: [],
         finalSentinel: "",
         merge: null,
         integrated: false,
+        runId: context.runId,
+        artifactScope: canonicalWorker.artifact_scope,
       };
     }
     const runner = options.runnerFor(slot.plan.adapter);
     const workerMissionPath = path.join(slot.plan.worktreePath, ".harness", "missions", mission.id, "mission.yaml");
     try {
-      const res = await runner(slot.plan.adapter, slot.plan.worktreePath, workerMissionPath);
-      // Read + strip per-worker session artifacts BEFORE staging the diff so
-      // they never reach the worker branch — otherwise every worker would
-      // commit `.harness/missions/<id>/runtime-final.txt` and the leader's
-      // merge would conflict on a file none of the workers actually own.
-      const finalSentinel = await readSentinel(slot.plan.worktreePath, mission.id);
+      const res = await runner(slot.plan.adapter, slot.plan.worktreePath, workerMissionPath, context);
+      const runtimeResult = await readCanonicalRuntimeResult(context.artifactRoot, mission.id, context.runId);
+      const finalSentinel = (await readCanonicalSentinel(context.artifactRoot, mission.id, context.runId))
+        || await readSentinel(slot.plan.worktreePath, mission.id);
       await stripWorkerSessionArtifacts(slot.plan.worktreePath, mission.id);
       const status = classifyRuntimeStatus(res);
+      canonicalWorker.status = status === "succeeded"
+        ? "succeeded"
+        : status === "blocked"
+          ? "blocked"
+          : status === "failed"
+            ? "failed"
+            : "error";
+      canonicalWorker.finished_at = new Date().toISOString();
+      canonicalWorker.runtime_result_path = runtimeResult
+        ? path.relative(root, path.join(context.artifactRoot, ".harness", "missions", mission.id, "runs", context.runId, "runtime-result.yaml"))
+        : null;
+      await persistState();
       let commitErr: string | null = null;
       if (status === "succeeded") {
         try {
@@ -463,26 +767,39 @@ export async function runTeamMission(
         finalSentinel,
         merge: null,
         integrated: false,
+        runId: context.runId,
+        artifactScope: canonicalWorker.artifact_scope,
+        runtimeResult,
       };
     } catch (err) {
+      canonicalWorker.status = "error";
+      canonicalWorker.finished_at = new Date().toISOString();
+      await persistState();
       return {
         plan: slot.plan,
         exitCode: 1,
-        status: "error",
+        status: "error" as const,
         errorMessage: err instanceof Error ? err.message : String(err),
         filesTouched: [],
         finalSentinel: "",
         merge: null,
         integrated: false,
+        runId: context.runId,
+        artifactScope: canonicalWorker.artifact_scope,
       };
     }
   }));
 
   // ------------------------------------------------------------------- leader
+  canonicalState.leader.status = "integrating";
+  await persistState();
   const leaderError = await safeAddWorktree(gitOps, root, plan.leader, baseRef);
   const leaderReady = leaderError === null;
   if (leaderReady) {
     await seedMissionPacket(canonicalMissionDir, plan.leader.worktreePath, mission.id);
+  } else {
+    canonicalState.leader.status = "failed";
+    await persistState();
   }
 
   // Collect files touched per worker (vs base). Done after worker commits so
@@ -574,6 +891,28 @@ export async function runTeamMission(
     }
     return "blocked";
   })();
+  canonicalState.status = overallStatus;
+  canonicalState.finished_at = new Date().toISOString();
+  canonicalState.integration_report_path = reportPath;
+  canonicalState.verification_status = verification?.status ?? (verificationFailed ? "failed" : null);
+  canonicalState.leader.status = !leaderReady
+    ? "failed"
+    : overallStatus === "passed" || overallStatus === "passed_partial"
+      ? "succeeded"
+      : overallStatus === "blocked"
+        ? "blocked"
+        : "failed";
+  await persistState();
+  const verificationPath = await persistCanonicalParentProjection(
+    root,
+    canonicalMissionDir,
+    verification,
+    canonicalState,
+    workerOutcomes.map((worker) => worker.runtimeResult),
+  );
+  if (verification && verificationPath) {
+    verification = { ...verification, path: verificationPath };
+  }
 
   // ----------------------------------------------------------------- cleanup
   const retained = options.retainOnSuccess === true || overallStatus !== "passed";
@@ -596,6 +935,7 @@ export async function runTeamMission(
     status: overallStatus,
     hadConflicts,
     retained,
+    runId: parentRunId,
   };
 }
 
@@ -756,6 +1096,7 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
     lines.push("");
     lines.push(`- Branch: \`${outcome.plan.branch}\``);
     lines.push(`- Status: ${outcome.status}${outcome.errorMessage ? ` (${outcome.errorMessage})` : ""}`);
+    if (outcome.runId) lines.push(`- Canonical run: \`${outcome.runId}\` (${outcome.artifactScope ?? "worker scope"})`);
     lines.push(`- Files touched: ${outcome.filesTouched.length}`);
     if (outcome.filesTouched.length > 0) {
       for (const p of outcome.filesTouched) lines.push(`  - \`${p}\``);

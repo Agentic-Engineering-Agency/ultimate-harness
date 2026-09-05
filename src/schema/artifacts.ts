@@ -109,6 +109,18 @@ export const PromotionSchema = z.object({
 
 export const RuntimeSessionStatusSchema = z.enum(["planned", "running", "succeeded", "failed"]);
 
+export const RuntimeUsageSchema = z.object({
+  input_tokens: z.number().nonnegative().optional(),
+  output_tokens: z.number().nonnegative().optional(),
+  total_tokens: z.number().nonnegative().optional(),
+  source: z.enum(["runtime", "estimated"]),
+  model: z.string().min(1).optional(),
+  provider: z.string().min(1).optional(),
+  cache_read_tokens: z.number().nonnegative().optional(),
+  cache_write_tokens: z.number().nonnegative().optional(),
+  cost_usd: z.number().nonnegative().optional(),
+}).strict();
+
 export const RuntimeSessionSchema = z.object({
   schema_version: z.literal("uh.runtime-session.v0"),
   mission_id: z.string().min(1),
@@ -121,6 +133,10 @@ export const RuntimeSessionSchema = z.object({
   finished_at: z.string().optional(),
   stdout_path: z.string().optional(),
   stderr_path: z.string().optional(),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  usage: RuntimeUsageSchema.optional(),
+  cost_usd: z.number().nonnegative().optional(),
 }).strict();
 
 /**
@@ -184,6 +200,10 @@ export const RuntimeResultSchema = z.object({
   diff_path: z.string().min(1).optional(),
   errors: z.array(z.string()).default([]),
   notes: z.string().optional(),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  usage: RuntimeUsageSchema.optional(),
+  cost_usd: z.number().nonnegative().optional(),
   verdict: RuntimeResultVerdictSchema.optional(),
 }).strict();
 

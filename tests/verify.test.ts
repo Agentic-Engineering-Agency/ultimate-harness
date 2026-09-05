@@ -122,25 +122,29 @@ describe("uh verify", () => {
     expect(verification.findings).toEqual([{ severity: "error", message: "verification check timed out: node hang after 25ms" }]);
   });
 
-  test("non-cooperative timed out command is hard-killed and returns promptly", async () => {
+  test("non-cooperative timed out command is stopped, not merely reported failed", async () => {
+    // Exercise OS process termination; fake timers cannot stop or observe this child.
     await writeMission("timeout-ignore-sigterm", [{
       name: "node ignore sigterm",
-      command: "node -e \"process.on('SIGTERM',()=>{}); setInterval(()=>{}, 1000)\"",
+      command: "node -e \"process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync('timeout-child.pid', String(process.pid)); setInterval(()=>{}, 1000)\"",
     }]);
 
-    const startedAt = Date.now();
-    const result = await verifyMission(TEST_ROOT, "timeout-ignore-sigterm", { commandTimeoutMs: 25 });
-    const elapsedMs = Date.now() - startedAt;
-
-    expect(elapsedMs).toBeLessThan(500);
-    expect(result.status).toBe("failed");
-    expect(result.checks_failed).toBe(1);
-    const verification = await readVerification("timeout-ignore-sigterm");
-    expect(verification.status).toBe("failed");
-    expect(verification.checks[0]).toMatchObject({ name: "node ignore sigterm", type: "command", status: "failed" });
-    expect(verification.checks[0].notes).toContain("timed out after 25ms");
-    expect(verification.findings).toEqual([{ severity: "error", message: "verification check timed out: node ignore sigterm after 25ms" }]);
-  }, 1000);
+    let childPid: number | undefined;
+    try {
+      const result = await verifyMission(TEST_ROOT, "timeout-ignore-sigterm", { commandTimeoutMs: 1000 });
+      childPid = Number(await readFile(join(TEST_ROOT, "timeout-child.pid"), "utf-8"));
+      expect(childPid).toBeGreaterThan(0);
+      expect(result.status).toBe("failed");
+      expect(result.checks_failed).toBe(1);
+      await expect.poll(() => {
+        try { process.kill(childPid!, 0); return true; } catch { return false; }
+      }).toBe(false);
+    } finally {
+      if (childPid !== undefined) {
+        try { process.kill(childPid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+    }
+  });
 
   test("CLI timeout option fails timed out verification promptly", async () => {
     await writeMission("timeout-cli", [{ name: "node hang", command: "node -e \"setTimeout(() => {}, 60000)\"" }]);

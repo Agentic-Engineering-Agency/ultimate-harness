@@ -80,6 +80,28 @@ describe("Delivery Observatory projector", () => {
     ]) expect(serialized).not.toContain(forbidden);
   });
 
+  it("projects conservative native route identifiers and withholds unsafe metadata", async () => {
+    const root = await fixture();
+    const runtimePath = path.join(root, ".harness", "missions", "work-one", "runtime-result.yaml");
+    const base = [
+      "schema_version: uh.runtime-result.v0", "mission_id: work-one", "runtime: openrouter", "status: passed",
+      "started_at: 2026-08-23T12:00:00Z", "finished_at: 2026-08-23T12:00:30Z",
+      `prompt_path: ${root}/prompt.md`, `stdout_path: ${root}/stdout.log`, `stderr_path: ${root}/stderr.log`,
+    ];
+    await writeFile(runtimePath, [...base, "provider: openrouter", "model: openai/gpt-4o-mini"].join("\n"));
+    const safe = await projectDeliveryObservatory(root, { now: "2026-08-23T12:01:00Z" });
+    expect(safe.work_items[0]?.resolved_model).toMatchObject({ state: "known", value: "openai/gpt-4o-mini" });
+    expect(safe.work_items[0]?.provider).toMatchObject({ state: "known", value: "openrouter" });
+
+    await writeFile(runtimePath, [...base, "provider: Bearer sk-live-secret", "model: C:/Users/example/private/prompt.json"].join("\n"));
+    const unsafe = await projectDeliveryObservatory(root, { now: "2026-08-23T12:01:00Z" });
+    expect(unsafe.work_items[0]?.resolved_model).toMatchObject({ state: "unknown", reason_code: "unauthorized" });
+    expect(unsafe.work_items[0]?.provider).toMatchObject({ state: "unknown", reason_code: "unauthorized" });
+    const serialized = JSON.stringify(unsafe);
+    expect(serialized).not.toContain("sk-live-secret");
+    expect(serialized).not.toContain("C:/Users/example/private/prompt.json");
+  });
+
   it("uses honest empty and unknown states when the project has no runs", async () => {
     const root = await fixture();
     await rm(path.join(root, ".harness", "missions", "work-one", "runtime-result.yaml"));
