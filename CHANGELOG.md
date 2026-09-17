@@ -4,6 +4,69 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
+## [Unreleased]
+
+### Added
+
+- Team workers now receive per-worker objectives, runtime budgets, declared outputs, and seeds with canonical contract and settlement records.
+- Deadline grace recovery now preserves an explicitly incomplete deliverable and missing-work handoff before settling the run.
+- Native runtime supervision now reports denial budgets and repeated commands, stops protected-path mutations, and resumes recoverable denials with source stop facts.
+- Acceptance missions now record attested real-runtime evidence, freshness-aware status, and generated capability reports.
+- Acceptance freshness requires evidence from the current harness commit.
+- Acceptance runtime overrides now select the requested adapter explicitly and warn when they differ from registry defaults.
+- Acceptance campaigns inherit caller environment variables and derive hook distribution paths from the known source root.
+- Acceptance evidence records fact sources for merged attempts, with deterministic sorted-run selection and fixture seams.
+- Attempted fixture-only missions now render their actual failure or pass outcome instead of hiding it as fixture-only.
+- Guardian acceptance requires settlement confirmation and a terminal guardian receipt.
+- Acceptance registry entries carry stable capability identifiers independently of probe names.
+- Deadline acceptance exercises an unscripted task rather than treating a turn-limit fixture as deadline proof.
+- Team budget acceptance remains unproven where canonical state does not expose the required budget or reservation fact.
+- Acceptance report generation is checked for drift against the registry and available evidence.
+- Resource-wave admission now maps `mapResourceWaves` with memory-headroom checks and cost reservations, preventing unsupported workers from entering a wave.
+- Team workers now carry distinct mission contracts through `team.workers[].mission_id`.
+- Native Claude Code adapter with structured event capture, tool-guard hooks, route checks, and saved-session recovery. End-to-end coordinator delegation is not yet validated.
+- TypeSafe System One integration in verification and independent-review collection, with typed verdict parsing, compact evidence summaries, and persisted decision receipts. Semantic routing, scope-change, retry policy, and confidence thresholds remain unimplemented.
+- Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
+
+### Fixed
+- Command Code print-mode runs now select non-interactive permissions through the harness guard (`--yolo`) and refuse ambiguous launches before spawn.
+- Guarded Command Code runs now fail closed when hook invocation evidence is absent, preventing `--yolo` workers from running unguarded.
+- Team integration-report paths in canonical team state now use relative forward-slash artifact paths, including cross-volume targets.
+- Independent reviewers write reports to permitted workspace outputs; protected request and assessment artifacts remain controller-owned.
+- Worker output declarations reject protected runtime paths before execution.
+- Runtime callback failures retain diagnostic details instead of reporting only a generic controller error.
+- Interrupted Claude streams retain known usage counters without treating an unfinished message as a complete total.
+- Verification preserves deterministic failures when a semantic evaluator recommends a pass.
+
+- Command Code planning now refuses print-mode launches without a guard or explicit permission mode for every configured `cli_command`, including custom executables.
+- Command Code `shell_command` queue events now stop protected-root shell mutations before execution.
+- Guard supervision now distinguishes a hook that ran but could not log from a hook that did not run.
+- Command Code guard hooks now record every invocation and fail closed when the evidence log cannot be written.
+- Repeated guarded Command Code setup now replaces the managed hook without accumulating duplicate `PreToolUse` entries.
+- Git mutation detection now keys on the Git subcommand, avoiding false positives from read-only text such as `git log --grep=commit`.
+- Native OMP progress is persisted before child exit, including UTF-8 and trailing-line handling. Nested assistant content and terminal errors are interpreted without treating arbitrary response IDs as authentication failures.
+- Windows runtime guardians are compiled once into a per-user, source-hash cache, use extended-length paths for deep run directories, and normalize forward-slash variants before prefix detection, with atomic publication and visible per-run fallback when the cache is not writable.
+- Sandboxed OMP execution publishes run facts to the host's canonical mission artifacts without promoting product changes. Cancellation settles the selected run and matching mission mirrors without overwriting newer run facts. Initial and streaming event-write failures settle writable terminal artifacts; the existing Observatory prefers an active run over a stale terminal result and rejects unsafe route metadata.
+- OMP token, cache, and reported cost totals aggregate completed assistant turns without counting repeated update/end envelopes, while retaining distinct explicit message identities. Incomplete measurements remain unknown rather than appearing as complete totals.
+- Product diff capture includes staged and unstaged text and applicable binary patches, leaves the Git index unchanged, and excludes generated harness bookkeeping while retaining harness configuration changes.
+- Team runs publish parent and isolated worker facts to durable host artifact scopes. The existing Observatory shows active/completed teams and reported worker usage after normal worktree cleanup; the leader's verification artifact is retained with the parent run.
+- Native OMP CLI interruption handles Ctrl-C (`SIGINT`) as well as `SIGTERM`, stops the owned process tree, and persists terminal cancellation facts before exit.
+- Verification timeouts terminate the owned process tree on Windows rather than leaving child commands behind. OMP and verification subprocesses no longer request separate Windows console windows.
+- Native OMP and Command Code process capture has a configurable combined-output byte limit (64 MiB by default). Exceeding it settles the owned tree as a failed run and retains only the admitted transcript prefix.
+- Recovery accounting includes failed source attempts, preserves mixed-route costs, and leaves incomplete totals unknown. Team accounting and live controls use each worker's canonical artifact root.
+- Anthropic, OpenRouter, and Hermes-proxy persist reported usage in canonical results. Runtime cost estimates carry provenance and are not presented as provider billing receipts.
+- Mission verification now enforces declared output files, JSON syntax, and optional final-line completion markers. Workspace-escaping paths and missing evidence fail through the existing verification result instead of requiring a separate launcher checker.
+- Command Code supports optional explicit USD pricing with cache-overlap semantics. Complete measured counters and an exact observed-model match are required; canonical receipts retain the configured rates and label the amount as an estimate.
+- Mixed native OMP routes no longer inherit the last provider/model as their sole attribution. Invalid counters and numeric-overflow totals remain unknown while independently complete usage and cost measurements are retained.
+- Finalized native lifecycle events now age under the existing Observatory freshness policy instead of remaining fresh indefinitely; confirmed terminal outcomes stay terminal.
+- Native OMP and Command Code runs fail on mismatched or unattested assigned routes, preserve the requested route in control receipts, and refuse saved-run recovery from route-policy stops. OMP honors adapter default model/provider settings; Command Code no longer receives unconditional workspace auto-trust. Unsupported inner `worktree_mode` settings fail before launch.
+- Windows canonical artifact transactions now release kernel-owned locks on controller death. Concurrent CLI updates remain serialized; legacy filesystem-lock evidence is retained rather than guessed stale or deleted.
+- Hermes CLI execution and OpenSandbox command templates reuse UH's owned process runner. Windows Node entrypoints are resolved directly, POSIX templates use a native POSIX shell, and timeout settlement completes before worktree cleanup.
+- Artifact publication rejects ancestor symlinks/junctions as well as linked target files, preventing a replaced run directory from redirecting writes outside the mission.
+- CLI integration tests launch through Node/tsx instead of Windows-incompatible extensionless shell shims. Directory-link fixtures work without granting symbolic-link privileges.
+- Independent review is emitted and collected through normal UH missions: full required-input snapshots, native fresh-session/model assignment guards, shared output validation, and hash-bound advisory assessments. Missing evidence or changed contracts cannot pass; human acceptance remains separate.
+- Team runs admit workers in resource-bounded waves and block remaining admission when resources or completed cost accounting cannot support another worker.
+
 ## [0.9.0] — 2026-05-29
 
 Milestone **"Memory & adapter matrix"** ([Linear UH-131 / UH-136 / UH-137](https://linear.app/agenticengineering-agency/team/UH/active); GitHub PRs #204–#206 / #214 / #215 / #216). Bundles everything merged to `dev` since v0.8.0: a native pay-per-token Anthropic adapter (experimental), harness-side Honcho memory operations with a per-mission opt-out, the team-run dogfood verdict/artifact fixes, and the Phase-0 DX hardening (real `uh --version`, opt-in telemetry primitive, adoption docs, curated npm allowlist, CI plugin gates).
@@ -101,7 +164,7 @@ Epic 7 (adapter capability routing + cost) and Epic 8 (SDD hardening) completed,
 
 ## [0.5.0] — 2026-05-20
 
-Epics 6–8 integrated on `dev` from feature branches (live observability, adapter auto-routing, SDD hardening). Execution spec: [`docs/specs/epics-6-7-8.md`](docs/specs/epics-6-7-8.md).
+Epics 6–8 integrated on `dev` from feature branches (live observability, adapter auto-routing, SDD hardening). Execution spec: [`specs/epics-6-7-8.md`](specs/epics-6-7-8.md).
 
 ### Added
 

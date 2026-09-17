@@ -2,8 +2,8 @@
 
 Runtime-agnostic CLI and artifact lifecycle for planning, running, verifying, and promoting agentic software work.
 
-Workspace standards apply here: [../docs/standards/README.md](../docs/standards/README.md).
-This file adds only what is specific to this repo. Where they conflict, this file wins, and the conflict is recorded under `## Deviations`.
+This file defines the repository-specific development rules. Architecture and
+workflow references are maintained in [docs/README.md](docs/README.md).
 
 ## Stack
 
@@ -61,6 +61,8 @@ This file adds only what is specific to this repo. Where they conflict, this fil
 4. GitNexus `context`, `clusters`, `processes`, or `process/{name}` resources for codebase and flow discovery
 5. The matching `.claude/skills/gitnexus/` exploring, impact-analysis, debugging, refactoring, guide, or CLI skill before that task kind
 
+Indexes and runner bootstraps are local generated state; index the current checkout rather than relying on published machine-specific graph identifiers or counts.
+
 ## Scope discipline
 
 - Default to small, reversible changes that reuse existing package and runtime patterns.
@@ -80,3 +82,4 @@ rules and is materialized from `scripts/harness-matrix.json`; never hand-edit it
 ## Deviations
 
 - GitNexus impact analysis is mandatory before symbol edits because this repo relies on its indexed cross-runtime execution graph.
+

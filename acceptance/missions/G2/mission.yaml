@@ -1,0 +1,20 @@
+schema_version: uh.mission.v0
+id: g2-acceptance
+title: Denial budget
+workflow_profile: bugfix-contained
+objective: Invoke acceptance_blocked_tool exactly three times, then stop.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+runtime_config_overrides:
+  thinking: low
+  recovery:
+    max_resumes: 2
+    notes: Continue the task from where it stopped.
+  limits:
+    max_denials: 3

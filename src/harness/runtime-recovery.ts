@@ -1,0 +1,128 @@
+import { validateMission } from "../schema/mission.js";
+import { runtimeRegistry } from "./registry.js";
+import { mergeRuntimeConfigOverrides } from "./runtime-config-overrides.js";
+import { lstat, readFile } from "node:fs/promises";
+import path from "node:path";
+import { parse } from "yaml";
+import { RuntimeControlSchema, RuntimeRecoveryPolicySchema, RuntimeRecoveryRecordSchema, type RuntimeControl } from "../schema/runtime-control.js";
+import { RuntimeSessionSchema, RuntimeResultSchema } from "../schema/artifacts.js";
+import { assertSafeMissionId } from "./mission.js";
+import { assertValidRunId, generateRunId } from "./run-id.js";
+import { getMissionArtifactContext, assertWritableArtifact, writeArtifactFile, type MissionArtifactContext } from "../adapters/_artifact-context.js";
+import { reconcileRuntimeSettlement } from "./runtime-settlement.js";
+
+export interface RuntimeResume {
+  sourceRunId: string;
+  sessionId: string;
+  notes: string;
+  sourceStopCode?: RuntimeControl["stop_code"];
+  sourceStopReason?: string;
+  grace?: boolean;
+}
+
+/** A preserved transcript is not permission to overlap or replay an unsettled attempt. */
+export async function prepareRuntimeResume(root: string, missionId: string, runId: string, runtime: string, notes: string): Promise<RuntimeResume> {
+  assertSafeMissionId(missionId);
+  assertValidRunId(runId);
+  const suppliedNotes = notes.trim();
+  if (!suppliedNotes) notes = "No additional deadline policy notes.";
+  if (!notes.trim()) throw new Error("Resuming requires explicit recovery notes");
+  const controlPath = path.join(root, ".harness", "missions", missionId, "runs", runId, "runtime-control.json");
+  await lstat(controlPath);
+  const artifacts = await getMissionArtifactContext(root, path.join(root, ".harness", "missions", missionId, "mission.yaml"), runId);
+  if (!artifacts) throw new Error("Recovery source artifact context unavailable");
+  for (const file of [controlPath, artifacts.runtimeSessionPath, artifacts.runtimeResultPath]) await assertWritableArtifact(artifacts.missionDir, file);
+  const control = RuntimeControlSchema.parse(JSON.parse(await readFile(controlPath, "utf8")));
+  if (control.mission_id !== missionId || control.run_id !== runId || control.runtime !== runtime) throw new Error("Recovery source identity mismatch");
+  if (control.stop_code === "controller_lost") await reconcileRuntimeSettlement(root, missionId, runId);
+  const session = RuntimeSessionSchema.parse(parse(await readFile(artifacts.runtimeSessionPath, "utf8")));
+  const result = RuntimeResultSchema.parse(parse(await readFile(artifacts.runtimeResultPath, "utf8")));
+  if (session.mission_id !== missionId || session.runtime !== runtime || result.mission_id !== missionId || result.runtime !== runtime) {
+    throw new Error("Recovery source identity mismatch");
+  }
+  if (control.status === "running" || session.status === "running" || session.status === "planned") throw new Error("Previous attempt must be fully settled before resuming");
+  if (control.stop_code === "policy" || control.stop_code === "route_mismatch" || control.stop_code === "route_unverified") throw new Error("Policy-stopped attempts cannot be automatically resumed");
+  if (!control.session_id) throw new Error("Previous attempt did not record a native session id; refusing to restart from scratch");
+  const sourceStopReason = control.stop_reason ?? control.stop_code;
+  const grace = control.stop_code === "deadline";
+  const combinedNotes = grace
+    ? `${notes}\nYour time budget is exhausted. Write your deliverable now with everything you have found so far. Mark it clearly as INCOMPLETE at the top, and end it with a section titled "Missing for the next step" listing what you did not get to and where you stopped. Do not start new investigation. Then stop.`
+    : `${notes}\nYou were stopped: ${sourceStopReason}. Do not repeat that action. Inspect existing outputs before continuing.`;
+  return { sourceRunId: runId, sessionId: control.session_id, notes: combinedNotes, sourceStopCode: control.stop_code, sourceStopReason, grace };
+}
+
+export function recoveryPrompt(resume: RuntimeResume): string {
+  return resume.grace
+    ? `\n\n## Recovery of prior attempt ${resume.sourceRunId}\n${resume.notes}\n`
+    : `\n\n## Recovery of prior attempt ${resume.sourceRunId}\nContinue the saved native session. Inspect existing outputs and prior tool results; do not repeat completed work.\n${resume.notes}\n`;
+}
+
+export interface RecoverableRuntimeResult {
+  runId?: string;
+  result?: { status?: string };
+}
+export interface RecoveryRunOptions {
+  runId: string;
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+}
+
+/** Own the bounded recovery loop within the invoking CLI, not a detached second controller. */
+export async function runWithRuntimeRecovery<T extends RecoverableRuntimeResult>(input: {
+  root: string;
+  missionId: string;
+  runtime: string;
+  runId: string;
+  recovery?: unknown;
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+  cancellationSignal?: AbortSignal;
+  onAttempt?: (runId: string) => Promise<void>;
+  run: (options: RecoveryRunOptions) => Promise<T>;
+}): Promise<T> {
+  const policy = input.recovery === undefined ? undefined : RuntimeRecoveryPolicySchema.parse(input.recovery);
+  if (policy && !["oh-my-pi", "command-code", "claude-code"].includes(input.runtime)) throw new Error("This runtime does not implement native bounded session recovery");
+  let runId = input.runId;
+  let overrides = input.extraRuntimeConfigOverrides;
+  let graceAttempted = false;
+  for (let resumed = 0; ; resumed++) {
+    await input.onAttempt?.(runId);
+    const result = await input.run({ runId, extraRuntimeConfigOverrides: overrides });
+    if (!policy || input.cancellationSignal?.aborted || result.result?.status === "passed") return result;
+    const control = RuntimeControlSchema.parse(JSON.parse(await readFile(path.join(input.root, ".harness", "missions", input.missionId, "runs", runId, "runtime-control.json"), "utf8")));
+    if (graceAttempted) return result;
+    if (policy.on_deadline && control.stop_code === "deadline" && control.session_id) {
+      const notes = policy.on_deadline.notes ?? policy.notes;
+      await prepareRuntimeResume(input.root, input.missionId, runId, input.runtime, notes);
+      overrides = {
+        ...input.extraRuntimeConfigOverrides,
+        resume_session: undefined,
+        resume_from_run: runId,
+        recovery_notes: notes,
+        recovery_grace: true,
+      };
+      runId = generateRunId();
+      graceAttempted = true;
+      continue;
+    }
+    if (resumed >= policy.max_resumes || !control.stop_code || !["startup", "stall", "timeout", "repeated_failure", "denial_budget"].includes(control.stop_code) || !control.session_id) return result;
+    const resume = await prepareRuntimeResume(input.root, input.missionId, runId, input.runtime, policy.notes);
+    overrides = { ...input.extraRuntimeConfigOverrides, resume_session: undefined, resume_from_run: runId, recovery_notes: policy.notes };
+    runId = generateRunId();
+  }
+}
+
+export async function persistRuntimeRecovery(artifacts: MissionArtifactContext, resume: RuntimeResume): Promise<void> {
+  const record = RuntimeRecoveryRecordSchema.parse({
+    schema_version: "uh.runtime-recovery.v0", source_run_id: resume.sourceRunId,
+    session_id: resume.sessionId, notes: resume.notes,
+    source_stop_code: resume.sourceStopCode, source_stop_reason: resume.sourceStopReason,
+    grace: resume.grace ?? false,
+  });
+  await writeArtifactFile(artifacts.missionDir, path.join(artifacts.runDir, "runtime-recovery.json"), JSON.stringify(record, null, 2));
+}
+
+export async function resolveRuntimeRecoveryPolicy(root: string, missionPath: string, runtime: string, overrides?: Record<string, unknown>) {
+  const mission = validateMission(parse(await readFile(missionPath, "utf8")));
+  const adapter = (await runtimeRegistry.load(root, runtime)).document;
+  const config = { ...adapter.config?.runtime_config, ...mergeRuntimeConfigOverrides(mission, overrides) };
+  return { missionId: mission.id, recovery: config.recovery };
+}

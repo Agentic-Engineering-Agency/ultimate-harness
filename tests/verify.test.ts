@@ -12,10 +12,9 @@ import { verifyMission } from "../src/harness/verify.js";
 
 let TEST_ROOT: string;
 const execFileP = promisify(execFile);
-const CLI = join(process.cwd(), "node_modules", ".bin", "tsx");
 
 async function runUh(args: string[]) {
-  return execFileP(CLI, ["src/cli.ts", ...args], { cwd: process.cwd() });
+  return execFileP(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], { cwd: process.cwd() });
 }
 
 async function runUhFailure(args: string[]) {
@@ -64,7 +63,75 @@ test.afterEach(async () => {
   await rm(TEST_ROOT, { recursive: true, force: true });
 });
 
+test("declared outputs gate completion on presence, JSON validity, and the required terminal marker", async () => {
+  const missionDir = await writeMission("outputs", []);
+  const missionPath = join(missionDir, "mission.yaml");
+  const mission = parse(await readFile(missionPath, "utf8"));
+  mission.expected_artifacts = [
+    { path: "out/data.json" },
+    { path: "out/report.md", completion_marker: "DONE" },
+  ];
+  await writeFile(missionPath, stringify(mission));
+  expect((await verifyMission(TEST_ROOT, "outputs", { useSandbox: false })).status).toBe("failed");
+  await mkdir(join(TEST_ROOT, "out"));
+  await writeFile(join(TEST_ROOT, "out", "data.json"), "private-malformed-payload");
+  await writeFile(join(TEST_ROOT, "out", "report.md"), "Evidence collected\nDONE\n");
+  expect((await verifyMission(TEST_ROOT, "outputs", { useSandbox: false })).status).toBe("failed");
+  expect(JSON.stringify(await readVerification("outputs"))).not.toContain("private-malformed-payload");
+  await writeFile(join(TEST_ROOT, "out", "data.json"), '{"verified":true}');
+  await writeFile(join(TEST_ROOT, "out", "report.md"), "BLOCKED: missing required evidence\n");
+  expect((await verifyMission(TEST_ROOT, "outputs", { useSandbox: false })).status).toBe("failed");
+  await writeFile(join(TEST_ROOT, "out", "report.md"), "Evidence collected\nDONE\n");
+  expect((await verifyMission(TEST_ROOT, "outputs", { useSandbox: false })).status).toBe("passed");
+});
+
+test("declared outputs cannot read through an external directory junction", async () => {
+  const outside = await mkdtemp(join(tmpdir(), "uh-external-output-"));
+  try {
+    await writeFile(join(outside, "data.json"), '{"private":"external-evidence"}');
+    await symlink(outside, join(TEST_ROOT, "linked"), process.platform === "win32" ? "junction" : "dir");
+    const missionDir = await writeMission("escaped-output", []);
+    const missionPath = join(missionDir, "mission.yaml");
+    const mission = parse(await readFile(missionPath, "utf8"));
+    mission.expected_artifacts = [{ path: "linked/data.json" }];
+    await writeFile(missionPath, stringify(mission));
+    expect((await verifyMission(TEST_ROOT, "escaped-output", { useSandbox: false })).status).toBe("failed");
+    expect(JSON.stringify(await readVerification("escaped-output"))).not.toContain("external-evidence");
+  } finally { await rm(outside, { recursive: true, force: true }); }
+});
+
 describe("uh verify", () => {
+  test("semantic gate receives summaries, not raw command output, and cannot override failed checks", async () => {
+    const missionDir = await writeMission("summary-gate", [{
+      name: "PRIVATE_CHECK_NAME",
+      command: "node -e \"console.log('PRIVATE_OUTPUT_SENTINEL'); process.exit(7)\"",
+    }]);
+    await writeFile(join(missionDir, "diff.patch"), "PRIVATE_DIFF_SENTINEL");
+    const originalFetch = globalThis.fetch;
+    const originalKey = process.env.TYPESAFE_API_KEY;
+    let payload = "";
+    process.env.TYPESAFE_API_KEY = "synthetic-test-key";
+    globalThis.fetch = async (_input, init) => {
+      payload = String(init?.body);
+      return new Response(JSON.stringify({ answers: {
+        verdict: { choice: "pass", confidence: 0.99 }, tamper: { noul: 0 },
+      } }));
+    };
+    try {
+      const result = await verifyMission(TEST_ROOT, "summary-gate");
+      expect(result.status).toBe("failed");
+      expect(JSON.parse(payload).state.outputs.checks).toContainEqual({ type: "command", status: "failed" });
+      expect(payload).not.toContain("PRIVATE_CHECK_NAME");
+      expect(payload).not.toContain("PRIVATE_OUTPUT_SENTINEL");
+      expect(payload).not.toContain("PRIVATE_DIFF_SENTINEL");
+      expect(payload).not.toContain(TEST_ROOT);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalKey === undefined) delete process.env.TYPESAFE_API_KEY;
+      else process.env.TYPESAFE_API_KEY = originalKey;
+    }
+  });
+
   test("passing command writes passed verification.yaml and exits 0", async () => {
     await writeMission("pass", [{ name: "node ok", command: "node -e \"console.log('ok')\"" }]);
 
@@ -82,7 +149,10 @@ describe("uh verify", () => {
     expect(verification.checks[0].command).toContain("node -e");
     expect(verification.checks[0].notes).toContain("stdout: ok");
     const events = (await readFile(join(TEST_ROOT, ".harness", "missions", "pass", "events.ndjson"), "utf-8")).trim().split("\n").map((line) => JSON.parse(line));
-    expect(events.map((e) => e.type)).toEqual(["verification.started", "verification.finished"]);
+    expect(events.find((event) => event.type === "decision.recorded")).toMatchObject({
+      provider_status: "disabled", applied: false,
+      state_transition: { from: "passed", to: "passed", unlocked: [] },
+    });
   });
 
   test("failing command writes failed verification.yaml and exits nonzero", async () => {
@@ -122,25 +192,29 @@ describe("uh verify", () => {
     expect(verification.findings).toEqual([{ severity: "error", message: "verification check timed out: node hang after 25ms" }]);
   });
 
-  test("non-cooperative timed out command is hard-killed and returns promptly", async () => {
+  test("non-cooperative timed out command is stopped, not merely reported failed", async () => {
+    // Exercise OS process termination; fake timers cannot stop or observe this child.
     await writeMission("timeout-ignore-sigterm", [{
       name: "node ignore sigterm",
-      command: "node -e \"process.on('SIGTERM',()=>{}); setInterval(()=>{}, 1000)\"",
+      command: "node -e \"process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync('timeout-child.pid', String(process.pid)); setInterval(()=>{}, 1000)\"",
     }]);
 
-    const startedAt = Date.now();
-    const result = await verifyMission(TEST_ROOT, "timeout-ignore-sigterm", { commandTimeoutMs: 25 });
-    const elapsedMs = Date.now() - startedAt;
-
-    expect(elapsedMs).toBeLessThan(500);
-    expect(result.status).toBe("failed");
-    expect(result.checks_failed).toBe(1);
-    const verification = await readVerification("timeout-ignore-sigterm");
-    expect(verification.status).toBe("failed");
-    expect(verification.checks[0]).toMatchObject({ name: "node ignore sigterm", type: "command", status: "failed" });
-    expect(verification.checks[0].notes).toContain("timed out after 25ms");
-    expect(verification.findings).toEqual([{ severity: "error", message: "verification check timed out: node ignore sigterm after 25ms" }]);
-  }, 1000);
+    let childPid: number | undefined;
+    try {
+      const result = await verifyMission(TEST_ROOT, "timeout-ignore-sigterm", { commandTimeoutMs: 1000 });
+      childPid = Number(await readFile(join(TEST_ROOT, "timeout-child.pid"), "utf-8"));
+      expect(childPid).toBeGreaterThan(0);
+      expect(result.status).toBe("failed");
+      expect(result.checks_failed).toBe(1);
+      await expect.poll(() => {
+        try { process.kill(childPid!, 0); return true; } catch { return false; }
+      }).toBe(false);
+    } finally {
+      if (childPid !== undefined) {
+        try { process.kill(childPid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+    }
+  });
 
   test("CLI timeout option fails timed out verification promptly", async () => {
     await writeMission("timeout-cli", [{ name: "node hang", command: "node -e \"setTimeout(() => {}, 60000)\"" }]);

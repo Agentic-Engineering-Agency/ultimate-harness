@@ -37,6 +37,13 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and seven wir
 | `pi` | active | Drives the vanilla `pi` agent CLI (`pi --print --mode json --no-session`) — the base CLI that oh-my-pi extends. `config.cli_command` overridable. See [`docs/runbooks/pi-setup.md`](./docs/runbooks/pi-setup.md). |
 | `anthropic` | experimental | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY` (env-only, never the manifest); a missing key makes `uh adapter check anthropic` degrade gracefully. Shipped v0.9.0 (#214); graduation to `active` pending live-smoke. |
 
+Unreleased development also includes native `command-code` and `claude-code`
+adapters, runtime supervision and recovery improvements, and semantic evaluation
+during verification and independent review. These changes are not a completed
+1.0 release. See [Unreleased changes](./CHANGELOG.md#unreleased),
+[runtime limitations](./docs/runtime-targets.md), and the
+[1.0 roadmap](./docs/ROADMAP.md#10--integrated-execution-lifecycle).
+
 Cross-cutting protocols every adapter participates in:
 
 - **UH-28 runtime-final-message capture** — every adapter prompts the model to emit a fenced `uh-runtime-final-message` block; the harness extracts it into `runtime-final.txt` for cross-runtime parity. See the protocol section of [`docs/architecture/runtime-adapter-contract.md`](./docs/architecture/runtime-adapter-contract.md).
@@ -63,6 +70,7 @@ Start with the [quickstart](./docs/quickstart.md), the [configuration guide](./d
 - [Runtime adapter contract](./docs/architecture/runtime-adapter-contract.md) — includes the UH-28 sentinel protocol
 - [Mission packet schema](./docs/architecture/mission-packet-schema.md)
 - [Verification and promotion lifecycle](./docs/architecture/verification-and-promotion.md)
+- [Progressive decisions](./docs/architecture/progressive-decisions.md) — implemented semantic evaluation, authority boundaries, and proposed policy flows.
 - [Telar governance and UH Run Control boundary](./docs/architecture/telar-integration.md)
 
 Runbooks:
@@ -110,7 +118,7 @@ uh validate --all-missions
 # Render the runtime invocation without launching.
 uh mission dry-run .harness/missions/m1-example/mission.yaml --runtime hermes
 
-# Execute the mission. --runtime accepts: hermes | codex | hermes-proxy | openrouter | pi | oh-my-pi | anthropic.
+# Execute the mission using an installed adapter; see `uh mission run --help` for supported runtimes.
 uh mission run .harness/missions/m1-example/mission.yaml --runtime hermes
 
 # Run the mission's declared verification checks.

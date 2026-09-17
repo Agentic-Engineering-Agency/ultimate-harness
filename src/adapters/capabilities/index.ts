@@ -10,7 +10,8 @@ import { hermesProxyCapabilities } from "./hermes-proxy.js";
 import { ohMyPiCapabilities } from "./oh-my-pi.js";
 import { openRouterCapabilities } from "./openrouter.js";
 import { piCapabilities } from "./pi.js";
-
+import { commandCodeCapabilities } from "./command-code.js";
+import { CLAUDE_CODE_CAPABILITIES } from "./claude-code.js";
 export type AdapterId = (typeof TEAM_ADAPTER_IDS)[number];
 
 export const CAPABILITIES: Record<AdapterId, AdapterCapabilities> = {
@@ -21,6 +22,8 @@ export const CAPABILITIES: Record<AdapterId, AdapterCapabilities> = {
   openrouter: openRouterCapabilities,
   anthropic: anthropicCapabilities,
   pi: piCapabilities,
+  "command-code": commandCodeCapabilities,
+  "claude-code": CLAUDE_CODE_CAPABILITIES,
 };
 
 export function getCapabilities(id: AdapterId): AdapterCapabilities {
@@ -36,4 +39,4 @@ export function parseCapabilitiesManifest(data: unknown): AdapterCapabilities {
   return AdapterCapabilitiesSchema.parse(data);
 }
 
-export { anthropicCapabilities, codexCapabilities, hermesCapabilities, hermesProxyCapabilities, ohMyPiCapabilities, openRouterCapabilities, piCapabilities };
+export { anthropicCapabilities, codexCapabilities, hermesCapabilities, hermesProxyCapabilities, ohMyPiCapabilities, openRouterCapabilities, piCapabilities, CLAUDE_CODE_CAPABILITIES };

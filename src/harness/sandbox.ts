@@ -1,5 +1,6 @@
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { relativeArtifactPath } from "./artifact-paths.js";
 import { parse, stringify } from "yaml";
 import {
   SandboxesIndexSchema,
@@ -130,7 +131,7 @@ export async function createSandbox(
     mission_id: opts.missionId,
     backend: backend.name,
     branch: materialized.branch,
-    path: toForwardSlash(path.relative(root, worktreePath)),
+    path: relativeArtifactPath(root, worktreePath),
     base_ref: materialized.base_ref,
     status: "created",
     created_at: now,
@@ -313,8 +314,71 @@ function toIndexEntry(record: SandboxRecord): SandboxIndexEntry {
   };
 }
 
-function toForwardSlash(p: string): string {
-  return p.split(path.sep).join("/");
+export type SandboxMissionRoute = {
+  effectiveRoot: string;
+  missionPath: string;
+  sandbox?: { id: string; path: string; backend: string };
+  error?: string;
+};
+
+
+export async function findBoundSandbox(
+  projectRoot: string,
+  missionId: string,
+): Promise<{ id: string; path: string; backend: string } | null> {
+  const indexPath = sandboxesIndex(projectRoot);
+  if (!(await fileExists(indexPath))) return null;
+  const index = await readIndex(projectRoot);
+  const sandboxesRoot = path.resolve(sandboxesDir(projectRoot));
+  const candidates = index.sandboxes
+    .filter((entry) => entry.mission_id === missionId && entry.status !== "discarded" && typeof entry.path === "string" && entry.path.length > 0)
+    .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
+  for (const candidate of candidates) {
+    const resolved = path.resolve(projectRoot, candidate.path ?? "");
+    if (!isPathWithin(resolved, sandboxesRoot)) continue;
+    if (!(await fileExists(resolved))) continue;
+    return { id: candidate.id, path: resolved, backend: candidate.backend };
+  }
+  return null;
 }
+
+export async function resolveSandboxMissionRoot(
+  root: string,
+  missionPath: string,
+  useSandbox: boolean,
+): Promise<SandboxMissionRoute> {
+  if (!useSandbox) return { effectiveRoot: root, missionPath };
+  let missionId: string;
+  try {
+    const parsed = parse(await readFile(missionPath, "utf-8"));
+    if (!parsed || typeof parsed !== "object" || typeof parsed.id !== "string" || parsed.id.length === 0) {
+      return { effectiveRoot: root, missionPath, error: "Cannot route mission without a valid mission id; refusing host-root execution." };
+    }
+    missionId = parsed.id;
+  } catch {
+    return { effectiveRoot: root, missionPath, error: "Cannot read mission for sandbox routing; refusing host-root execution." };
+  }
+  const sandbox = await findBoundSandbox(root, missionId);
+  if (!sandbox) {
+    const indexPath = sandboxesIndex(root);
+    if (!(await fileExists(indexPath))) return { effectiveRoot: root, missionPath };
+    let index: SandboxesIndexDocument;
+    try {
+      index = await readIndex(root);
+    } catch {
+      return { effectiveRoot: root, missionPath, error: "Sandbox registry is invalid; refusing host-root fallback." };
+    }
+    const hasInvalidBinding = index.sandboxes.some((entry) => entry.mission_id === missionId && entry.status !== "discarded");
+    return hasInvalidBinding
+      ? { effectiveRoot: root, missionPath, error: `Sandbox binding for mission ${missionId} is invalid; refusing host-root fallback.` }
+      : { effectiveRoot: root, missionPath };
+  }
+  return {
+    effectiveRoot: sandbox.path,
+    missionPath: path.join(sandbox.path, ".harness", "missions", missionId, "mission.yaml"),
+    sandbox,
+  };
+}
+
 
 export type { SandboxStatus };

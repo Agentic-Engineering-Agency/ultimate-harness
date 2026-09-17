@@ -1,5 +1,10 @@
 #!/usr/bin/env node
+import { prepareIndependentReview, collectIndependentReview } from "./harness/independent-review.js";
 import { Command } from "commander";
+import { z } from "zod";
+import type { RuntimeLimits } from "./schema/runtime-control.js";
+import type { MissionDocument } from "./schema/mission.js";
+import { resolveRuntimeRecoveryPolicy, runWithRuntimeRecovery } from "./harness/runtime-recovery.js";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
 import { assertSafeMissionId, createMission } from "./harness/mission.js";
@@ -11,6 +16,8 @@ import { resolveRoot, missionDir } from "./harness/paths.js";
 import { checkHermes, dryRunHermes, runHermes } from "./adapters/hermes.js";
 import { dryRunCodex, runCodex } from "./adapters/codex.js";
 import { dryRunOhMyPi, runOhMyPi } from "./adapters/oh-my-pi.js";
+import { dryRunCommandCode, runCommandCode } from "./adapters/command-code.js";
+import { dryRunClaudeCode, runClaudeCode } from "./adapters/claude-code.js";
 import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { dryRunOpenRouter, runOpenRouter } from "./adapters/openrouter.js";
 import { dryRunAnthropic, runAnthropic } from "./adapters/anthropic.js";
@@ -23,12 +30,12 @@ import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabil
 import { forecastCost } from "./harness/cost-forecast.js";
 import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
 import { COST_CLASSES } from "./schema/adapter-capabilities.js";
-import { findBoundSandbox } from "./harness/verify.js";
-import { appendRuntimeCancelledEvent } from "./harness/runtime-events.js";
-import { cancelMissionRunViaPlugin, defaultPluginApiBase, MissionCancelError } from "./harness/mission-cancel.js";
+import { resolveSandboxMissionRoot } from "./harness/sandbox.js";
+import { finalizeRuntimeCancelledRun } from "./harness/runtime-events.js";
+import { cancelLocalMissionRun, cancelMissionRunViaPlugin, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
 import { parseScaffoldLang, scaffoldTestsFromSpec } from "./harness/test-scaffold.js";
-import { assertValidRunId } from "./harness/run-id.js";
+import { assertValidRunId, generateRunId } from "./harness/run-id.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -39,6 +46,7 @@ import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js"
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 import { installTelemetryHooks } from "./harness/telemetry.js";
 import { projectDeliveryObservatory } from "./harness/delivery-observatory/project.js";
+import { acceptanceStatus, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
 
 import {
   createSandbox,
@@ -49,7 +57,7 @@ import {
 import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 import { recordManualVerdict } from "./harness/verdict.js";
-import type { VerdictValue } from "./schema/artifacts.js";
+import { SandboxesIndexSchema, type VerdictValue } from "./schema/artifacts.js";
 
 function readPackageVersion(): string {
   try {
@@ -95,8 +103,13 @@ type RuntimeDryRunResult = {
 interface RuntimeRunOptions {
   /** UH-81 — CLI-time runtime_config overrides spread on top of the mission's own overrides. */
   extraRuntimeConfigOverrides?: Record<string, unknown>;
-  /** UH-82 — explicit per-run id; generated when absent. */
+  /** Canonical host root for OMP artifacts when execution is sandbox-routed. */
+  artifactRoot?: string;
+  /** UH-82 — explicit per-run id. */
   runId?: string;
+  /** Signal used by the CLI to stop an owned runtime process tree. */
+  cancellationSignal?: AbortSignal;
+  limits?: RuntimeLimits;
 }
 interface RuntimeWiring {
   dryRun(root: string, missionPath: string): Promise<RuntimeDryRunResult>;
@@ -107,42 +120,14 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
   hermes: { dryRun: dryRunHermes, run: (root, missionPath, opts) => runHermes(root, missionPath, opts), surfaceBlocked: false },
   codex: { dryRun: dryRunCodex, run: (root, missionPath, opts) => runCodex(root, missionPath, opts), surfaceBlocked: true },
   "oh-my-pi": { dryRun: dryRunOhMyPi, run: (root, missionPath, opts) => runOhMyPi(root, missionPath, opts), surfaceBlocked: true },
+  "command-code": { dryRun: dryRunCommandCode, run: (root, missionPath, opts) => runCommandCode(root, missionPath, opts), surfaceBlocked: true },
   "hermes-proxy": { dryRun: dryRunHermesProxy, run: (root, missionPath, opts) => runHermesProxy(root, missionPath, opts), surfaceBlocked: true },
   openrouter: { dryRun: dryRunOpenRouter, run: (root, missionPath, opts) => runOpenRouter(root, missionPath, opts), surfaceBlocked: true },
   anthropic: { dryRun: dryRunAnthropic, run: (root, missionPath, opts) => runAnthropic(root, missionPath, opts), surfaceBlocked: true },
   pi: { dryRun: dryRunPi, run: (root, missionPath, opts) => runPi(root, missionPath, opts), surfaceBlocked: true },
+  "claude-code": { dryRun: dryRunClaudeCode, run: (root, missionPath, opts) => runClaudeCode(root, missionPath, opts), surfaceBlocked: true },
 };
 
-/**
- * Auto-route a mission invocation into its bound sandbox worktree.
- *
- * Mirrors `verifyMission`'s sandbox-routing: when a mission has an active
- * sandbox entry in `.harness/sandboxes/index.yaml`, the adapter is invoked
- * with the worktree path as `root` so prompts, artifacts, and diff capture
- * all see the worktree, not the canonical repo. Returns the original root
- * untouched when `--no-sandbox` is passed or no bound sandbox exists.
- */
-async function resolveMissionRoot(
-  root: string,
-  missionPath: string,
-  useSandbox: boolean,
-): Promise<{ effectiveRoot: string; sandbox?: { id: string; path: string; backend: string } }> {
-  if (!useSandbox) return { effectiveRoot: root };
-  let missionId: string;
-  try {
-    const raw = await readFileAsync(missionPath, "utf-8");
-    const parsed = parseYaml(raw) as { id?: unknown } | null;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.id !== "string" || parsed.id.length === 0) {
-      return { effectiveRoot: root };
-    }
-    missionId = parsed.id;
-  } catch {
-    return { effectiveRoot: root };
-  }
-  const sandbox = await findBoundSandbox(root, missionId);
-  if (!sandbox) return { effectiveRoot: root };
-  return { effectiveRoot: sandbox.path, sandbox };
-}
 
 async function enforceRuntimeCapabilities(
   root: string,
@@ -167,25 +152,35 @@ async function enforceRuntimePreflight(
 }
 
 async function installRuntimeCancelledEventHandler(
-  root: string,
+  artifactRoot: string,
   missionPath: string,
   runtime: string,
+  runId: string,
+  cancellationController: AbortController,
 ): Promise<() => void> {
   const mission = await loadMissionFile(missionPath);
   let handled = false;
-  const onSigterm = (): void => {
+  const onSignal = (signal: "SIGINT" | "SIGTERM"): void => {
     if (handled) return;
     handled = true;
-    appendRuntimeCancelledEvent({
-      root,
+    cancellationController.abort();
+    finalizeRuntimeCancelledRun({
+      root: artifactRoot,
       missionId: mission.id,
       runtime,
-      signal: "SIGTERM",
+      signal,
+      runId,
     });
     process.exit(143);
   };
+  const onSigint = (): void => onSignal("SIGINT");
+  const onSigterm = (): void => onSignal("SIGTERM");
+  process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
-  return () => process.removeListener("SIGTERM", onSigterm);
+  return () => {
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+  };
 }
 
 const program = new Command();
@@ -387,8 +382,71 @@ program
       console.log(`Verified missions: ${s.verified_missions_count}`);
       console.log(`Promoted missions: ${s.promoted_missions_count}`);
       console.log(`Recent audit events: ${s.recent_audit_events}`);
+      console.log(`Acceptance evidence: proven ${s.acceptance.proven}, stale ${s.acceptance.stale}, failed ${s.acceptance.failed}, unproven ${s.acceptance.unproven}`);
     } catch (err) {
       console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// uh acceptance — real runtime evidence, separate from test and fixture status.
+const acceptanceCmd = program.command("acceptance").description("Run and inspect real runtime acceptance evidence");
+
+acceptanceCmd
+  .command("run")
+  .description("Run one registered capability or every capability for real")
+  .argument("[capability]", "Registered capability id")
+  .option("--all", "Run every registered capability")
+  .requiredOption("--workspace <dir>", "Fresh workspace root for acceptance artifacts")
+  .option("--runtime <id>", "Override the registry runtime")
+  .option("--model <id>", "Override the requested runtime model")
+  .option("--keep", "Retain the run workspace")
+  .option("--root <path>", "Harness repository root (default: cwd)")
+  .action(async (capability: string | undefined, opts: { all?: boolean; workspace: string; runtime?: string; model?: string; keep?: boolean; root?: string }) => {
+    if (opts.all && capability) {
+      console.error("[FAIL] <capability> and --all are mutually exclusive");
+      process.exit(1);
+      return;
+    }
+    try {
+      await runAcceptance(resolveRoot(opts.root), {
+        workspace: opts.workspace,
+        runtime: opts.runtime,
+        model: opts.model,
+        keep: opts.keep,
+        capabilities: capability ? [capability] : undefined,
+      });
+    } catch (error) {
+      console.error(`[FAIL] acceptance run: ${(error as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+acceptanceCmd
+  .command("status")
+  .description("Classify acceptance evidence by freshness and outcome")
+  .option("--json", "Emit JSON")
+  .option("--root <path>", "Harness repository root (default: cwd)")
+  .action(async (opts: { json?: boolean; root?: string }) => {
+    try {
+      const summary = await acceptanceStatus(resolveRoot(opts.root));
+      if (opts.json) console.log(JSON.stringify(summary, null, 2));
+      else console.log(`Acceptance evidence: proven ${summary.counts.proven}, stale ${summary.counts.stale}, failed ${summary.counts.failed}, unproven ${summary.counts.unproven}, fixture_only ${summary.counts.fixture_only}`);
+    } catch (error) {
+      console.error(`[FAIL] acceptance status: ${(error as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+acceptanceCmd
+  .command("report")
+  .description("Generate docs/acceptance/README.md from registry and latest evidence")
+  .option("--root <path>", "Harness repository root (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    try {
+      console.log(await writeAcceptanceReport(resolveRoot(opts.root)));
+    } catch (error) {
+      console.error(`[FAIL] acceptance report: ${(error as Error).message}`);
       process.exit(1);
     }
   });
@@ -823,7 +881,7 @@ adapterCmd
     for (const c of caps) {
       const tag = probed[c.id] ? ` (${probed[c.id]})` : "";
       console.log(`${c.id} — ${c.display_name}${tag}`);
-      console.log(`  cost_class: ${c.cost_class}  max_context_tokens: ${c.max_context_tokens}  sandbox: ${c.sandbox}`);
+      console.log(`  cost_class: ${c.cost_class}  max_context_tokens: ${c.max_context_tokens ?? "model-dependent (unknown)"}  sandbox: ${c.sandbox}`);
       console.log(`  tools: shell=${c.tools.shell} fs_read=${c.tools.fs_read} fs_write=${c.tools.fs_write} network=${c.tools.network}`);
     }
   });
@@ -878,6 +936,38 @@ adapterCmd
 const missionCmd = program
   .command("mission")
   .description("Create and execute missions against configured runtimes");
+
+missionCmd.command("review-prepare")
+  .description("Capture complete review inputs and emit an advisory independent-review mission; does not start a runtime")
+  .argument("<id>", "New review mission id")
+  .requiredOption("--sources <json>", "JSON array of {missionId, workspaceRoot?}; roots default to each source mission's bound workspace")
+  .requiredOption("--runtime <runtime>", "oh-my-pi, command-code, or claude-code")
+  .requiredOption("--model <model>", "Explicit independent reviewer model")
+  .option("--workflow <profile>", "Review workflow", "research-docs")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { sources: string; runtime: string; model: string; workflow: string; root?: string }) => {
+    try {
+      const sources = z.array(z.object({ missionId: z.string().min(1), workspaceRoot: z.string().min(1).optional() }).strict()).min(1).parse(JSON.parse(opts.sources));
+      const runtime = z.enum(["oh-my-pi", "command-code", "claude-code"]).parse(opts.runtime);
+      console.log(JSON.stringify(await prepareIndependentReview(resolveRoot(opts.root), { id, sources, runtime, model: opts.model, workflow: opts.workflow }), null, 2));
+    } catch (error) {
+      console.error(`[FAIL] mission review-prepare: ${(error as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
+
+missionCmd.command("review-collect")
+  .description("Validate review provenance and evidence; never grants human acceptance or promotes source work")
+  .argument("<id>", "Review mission id")
+  .option("--root <path>", "Canonical project root (default: cwd)")
+  .action(async (id: string, opts: { root?: string }) => {
+    try {
+      console.log(JSON.stringify(await collectIndependentReview(resolveRoot(opts.root), id), null, 2));
+    } catch (error) {
+      console.error(`[FAIL] mission review-collect: ${(error as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
 
 missionCmd
   .command("create")
@@ -1051,7 +1141,13 @@ missionCmd
       process.exit(1);
       return;
     }
-    const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    const routing = await resolveSandboxMissionRoot(root, filePath, opts.sandbox);
+    if (routing.error) {
+      console.error(`[BLOCKED] sandbox routing failed:`);
+      console.error(`  error: ${routing.error}`);
+      process.exit(1);
+      return;
+    }
     if (routing.sandbox?.backend === "container") {
       console.error(`[BLOCKED] container sandbox mission dry-run requires an OpenSandbox adapter-execution bridge; refusing host execution for sandbox ${routing.sandbox.id}`);
       process.exit(1);
@@ -1060,7 +1156,7 @@ missionCmd
     if (routing.sandbox) {
       console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
     }
-    const result = await wiring.dryRun(routing.effectiveRoot, filePath);
+    const result = await wiring.dryRun(routing.effectiveRoot, routing.missionPath);
     if (result.errors.length > 0) {
       console.log("[FAIL] dry-run errors:");
       for (const e of result.errors) {
@@ -1152,7 +1248,13 @@ missionCmd
       process.exit(1);
       return;
     }
-    const routing = await resolveMissionRoot(root, filePath, opts.sandbox);
+    const routing = await resolveSandboxMissionRoot(root, filePath, opts.sandbox);
+    if (routing.error) {
+      console.error(`[BLOCKED] sandbox routing failed:`);
+      console.error(`  error: ${routing.error}`);
+      process.exit(1);
+      return;
+    }
     if (routing.sandbox?.backend === "container") {
       console.error(`[BLOCKED] container sandbox mission run requires an OpenSandbox adapter-execution bridge; refusing host execution for sandbox ${routing.sandbox.id}`);
       process.exit(1);
@@ -1180,21 +1282,31 @@ missionCmd
       const keys = Object.keys(extraRuntimeConfigOverrides);
       console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
     }
+    const runId = opts.runId ?? generateRunId();
     console.log("");
     let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] }; runId?: string };
-    let uninstallCancelHandler: (() => void) | null = null;
+    const cancellationController = new AbortController();
     try {
-      uninstallCancelHandler = await installRuntimeCancelledEventHandler(root, filePath, runtime);
-      result = await wiring.run(routing.effectiveRoot, filePath, { extraRuntimeConfigOverrides, runId: opts.runId });
+      const recovery = await resolveRuntimeRecoveryPolicy(routing.effectiveRoot, routing.missionPath, runtime, extraRuntimeConfigOverrides);
+      result = await runWithRuntimeRecovery({
+        root, runtime, runId, ...recovery, extraRuntimeConfigOverrides,
+        cancellationSignal: cancellationController.signal,
+        run: async (attempt) => {
+          const uninstall = await installRuntimeCancelledEventHandler(root, routing.missionPath, runtime, attempt.runId, cancellationController);
+          try {
+            return await wiring.run(routing.effectiveRoot, routing.missionPath, {
+              ...attempt, artifactRoot: root, cancellationSignal: cancellationController.signal,
+            });
+          } finally { uninstall(); }
+        },
+      });
     } catch (err) {
       console.log("[FAIL] mission run error:");
       console.log(`  error: ${(err as Error).message}`);
       process.exit(1);
       return;
-    } finally {
-      if (uninstallCancelHandler) uninstallCancelHandler();
     }
-    if (!opts.runId && result.runId) {
+    if (result.runId && (!opts.runId || result.runId !== runId)) {
       console.log(`Run id: ${result.runId}`);
     }
     if (result.stdout) {
@@ -1218,12 +1330,12 @@ missionCmd
 
 missionCmd
   .command("cancel")
-  .description("Cancel an in-flight mission run via the Hermes plugin API")
+  .description("Cancel an owned local mission run; use --plugin-url only for plugin-managed runs")
   .requiredOption("--mission <id>", "Mission id (validated; run lookup uses --run-id)")
   .requiredOption("--run-id <id>", "Run id to cancel")
   .option("--root <path>", "Root directory (default: cwd)")
-  .option("--plugin-url <url>", "Hermes plugin API base URL", defaultPluginApiBase())
-  .action(async (opts: { mission: string; runId: string; root?: string; pluginUrl: string }) => {
+  .option("--plugin-url <url>", "Explicit Hermes plugin API base URL for plugin-managed runs")
+  .action(async (opts: { mission: string; runId: string; root?: string; pluginUrl?: string }) => {
     const root = resolveRoot(opts.root);
     try {
       assertSafeMissionId(opts.mission);
@@ -1242,8 +1354,10 @@ missionCmd
       return;
     }
     try {
-      const result = await cancelMissionRunViaPlugin(opts.pluginUrl, opts.runId);
-      console.log(`Cancelled run ${opts.runId} for mission ${opts.mission} (status: ${result.status})`);
+      const result = opts.pluginUrl
+        ? await cancelMissionRunViaPlugin(opts.pluginUrl, opts.runId)
+        : await cancelLocalMissionRun(root, opts.mission, opts.runId);
+      console.log(`Run ${opts.runId} for mission ${opts.mission} settled with status: ${result.status}`);
     } catch (err) {
       if (err instanceof MissionCancelError) {
         if (err.code === "already_finished") {
@@ -1343,7 +1457,7 @@ missionCmd
 
 missionCmd
   .command("run-team")
-  .description("Run a team-shape mission: fan out to N workers in their own worktrees, then ask the leader to integrate")
+  .description("Run resource-bounded worker waves in separate worktrees, then mechanically integrate and verify; no leader model is invoked")
   .argument("<mission-id>", "Mission id (must exist in .harness/missions/, with team shape)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--base-ref <ref>", "Base git ref for worker / leader worktrees (default: HEAD)")
@@ -1380,59 +1494,47 @@ missionCmd
       process.exit(1);
       return;
     }
-    // UH-71 schema validates the structural mission packet. The team-specific
-    // `shape`/`team` fields ride alongside and are validated separately by
-    // the team-run planner.
+    // UH-71 schema validates the structural mission packet and the team shape,
+    // so the typed value below is the single source for dispatch.
     const { validateMission } = await import("./schema/mission.js");
+    let validatedMission: MissionDocument;
     try {
-      validateMission(parsed);
+      validatedMission = validateMission(parsed);
     } catch (err) {
       console.error(`[FAIL] mission validation failed: ${(err as Error).message}`);
       process.exit(1);
       return;
     }
-    if ((parsed as { shape?: unknown }).shape !== "team") {
+    if (validatedMission.shape !== "team") {
       console.error(`[FAIL] mission ${missionId} is not a team-shape mission. Add 'shape: team' and a 'team:' block, or use 'uh mission run'.`);
       process.exit(1);
       return;
     }
-    const team = (parsed as { team?: unknown }).team;
-    if (!team || typeof team !== "object") {
+    if (!validatedMission.team) {
       console.error(`[FAIL] mission ${missionId} declares shape: team but has no 'team:' block.`);
       process.exit(1);
       return;
     }
-    // Codex P2: validate workers is an array before dereferencing .length.
-    // A malformed mission (shape:team with no workers, or workers not an
-    // array) used to throw a raw TypeError on the log line below; now it
-    // surfaces as a normal CLI error.
-    const workersRaw = (team as { workers?: unknown }).workers;
-    if (!Array.isArray(workersRaw) || workersRaw.length === 0) {
-      console.error(`[FAIL] mission ${missionId} has shape: team but team.workers is missing, empty, or not an array.`);
-      process.exit(1);
-      return;
-    }
-    const leaderRaw = (team as { leader?: unknown }).leader;
-    if (!leaderRaw || typeof leaderRaw !== "object") {
-      console.error(`[FAIL] mission ${missionId} has shape: team but team.leader is missing.`);
-      process.exit(1);
-      return;
-    }
     const teamMission = {
-      id: missionId,
-      team: team as { workers: { role: string; adapter: string; count?: number }[]; leader: { adapter: string } },
-      integration_report_path: (parsed as { integration_report_path?: string }).integration_report_path,
+      id: validatedMission.id,
+      team: validatedMission.team,
+      integration_report_path: validatedMission.integration_report_path,
     };
     const { runTeamMission } = await import("./harness/team-run.js");
     const { verifyMission } = await import("./harness/verify.js");
     console.log(`Running team mission ${missionId} with ${teamMission.team.workers.length} worker spec(s)`);
     try {
       const result = await runTeamMission(teamMission, root, {
-        runnerFor: (adapter) => async (rt, effectiveRoot, missionPath) => {
+        runnerFor: (adapter) => async (rt, effectiveRoot, missionPath, runtimeOptions) => {
           const wiring = RUNTIME_WIRINGS[adapter];
           if (!wiring) throw new Error(`Unknown adapter: ${adapter}`);
           void rt;
-          return wiring.run(effectiveRoot, missionPath);
+          const recovery = await resolveRuntimeRecoveryPolicy(effectiveRoot, missionPath, adapter);
+          return runWithRuntimeRecovery({
+            root: runtimeOptions.artifactRoot, runtime: adapter, runId: runtimeOptions.runId,
+            ...recovery, onAttempt: runtimeOptions.onAttempt,
+            run: (attempt) => wiring.run(effectiveRoot, missionPath, { ...runtimeOptions, ...attempt }),
+          });
         },
         verifier: async (workRoot, mid) => verifyMission(workRoot, mid, { useSandbox: false }),
         baseRef: opts.baseRef,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { validateMission, TEAM_ADAPTER_IDS } from "../src/schema/mission.js";
+import { validateMission } from "../src/schema/mission.js";
 
 const BASE = {
   schema_version: "uh.mission.v0",
@@ -9,20 +9,22 @@ const BASE = {
 };
 
 describe("mission shape: team", () => {
-  test("defaults shape to 'single' and design_path to 'design.md'", () => {
-    const m = validateMission(BASE);
-    expect(m.shape).toBe("single");
-    expect(m.design_path).toBe("design.md");
-    expect(m.team).toBeUndefined();
-  });
-
   test("accepts a valid team mission", () => {
     const m = validateMission({
       ...BASE,
       shape: "team",
       team: {
         workers: [
-          { adapter: "codex", role: "frontend" },
+          {
+            adapter: "codex",
+            role: "frontend",
+            mission_id: "frontend-mission",
+            objective: "Build the UI",
+            runtime_config_overrides: { model: "provider/model" },
+            limits: { max_turns: 4 },
+            expected_outputs: { files: ["out/ui.txt"] },
+            seed: 7,
+          },
           { adapter: "oh-my-pi", role: "backend", count: 2 },
         ],
         leader: { adapter: "hermes", role: "integrator" },
@@ -32,20 +34,12 @@ describe("mission shape: team", () => {
     expect(m.shape).toBe("team");
     expect(m.team?.workers).toHaveLength(2);
     expect(m.team?.workers[1].count).toBe(2);
+    expect(m.team?.workers[0].mission_id).toBe("frontend-mission");
+    expect(m.team?.workers[0].limits?.max_turns).toBe(4);
+    expect(m.team?.workers[0].expected_outputs?.files).toEqual(["out/ui.txt"]);
+    expect(m.team?.workers[0].seed).toBe(7);
     expect(m.team?.leader.adapter).toBe("hermes");
     expect(m.integration_report_path).toBe("integration-report.md");
-  });
-
-  test("defaults worker.count to 1", () => {
-    const m = validateMission({
-      ...BASE,
-      shape: "team",
-      team: {
-        workers: [{ adapter: "codex", role: "solo" }],
-        leader: { adapter: "hermes" },
-      },
-    });
-    expect(m.team?.workers[0].count).toBe(1);
   });
 
   test("rejects team shape without team.workers", () => {
@@ -112,10 +106,26 @@ describe("mission shape: team", () => {
       },
     })).toThrow();
   });
-
-  test("TEAM_ADAPTER_IDS exposes the registered runtimes", () => {
-    expect(new Set(TEAM_ADAPTER_IDS)).toEqual(
-      new Set(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi"]),
-    );
+  test("rejects per-worker memory limits with the team resource guidance", () => {
+    expect(() => validateMission({
+      ...BASE,
+      shape: "team",
+      team: {
+        workers: [{ adapter: "codex", role: "frontend", limits: { memory_mb: 128 } }],
+        leader: { adapter: "hermes" },
+      },
+    })).toThrow(/team\.resources\.worker_memory_mb/);
   });
+
+  test("rejects unknown worker contract keys", () => {
+    expect(() => validateMission({
+      ...BASE,
+      shape: "team",
+      team: {
+        workers: [{ adapter: "codex", role: "frontend", unexpected: true }],
+        leader: { adapter: "hermes" },
+      },
+    })).toThrow();
+  });
+
 });

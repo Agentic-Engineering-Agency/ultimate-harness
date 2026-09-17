@@ -1,8 +1,9 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileExists } from "./mission.js";
+import { runRuntimeProcess } from "./runtime-process.js";
 
 const execFileP = promisify(execFile);
 const OPENSANDBOX_METADATA = ".uh-opensandbox.json";
@@ -299,40 +300,48 @@ async function runOpenSandboxTemplate(
   return runShell(rendered, values.spawnCwd ?? values.cwd, values.timeoutMs);
 }
 
-function runShell(command: string, cwd: string, commandTimeoutMs: number): Promise<SandboxCommandRunResult> {
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    const child = spawn(command, { cwd, detached: true, shell: true, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    let timeoutTimer: NodeJS.Timeout | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
-    const append = (current: string, chunk: unknown) => (current + (typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf-8") : String(chunk))).slice(0, COMMAND_OUTPUT_LIMIT);
-    const finish = (metrics: Omit<SandboxCommandRunResult, "durationMs">) => {
-      if (settled) return;
-      settled = true;
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killTimer) clearTimeout(killTimer);
-      resolve({ ...metrics, durationMs: Date.now() - startedAt });
+async function runShell(command: string, cwd: string, commandTimeoutMs: number): Promise<SandboxCommandRunResult> {
+  const startedAt = Date.now();
+  try {
+    const shell = await resolveTemplateShell(commandTimeoutMs);
+    const remainingMs = commandTimeoutMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) return { exitCode: 124, stdout: "", stderr: "Command preparation exceeded its deadline",
+      timedOut: true, durationMs: Date.now() - startedAt };
+    const result = await runRuntimeProcess({ command: shell, args: ["-c", command], cwd, timeoutMs: remainingMs });
+    return {
+      exitCode: result.timedOut ? 124 : result.exitCode,
+      stdout: result.stdout.slice(0, COMMAND_OUTPUT_LIMIT),
+      stderr: (result.stderr || result.spawnError || "").slice(0, COMMAND_OUTPUT_LIMIT),
+      timedOut: result.timedOut,
+      spawnError: result.spawnError ? new Error(result.spawnError) : undefined,
+      durationMs: Date.now() - startedAt,
     };
-    const killChild = (signal: NodeJS.Signals) => {
-      if (child.pid === undefined) return;
-      try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { /* best effort */ } }
-    };
-    child.stdout?.setEncoding("utf-8");
-    child.stderr?.setEncoding("utf-8");
-    child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
-    child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
-    child.on("error", (err) => finish({ exitCode: 1, stdout, stderr: stderr || err.message, timedOut: false, spawnError: err }));
-    child.on("close", (code) => finish({ exitCode: code ?? 1, stdout, stderr, timedOut }));
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      killChild("SIGTERM");
-      killTimer = setTimeout(() => { killChild("SIGKILL"); finish({ exitCode: 124, stdout, stderr, timedOut: true }); }, 100);
-    }, commandTimeoutMs);
-  });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    return { exitCode: 1, stdout: "", stderr: failure.message, timedOut: false,
+      spawnError: failure, durationMs: Date.now() - startedAt };
+  }
+}
+
+let discoveredWindowsShell: { searchPath: string; executable: string } | undefined;
+
+async function resolveTemplateShell(timeoutMs: number): Promise<string> {
+  if (process.env.UH_OPENSANDBOX_SHELL) return process.env.UH_OPENSANDBOX_SHELL;
+  if (process.platform !== "win32") return "/bin/sh";
+  const searchPath = process.env.PATH ?? "";
+  if (discoveredWindowsShell?.searchPath === searchPath) return discoveredWindowsShell.executable;
+  // Derive a native shell from the installed Git distribution, never a WSL launcher.
+  const { stdout } = await execFileP("where.exe", ["git.exe"], { timeout: Math.max(1, Math.min(timeoutMs, 10_000)) });
+  for (const git of stdout.trim().split(/\r?\n/)) {
+    for (const relative of ["../bin/bash.exe", "../usr/bin/bash.exe", "../../usr/bin/bash.exe"]) {
+      const executable = path.resolve(path.dirname(git), relative);
+      if (await fileExists(executable)) {
+        discoveredWindowsShell = { searchPath, executable };
+        return executable;
+      }
+    }
+  }
+  throw new Error("POSIX command templates require a native shell; set UH_OPENSANDBOX_SHELL to its executable path");
 }
 
 function shellQuote(value: string): string {

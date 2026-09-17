@@ -29,11 +29,13 @@ export interface DispatchContextIssue {
 export interface DispatchContextArtifact {
   path: string;
   type?: string;
+  completion_marker?: string;
 }
 
 export interface DispatchContextAcceptanceCriterion {
   id: string;
   description: string;
+  check_command?: string;
   severity: "block" | "warn";
 }
 
@@ -42,6 +44,7 @@ export interface DispatchContext {
   workflow?: WorkflowDocument;
   issues: DispatchContextIssue[];
   readFirst: string[];
+  constraints: string[];
   expectedArtifacts: DispatchContextArtifact[];
   verificationChecks: string[];
   acceptanceCriteria: DispatchContextAcceptanceCriterion[];
@@ -80,11 +83,14 @@ export function buildDispatchContext(
       url: i.url,
     })),
     readFirst: [...mission.read_first],
-    expectedArtifacts: mission.expected_artifacts.map((a) => ({ path: a.path, type: a.type })),
+    constraints: [...mission.constraints],
+    expectedArtifacts: mission.expected_artifacts.map((a) => ({ path: a.path, type: a.type,
+      ...(a.completion_marker !== undefined ? { completion_marker: a.completion_marker } : {}) })),
     verificationChecks: [...(mission.verification.checks ?? [])],
     acceptanceCriteria: mission.acceptance_criteria.map((ac) => ({
       id: ac.id,
       description: ac.description,
+      ...(ac.check_command !== undefined ? { check_command: ac.check_command } : {}),
       severity: ac.severity,
     })),
     memoryBlock: options.memoryBlock,

@@ -10,10 +10,9 @@ import { addSkill, checkSkill, listSkills } from "../src/harness/skill.js";
 
 let TEST_ROOT: string;
 const execFileP = promisify(execFile);
-const CLI = join(process.cwd(), "node_modules", ".bin", "tsx");
 
 async function runUh(args: string[]) {
-  return execFileP(CLI, ["src/cli.ts", ...args], { cwd: process.cwd() });
+  return execFileP(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], { cwd: process.cwd() });
 }
 
 type Frontmatter = {
@@ -94,7 +93,7 @@ describe("addSkill", () => {
       id: "code-review",
       name: "Code Review",
       description: "Review code for quality.",
-      path: join("skills", "code-review"),
+      path: "skills/code-review",
       triggers: ["review my code", "check this diff"],
       prerequisites: ["linting"],
       related: ["test-authoring"],

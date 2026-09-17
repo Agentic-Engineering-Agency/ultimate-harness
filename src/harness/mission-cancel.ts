@@ -1,3 +1,14 @@
+import { readFile, writeFile, lstat } from "node:fs/promises";
+import path from "node:path";
+import { RuntimeControlSchema, RuntimeCancelRequestSchema } from "../schema/runtime-control.js";
+import { assertSafeMissionId } from "./mission.js";
+import { assertValidRunId } from "./run-id.js";
+import { getMissionArtifactContext, assertWritableArtifact } from "../adapters/_artifact-context.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { parse } from "yaml";
+import { RuntimeSessionSchema } from "../schema/artifacts.js";
+import { reconcileRuntimeSettlement } from "./runtime-settlement.js";
+
 /** UH-95 — cancel an in-flight mission run via the Hermes plugin API. */
 
 export interface MissionCancelResult {
@@ -54,4 +65,59 @@ export async function cancelMissionRunViaPlugin(
     });
   }
   return { ok: body.ok === true, status: body.status ?? "cancelled" };
+}
+
+/** Request cancellation from the owning CLI; no plugin, PID guessing or unrelated resource sweep. */
+export async function cancelLocalMissionRun(root: string, missionId: string, runId: string): Promise<MissionCancelResult> {
+  assertSafeMissionId(missionId);
+  assertValidRunId(runId);
+  const directory = path.join(root, ".harness", "missions", missionId, "runs", runId);
+  const controlPath = path.join(directory, "runtime-control.json");
+  // Unknown targets must not allocate a new attempt merely because cancellation was requested.
+  await lstat(controlPath);
+  const artifacts = await getMissionArtifactContext(root, path.join(root, ".harness", "missions", missionId, "mission.yaml"), runId);
+  if (!artifacts) throw new Error("Mission artifact context unavailable");
+  const readControl = async () => {
+    await assertWritableArtifact(artifacts.missionDir, controlPath);
+    const control = RuntimeControlSchema.parse(JSON.parse(await readFile(controlPath, "utf8")));
+    if (control.mission_id !== missionId || control.run_id !== runId) throw new Error("Runtime control identity mismatch");
+    return control;
+  };
+  const canonicalSettled = async (): Promise<boolean> => {
+    await assertWritableArtifact(artifacts.missionDir, artifacts.runtimeSessionPath);
+    try {
+      const session = RuntimeSessionSchema.parse(parse(await readFile(artifacts.runtimeSessionPath, "utf8")));
+      if (session.mission_id !== missionId) throw new Error("Runtime session identity mismatch");
+      return session.status === "succeeded" || session.status === "failed";
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      throw error;
+    }
+  };
+  const control = await readControl();
+  if (control.stop_code === "controller_lost") await reconcileRuntimeSettlement(root, missionId, runId);
+  if (control.settlement_confirmed === false) throw new Error("Owned process-tree settlement is not confirmed");
+  if (control.status !== "running" && await canonicalSettled()) return { ok: true, status: control.status };
+  if (control.status === "running") {
+    if (Date.now() - Date.parse(control.heartbeat_at) > 10_000) throw new Error("Runtime controller heartbeat is stale; cancellation is not confirmed");
+    const requestPath = path.join(directory, "cancel-request.json");
+    await assertWritableArtifact(artifacts.missionDir, requestPath);
+    try {
+      await writeFile(requestPath, JSON.stringify(RuntimeCancelRequestSchema.parse({
+        schema_version: "uh.runtime-cancel-request.v0", mission_id: missionId, run_id: runId,
+        requested_at: new Date().toISOString(),
+      })), { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const request = RuntimeCancelRequestSchema.parse(JSON.parse(await readFile(requestPath, "utf8")));
+      if (request.mission_id !== missionId || request.run_id !== runId) throw new Error("Cancellation request identity mismatch");
+    }
+  }
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const state = await readControl();
+    if (state.status !== "running" && state.settlement_confirmed !== false && await canonicalSettled()) return { ok: true, status: state.status };
+    await delay(100);
+  }
+  throw new Error("Cancellation requested but runtime settlement was not observed");
 }

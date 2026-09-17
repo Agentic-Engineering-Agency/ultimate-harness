@@ -109,6 +109,33 @@ export const PromotionSchema = z.object({
 
 export const RuntimeSessionStatusSchema = z.enum(["planned", "running", "succeeded", "failed"]);
 
+export const RuntimeCostBasisSchema = z.enum(["runtime_estimate", "configured_estimate", "provider_reported", "mixed"]);
+
+/** Explicit USD list prices and counter overlap semantics; never a billing receipt. */
+export const RuntimePricingSchema = z.object({
+  model: z.string().min(1),
+  input_usd_per_million: z.number().finite().nonnegative(),
+  output_usd_per_million: z.number().finite().nonnegative(),
+  cache_read_usd_per_million: z.number().finite().nonnegative(),
+  cache_write_usd_per_million: z.number().finite().nonnegative(),
+  input_includes_cache_read: z.boolean(),
+  input_includes_cache_write: z.boolean(),
+}).strict();
+export type RuntimePricing = z.infer<typeof RuntimePricingSchema>;
+
+export const RuntimeUsageSchema = z.object({
+  input_tokens: z.number().nonnegative().optional(),
+  output_tokens: z.number().nonnegative().optional(),
+  total_tokens: z.number().nonnegative().optional(),
+  source: z.enum(["runtime", "estimated"]),
+  model: z.string().min(1).optional(),
+  provider: z.string().min(1).optional(),
+  cache_read_tokens: z.number().nonnegative().optional(),
+  cache_write_tokens: z.number().nonnegative().optional(),
+  cost_usd: z.number().nonnegative().optional(),
+  cost_basis: RuntimeCostBasisSchema.optional(),
+}).strict();
+
 export const RuntimeSessionSchema = z.object({
   schema_version: z.literal("uh.runtime-session.v0"),
   mission_id: z.string().min(1),
@@ -121,6 +148,12 @@ export const RuntimeSessionSchema = z.object({
   finished_at: z.string().optional(),
   stdout_path: z.string().optional(),
   stderr_path: z.string().optional(),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  usage: RuntimeUsageSchema.optional(),
+  cost_usd: z.number().nonnegative().optional(),
+  cost_basis: RuntimeCostBasisSchema.optional(),
+  pricing: RuntimePricingSchema.optional(),
 }).strict();
 
 /**
@@ -175,15 +208,23 @@ export const RuntimeResultSchema = z.object({
   mission_id: z.string().min(1),
   runtime: z.string().min(1),
   status: RuntimeResultStatusSchema,
+  completion: z.enum(["complete", "incomplete"]).optional(),
+  incomplete_reason: z.string().optional(),
   started_at: z.string().min(1),
   finished_at: z.string().min(1),
   exit_code: z.number().int().optional(),
+  exit_code_ignored_reason: z.literal("runtime exited non-zero after completed native terminal event").optional(),
   prompt_path: z.string().min(1),
   stdout_path: z.string().min(1),
   stderr_path: z.string().min(1),
   diff_path: z.string().min(1).optional(),
   errors: z.array(z.string()).default([]),
   notes: z.string().optional(),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  usage: RuntimeUsageSchema.optional(),
+  cost_usd: z.number().nonnegative().optional(),
+  cost_basis: RuntimeCostBasisSchema.optional(),
   verdict: RuntimeResultVerdictSchema.optional(),
 }).strict();
 
