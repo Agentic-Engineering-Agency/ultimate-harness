@@ -22,7 +22,7 @@ export interface AutoRouteCandidate {
   eligible: boolean;
   exclusionReasons: string[];
   cost_class: CostClass;
-  max_context_tokens: number;
+  max_context_tokens: number | null;
 }
 
 export interface AutoRouteDecision {
@@ -38,7 +38,7 @@ function rankCandidate(a: AutoRouteCandidate, b: AutoRouteCandidate): number {
   const byCost = compareCostClass(a.cost_class, b.cost_class);
   if (byCost !== 0) return byCost;
   if (a.max_context_tokens !== b.max_context_tokens) {
-    return b.max_context_tokens - a.max_context_tokens;
+    return (b.max_context_tokens ?? 0) - (a.max_context_tokens ?? 0);
   }
   return a.adapter.localeCompare(b.adapter);
 }

@@ -39,6 +39,7 @@
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.tests.json --noEmit",
+    "landscape:verify": "node scripts/landscape/verify-register.mjs",
     "tui-spike": "bun bin/uh-tui-spike.tsx",
     "clean": "rm -rf dist",
     "publish:dry-run": "bun publish --dry-run",

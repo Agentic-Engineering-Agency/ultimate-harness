@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeAll } from "vitest";
 import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { validateFile } from "../src/harness/validate.js";
@@ -15,7 +15,7 @@ import {
   type DiffCollector,
 } from "../src/adapters/codex.js";
 
-const TEST_ROOT = "/tmp/uh-test-codex-adapter";
+const TEST_ROOT = resolve("/tmp/uh-test-codex-adapter");
 
 async function cleanup() {
   try { await rm(TEST_ROOT, { recursive: true, force: true }); } catch {}
@@ -114,7 +114,7 @@ describe("uh mission dry-run --runtime codex", () => {
     expect(result.args).toEqual(expect.arrayContaining([
       "exec",
       "--cd",
-      TEST_ROOT,
+      resolve(TEST_ROOT),
       "--sandbox",
       "workspace-write",
       "--json",
@@ -266,6 +266,7 @@ describe("uh mission run --runtime codex", () => {
       stdout_path: `.harness/missions/run-success/runs/${runId}/runtime.stdout.log`,
       stderr_path: `.harness/missions/run-success/runs/${runId}/runtime.stderr.log`,
     });
+    expect(runtimeResult.diff_path).not.toContain("\\");
   });
 
   test("classifies quota failures as blocked", async () => {

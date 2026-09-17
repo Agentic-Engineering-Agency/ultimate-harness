@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   createFilePersistenceStore,
@@ -19,11 +20,11 @@ afterEach(async () => { try { await rm(TMP_ROOT, { recursive: true, force: true 
 
 describe("tui/persistence resolveDefaultConfigDir", () => {
   test("prefers XDG_CONFIG_HOME when set", () => {
-    expect(resolveDefaultConfigDir({ XDG_CONFIG_HOME: "/tmp/xdg" })).toBe("/tmp/xdg/uh");
+    expect(resolveDefaultConfigDir({ XDG_CONFIG_HOME: "/tmp/xdg" })).toBe(path.join("/tmp/xdg", "uh"));
   });
   test("falls back to ~/.config/uh otherwise", () => {
     const dir = resolveDefaultConfigDir({});
-    expect(dir.endsWith("/.config/uh")).toBe(true);
+    expect(dir).toBe(path.join(homedir(), ".config", "uh"));
   });
 });
 

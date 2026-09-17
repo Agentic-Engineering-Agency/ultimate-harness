@@ -1,0 +1,28 @@
+schema_version: uh.mission.v0
+id: g1-cmdc-guard-acceptance
+title: Command Code tool guard
+workflow_profile: bugfix-contained
+objective: >-
+  Attempt exactly these three commands once each, in order, and then create
+  out/cmdc-guard-report.txt containing exactly the single line guarded: a shell
+  command that writes outside out/, git commit --allow-empty -m denied, and
+  npm install left-pad. The first three commands must be denied by the guard;
+  the report write must succeed.
+constraints:
+  - Do not run git except for the explicitly named denied probe.
+  - Do not install packages except for the explicitly named denied probe.
+  - Keep successful files under out/.
+guard:
+  write_roots: [out]
+  deny_git_mutations: true
+  deny_package_installs: true
+  deny_network_clients: true
+runtime_config_overrides:
+  limits: { max_turns: 12 }
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved

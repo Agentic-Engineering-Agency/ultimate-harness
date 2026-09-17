@@ -1,15 +1,19 @@
 import { access, appendFile, lstat, readFile, realpath, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { parse, stringify } from "yaml";
 import { validateMission, type MissionDocument } from "../schema/mission.js";
 import { validateVerificationResult, type VerificationResultDocument } from "../schema/artifacts.js";
 import { promoteMission } from "./promote.js";
-import { harnessDir, missionsDir, projectYaml, sandboxesDir, sandboxesIndex } from "./paths.js";
+import { harnessDir, missionsDir, projectYaml } from "./paths.js";
 import { validateFile } from "./validate.js";
-import { SandboxesIndexSchema } from "../schema/artifacts.js";
 import { classifyDiff } from "./diff-classifier.js";
 import { runOpenSandboxCommand, type SandboxCommandRunResult } from "./sandbox-backends.js";
+import { findBoundSandbox } from "./sandbox.js";
+import { verifyExpectedArtifact } from "./output-verification.js";
+import { collectIndependentReview } from "./independent-review.js";
+import { recordAcceptanceDecision } from "./decision-receipts.js";
+import { isDeepStrictEqual } from "node:util";
 
 const SNIPPET_LIMIT = 800;
 const TIMEOUT_KILL_GRACE_MS = 100;
@@ -53,6 +57,7 @@ export type VerifyMissionResult = {
   promotion_error?: string;
 };
 
+
 export async function verifyMission(root: string, missionId: string, options: VerifyMissionOptions = {}): Promise<VerifyMissionResult> {
   assertSafeMissionId(missionId);
   const commandTimeoutMs = normalizeCommandTimeoutMs(options.commandTimeoutMs);
@@ -94,6 +99,14 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   const mission = await readMissionAtLocation(missionPath);
   if (mission.id !== missionId) {
     throw new Error(`Mission id mismatch: expected ${missionId}, got ${mission.id}`);
+  }
+  const canonicalMissionPath = path.resolve(missionsDir(projectRoot), missionId, "mission.yaml");
+  const canonicalMission = effectiveRoot === projectRoot ? mission :
+    (await fileExists(canonicalMissionPath) ? await readMissionAtLocation(canonicalMissionPath) : undefined);
+  if (canonicalMission?.independent_review || mission.independent_review) {
+    if (!canonicalMission?.independent_review || !isDeepStrictEqual(canonicalMission, mission)) {
+      throw new Error("Independent review contract differs from its canonical mission");
+    }
   }
 
   // UH-130: `constraints[]` is accepted on the mission packet but the harness
@@ -192,6 +205,23 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     });
   }
 
+  for (const expected of mission.expected_artifacts) {
+    const checked = await verifyExpectedArtifact(effectiveRoot, expected);
+    checks.push(checked);
+    executableChecks++;
+    if (checked.status !== "passed") findings.push({ severity: "error", message: `Required output failed verification: ${expected.path}` });
+  }
+  if (canonicalMission?.independent_review) {
+    executableChecks++;
+    try {
+      await collectIndependentReview(projectRoot, missionId);
+      checks.push({ name: "independent-review-evidence", type: "artifact", status: "passed", notes: "Advisory report validated; human acceptance remains required" });
+    } catch (error) {
+      checks.push({ name: "independent-review-evidence", type: "artifact", status: "failed", notes: (error as Error).message });
+      findings.push({ severity: "error", message: "Independent review provenance or evidence is invalid" });
+    }
+  }
+
   // UH-55 TDD gate. When the mission opts in, classify the captured diff
   // and add a synthetic acceptance_criteria entry that blocks the run on
   // a tests-absent change. Treated as a regular AC for status escalation
@@ -262,13 +292,42 @@ export async function verifyMission(root: string, missionId: string, options: Ve
 
   const anyBlockingAcFailed = acceptanceResults.some((r) => r.severity === "block" && r.status === "failed");
   const anyBlockingAcUnverified = acceptanceResults.some((r) => r.severity === "block" && r.status === "blocked");
-  const status: VerificationResultDocument["status"] = anyBlockingAcFailed || checks.some((check) => check.status === "failed")
+  let status: VerificationResultDocument["status"] = anyBlockingAcFailed || checks.some((check) => check.status === "failed")
     ? "failed"
     : anyBlockingAcUnverified
       ? "blocked"
       : checks.length > 0 && checks.every((check) => check.status === "passed") && executableChecks > 0
         ? "passed"
         : "blocked";
+  await recordAcceptanceDecision({
+    missionDir, missionId, consumer: "verification", from: status,
+    state: {
+      contract: {
+        acceptance_criteria: acceptanceResults.map(result => ({
+          id: result.id, description: result.description, severity: result.severity,
+        })),
+        human_review_required: mission.verification.review_gates.length > 0,
+      },
+      outputs: {
+        status,
+        checks: checks.map(check => ({ type: check.type, status: check.status })),
+        acceptance_criteria: acceptanceResults.map(result => ({
+          id: result.id, status: result.status, exit_code: result.exit_code,
+        })),
+        findings: findings.map(finding => ({ severity: finding.severity })),
+      },
+    },
+    prompt: "Assess consistency of the verification disposition with the supplied check and acceptance summaries. Raw outputs and source diffs are not included; do not infer that unreported checks or scope protections passed.",
+    apply: gate => {
+      const blocked = gate.tamper || gate.verdict === "needs-remediation";
+      findings.push({
+        severity: blocked ? "error" : "warning",
+        message: `TypeSafe System One verdict: ${gate.verdict}${gate.tamper ? " (tamper detected)" : ""}`,
+      });
+      if (blocked) status = "failed";
+      return status;
+    },
+  });
 
   const artifact: VerificationResultDocument = validateVerificationResult({
     schema_version: "uh.verification-result.v0",
@@ -349,43 +408,6 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   };
 }
 
-export async function findBoundSandbox(
-  projectRoot: string,
-  missionId: string,
-): Promise<{ id: string; path: string; backend: string } | null> {
-  const indexPath = sandboxesIndex(projectRoot);
-  if (!(await fileExists(indexPath))) {
-    return null;
-  }
-  let raw: string;
-  try {
-    raw = await readFile(indexPath, "utf-8");
-  } catch {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = parse(raw);
-  } catch {
-    return null;
-  }
-  const result = SandboxesIndexSchema.safeParse(parsed);
-  if (!result.success) {
-    return null;
-  }
-  const sandboxesRoot = path.resolve(sandboxesDir(projectRoot));
-  const candidates = result.data.sandboxes
-    .filter((entry) => entry.mission_id === missionId && entry.status !== "discarded" && typeof entry.path === "string" && entry.path.length > 0)
-    .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
-  for (const candidate of candidates) {
-    if (!candidate.path) continue;
-    const abs = path.resolve(projectRoot, candidate.path);
-    if (!isPathWithin(abs, sandboxesRoot)) continue;
-    if (!(await fileExists(abs))) continue;
-    return { id: candidate.id, path: abs, backend: candidate.backend };
-  }
-  return null;
-}
 
 /**
  * UH-130: surface that mission `constraints[]` are advisory-only. The harness
@@ -431,7 +453,8 @@ async function runCommand(root: string, command: string, commandTimeoutMs: numbe
     const startedAt = Date.now();
     const child = spawn(command, {
       cwd: root,
-      detached: true,
+      detached: process.platform !== "win32",
+      windowsHide: true,
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -453,6 +476,18 @@ async function runCommand(root: string, command: string, commandTimeoutMs: numbe
     };
     const killChild = (signal: NodeJS.Signals) => {
       if (child.pid === undefined) return;
+      if (process.platform === "win32") {
+        try {
+          execFileSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          return;
+        } catch {
+          try { child.kill(signal); } catch { /* child already exited */ }
+          return;
+        }
+      }
       try { process.kill(-child.pid, signal); } catch {
         try { child.kill(signal); } catch { /* best effort */ }
       }

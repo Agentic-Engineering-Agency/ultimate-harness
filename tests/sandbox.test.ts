@@ -9,7 +9,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, normalize } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
@@ -24,10 +24,9 @@ import {
 
 let TEST_ROOT: string;
 const execFileP = promisify(execFile);
-const CLI = join(process.cwd(), "node_modules", ".bin", "tsx");
 
 async function runUh(args: string[]) {
-  return execFileP(CLI, ["src/cli.ts", ...args], { cwd: process.cwd() });
+  return execFileP(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], { cwd: process.cwd() });
 }
 
 async function runUhFailure(args: string[]) {
@@ -71,7 +70,7 @@ async function listWorktrees(root: string): Promise<string[]> {
   return stdout
     .split("\n")
     .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length));
+    .map((line) => normalize(line.slice("worktree ".length).trim()));
 }
 
 async function listBranches(root: string): Promise<string[]> {
@@ -607,8 +606,8 @@ describe("container backend (#155 OpenSandbox)", () => {
 
   test("OpenSandbox templates spawn in the requested sandbox cwd (#157)", async () => {
     process.env.UH_OPENSANDBOX_ENABLED = "1";
-    // Template ignores {command} via the shell `:` no-op so we only observe the spawn cwd.
-    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "pwd; : {command}";
+    await writeFile(join(TEST_ROOT, "cwd-proof.txt"), TEST_ROOT, "utf8");
+    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "cat cwd-proof.txt; : {command}";
     try {
       const observed = await runOpenSandboxCommand(TEST_ROOT, "noop", 5_000);
       expect(observed.exitCode).toBe(0);

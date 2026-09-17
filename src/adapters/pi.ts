@@ -13,6 +13,7 @@ import {
 } from "./_artifact-context.js";
 import { parse, stringify } from "yaml";
 import path from "node:path";
+import { relativeArtifactPath } from "../harness/artifact-paths.js";
 import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.js";
 import { z } from "zod";
 import { MissionDocument } from "../schema/mission.js";
@@ -717,10 +718,10 @@ export async function collectPiSession(
       started_at: startedAt,
       finished_at: finishedAt,
       exit_code: exitCode,
-      prompt_path: path.relative(root, artifacts.promptPath),
-      stdout_path: path.relative(root, artifacts.stdoutPath),
-      stderr_path: path.relative(root, artifacts.stderrPath),
-      diff_path: path.relative(root, artifacts.diffPath),
+      prompt_path: relativeArtifactPath(root, artifacts.promptPath),
+      stdout_path: relativeArtifactPath(root, artifacts.stdoutPath),
+      stderr_path: relativeArtifactPath(root, artifacts.stderrPath),
+      diff_path: relativeArtifactPath(root, artifacts.diffPath),
       errors,
     };
     result = validateRuntimeResult(draft);

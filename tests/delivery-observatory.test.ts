@@ -80,6 +80,28 @@ describe("Delivery Observatory projector", () => {
     ]) expect(serialized).not.toContain(forbidden);
   });
 
+  it("projects conservative native route identifiers and withholds unsafe metadata", async () => {
+    const root = await fixture();
+    const runtimePath = path.join(root, ".harness", "missions", "work-one", "runtime-result.yaml");
+    const base = [
+      "schema_version: uh.runtime-result.v0", "mission_id: work-one", "runtime: openrouter", "status: passed",
+      "started_at: 2026-08-23T12:00:00Z", "finished_at: 2026-08-23T12:00:30Z",
+      `prompt_path: ${root}/prompt.md`, `stdout_path: ${root}/stdout.log`, `stderr_path: ${root}/stderr.log`,
+    ];
+    await writeFile(runtimePath, [...base, "provider: openrouter", "model: openai/gpt-4o-mini"].join("\n"));
+    const safe = await projectDeliveryObservatory(root, { now: "2026-08-23T12:01:00Z" });
+    expect(safe.work_items[0]?.resolved_model).toMatchObject({ state: "known", value: "openai/gpt-4o-mini" });
+    expect(safe.work_items[0]?.provider).toMatchObject({ state: "known", value: "openrouter" });
+
+    await writeFile(runtimePath, [...base, "provider: Bearer sk-live-secret", "model: C:/Users/example/private/prompt.json"].join("\n"));
+    const unsafe = await projectDeliveryObservatory(root, { now: "2026-08-23T12:01:00Z" });
+    expect(unsafe.work_items[0]?.resolved_model).toMatchObject({ state: "unknown", reason_code: "unauthorized" });
+    expect(unsafe.work_items[0]?.provider).toMatchObject({ state: "unknown", reason_code: "unauthorized" });
+    const serialized = JSON.stringify(unsafe);
+    expect(serialized).not.toContain("sk-live-secret");
+    expect(serialized).not.toContain("C:/Users/example/private/prompt.json");
+  });
+
   it("uses honest empty and unknown states when the project has no runs", async () => {
     const root = await fixture();
     await rm(path.join(root, ".harness", "missions", "work-one", "runtime-result.yaml"));
@@ -97,5 +119,47 @@ describe("Delivery Observatory projector", () => {
     expect(snapshot.redaction.records_rejected).toBe(1);
     expect(snapshot.sources[0]?.rejected_records).toBe(1);
     expect(snapshot.work_items[0]?.operation).toBe("blocked");
+  });
+
+  it("distinguishes live, stale, and guardian-settled runs without exposing native private fields", async () => {
+    const root = await fixture();
+    const runs = path.join(root, ".harness", "missions", "work-one", "runs");
+    const directory = path.join(runs, "native");
+    await mkdir(directory);
+    const started = "2026-09-15T00:00:00.000Z";
+    await writeFile(path.join(runs, "index.json"), JSON.stringify({
+      schema_version: "uh.runs-index.v0",
+      runs: [{ run_id: "native", runtime: "command-code", started_at: started, status: "running" }],
+    }));
+    const control = { schema_version: "uh.runtime-control.v0", mission_id: "work-one", run_id: "native",
+      runtime: "command-code", controller_pid: 12345, status: "running", started_at: started,
+      heartbeat_at: started, ready_at: started, turns: 2, denials: 0, inflight_tools: 1,
+      session_id: "PRIVATE_NATIVE_SESSION", stop_reason: "PRIVATE_NATIVE_COMMAND",
+      usage: { source: "runtime", total_tokens: 250 },
+    };
+    await writeFile(path.join(directory, "runtime-control.json"), JSON.stringify(control));
+    const live = await projectDeliveryObservatory(root, { now: started });
+    expect(live.work_items[0].operation).toBe("active");
+    expect(live.work_items[0].tokens).toMatchObject({ state: "known", value: 250, method: "reported" });
+    const usageEvidence = live.work_items[0].tokens.state === "known" ? live.work_items[0].tokens.evidence_refs : [];
+    expect(usageEvidence).toHaveLength(1);
+    expect(live.evidence.find(item => item.evidence_id === usageEvidence[0])?.media_type).toBe("application/json");
+    const stale = await projectDeliveryObservatory(root, { now: "2026-09-15T00:00:15.000Z" });
+    expect(stale.work_items[0].operation).toBe("uncertain");
+    expect(stale.work_items[0].state.freshness).toBe("stale");
+    await writeFile(path.join(directory, "runtime-control.json"), JSON.stringify({
+      ...control, status: "failed", stop_code: "controller_lost", settlement_confirmed: true,
+      heartbeat_at: "2026-09-15T00:00:16.000Z", peak_memory_bytes: 1024,
+    }));
+    const failed = await projectDeliveryObservatory(root, { now: "2026-09-15T00:00:17.000Z" });
+    expect(failed.work_items[0].operation).toBe("failed");
+    expect(failed.work_items[0].cost.state).toBe("unknown");
+    const serialized = JSON.stringify(failed);
+    expect(serialized).not.toContain("PRIVATE_NATIVE_SESSION");
+    expect(serialized).not.toContain("PRIVATE_NATIVE_COMMAND");
+    const aged = await projectDeliveryObservatory(root, { now: "2026-09-17T00:00:00.000Z" });
+    expect(aged.work_items[0].operation).toBe("failed");
+    const lifecycle = aged.events.find(event => event.occurred_at === "2026-09-15T00:00:16.000Z");
+    expect(lifecycle?.state.freshness).toBe("stale");
   });
 });

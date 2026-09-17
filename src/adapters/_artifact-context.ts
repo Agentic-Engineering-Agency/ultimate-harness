@@ -112,19 +112,21 @@ export async function getMissionArtifactContext(
 }
 
 /**
- * Guard before writing/overwriting an artifact: the target must be inside the
- * mission directory and must not be a symlink (refuse to follow it).
+ * Guard before writing/overwriting an artifact: reject symlinks at the target
+ * and every ancestor through the owning .harness directory.
  */
 export async function assertWritableArtifact(missionDir: string, artifactPath: string): Promise<void> {
   assertPathInsideMissionDir(missionDir, artifactPath);
-  try {
-    const stat = await lstat(artifactPath);
-    if (stat.isSymbolicLink()) {
-      throw new Error(`Refusing to overwrite symlinked artifact: ${artifactPath}`);
+  const boundary = path.resolve(missionDir, "..", "..");
+  for (let candidate = path.resolve(artifactPath); ; candidate = path.dirname(candidate)) {
+    try {
+      if ((await lstat(candidate)).isSymbolicLink()) {
+        throw new Error(`Refusing to overwrite symlinked artifact: ${candidate}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw err;
+    if (path.relative(boundary, candidate) === "") return;
   }
 }
 

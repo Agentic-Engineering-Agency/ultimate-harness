@@ -41,6 +41,31 @@ const FIXTURE_WORKFLOW: WorkflowDocument = validateWorkflow({
 });
 
 const FINAL_INSTRUCTION = "::FINAL::";
+const STRUCTURED_MISSION: MissionDocument = validateMission({
+  schema_version: "uh.mission.v0",
+  id: "m-structured",
+  title: "Structured mission",
+  workflow_profile: "research-docs",
+  objective: "Preserve structured mission fields.",
+  constraints: [
+    "Keep this line exactly.\nKeep this literal continuation.",
+    "Second constraint arrives after the first.",
+  ],
+  acceptance_criteria: [
+    {
+      id: "ac-build",
+      description: "Build output exists.\nThe description keeps its second line.",
+      check_command: "bun run build --literal='a b'",
+      severity: "block",
+    },
+    {
+      id: "ac-review",
+      description: "A reviewer confirms the result.",
+      severity: "warn",
+    },
+  ],
+});
+
 
 describe("UH-80 dispatch context contract", () => {
   test("buildDispatchContext copies mission fields without mutating them", () => {
@@ -105,6 +130,85 @@ describe("UH-80 dispatch context contract", () => {
     `);
   });
 
+  test("transmits constraints and acceptance criteria without mutating the mission", () => {
+    const ctx = buildDispatchContext(STRUCTURED_MISSION, undefined, {
+      finalMessageInstruction: FINAL_INSTRUCTION,
+    });
+
+    expect(ctx.constraints).toEqual([
+      "Keep this line exactly.\nKeep this literal continuation.",
+      "Second constraint arrives after the first.",
+    ]);
+    expect(ctx.acceptanceCriteria).toEqual([
+      {
+        id: "ac-build",
+        description: "Build output exists.\nThe description keeps its second line.",
+        check_command: "bun run build --literal='a b'",
+        severity: "block",
+      },
+      {
+        id: "ac-review",
+        description: "A reviewer confirms the result.",
+        severity: "warn",
+      },
+    ]);
+
+    ctx.constraints[0] = "changed";
+    ctx.acceptanceCriteria[0].description = "changed";
+    expect(STRUCTURED_MISSION.constraints[0]).toBe("Keep this line exactly.\nKeep this literal continuation.");
+    expect(STRUCTURED_MISSION.acceptance_criteria[0].description).toBe(
+      "Build output exists.\nThe description keeps its second line.",
+    );
+  });
+
+  test("renders structured fields in declared order and preserves optional commands", () => {
+    const prompt = renderPrompt(buildDispatchContext(STRUCTURED_MISSION, undefined, {
+      finalMessageInstruction: FINAL_INSTRUCTION,
+    }));
+
+    expect(prompt).toContain(
+      "## Constraints\n" +
+      "- Keep this line exactly.\n" +
+      "Keep this literal continuation.\n" +
+      "- Second constraint arrives after the first.\n\n",
+    );
+    expect(prompt).toContain(
+      "## Acceptance Criteria\n" +
+      "- ac-build [block] Build output exists.\n" +
+      "The description keeps its second line.\n" +
+      "  - check_command: bun run build --literal='a b'\n" +
+      "- ac-review [warn] A reviewer confirms the result.\n\n",
+    );
+    const reviewStart = prompt.indexOf("- ac-review [warn]");
+    expect(prompt.slice(reviewStart).split("\n\n", 1)[0]).toBe(
+      "- ac-review [warn] A reviewer confirms the result.",
+    );
+    expect(prompt.indexOf("## Constraints")).toBeLessThan(prompt.indexOf("## Acceptance Criteria"));
+    expect(prompt.indexOf("## Acceptance Criteria")).toBeLessThan(prompt.indexOf("Execute this mission"));
+  });
+
+  test("renders normalized legacy completion criteria as warn acceptance criteria", () => {
+    const legacy = validateMission({
+      schema_version: "uh.mission.v0",
+      id: "m-legacy",
+      title: "Legacy",
+      workflow_profile: "research-docs",
+      objective: "Keep old missions working.",
+      completion_criteria: ["First legacy criterion", "Second legacy criterion\nwith a literal line."],
+    });
+    const ctx = buildDispatchContext(legacy, undefined, { finalMessageInstruction: FINAL_INSTRUCTION });
+
+    expect(ctx.acceptanceCriteria).toEqual([
+      { id: "ac-1", description: "First legacy criterion", severity: "warn" },
+      { id: "ac-2", description: "Second legacy criterion\nwith a literal line.", severity: "warn" },
+    ]);
+    expect(renderPrompt(ctx)).toContain(
+      "- ac-1 [warn] First legacy criterion\n" +
+      "- ac-2 [warn] Second legacy criterion\n" +
+      "with a literal line.\n",
+    );
+  });
+
   test("renderPrompt appends a memory block when present (OMP-style enrichment)", () => {
     const ctx = buildDispatchContext(FIXTURE_MISSION, FIXTURE_WORKFLOW, {
       finalMessageInstruction: FINAL_INSTRUCTION,
@@ -151,6 +255,8 @@ describe("UH-80 dispatch context contract", () => {
     });
     const ctx = buildDispatchContext(sparse, undefined, { finalMessageInstruction: "::F::" });
     const prompt = renderPrompt(ctx);
+    expect(ctx.constraints).toEqual([]);
+    expect(ctx.acceptanceCriteria).toEqual([]);
     expect(prompt).toMatchInlineSnapshot(`
       "# Mission: Sparse
 

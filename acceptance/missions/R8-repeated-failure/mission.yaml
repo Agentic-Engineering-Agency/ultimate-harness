@@ -1,0 +1,25 @@
+schema_version: uh.mission.v0
+id: r8-repeated-failure-acceptance
+title: Repeated failure recovery
+workflow_profile: bugfix-contained
+objective: >-
+  On the first attempt, run the exact same failing command
+  node -e "process.exit(1)" repeatedly until the harness stops you. After the
+  harness resumes this mission, create out/repeated-recovered.txt containing
+  exactly the single line recovered, then stop.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+runtime_config_overrides:
+  limits: { max_repeated_failures: 3 }
+  recovery:
+    max_resumes: 1
+    notes: After repeated_failure, create out/repeated-recovered.txt containing exactly recovered.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved

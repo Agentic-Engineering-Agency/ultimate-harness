@@ -323,8 +323,8 @@ workflow_profile: research-docs
     );
 
     const { stdout, stderr } = await execFileP(
-      join(process.cwd(), "node_modules", ".bin", "tsx"),
-      ["src/cli.ts", "validate", "--all-missions", "--root", TEST_ROOT],
+      process.execPath,
+      ["--import", "tsx", "src/cli.ts", "validate", "--all-missions", "--root", TEST_ROOT],
       { cwd: process.cwd() }
     );
 
@@ -344,8 +344,8 @@ id: bad-mission
 
     try {
       await execFileP(
-        join(process.cwd(), "node_modules", ".bin", "tsx"),
-        ["src/cli.ts", "validate", "--all-missions", "--root", TEST_ROOT],
+        process.execPath,
+        ["--import", "tsx", "src/cli.ts", "validate", "--all-missions", "--root", TEST_ROOT],
         { cwd: process.cwd() }
       );
       throw new Error("expected CLI to fail");
@@ -375,7 +375,7 @@ priority: high
 objective: >
   Build the initial documentation foundation before implementation begins.
 context:
-  repo_root: /Users/eduardojaviergarcialopez/AgenticEngineering/ultimate-harness
+  repo_root: /workspace/ultimate-harness
   read_first:
     - README.md
     - docs/architecture/overview.md

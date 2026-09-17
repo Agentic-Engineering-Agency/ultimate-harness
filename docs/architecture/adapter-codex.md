@@ -139,7 +139,7 @@ mission_id: <mission.id>
 runtime:
   adapter_id: codex
   session_id: <codex-thread-id>
-status: completed   # completed | failed | cancelled | blocked
+status: passed   # passed | failed | blocked | cancelled
 summary: <one-line summary>
 artifacts:
   - path: <path>
@@ -160,8 +160,8 @@ logs:
 If the model omits the block, the adapter synthesizes one from the JSONL
 event stream and the captured diff, and stamps `status: blocked` with a
 `runtime.missing_result_block` finding. The harness never trusts the model's
-status word alone — `status: completed` requires a non-empty diff *and*
-either an empty `blockers[]` or explicit waiver.
+status word alone. A canonical `status: passed` requires a zero exit and a
+valid runtime-result block.
 
 ## stdout/stderr/diff capture
 

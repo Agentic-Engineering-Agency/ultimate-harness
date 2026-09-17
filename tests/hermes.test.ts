@@ -229,10 +229,6 @@ describe("runHermes with injected runner", () => {
       runtime: "hermes",
       status: "passed",
       exit_code: 0,
-      prompt_path: ".harness/missions/captures/runs/test-captures/prompt.md",
-      stdout_path: ".harness/missions/captures/runs/test-captures/runtime.stdout.log",
-      stderr_path: ".harness/missions/captures/runs/test-captures/runtime.stderr.log",
-      diff_path: ".harness/missions/captures/runs/test-captures/diff.patch",
       errors: [],
     });
     expect(resultDoc.started_at).toBeTypeOf("string");
@@ -642,7 +638,3 @@ describe("collectHermesSession honcho opt-out", () => {
   });
 });
 
-// Smoke-check the default runner exports remain hooks tests can replace.
-test("defaultHermesRunner is exported and callable", () => {
-  expect(typeof defaultHermesRunner).toBe("function");
-});

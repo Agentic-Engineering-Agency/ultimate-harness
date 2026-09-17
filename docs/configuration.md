@@ -7,11 +7,22 @@ Ultimate Harness keeps durable project state in `.harness/` and keeps secrets ou
 `uh init` writes:
 
 - `.harness/project.yaml`
-- `.harness/adapters/*.yaml`
 - `.harness/workflows/*.yaml`
 - `.harness/skills/index.yaml`
 - `.harness/sandboxes/index.yaml`
 - `.harness/audit/events.ndjson`
+
+`uh init` creates the `.harness/adapters/` directory but does not write adapter manifests. Use `uh adapter add <runtime>` to write `.harness/adapters/<runtime>.yaml`.
+
+## Audit and Decision Logs
+
+The harness has three distinct durable log locations:
+
+| Path | Receives |
+| --- | --- |
+| `.harness/audit/events.ndjson` | Project-level events, including the `project.init` event written by `uh init`. |
+| `.harness/audit.log` | Text lines appended when `uh mission verdict` records a manual verdict. |
+| `.harness/missions/<mission-id>/events.ndjson` | Mission-scoped lifecycle events, including promotion events appended by `uh promote`. |
 
 Validate state with:
 
@@ -39,6 +50,7 @@ Use `.env.example` as a placeholder reference only. Real values should come from
 | `HONCHO_ENABLED` | Force the Honcho memory extension on/off (`true`/`false`). Defaults to on when a key is resolvable. |
 | `HONCHO_SEARCH_LIMIT` | Max snippets returned by `honcho_search`. Defaults to 8. |
 | `HONCHO_TOOL_PREVIEW_LENGTH` | Per-snippet char cap for `honcho_search`. Defaults to 500. |
+| `TYPESAFE_API_KEY` | Enables TypeSafe System One judgments in verification and independent-review collection. Recommendations can harden a result but cannot override deterministic failure or authorize promotion. See [progressive decisions](./architecture/progressive-decisions.md) for limitations. |
 
 ## Runtime Config Overrides
 

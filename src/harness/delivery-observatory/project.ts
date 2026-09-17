@@ -3,13 +3,19 @@ import { access, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import { MissionSchema, type MissionDocument } from "../../schema/mission.js";
-import { RunsIndexSchema, type RunsIndex } from "../../schema/runs.js";
+import { LatestRunPointerSchema, RunsIndexSchema, type RunsIndex } from "../../schema/runs.js";
 import {
   RuntimeResultSchema,
   VerificationResultSchema,
   type RuntimeResultDocument,
   type VerificationResultDocument,
 } from "../../schema/artifacts.js";
+import { CanonicalTeamStateSchema, type CanonicalTeamState } from "../../schema/team.js";
+import { RuntimeControlSchema, type RuntimeControl } from "../../schema/runtime-control.js";
+import { assertValidRunId } from "../run-id.js";
+import { assertWritableArtifact } from "../../adapters/_artifact-context.js";
+import { readRuntimeAccounting } from "../runtime-accounting.js";
+import { aggregateRuntimeUsage } from "../usage.js";
 import {
   DELIVERY_OBSERVATORY_CONTRACT_VERSION,
   DELIVERY_OBSERVATORY_REDACTION_VERSION,
@@ -26,6 +32,12 @@ type ProjectInput = {
   now?: string;
   sourceObservedAt?: string;
 };
+type TeamWorkerProjection = {
+  state: CanonicalTeamState["workers"][number];
+  runtime: RuntimeResultDocument | null;
+  observedAt: string | null;
+  digest: string | null;
+};
 
 type MissionProjection = {
   mission: MissionDocument;
@@ -39,6 +51,11 @@ type MissionProjection = {
   verificationDigest: string | null;
   runsIndex: RunsIndex | null;
   runsObservedAt: string | null;
+  teamState: CanonicalTeamState | null;
+  teamStateObservedAt: string | null;
+  teamWorkers: TeamWorkerProjection[];
+  nativeControls: Array<{ data: RuntimeControl; digest: string }>;
+  accounting: Awaited<ReturnType<typeof readRuntimeAccounting>> | null;
 };
 
 function opaqueId(prefix: string, ...parts: string[]): string {
@@ -68,6 +85,33 @@ function safeLabel(value: unknown, fallback: string): string {
     || /(?:https?:|file:|~|Users|home)/i.test(compact)
   ) return fallback;
   return compact;
+}
+
+const SAFE_MODEL_NAMESPACES: Record<string, true> = {
+  anthropic: true, azure: true, claude: true, cohere: true, deepseek: true, gemini: true, google: true,
+  meta: true, "meta-llama": true, mistral: true, mistralai: true, nousresearch: true, openai: true,
+  qwen: true, "x-ai": true,
+};
+const SAFE_ROUTE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Native route metadata is provider-controlled and may contain arbitrary
+ * diagnostics. Only compact identifiers are safe to expose; namespaced model
+ * IDs are accepted for known provider namespaces, while path-like and secret-
+ * looking values remain explicitly unknown.
+ */
+function safeRouteIdentifier(value: unknown, kind: "model" | "provider"): string | null {
+  if (typeof value !== "string" || value.length === 0 || value !== value.trim()) return null;
+  if (
+    value.length > 160
+    || /[\u0000-\u001F\u007F\\\s]/.test(value)
+    || /(?:https?:|file:|data:|~|bearer|api[_-]?key|credential|password|payload|secret|token|sk-[A-Za-z0-9]|-----BEGIN)/i.test(value)
+  ) return null;
+  if (kind === "provider") return SAFE_ROUTE_COMPONENT.test(value) ? value : null;
+  const components = value.split("/");
+  if (components.length === 1) return SAFE_ROUTE_COMPONENT.test(value) ? value : null;
+  if (components.length !== 2 || !SAFE_ROUTE_COMPONENT.test(components[0]!) || !SAFE_ROUTE_COMPONENT.test(components[1]!)) return null;
+  return SAFE_MODEL_NAMESPACES[components[0]!.toLowerCase()] ? value : null;
 }
 
 async function readYamlArtifact<T>(filePath: string, schema: { safeParse(value: unknown): { success: boolean; data?: T } }): Promise<{ data: T | null; observedAt: string | null; raw: string | null; rejected: boolean }> {
@@ -132,8 +176,41 @@ function canonicalRole(role: string): "planner" | "executor" | "reviewer" | "int
   return "executor";
 }
 
-function mapOperation(runtime: RuntimeResultDocument | null, runs: RunsIndex | null) {
-  if (runs?.runs.some((run) => run.status === "running")) return "active" as const;
+function mapOperation(
+  runtime: RuntimeResultDocument | null,
+  runs: RunsIndex | null,
+  teamState: CanonicalTeamState | null = null,
+  controls: MissionProjection["nativeControls"] = [],
+  now = new Date().toISOString(),
+) {
+  if (teamState?.status === "running") {
+    const workers = teamState.workers.filter(worker => worker.status === "running");
+    if (workers.length && workers.every(worker => {
+      const control = controls.find(item => item.data.run_id === worker.run_id)?.data;
+      return control && (control.status !== "running" || Date.parse(now) - Date.parse(control.heartbeat_at) > 10_000);
+    })) return "uncertain" as const;
+    return "active" as const;
+  }
+  const running = runs?.runs.filter(run => run.status === "running") ?? [];
+  if (running.length) {
+    let uncertain = false;
+    const terminal: RuntimeControl["status"][] = [];
+    for (const run of running) {
+      const control = controls.find(item => item.data.run_id === run.run_id)?.data;
+      if (!control) {
+        if (run.runtime !== "oh-my-pi" && run.runtime !== "command-code" && run.runtime !== "claude-code") return "active" as const;
+        uncertain = true;
+      } else if (control.status === "running" || control.status === "passed") {
+        if (Date.parse(now) - Date.parse(control.heartbeat_at) <= 10_000) return "active" as const;
+        uncertain = true;
+      } else if (control.settlement_confirmed === false) uncertain = true;
+      else terminal.push(control.status);
+    }
+    if (uncertain) return "uncertain" as const;
+    if (terminal.every(status => status === "cancelled")) return "cancelled" as const;
+    if (terminal.every(status => status === "blocked")) return "blocked" as const;
+    return "failed" as const;
+  }
   if (!runtime) return "queued" as const;
   if (runtime.status === "passed") return "succeeded" as const;
   if (runtime.status === "blocked") return "blocked" as const;
@@ -141,8 +218,16 @@ function mapOperation(runtime: RuntimeResultDocument | null, runs: RunsIndex | n
   return "failed" as const;
 }
 
+function mapWorkerOperation(status: CanonicalTeamState["workers"][number]["status"]) {
+  if (status === "running") return "active" as const;
+  if (status === "succeeded") return "succeeded" as const;
+  if (status === "blocked") return "blocked" as const;
+  if (status === "failed" || status === "error") return "failed" as const;
+  return "queued" as const;
+}
+
 function mapPhase(projection: MissionProjection): "plan" | "execute" | "review" | "verify" | "unknown" {
-  if (projection.runsIndex?.runs.some((run) => run.status === "running")) return "execute";
+  if (projection.teamState?.status === "running" || projection.runsIndex?.runs.some((run) => run.status === "running")) return "execute";
   if (projection.verification) return "verify";
   if (projection.runtime) return "review";
   return projection.mission ? "plan" : "unknown";
@@ -162,10 +247,10 @@ function countOmittedMissionFields(mission: MissionDocument, runtime: RuntimeRes
   return count;
 }
 
-async function collectMissionProjections(root: string): Promise<{ records: MissionProjection[]; rejected: number }> {
+async function collectMissionProjections(root: string, missionsRoot = missionsDir(root)): Promise<{ records: MissionProjection[]; rejected: number }> {
   let entries: Array<{ name: string; isDirectory(): boolean }> = [];
   try {
-    entries = await readdir(missionsDir(root), { withFileTypes: true });
+    entries = await readdir(missionsRoot, { withFileTypes: true });
   } catch {
     return { records: [], rejected: 0 };
   }
@@ -173,15 +258,103 @@ async function collectMissionProjections(root: string): Promise<{ records: Missi
   let rejected = 0;
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory()) continue;
-    const dir = path.join(missionsDir(root), entry.name);
-    const [mission, runtime, verification, runsIndex] = await Promise.all([
+    const dir = path.join(missionsRoot, entry.name);
+    const [mission, runtimeArtifact, verificationArtifact, runsIndex, latest] = await Promise.all([
       readYamlArtifact(path.join(dir, "mission.yaml"), MissionSchema),
       readYamlArtifact(path.join(dir, "runtime-result.yaml"), RuntimeResultSchema),
       readYamlArtifact(path.join(dir, "verification.yaml"), VerificationResultSchema),
       readJsonArtifact(path.join(dir, "runs", "index.json"), RunsIndexSchema),
+      readJsonArtifact(path.join(dir, "latest.json"), LatestRunPointerSchema),
     ]);
-    rejected += Number(mission.rejected) + Number(runtime.rejected) + Number(verification.rejected) + Number(runsIndex.rejected);
+    let selectedRuntime = runtimeArtifact;
+    if (latest.data?.run_id) {
+      try {
+        assertValidRunId(latest.data.run_id);
+        const runDirectory = path.join(dir, "runs", latest.data.run_id);
+        await assertWritableArtifact(dir, runDirectory);
+        const resultPath = path.join(runDirectory, "runtime-result.yaml");
+        await assertWritableArtifact(dir, resultPath);
+        selectedRuntime = await readYamlArtifact(resultPath, RuntimeResultSchema);
+      } catch { selectedRuntime = { data: null, observedAt: null, raw: null, rejected: true }; }
+    }
+    const runtime = runsIndex.data?.runs.some((run) => run.status === "running")
+      ? { data: null, observedAt: null, raw: null, rejected: selectedRuntime.rejected }
+      : selectedRuntime;
+    let teamState: { data: CanonicalTeamState | null; observedAt: string | null; raw: string | null; rejected: boolean } = {
+      data: null, observedAt: null, raw: null, rejected: false,
+    };
+    if (latest.data?.run_id) {
+      try {
+        assertValidRunId(latest.data.run_id);
+        const teamPath = path.join(dir, "runs", latest.data.run_id, "team-state.json");
+        await assertWritableArtifact(dir, path.dirname(teamPath));
+        await assertWritableArtifact(dir, teamPath);
+        teamState = await readJsonArtifact(teamPath, CanonicalTeamStateSchema);
+      } catch { teamState = { data: null, observedAt: null, raw: null, rejected: true }; }
+    }
+    const verification = teamState.data
+      ? await readYamlArtifact(path.join(dir, "runs", teamState.data.run_id, "verification.yaml"), VerificationResultSchema)
+      : verificationArtifact;
+    const nativeControls: MissionProjection["nativeControls"] = [];
+    const teamWorkers: TeamWorkerProjection[] = [];
+    const collectControl = async (directory: string, runId: string, runtimeId?: string): Promise<void> => {
+      if (!mission.data) return;
+      try {
+        assertValidRunId(runId);
+        await assertWritableArtifact(dir, directory);
+        const controlPath = path.join(directory, "runtime-control.json");
+        await assertWritableArtifact(dir, controlPath);
+        const control = await readJsonArtifact(controlPath, RuntimeControlSchema);
+        rejected += Number(control.rejected);
+        if (!control.data) return;
+        if (control.data.mission_id !== mission.data.id || control.data.run_id !== runId ||
+            (runtimeId && control.data.runtime !== runtimeId)) { rejected++; return; }
+        nativeControls.push({ data: control.data, digest: digest(control.raw!) });
+      } catch { rejected++; }
+    };
+    if (teamState.data) {
+      for (const worker of teamState.data.workers) {
+        const workerRoot = path.resolve(dir, "team", worker.artifact_scope);
+        await collectControl(path.join(workerRoot, ".harness", "missions", mission.data?.id ?? entry.name, "runs", worker.run_id), worker.run_id, worker.adapter);
+        if (!worker.runtime_result_path) {
+          teamWorkers.push({ state: worker, runtime: null, observedAt: null, digest: null });
+          continue;
+        }
+        try { await assertWritableArtifact(dir, path.resolve(root, worker.runtime_result_path)); }
+        catch {
+          rejected++;
+          teamWorkers.push({ state: worker, runtime: null, observedAt: null, digest: null });
+          continue;
+        }
+        const workerRuntime = await readYamlArtifact(
+          path.resolve(root, worker.runtime_result_path),
+          RuntimeResultSchema,
+        );
+        rejected += Number(workerRuntime.rejected);
+        teamWorkers.push({
+          state: worker,
+          runtime: workerRuntime.data,
+          observedAt: workerRuntime.observedAt,
+          digest: workerRuntime.raw ? digest(workerRuntime.raw) : null,
+        });
+      }
+    }
+    rejected += Number(mission.rejected)
+      + Number(runtime.rejected)
+      + Number(verification.rejected)
+      + Number(runsIndex.rejected)
+      + Number(latest.rejected)
+      + Number(teamState.rejected);
     if (!mission.data || !mission.observedAt) continue;
+    for (const run of runsIndex.data?.runs ?? []) {
+      if (!run.archived) await collectControl(path.join(dir, "runs", run.run_id), run.run_id, run.runtime);
+    }
+    nativeControls.sort((a, b) => Date.parse(a.data.heartbeat_at) - Date.parse(b.data.heartbeat_at));
+    let accounting: MissionProjection["accounting"] = null;
+    if (latest.data && runtime.data) {
+      try { accounting = await readRuntimeAccounting(root, mission.data.id, [latest.data.run_id]); }
+      catch { rejected++; accounting = { facts: {}, attemptRunIds: [], receipts: [] }; }
+    }
     records.push({
       mission: mission.data,
       missionObservedAt: mission.observedAt,
@@ -194,10 +367,16 @@ async function collectMissionProjections(root: string): Promise<{ records: Missi
       verificationDigest: verification.raw ? digest(verification.raw) : null,
       runsIndex: runsIndex.data,
       runsObservedAt: runsIndex.observedAt,
+      teamState: teamState.data,
+      teamStateObservedAt: teamState.observedAt,
+      teamWorkers,
+      nativeControls,
+      accounting,
     });
   }
   return { records, rejected };
 }
+
 
 export async function projectDeliveryObservatory(root: string, input: ProjectInput = {}): Promise<DeliveryObservatorySnapshot> {
   const generatedAt = input.now ?? new Date().toISOString();
@@ -218,17 +397,46 @@ export async function projectDeliveryObservatory(root: string, input: ProjectInp
 
   const workItems = records.map((record) => {
     omitted += countOmittedMissionFields(record.mission, record.runtime, record.verification);
+    omitted += record.nativeControls.reduce((count, { data }) => count + 1 + Number(Boolean(data.session_id)) + Number(Boolean(data.stop_reason)), 0);
     const workId = opaqueId("work", projectId, record.mission.id);
     const missionEvidenceId = opaqueId("evidence", workId, "mission");
     const runtimeEvidenceId = record.runtime ? opaqueId("evidence", workId, "runtime") : null;
     const verificationEvidenceId = record.verification ? opaqueId("evidence", workId, "verification") : null;
-    const operation = mapOperation(record.runtime, record.runsIndex);
-    const startedAt = record.runsIndex?.runs.at(-1)?.started_at ?? record.runtime?.started_at ?? null;
-    const elapsed = startedAt ? Math.max(0, Date.parse(record.runtime?.finished_at ?? generatedAt) - Date.parse(startedAt)) : null;
+    const operation = mapOperation(record.runtime, record.runsIndex, record.teamState, record.nativeControls, generatedAt);
+    const startedAt = record.teamState?.started_at ?? record.runsIndex?.runs.at(-1)?.started_at ?? record.runtime?.started_at ?? null;
+    const elapsed = startedAt ? Math.max(0, Date.parse(record.teamState?.finished_at ?? record.runtime?.finished_at ?? generatedAt) - Date.parse(startedAt)) : null;
     const attentionId = record.mission.verification.review_gates.length > 0 && operation !== "succeeded"
       ? opaqueId("decision", workId, "review-gate")
       : null;
     const blockerId = operation === "blocked" ? opaqueId("event", workId, "blocked") : null;
+    const runtime = record.runtime;
+    const activeRuns = record.runsIndex?.runs.filter(run => run.status === "running") ?? [];
+    const activeControls = activeRuns.map(run => record.nativeControls.find(control => control.data.run_id === run.run_id)?.data);
+    const liveFacts = activeRuns.length > 0 && !record.teamState
+      ? aggregateRuntimeUsage(activeControls.map(control => control ? { usage: control.usage } : undefined))
+      : undefined;
+    const accountingFacts = liveFacts ?? record.accounting?.facts ?? runtime;
+    const usage = accountingFacts?.usage;
+    const cost = accountingFacts?.cost_usd ?? usage?.cost_usd;
+    const costBasis = accountingFacts?.cost_basis ?? usage?.cost_basis;
+    const accountingEvidenceRefs = liveFacts
+      ? activeControls.flatMap(control => control ? [opaqueId("evidence", workId, "control", control.run_id)] : [])
+      : record.accounting
+      ? record.accounting.receipts.map(receipt => receipt.runId === record.accounting!.attemptRunIds[0]
+        ? opaqueId("evidence", workId, "runtime") : opaqueId("evidence", workId, "accounting", receipt.runId))
+      : runtimeEvidenceId ? [runtimeEvidenceId] : [];
+    const safeModel = safeRouteIdentifier(runtime?.model, "model");
+    const safeProvider = safeRouteIdentifier(runtime?.provider, "provider");
+    if (runtime?.model && !safeModel) omitted += 1;
+    if (runtime?.provider && !safeProvider) omitted += 1;
+    const latestControl = record.nativeControls.at(-1)?.data;
+    const controlEvidenceId = latestControl ? opaqueId("evidence", workId, "control", latestControl.run_id) : null;
+    const staleNative = record.nativeControls.some(({ data }) => data.status === "running"
+      && record.runsIndex?.runs.some(run => run.run_id === data.run_id && run.status === "running")
+      && Date.parse(generatedAt) - Date.parse(data.heartbeat_at) > 10_000);
+    const observation = (operation === "active" || operation === "uncertain") && latestControl
+      ? latestControl.heartbeat_at
+      : latestTimestamp([record.teamStateObservedAt, record.runsObservedAt, record.runtimeObservedAt, record.verificationObservedAt, record.missionObservedAt], generatedAt);
     return {
       work_item_id: workId,
       source_id: SOURCE_ID,
@@ -238,24 +446,26 @@ export async function projectDeliveryObservatory(root: string, input: ProjectInp
       operation,
       state: {
         assertion: mapPhase(record) === "plan" ? "observed" as const : "inferred" as const,
-        freshness: recordFreshness(latestTimestamp([record.runsObservedAt, record.runtimeObservedAt, record.verificationObservedAt, record.missionObservedAt], generatedAt), generatedAt),
-        observed_at: latestTimestamp([record.runsObservedAt, record.runtimeObservedAt, record.verificationObservedAt, record.missionObservedAt], generatedAt),
+        freshness: staleNative ? "stale" as const : recordFreshness(observation, generatedAt),
+        observed_at: observation,
       },
       elapsed_ms: Number.isFinite(elapsed) ? elapsed : null,
       owner_agent_ref: null,
       requested_model: unknown("not_reported"),
-      resolved_model: unknown("not_reported"),
-      provider: unknown("not_reported"),
+      resolved_model: safeModel ? known(safeModel, runtimeEvidenceId ? [runtimeEvidenceId] : []) : runtime?.model ? unknown("unauthorized") : unknown("not_reported"),
+      provider: safeProvider ? known(safeProvider, runtimeEvidenceId ? [runtimeEvidenceId] : []) : runtime?.provider ? unknown("unauthorized") : unknown("not_reported"),
       harness: known("Ultimate Harness", [missionEvidenceId]),
-      adapter: record.runtime ? known(record.runtime.runtime, runtimeEvidenceId ? [runtimeEvidenceId] : []) : unknown("not_reported"),
+      adapter: runtime ? known(runtime.runtime, runtimeEvidenceId ? [runtimeEvidenceId] : []) : unknown("not_reported"),
       reasoning_effort: unknown("unsupported"),
-      cost: unknown("unsupported"),
-      tokens: unknown("unsupported"),
+      cost: cost === undefined ? unknown("not_reported") : { state: "known" as const, value: cost,
+        method: costBasis === "provider_reported" ? "reported" as const : "estimated" as const, evidence_refs: accountingEvidenceRefs },
+      tokens: usage?.total_tokens === undefined ? unknown("not_reported") : { state: "known" as const, value: usage.total_tokens,
+        method: usage.source === "estimated" ? "estimated" as const : "reported" as const, evidence_refs: accountingEvidenceRefs },
       latency_ms: elapsed === null ? unknown("not_reported") : known(elapsed, runtimeEvidenceId ? [runtimeEvidenceId] : []),
       blocker_refs: blockerId ? [blockerId] : [],
       attention_refs: attentionId ? [attentionId] : [],
-      last_evidence_ref: verificationEvidenceId ?? runtimeEvidenceId ?? missionEvidenceId,
-      risk: operation === "blocked" || operation === "failed" ? "high" as const : attentionId ? "medium" as const : "unknown" as const,
+      last_evidence_ref: verificationEvidenceId ?? runtimeEvidenceId ?? controlEvidenceId ?? missionEvidenceId,
+      risk: operation === "blocked" || operation === "failed" || operation === "uncertain" ? "high" as const : attentionId ? "medium" as const : "unknown" as const,
     };
   });
 
@@ -279,11 +489,43 @@ export async function projectDeliveryObservatory(root: string, input: ProjectInp
       digest: record.verificationDigest, media_type: "application/yaml", observed_at: record.verificationObservedAt,
       classification: "internal", availability: "available",
     });
+    for (const worker of record.teamState?.workers ?? []) {
+      const workerProjection = record.teamWorkers.find((item) => item.state.id === worker.id);
+      if (!workerProjection?.runtime) continue;
+      base.push({
+        evidence_id: opaqueId("evidence", workId, "worker", worker.id, worker.run_id),
+        kind: "route_receipt",
+        safe_title: `${safeLabel(record.mission.name, "Work item")} ${safeLabel(worker.role, "worker")} route receipt`,
+        project_ref: projectId,
+        digest: workerProjection.digest,
+        media_type: "application/yaml",
+        observed_at: workerProjection.observedAt,
+        classification: "internal",
+        availability: "available",
+      });
+    }
+    for (const control of record.nativeControls) {
+      base.push({
+        evidence_id: opaqueId("evidence", workId, "control", control.data.run_id), kind: "route_receipt",
+        safe_title: "Native runtime lifecycle receipt", project_ref: projectId, digest: control.digest,
+        media_type: "application/json", observed_at: control.data.heartbeat_at,
+        classification: "internal", availability: "available",
+      });
+    }
+    for (const receipt of record.accounting?.receipts ?? []) {
+      if (receipt.runId === record.accounting?.attemptRunIds[0]) continue;
+      base.push({
+        evidence_id: opaqueId("evidence", workId, "accounting", receipt.runId), kind: "route_receipt",
+        safe_title: "Recovered attempt accounting receipt", project_ref: projectId, digest: receipt.digest,
+        media_type: "application/yaml", observed_at: record.runtimeObservedAt,
+        classification: "internal", availability: "available",
+      });
+    }
     return base;
   });
 
   const decisions = records.flatMap((record) => {
-    if (record.mission.verification.review_gates.length === 0 || mapOperation(record.runtime, record.runsIndex) === "succeeded") return [];
+    if (record.mission.verification.review_gates.length === 0 || mapOperation(record.runtime, record.runsIndex, record.teamState, record.nativeControls, generatedAt) === "succeeded") return [];
     const workId = opaqueId("work", projectId, record.mission.id);
     return [{
       decision_id: opaqueId("decision", workId, "review-gate"), kind: "human_gate" as const,
@@ -312,6 +554,37 @@ export async function projectDeliveryObservatory(root: string, input: ProjectInp
         state: { assertion: "observed", freshness: recordFreshness(record.runsObservedAt, generatedAt), observed_at: record.runsObservedAt },
       });
     }
+    for (const worker of record.teamState?.workers ?? []) {
+      const workerProjection = record.teamWorkers.find((item) => item.state.id === worker.id);
+      const workerEventId = opaqueId("event", workId, "worker", worker.id, worker.run_id);
+      result.push({
+        event_id: workerEventId,
+        kind: worker.status === "failed" || worker.status === "blocked" || worker.status === "error" ? "failure" : "status_change",
+        occurred_at: worker.finished_at ?? worker.started_at,
+        safe_summary: `Worker ${canonicalRole(worker.role)} status changed to ${worker.status}.`,
+        work_item_ref: workId,
+        evidence_refs: workerProjection?.runtime
+          ? [opaqueId("evidence", workId, "worker", worker.id, worker.run_id)]
+          : [],
+        state: {
+          assertion: "observed",
+          freshness: recordFreshness(workerProjection?.observedAt ?? record.teamStateObservedAt, generatedAt),
+          observed_at: workerProjection?.observedAt ?? record.teamStateObservedAt,
+        },
+      });
+    }
+    for (const { data } of record.nativeControls) {
+      const freshness = data.status === "running" && Date.parse(generatedAt) - Date.parse(data.heartbeat_at) > 10_000
+        ? "stale" : recordFreshness(data.heartbeat_at, generatedAt);
+      result.push({
+        event_id: opaqueId("event", workId, "control", data.run_id),
+        kind: data.status === "failed" || data.status === "blocked" ? "failure" : "status_change",
+        occurred_at: data.heartbeat_at, work_item_ref: workId,
+        safe_summary: `Native runtime ${data.status}; ${data.ready_at ? "ready" : "not ready"}; turns ${data.turns}; in-flight tools ${data.inflight_tools}; denials ${data.denials}${data.stop_code ? `; stop ${data.stop_code}` : ""}${data.peak_memory_bytes === undefined ? "" : `; peak job memory ${data.peak_memory_bytes} bytes`}.`,
+        evidence_refs: [opaqueId("evidence", workId, "control", data.run_id)],
+        state: { assertion: "observed", freshness, observed_at: data.heartbeat_at },
+      });
+    }
     return result;
   });
 
@@ -325,6 +598,16 @@ export async function projectDeliveryObservatory(root: string, input: ProjectInp
     safe_label: label, task_shape_ref: null, value: unknown(family === "pareto" ? "not_comparable" : "unsupported"), unit, coverage: "unknown" as const,
   }));
 
+  const unavailableCapabilities = [
+    ...(records.some((record) => Boolean(safeRouteIdentifier(record.runtime?.model, "model") || safeRouteIdentifier(record.runtime?.provider, "provider"))) ? [] : ["model-route"]),
+    ...(workItems.some(item => item.tokens.state === "known") ? [] : ["token-usage"]),
+    ...(workItems.some(item => item.cost.state === "known") ? [] : ["cost"]),
+    "reasoning-effort",
+    "dora",
+    "product-metrics",
+    "authority-links",
+  ];
+
   const snapshot = {
     contract_version: DELIVERY_OBSERVATORY_CONTRACT_VERSION,
     snapshot_id: opaqueId("snapshot", projectId, generatedAt, observedAt),
@@ -337,13 +620,47 @@ export async function projectDeliveryObservatory(root: string, input: ProjectInp
       transport: "filesystem" as const, health: "reachable" as const, observed_at: observedAt,
       ingested_at: generatedAt, freshness: "fresh" as const, stale_after_ms: SOURCE_STALE_AFTER_MS,
       coverage: "partial" as const, omitted_fields: omitted, rejected_records: rejected,
-      unavailable_capabilities: ["model-route", "token-usage", "cost", "reasoning-effort", "dora", "product-metrics", "authority-links"],
+      unavailable_capabilities: unavailableCapabilities,
     }],
     projects: [{ project_id: projectId, safe_name: projectName }],
     work_items: workItems,
-    agents: records.flatMap((record) => {
+    agents: records.flatMap<DeliveryObservatorySnapshot["agents"][number]>((record) => {
       const team = record.mission.team;
       if (!team) return [];
+      if (record.teamState) {
+        const configured = [
+          ...record.teamState.workers.map((worker, index) => ({ role: worker.role, adapter: worker.adapter, index, worker })),
+          {
+            role: record.teamState.leader.role,
+            adapter: record.teamState.leader.adapter,
+            index: record.teamState.workers.length,
+            leader: record.teamState.leader,
+          },
+        ];
+        return configured.map((agent, index) => {
+          const role = canonicalRole(agent.role);
+          let workerStatus: DeliveryObservatorySnapshot["agents"][number]["operation"] = "worker" in agent ? mapWorkerOperation(agent.worker.status) : agent.leader.status === "integrating" ? "active" : agent.leader.status === "succeeded" ? "succeeded" : agent.leader.status === "failed" ? "failed" : agent.leader.status === "blocked" ? "blocked" : "queued";
+          const control = "worker" in agent ? record.nativeControls.find(item => item.data.run_id === agent.worker.run_id)?.data : undefined;
+          if (workerStatus === "active" && control) {
+            if (control.settlement_confirmed === false) workerStatus = "uncertain";
+            else if (control.status === "failed" || control.status === "blocked" || control.status === "cancelled") workerStatus = control.status;
+            else if (Date.parse(generatedAt) - Date.parse(control.heartbeat_at) > 10_000) workerStatus = "uncertain";
+          }
+          const observed = control?.heartbeat_at ?? ("worker" in agent ? agent.worker.finished_at ?? agent.worker.started_at : record.teamStateObservedAt);
+          return {
+            agent_id: opaqueId("agent", projectId, record.mission.id, agent.adapter, agent.role, String(agent.index), String(index)),
+            safe_name: `Configured ${role}`,
+            roles: [role],
+            family_profile_ref: null,
+            operation: workerStatus,
+            state: {
+              assertion: "observed" as const,
+              freshness: workerStatus === "uncertain" ? "stale" as const : recordFreshness(observed, generatedAt),
+              observed_at: observed,
+            },
+          };
+        });
+      }
       const configured = [
         ...team.workers.flatMap((worker) => Array.from({ length: worker.count }, (_, index) => ({ role: worker.role, adapter: worker.adapter, index }))),
         { role: team.leader.role ?? "integrator", adapter: team.leader.adapter, index: 0 },

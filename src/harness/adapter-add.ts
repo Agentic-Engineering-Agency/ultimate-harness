@@ -17,8 +17,49 @@ import { fileExists } from "./mission.js";
  * - `openrouter` — active   (HTTP, OpenAI-compat pay-per-token)
  * - `anthropic`  — experimental (HTTP, native Anthropic Messages API; UH-136)
  * - `pi`         — active
+ * - `claude-code` — active (native Claude Code CLI, guarded stream-json)
  */
 const ADAPTER_TEMPLATES: Record<string, string> = {
+  "command-code": `schema_version: uh.adapter.v0
+id: command-code
+name: Command Code
+description: Native Command Code execution with persistent sessions and UH supervision.
+runtime: command-code
+capabilities:
+  - cli-execution
+  - json-output
+  - diff-output
+  - session-resume
+status: experimental
+config:
+  cli_command: cmdc
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    model: ""
+`,
+  "claude-code": `schema_version: uh.adapter.v0
+id: claude-code
+name: Claude Code
+description: Native Claude Code execution with exact model routing, stream supervision, guard hooks, and session recovery.
+runtime: claude-code
+capabilities:
+  - cli-execution
+  - non-interactive
+  - stream-json
+  - structured-events
+  - diff-output
+  - session-resume
+status: active
+config:
+  cli_command: claude
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    model: claude-fable-5-1[1m]
+    role: worker
+    permission_mode: default
+`,
   hermes: `schema_version: uh.adapter.v0
 id: hermes
 name: Hermes Agent
@@ -81,7 +122,7 @@ id: oh-my-pi
 name: oh-my-pi
 description: >-
   Runtime adapter for oh-my-pi (omp), a multi-provider CLI coding agent.
-  Executes missions via \`omp --print --mode json\` with sessions ephemeral and
+  Executes missions via \`omp --print --mode json\` with persistent sessions and
   extensions/skills disabled by default for deterministic runs. Provider /
   account auth flows through OMP's own credential store and env vars.
   See docs/runbooks/anthropic-via-omp.md for the Anthropic-via-OMP routing

@@ -1,0 +1,22 @@
+schema_version: uh.mission.v0
+id: r7-turn-cap-acceptance
+title: Turn limit
+workflow_profile: bugfix-contained
+objective: >-
+  Complete these three commands in three separate turns, one command per turn,
+  ending each turn after the command: node -e "process.stdout.write('one')",
+  node -e "process.stdout.write('two')", and node -e
+  "require('fs').writeFileSync('out/turn-cap.txt','three\\n')". Do not combine commands.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+runtime_config_overrides:
+  limits: { max_turns: 2 }
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved
