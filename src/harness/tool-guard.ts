@@ -162,17 +162,31 @@ function deleteTargets(command: string): { targets: string[]; unresolved: boolea
   return { targets, unresolved };
 }
 
+/**
+ * One canonical comparison form for paths, independent of the host running UH.
+ * The guard judges commands written for whatever platform the agent targets,
+ * so a `C:\worker` root and an `out\x` target must relate the same way on
+ * Linux CI as they do on Windows.
+ */
 function normalized(value: string, root: string): string {
-  const candidate = path.isAbsolute(value) ? value : path.resolve(root, value);
-  return path.normalize(candidate).toLowerCase();
+  const raw = value.replaceAll("\\", "/");
+  const base = root.replaceAll("\\", "/").replace(/\/+$/, "");
+  const absolute = /^[a-zA-Z]:\//.test(raw) || raw.startsWith("/");
+  const segments: string[] = [];
+  for (const segment of (absolute ? raw : `${base}/${raw}`).split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") { segments.pop(); continue; }
+    segments.push(segment.toLowerCase());
+  }
+  return segments.join("/");
 }
 function inside(value: string, root: string, roots: string[]): boolean {
   const candidate = normalized(value, root);
-  return roots.some(r => { const base = normalized(r, root); return candidate === base || candidate.startsWith(`${base}${path.sep}`); });
+  return roots.some(r => { const base = normalized(r, root); return candidate === base || candidate.startsWith(`${base}/`); });
 }
 function protectedRoot(value: string, root: string, roots: string[]): string | undefined {
   const candidate = normalized(value, root);
-  return roots.find(r => { const base = normalized(r, root); return candidate === base || candidate.startsWith(`${base}${path.sep}`); });
+  return roots.find(r => { const base = normalized(r, root); return candidate === base || candidate.startsWith(`${base}/`); });
 }
 function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = ""): ToolGuardDecision {
   const roots = policy.write_roots.join(", ");

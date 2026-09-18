@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeAll } from "vitest";
-import { cp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { cp, mkdir, rm, writeFile, readFile, realpath } from "node:fs/promises";
 import path, { join } from "node:path";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
@@ -551,7 +551,9 @@ describe("uh mission run --runtime oh-my-pi", () => {
           expect(startLine).toBeDefined();
           const events = await readFile(join(missionDir, "runs", runId, "events.ndjson"), "utf-8");
           sawCanonicalProgress = events.includes('"event":"oh-my-pi.tool_execution_start"');
-          expect(JSON.parse(startLine!).cwd).toBe(path.resolve(sandboxRoot));
+          // The child reports the resolved cwd, so compare against the real
+          // path: on macOS /tmp is a symlink to /private/tmp.
+          expect(JSON.parse(startLine!).cwd).toBe(await realpath(sandboxRoot));
         }
       },
     });
