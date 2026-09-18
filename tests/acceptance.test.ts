@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { AcceptanceEvidenceSchema, AcceptanceRegistrySchema } from "../src/schema/acceptance.js";
 import { classifyAcceptance, collectFacts, compareAcceptanceFacts, renderAcceptanceReport, runAcceptance } from "../src/harness/acceptance.js";
@@ -51,7 +52,7 @@ describe("acceptance evidence", () => {
     expect(classifyAcceptance(null, 30, now, "abc")).toBe("unproven");
   });
   test("renders generated report from a registry fixture", async () => {
-    const root = await mkdtemp("T:/tmp/acceptance-report-");
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-report-"));
     await mkdir(path.join(root, "acceptance", "evidence", "C1"), { recursive: true });
     await writeFile(path.join(root, "acceptance", "registry.yaml"), "schema_version: uh.acceptance-registry.v0\nentries:\n  C1:\n    title: Per-worker contracts\n    capability: C1\n    mission: missions/C1/mission.yaml\n    shape: single\n    runtime: oh-my-pi\n    expected: { status: passed }\n");
     await writeFile(path.join(root, "acceptance", "evidence", "C1", "latest.json"), JSON.stringify({
@@ -62,7 +63,7 @@ describe("acceptance evidence", () => {
   });
 
   test("records fact source selection across attempts", async () => {
-    const root = await mkdtemp("T:/tmp/acceptance-facts-");
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-facts-"));
     const missionRoot = path.join(root, ".harness", "missions", "fixture", "runs");
     await mkdir(path.join(missionRoot, "001"), { recursive: true });
     await mkdir(path.join(missionRoot, "002"), { recursive: true });
@@ -77,7 +78,7 @@ describe("acceptance evidence", () => {
   });
 
   test("renders failed evidence for attempted fixture-only missions", async () => {
-    const root = await mkdtemp("T:/tmp/acceptance-fixture-");
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-fixture-"));
     await mkdir(path.join(root, "acceptance", "evidence", "R10-stall"), { recursive: true });
     await writeFile(path.join(root, "acceptance", "registry.yaml"), "schema_version: uh.acceptance-registry.v0\nentries:\n  R10-stall:\n    title: Stall recovery\n    capability: R10\n    mission: missions/R10-stall/mission.yaml\n    shape: single\n    runtime: oh-my-pi\n    real_mission: not_applicable\n    expected: { status: passed }\n");
     await writeFile(path.join(root, "acceptance", "evidence", "R10-stall", "latest.json"), JSON.stringify({

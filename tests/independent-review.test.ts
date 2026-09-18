@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -23,7 +23,10 @@ async function fixture() {
   return root;
 }
 
-const reviewerFixture = `const fs = require('node:fs');
+// The adapter spawns `cli_command` directly, so the fixture must be a real
+// executable on POSIX: shebang plus the exec bit set below.
+const reviewerFixture = `#!/usr/bin/env node
+const fs = require('node:fs');
 const path = require('node:path');
 const requestBase = '.harness/missions/review/';
 const reportPath = 'out/review-report.json';
@@ -46,6 +49,7 @@ console.log(JSON.stringify({type:'result',subtype:'success',finalText:'Review co
 async function executeFixture(root: string) {
   const executable = path.join(root, "reviewer.cjs");
   await writeFile(executable, reviewerFixture);
+  await chmod(executable, 0o755);
   const adapterPath = path.join(root, ".harness", "adapters", "command-code.yaml");
   const adapter = parse(await readFile(adapterPath, "utf8"));
   adapter.config.cli_command = executable;
