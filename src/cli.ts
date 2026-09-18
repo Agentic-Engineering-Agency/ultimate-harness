@@ -1030,7 +1030,7 @@ missionCmd
   .option("--runtime <runtime>", "Runtime to use (default: hermes)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
-  .option("--force", "Bypass mission capability matching for this runtime")
+  .option("--force", "Bypass mission capability matching and runtime_requirements for this runtime")
   .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean }) => {
     const root = resolveRoot(opts.root);
     const runtime = opts.runtime || "hermes";
@@ -1084,7 +1084,7 @@ missionCmd
   .option("--runtime <runtime>", "Runtime to use (default: hermes)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
-  .option("--force", "Bypass mission capability matching for this runtime")
+  .option("--force", "Bypass mission capability matching and runtime_requirements for this runtime")
   .option(
     "--runtime-config-overrides <json>",
     "JSON object of runtime_config overrides applied on top of the mission file (e.g. '{\"model\":\"gpt-5\"}')",
@@ -1108,7 +1108,12 @@ missionCmd
           .map((entry) => entry.id)
           .filter((id): id is AdapterId => id in CAPABILITIES);
         const mission = await loadMissionFile(filePath);
-        const decision = chooseAdapter(mission, installed);
+        // --force bypasses runtime_requirements in the preflight below, so it
+        // must also bypass the auto-route requirements filter; otherwise
+        // `--auto --force` would still be blocked here.
+        const decision = chooseAdapter(mission, installed, CAPABILITIES, {
+          ignoreRequirements: opts.force === true,
+        });
         if (opts.explain) {
           console.log(formatAutoRouteExplain(decision));
           console.log("");
@@ -1269,7 +1274,7 @@ missionCmd
   .option("--runtimes <list>", "Comma-separated runtime list (default: every active adapter)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--serial", "Run runtimes sequentially instead of in parallel")
-  .option("--force", "Bypass mission capability matching for selected runtimes")
+  .option("--force", "Bypass mission capability matching and runtime_requirements for selected runtimes")
   .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean }) => {
     const root = resolveRoot(opts.root);
     const requested = opts.runtimes ? opts.runtimes.split(",").map((s) => s.trim()).filter(Boolean) : await resolveActiveRuntimes(root);
