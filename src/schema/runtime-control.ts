@@ -11,6 +11,7 @@ export const ToolGuardFieldsSchema = z.object({
   deny_package_installs: z.boolean().optional(),
   deny_network_clients: z.boolean().optional(),
   agent_clients: z.array(z.string().min(1)).optional(),
+  allow_native_subagents: z.boolean().optional(),
 }).strict();
 export type ToolGuardFields = z.infer<typeof ToolGuardFieldsSchema>;
 
@@ -21,6 +22,8 @@ export const ToolGuardPolicySchema = z.object({
   deny_package_installs: z.boolean().default(true),
   deny_network_clients: z.boolean().default(true),
   agent_clients: z.array(z.string().min(1)).default(["omp", "cmdc", "codex", "pi", "hermes", "aider", "gemini", "claude", "opencode", "qwen", "goose", "cursor-agent"]),
+  /** Lets a runtime use its own sub-agent tool. Delegated routes are still held to the assigned route. */
+  allow_native_subagents: z.boolean().default(false),
 }).strict();
 export type ToolGuardPolicy = z.infer<typeof ToolGuardPolicySchema>;
 

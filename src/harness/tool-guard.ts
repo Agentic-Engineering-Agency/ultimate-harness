@@ -11,6 +11,8 @@ const SUFFIX = " Do not retry this by another route; record it in your final mes
 export const SHELL_TOOLS = new Set(["bash", "shell", "shell_command", "powershell", "pwsh", "cmd", "run_command"]);
 export const WRITE_TOOLS = new Set(["write_file", "edit_file", "notebook_edit", "multi_edit", "write", "edit", "create_file", "apply_patch", "delete_file", "remove", "move_file"]);
 const DELETE_TOOLS = new Set(["delete_file", "remove"]);
+/** Native tools that start another agent inside the runtime. Judged by tool name only. */
+export const AGENT_TOOLS = new Set(["task", "agent", "subagent", "spawn_agent", "dispatch_agent", "delegate"]);
 const DEL_VERBS = new Set(["remove-item", "ri", "rm", "rmdir", "rd", "del", "erase"]);
 const COPY_VERBS = new Set(["copy", "cp", "move", "mv", "xcopy", "robocopy", "copy-item", "move-item", "cpi", "mi"]);
 const NULL_TARGETS = new Set(["nul", "null", "/dev/null", "$null", "&1", "&2", "con", "prn"]);
@@ -326,7 +328,8 @@ function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = "")
     : className === "git_mutation" ? "CONTRACT: no git mutations; the harness commits for you. Use read-only git (status, diff, log) or skip it."
     : className === "delete_outside" || className === "kill_or_format" ? `CONTRACT: deletes and process kills only inside ${roots}.`
     : className === "package_install" ? "CONTRACT: no package installs. Use what is installed; if a dependency is missing, end with BLOCKED: <dependency>."
-    : className === "agent_client" || className === "network_client" ? "CONTRACT: no network or agent clients. Everything you need is on disk; if it is not, end with BLOCKED: <what is missing>."
+    : className === "agent_client" ? "CONTRACT: no sub-agents. Workers do not start agents, agent CLIs or harness runs. Do the work yourself; if part of it exceeds your scope, end with ESCALATE: <what your orchestrator should delegate>."
+    : className === "network_client" ? "CONTRACT: no network or agent clients. Everything you need is on disk; if it is not, end with BLOCKED: <what is missing>."
     : `CONTRACT: ${target || "path"} belongs to the harness and is read-only.`;
   return { deny: { class: className, target: target || undefined, reason: text + SUFFIX } };
 }
@@ -385,6 +388,7 @@ export function decideToolCall(
     if (DELETE_TOOLS.has(lowerTool) && !inside(directTarget, workerRoot, policy.write_roots)) return reason("delete_outside", policy, directTarget);
     if (!DELETE_TOOLS.has(lowerTool) && !inside(directTarget, workerRoot, policy.write_roots)) return reason("write_outside", policy, directTarget);
   }
+  if (AGENT_TOOLS.has(lowerTool) && policy.agent_clients.length && !policy.allow_native_subagents) return reason("agent_client", policy);
   if (!SHELL_TOOLS.has(lowerTool)) return {};
   const command = `${typeof args.command === "string" ? args.command : ""} ${Array.isArray(args.args) ? args.args.map(String).join(" ") : ""}`.trim();
   if (options.allowControllerCommands && isControllerCommand(command)) return {};

@@ -81,4 +81,38 @@ describe("agent-client denial: workers never spawn agents", () => {
     expect(classOf("uh mission run m.yaml --force", policy, orchestrator)).toBe("agent_client");
     expect(classOf("uh mission run m.yaml && omp -p hi", policy, orchestrator)).toBe("agent_client");
   });
+
+  test.each([
+    ["oh-my-pi task tool", "task", { context: "x", tasks: [{ name: "Review", agent: "reviewer", task: "review" }] }],
+    ["claude code Task tool", "Task", { subagent_type: "general-purpose", prompt: "x" }],
+    ["claude code Agent tool", "Agent", { subagent_type: "Explore", prompt: "x" }],
+    ["generic subagent tool", "subagent", { prompt: "x" }],
+  ])("denies the native sub-agent tool: %s", (_name, tool, input) => {
+    const denial = decideToolCall(resolveToolGuardPolicy({}), tool, input, root).deny;
+    expect(denial?.class).toBe("agent_client");
+    expect(denial?.reason).toMatch(/^CONTRACT: no sub-agents\./);
+    expect(denial?.reason).toContain("ESCALATE:");
+  });
+
+  test("native sub-agent tools stay denied when the mission needs network and for the orchestrator role", () => {
+    expect(decideToolCall(resolveToolGuardPolicy({}, true), "task", { tasks: [] }, root).deny?.class).toBe("agent_client");
+    expect(decideToolCall(resolveToolGuardPolicy({}), "Task", { prompt: "x" }, root, { allowControllerCommands: true }).deny?.class).toBe("agent_client");
+  });
+
+  test("bookkeeping tools with similar names are not sub-agent tools", () => {
+    for (const tool of ["todo", "TodoWrite", "TaskCreate", "TaskList", "hub"]) {
+      expect(decideToolCall(resolveToolGuardPolicy({}), tool, { op: "wait" }, root).deny).toBeUndefined();
+    }
+  });
+
+  test("an empty agent_clients list also lifts the native sub-agent denial", () => {
+    expect(decideToolCall(resolveToolGuardPolicy({ agent_clients: [] }), "task", { tasks: [] }, root).deny).toBeUndefined();
+  });
+
+  test("allow_native_subagents lifts only the native tool denial, never agent CLIs", () => {
+    const policy = resolveToolGuardPolicy({ allow_native_subagents: true });
+    expect(decideToolCall(policy, "task", { tasks: [] }, root).deny).toBeUndefined();
+    expect(classOf("omp -p hi", policy)).toBe("agent_client");
+    expect(classOf("uh mission run m.yaml", policy)).toBe("agent_client");
+  });
 });

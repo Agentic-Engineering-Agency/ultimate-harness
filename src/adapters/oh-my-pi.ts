@@ -3,10 +3,11 @@ import { prepareRuntimeResume, recoveryPrompt, persistRuntimeRecovery, type Runt
 import { claimRuntimeAttempt } from "../harness/runtime-attempt.js";
 import { runRuntimeProcess, type RuntimeProcessInput } from "../harness/runtime-process.js";
 import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, RuntimeRouteSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode, type RuntimeRecoveryDeadline, type ToolGuardPolicy, DEFAULT_PROTECTED_PATHS, ToolGuardArtifactSchema } from "../schema/runtime-control.js";
-import { nativeRuntimeCompleted, nativeRuntimeRoute, runtimeRouteMismatch } from "../harness/runtime-supervision.js";
+import { delegatedRouteMismatch, nativeRuntimeCompleted, nativeRuntimeRoute, runtimeRouteMismatch } from "../harness/runtime-supervision.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, appendFile } from "node:fs/promises";
+import { readFile, appendFile, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   type MissionArtifactContext,
@@ -92,6 +93,8 @@ export type OhMyPiRunPlan = {
   limits?: RuntimeLimits;
   guard?: ToolGuardPolicy;
   expectedRoute?: RuntimeRoute;
+  /** config.yml-style overlay written per run and passed with `--config`; outranks the operator's global OMP settings. */
+  runtimeOverlay: Record<string, unknown>;
   reviewRequestSha256?: string;
   resume?: RuntimeResume;
   grace?: boolean;
@@ -460,8 +463,27 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     grace,
     deadline,
     expectedRoute,
+    runtimeOverlay: ohMyPiRuntimeOverlay(model, mission.guard?.allow_native_subagents === true),
     reviewRequestSha256,
     honchoMemoryEnabled,
+  };
+}
+
+/** Roles OMP resolves on its own for sub-agents, summaries, commits and advice. */
+const OMP_MODEL_ROLES = ["default", "smol", "slow", "plan", "task", "commit", "advisor", "tiny", "vision", "designer"] as const;
+
+/**
+ * OMP inherits the operator's global settings: eager delegation and role models
+ * that point at other providers. `--model` pins only the top-level session, so a
+ * sub-agent or helper role can spend on an unassigned route. The overlay pins
+ * every role to the assigned model and removes the native `task` tool unless
+ * the mission's guard allows native sub-agents.
+ */
+export function ohMyPiRuntimeOverlay(model: string | undefined, allowNativeSubagents: boolean): Record<string, unknown> {
+  return {
+    ...(model ? { modelRoles: Object.fromEntries(OMP_MODEL_ROLES.map(role => [role, model])) } : {}),
+    task: { eager: "default", maxRecursionDepth: allowNativeSubagents ? 1 : 0 },
+    advisor: { enabled: false },
   };
 }
 
@@ -502,6 +524,12 @@ export async function runOhMyPi(
   const artifactMissionPath = path.join(artifactRoot, ".harness", "missions", plan.mission.id, "mission.yaml");
   const artifacts = await getMissionArtifactContext(artifactRoot, artifactMissionPath, runId);
   if (artifacts) await claimRuntimeAttempt(artifacts);
+  const overlayDir = artifacts?.runDir ?? await mkdtemp(path.join(tmpdir(), "uh-omp-overlay-"));
+  const overlayPath = path.join(overlayDir, "omp-overlay.yml");
+  if (artifacts) await writeArtifactFile(artifacts.missionDir, overlayPath, stringify(plan.runtimeOverlay));
+  else await writeFile(overlayPath, stringify(plan.runtimeOverlay), "utf8");
+  const titleFlag = plan.args.lastIndexOf("--no-title");
+  plan.args.splice(titleFlag < 0 ? 0 : titleFlag, 0, "--config", overlayPath);
 
   let initializationError: string | undefined;
   if (artifacts) {
@@ -795,7 +823,7 @@ export async function collectOhMyPiSession(
 
   const parsedStream = parseOhMyPiOutput(runnerResult.stdout);
   errors.push(...parsedStream.parseErrors);
-  const routeMismatch = parsedStream.events.some(event => runtimeRouteMismatch(nativeRuntimeRoute(event), plan.expectedRoute));
+  const routeMismatch = parsedStream.events.some(event => runtimeRouteMismatch(nativeRuntimeRoute(event), plan.expectedRoute) || delegatedRouteMismatch(event, plan.expectedRoute) !== undefined);
   if (routeMismatch) {
     errors.push("Runtime reported a route outside the configured assignment");
     if (exitCode === 0) exitCode = 1;

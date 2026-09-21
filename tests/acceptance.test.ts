@@ -51,6 +51,18 @@ describe("acceptance evidence", () => {
     expect(classifyAcceptance({ outcome: "failed", checked_at: "2026-09-14T23:00:00.000Z", harness_commit: "abc" }, 30, now, "abc")).toBe("failed");
     expect(classifyAcceptance(null, 30, now, "abc")).toBe("unproven");
   });
+  test("renders evidence links relative to the generated report and omits absent evidence links", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-report-"));
+    await mkdir(path.join(root, "acceptance", "evidence", "C1"), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), "schema_version: uh.acceptance-registry.v0\nentries:\n  C1:\n    title: Per-worker contracts\n    capability: C1\n    mission: missions/C1/mission.yaml\n    shape: single\n    runtime: oh-my-pi\n    expected: { status: passed }\n  S1:\n    title: Resource wave baseline\n    capability: S1\n    mission: missions/S1/mission.yaml\n    shape: single\n    runtime: oh-my-pi\n    expected: { status: passed }\n");
+    await writeFile(path.join(root, "acceptance", "evidence", "C1", "latest.json"), JSON.stringify({
+      schema_version: "uh.acceptance-evidence.v0", capability: "C1", outcome: "passed", checked_at: "2026-09-15T00:00:00.000Z", harness_commit: "unknown", runtime: "oh-my-pi", provider: "unknown", model: "unknown", cost_usd: "unknown", workspace: "T:/tmp/run", run_ids: [], mission_id: "c1", expected: { status: "passed" }, observed: { status: "passed" }, fact_sources: {}, mismatches: [], artifact_root: "T:/tmp/run/.harness",
+    }) + "\n");
+    const report = await renderAcceptanceReport(root, new Date("2026-09-15T00:00:00.000Z"));
+    expect(report).toContain("[latest](../../acceptance/evidence/C1/latest.json)");
+    expect(report).toContain("| S1 | S1 | Resource wave baseline | unproven | — | oh-my-pi | — | — | — |");
+  });
+
   test("renders generated report from a registry fixture", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "acceptance-report-"));
     await mkdir(path.join(root, "acceptance", "evidence", "C1"), { recursive: true });
