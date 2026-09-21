@@ -32,8 +32,14 @@ describe("fleet admission decision", () => {
   test("a worker-only model cannot be an orchestrator", () => {
     expect(decideFleetAdmission(fleet, { adapter: "oh-my-pi", model: LUNA, role: "orchestrator" })).toMatch(/orchestrator/);
   });
-  test("model identifiers are compared exactly", () => {
-    expect(decideFleetAdmission(fleet, { adapter: "oh-my-pi", model: LUNA.toUpperCase(), role: "worker" })).toBeDefined();
+  test("model and adapter identifiers are compared case-insensitively", () => {
+    expect(decideFleetAdmission(fleet, { adapter: "oh-my-pi", model: LUNA.toUpperCase(), role: "worker" })).toBeUndefined();
+    expect(decideFleetAdmission(fleet, { adapter: "OH-MY-PI", model: LUNA.toUpperCase(), role: "worker" })).toBeUndefined();
+    expect(decideFleetAdmission(fleet, { adapter: "oh-my-pi", model: "GPT-5.6-LUNA", role: "worker" })).toBeUndefined();
+  });
+  test("a model that differs beyond case and provider prefix is still refused", () => {
+    expect(decideFleetAdmission(fleet, { adapter: "oh-my-pi", model: "openai-codex/gpt-5.6", role: "worker" })).toMatch(/gpt-5\.6/);
+    expect(decideFleetAdmission(fleet, { adapter: "oh-my-pi", model: "google-antigravity/gemini-3.8-flash", role: "worker" })).toMatch(/gemini-3\.8-flash/);
   });
 });
 

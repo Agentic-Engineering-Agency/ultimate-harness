@@ -1,5 +1,5 @@
 import path from "node:path";
-import { RuntimeSupervision, nativeRuntimeCompleted, runtimeTerminalFailure } from "../src/harness/runtime-supervision.js";
+import { RuntimeSupervision, nativeRuntimeCompleted, runtimeRouteMismatch, runtimeTerminalFailure, sameRouteIdentifier } from "../src/harness/runtime-supervision.js";
 
 describe("runtime supervision", () => {
   test("a blocked tool leaves in-flight state so subsequent stalls remain detectable", () => {
@@ -218,5 +218,42 @@ describe("runtime supervision", () => {
     run.observe({ type: "turn_end" }, 2);
     expect(run.observe({ type: "turn_start" }, 3)).toContain("2 turns remaining for grace");
     expect(run.stopCode).toBe("deadline");
+  });
+});
+
+describe("route identifier comparison", () => {
+  test("letter case and surrounding whitespace do not distinguish a route", () => {
+    expect(sameRouteIdentifier("qwen/qwen3.8-flash", "Qwen/Qwen3.8-Flash")).toBe(true);
+    expect(sameRouteIdentifier("  Qwen  ", "qwen")).toBe(true);
+    expect(sameRouteIdentifier("gpt-5.6-luna", "GPT-5.6-Luna")).toBe(true);
+  });
+
+  test("a provider prefix on exactly one side is dropped for comparison", () => {
+    expect(sameRouteIdentifier("qwen/qwen3.8-flash", "Qwen3.8-Flash")).toBe(true);
+    expect(sameRouteIdentifier("Qwen3.8-Flash", "qwen/qwen3.8-flash")).toBe(true);
+  });
+
+  test("a different model still mismatches", () => {
+    expect(sameRouteIdentifier("qwen/qwen3.8-flash", "qwen/qwen3.8-max")).toBe(false);
+    expect(sameRouteIdentifier("gpt-5.6-luna", "gpt-5.6")).toBe(false);
+    expect(sameRouteIdentifier("google-antigravity/gemini-3.8-flash", "openai-codex/gemini-3.8-flash")).toBe(false);
+  });
+
+  test("runtimeRouteMismatch compares providers and models case-insensitively", () => {
+    expect(runtimeRouteMismatch({ provider: "Qwen", model: "Qwen/Qwen3.8-Flash" }, { provider: "qwen", model: "qwen/qwen3.8-flash" })).toBe(false);
+    expect(runtimeRouteMismatch({ provider: "qwen", model: "qwen/qwen3.8-max" }, { provider: "qwen", model: "qwen/qwen3.8-flash" })).toBe(true);
+    expect(runtimeRouteMismatch({ provider: "other", model: "qwen/qwen3.8-flash" }, { provider: "qwen", model: "qwen/qwen3.8-flash" })).toBe(true);
+  });
+
+  test("a model_request_start reporting a different-case route does not stop the run", () => {
+    const run = new RuntimeSupervision({}, 0, { provider: "qwen", model: "qwen/qwen3.8-flash" });
+    expect(run.observe({ type: "model_request_start", provider: "Qwen", model: "Qwen/Qwen3.8-Flash" }, 1)).toBeUndefined();
+    expect(run.stopCode).toBeUndefined();
+  });
+
+  test("a model_request_start on another model still stops the run with route_mismatch", () => {
+    const run = new RuntimeSupervision({}, 0, { provider: "qwen", model: "qwen/qwen3.8-flash" });
+    run.observe({ type: "model_request_start", provider: "Qwen", model: "Qwen/Qwen3.8-Max" }, 1);
+    expect(run.stopCode).toBe("route_mismatch");
   });
 });

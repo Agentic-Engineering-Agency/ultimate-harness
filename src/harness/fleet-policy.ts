@@ -6,22 +6,24 @@ import { adaptersDir, projectYaml } from "./paths.js";
 import { loadMissionFile } from "./capabilities.js";
 import { fileExists } from "./mission.js";
 import { mergeRuntimeConfigOverrides } from "./runtime-config-overrides.js";
+import { sameRouteIdentifier } from "./runtime-supervision.js";
 
 export type FleetRequest = { adapter: string; model: string | undefined; role: FleetRole };
 
 /**
  * Spend authorization: which model may run on which adapter, and in which role.
  * Returns the refusal reason, or undefined when the run is admitted. A project
- * without a fleet block has no policy. Identifiers are compared exactly.
+ * without a fleet block has no policy. Identifiers are compared case-insensitively.
  */
 export function decideFleetAdmission(fleet: FleetPolicy | undefined, request: FleetRequest): string | undefined {
   if (!fleet) return undefined;
   if (!request.model) return `${request.adapter} has no assigned model; the runtime would choose its own default`;
-  const routes = fleet.routes.filter(route => route.model === request.model);
-  if (!routes.length) return `model ${request.model} is not in the project fleet`;
-  const onAdapter = routes.filter(route => route.adapter === request.adapter);
-  if (!onAdapter.length) return `model ${request.model} is not authorized on adapter ${request.adapter}`;
-  if (!onAdapter.some(route => route.roles.includes(request.role))) return `model ${request.model} on ${request.adapter} is not authorized for the ${request.role} role`;
+  const model = request.model;
+  const routes = fleet.routes.filter(route => sameRouteIdentifier(route.model, model));
+  if (!routes.length) return `model ${model} is not in the project fleet`;
+  const onAdapter = routes.filter(route => sameRouteIdentifier(route.adapter, request.adapter));
+  if (!onAdapter.length) return `model ${model} is not authorized on adapter ${request.adapter}`;
+  if (!onAdapter.some(route => route.roles.includes(request.role))) return `model ${model} on ${request.adapter} is not authorized for the ${request.role} role`;
   return undefined;
 }
 
