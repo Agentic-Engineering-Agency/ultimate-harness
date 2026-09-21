@@ -27,6 +27,56 @@ describe("runtime supervision", () => {
     run.observe({ type: "message_update", delta: "more broken arguments" }, 19);
     expect(run.check(20)).toMatch(/stalled/);
   });
+  test("varied reasoning refreshes the stall clock", () => {
+    const run = new RuntimeSupervision({ stall_timeout_ms: 100, max_thinking_ms: 1_000 }, 0);
+    const varied = Array.from({ length: 5_000 }, (_, index) => String.fromCharCode(32 + index % 95)).join("");
+    run.observe({ type: "thinking_start" }, 0);
+    for (const [index, now] of [50, 100, 150, 200].entries()) {
+      run.observe({ type: "message_update", assistantMessageEvent: {
+        type: "thinking_delta", delta: varied.slice(index * 1_250, (index + 1) * 1_250),
+      } }, now);
+    }
+    expect(run.check(299)).toBeUndefined();
+  });
+  test("configured thinking budget stops a live reasoning stretch", () => {
+    const run = new RuntimeSupervision({ stall_timeout_ms: 100, max_thinking_ms: 350 }, 0);
+    run.observe({ type: "thinking_start" }, 0);
+    for (const now of [50, 100, 150, 200, 250, 300]) {
+      run.observe({ type: "thinking_delta", delta: "varied reasoning" }, now);
+    }
+    expect(run.check(349)).toBeUndefined();
+    expect(run.check(350)).toBe("Reasoning exceeded max_thinking_ms without a tool call or message");
+    expect(run.stopCode).toBe("stall");
+  });
+  test("thinking uses four times the stall timeout by default", () => {
+    const run = new RuntimeSupervision({ stall_timeout_ms: 100 }, 0);
+    run.observe({ type: "thinking_start" }, 0);
+    for (const now of [90, 180, 270]) run.observe({ type: "thinking_delta", delta: "varied reasoning" }, now);
+    expect(run.check(350)).toBeUndefined();
+    expect(run.check(400)).toBe("Reasoning exceeded max_thinking_ms without a tool call or message");
+  });
+  test("repeated reasoning text still stalls at the ordinary stall timeout", () => {
+    const run = new RuntimeSupervision({ stall_timeout_ms: 100 }, 0);
+    run.observe({ type: "thinking_start" }, 0);
+    run.observe({ type: "thinking_delta", delta: "R".repeat(4_096) }, 10);
+    expect(run.check(99)).toBeUndefined();
+    expect(run.check(100)).toBe("Runtime stalled without an in-flight tool");
+  });
+  test("text deltas alone do not count as progress", () => {
+    const run = new RuntimeSupervision({ stall_timeout_ms: 20 }, 0);
+    run.observe({ type: "text_delta", delta: "varied output" }, 19);
+    expect(run.check(20)).toBe("Runtime stalled without an in-flight tool");
+  });
+  test("a tool call resets the reasoning stretch budget", () => {
+    const run = new RuntimeSupervision({ stall_timeout_ms: 1_000, max_thinking_ms: 300 }, 0);
+    run.observe({ type: "thinking_start" }, 0);
+    run.observe({ type: "tool_execution_start", toolCallId: "call" }, 100);
+    run.observe({ type: "tool_execution_end", toolCallId: "call" }, 110);
+    run.observe({ type: "thinking_delta", delta: "varied reasoning" }, 150);
+    expect(run.check(300)).toBeUndefined();
+    expect(run.check(449)).toBeUndefined();
+    expect(run.check(450)).toBe("Reasoning exceeded max_thinking_ms without a tool call or message");
+  });
   test("a session banner is not readiness", () => {
     const run = new RuntimeSupervision({ startup_timeout_ms: 20 }, 0);
     run.observe({ type: "session", id: "saved-session" }, 1);
