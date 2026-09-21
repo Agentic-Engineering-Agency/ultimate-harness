@@ -8,25 +8,66 @@ Verification and independent-review collection now persist
 `uh.decision-receipt.v0` artifacts under the owning mission's
 `decision-receipts/` directory and append `decision.recorded` lifecycle events.
 Receipts distinguish disabled credentials, unavailable providers, malformed
-responses, advisory recommendations, and recommendations that changed the
-consumer's disposition. They retain digests rather than raw prompts, source
-content, provider error messages, or provider responses. Human acceptance remains
-required; a semantic pass does not override a deterministic failure.
+responses, non-discriminating answers, advisory recommendations, and
+recommendations that changed the consumer's disposition. They retain digests
+rather than raw prompts, source content, provider error messages, or provider
+responses. Human acceptance remains required; a semantic pass does not override a
+deterministic failure, and no result authorizes promotion, scope or spend.
 
-Provider-free regression coverage exercises a consumed remediation decision,
-transport failure, malformed success responses, receipt validation, and omission
-of synthetic private-data sentinels. The verification integration also exercises
-a real failing subprocess against a synthetic semantic pass: the deterministic
-failure remains failed and raw output, command names, diffs, and workspace paths
-are excluded from the provider request.
+TypeSafe System One questions are atomic. `evaluateThreeVerdict` asks one Noul per
+supplied non-deterministic criterion, points each question at its own `state`
+entry (for example `criteria[2]`), and adds a fixed battery of three report Nouls
+(work incomplete, blocker named, a check claimed passed that the state records as
+failed). The former broad acceptance `choice` and the `tamper` question are gone:
+criteria that already carry a deterministic result are not sent, and `tamper`
+comes from the deterministic Tool Guard, protected-path and diff state the caller
+supplies. The verdict is composed in code — any deterministic failure or any
+per-criterion Noul below `REMEDIATION_THRESHOLD` (0.5) yields `needs-remediation`;
+every criterion at or above `PASS_THRESHOLD` (0.8) with no report flag yields
+`pass`; anything else `needs-attention` — and `confidence` is the minimum distance
+from 0.5 across the asked Nouls, scaled to `[0,1]`.
+
+`evaluateSystemOne` bounds the request with `timeoutMs` (default 10 s) enforced
+through `AbortSignal.timeout`, retries only 429 and 529 up to three attempts
+honoring a numeric `retry-after` in seconds capped at 5 s and otherwise 250 ms
+then 1000 ms, and never throws for provider conditions. It returns a
+discriminated result: `disabled`, `unavailable` (`timeout`, `transport`, `http`),
+`malformed` (`invalid_json`, `invalid_envelope`) or `ok`. The zod-validated
+envelope requires one answer per asked question whose type matches the question
+(noul in `[0,1]`, choice within its declared options with probabilities over
+exactly those options, score within the level range); a missing or mistyped
+answer is an invalid envelope. The requested model can be pinned through the call
+options or `UH_TYPESAFE_MODEL`; the receipt records the versioned model id that
+actually answered with its latency and bounded usage, so a future threshold can be
+tied to the version it was fitted on. Result kinds map onto the existing receipt
+statuses: `disabled` and `unavailable` record `unavailable`, `malformed` records
+`malformed`, and an answer set with no discriminating signal (confidence 0)
+records `uncertain`; none of them is applied.
+
+Provider-free regression coverage exercises timeout, 429 retry with `retry-after`,
+capped and non-numeric `retry-after`, 529 retries with default backoff,
+non-retryable statuses, invalid JSON, a missing answer, a choice outside its
+options, the composition table, the request shape (one question per
+non-deterministic criterion, no `tamper` question), tamper taken from
+deterministic state, disabled credentials, transport failure, malformed success
+responses, receipt validation, the all-abstention `uncertain` receipt, and
+omission of synthetic private-data sentinels. The verification integration also
+exercises a real failing subprocess with a synthetic provider answer: the
+deterministic failure remains failed and raw output, command names, diffs, and
+workspace paths are excluded from the provider request.
 
 Both callers project evidence into check dispositions, criterion identifiers and
 descriptions, severities, and review input/claim states. They do not send full
-mission packets, source diffs, raw logs, or review evidence text. Criterion
-descriptions remain task content, not a guarantee of anonymity; these projections
-are not yet a general-purpose privacy filter or a measured minimum-token design.
-Live judgment quality, confidence-policy enforcement, and the other decision
-flows specified below remain unverified or unimplemented.
+mission packets, source diffs, raw logs, or review evidence text. Their current
+projections supply dispositions rather than per-criterion evidence states, so live
+requests carry the fixed report battery plus whatever criteria a caller adds as
+`state.criteria`; the atomic per-criterion seam is implemented and tested but the
+callers are not yet migrated to it. Criterion descriptions remain task content,
+not a guarantee of anonymity; these projections are not yet a general-purpose
+privacy filter or a measured minimum-token design. Confidence-policy enforcement
+is still absent (thresholds compose the verdict, they do not gate application),
+and live judgment quality and the other decision flows specified below remain
+unverified or unimplemented.
 
 ## Goal
 
