@@ -5,7 +5,7 @@ import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
 export type ToolGuardClass =
   | "write_outside" | "git_mutation" | "delete_outside" | "kill_or_format"
   | "package_install" | "network_client" | "agent_client" | "protected_root"
-  | "containment_escape";
+  | "guard_tamper" | "containment_escape";
 export type ToolGuardDecision = { deny?: { reason: string; class: ToolGuardClass; target?: string } };
 
 const SUFFIX = " Do not retry this by another route; record it in your final message and continue with the rest of the task.";
@@ -44,25 +44,6 @@ function tokens(command: string): string[] {
   return command.match(/'[^']*'|"(?:[^"\\]|\\.)*"|\S+/g)?.map(t => t.replace(/^['"]|['"]$/g, "")) ?? [];
 }
 
-function unwrap(command: string): string[] {
-  const out = [command];
-  for (const [segment] of splitSegments(command)) {
-    const ts = tokens(segment);
-    if (!ts.length) continue;
-    const head = path.basename(ts[0]).toLowerCase();
-    if (!["powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe"].includes(head)) continue;
-    for (let i = 1; i < ts.length; i += 1) {
-      if (![ "-command", "-c", "/c", "/k", "-encodedcommand" ].includes(ts[i].toLowerCase())) continue;
-      let body = ts.slice(i + 1).join(" ").trim();
-      if (body.startsWith('\\"') && body.endsWith('\\"')) body = body.slice(2, -2);
-      else if (body.length >= 2 && ((body.startsWith('"') && body.endsWith('"')) || (body.startsWith("'") && body.endsWith("'")))) body = body.slice(1, -1);
-      body = body.replaceAll('\\"', '"').replaceAll('`"', '"');
-      if (body) out.push(...unwrap(body));
-      break;
-    }
-  }
-  return out;
-}
 
 const NESTED_SHELLS = new Set(["bash", "sh", "zsh", "dash", "powershell", "pwsh", "cmd"]);
 const NESTED_SHELL_FLAGS = new Set(["-command", "-c", "/c", "/k", "-lc"]);
@@ -222,105 +203,204 @@ function containmentEscapeInvoked(command: string, depth = 0): boolean {
   return false;
 }
 
+type DirectoryState = { current?: string; unknown: boolean; stack: Array<{ current?: string; unknown: boolean }> };
+type ShellTarget = { value: string; resolved?: string; ignored?: boolean };
+
 function assignments(command: string): Map<string, string> {
   const result = new Map<string, string>();
-  for (const match of command.matchAll(/\$(\w+)\s*=\s*['"]([^'"]+)['"]/g)) result.set(match[1].toLowerCase(), match[2]);
-  for (const match of command.matchAll(/\$(\w+)\s*=\s*([^;&|]+)/g)) result.set(match[1].toLowerCase(), match[2].trim());
-  for (const match of command.matchAll(/\bset\s+(\w+)=([^\s&;]+)/gi)) result.set(match[1].toLowerCase(), match[2]);
+  const addLiteral = (name: string, value: string): void => {
+    const clean = value.trim().replace(/^['"]|['"]$/g, "");
+    if (!clean || clean.startsWith("$") || clean.startsWith("%") || clean.startsWith("~") || clean.includes("`") || clean.includes("$(")) return;
+    result.set(name.toLowerCase(), clean);
+  };
+  for (const match of command.matchAll(/\$(\w+)\s*=\s*['"]([^'"]+)['"]/g)) addLiteral(match[1], match[2]);
+  for (const match of command.matchAll(/\$(\w+)\s*=\s*([^;&|]+)/g)) addLiteral(match[1], match[2]);
+  for (const match of command.matchAll(/\bset\s+(\w+)=([^\s&;]+)/gi)) addLiteral(match[1], match[2]);
   return result;
 }
-
 function resolveToken(value: string, vars: Map<string, string>): string | undefined {
   const clean = value.replace(/^['"]|['"]$/g, "");
-  const match = clean.match(/^\$\{?(\w+)\}?((?:.*))$/);
+  if (!clean || clean === "-" || clean.startsWith("~") || clean.includes("$(") || clean.includes("`")) return undefined;
+  const windowsVariable = clean.match(/^%(\w+)%((?:.*))$/);
+  if (windowsVariable) {
+    const base = vars.get(windowsVariable[1].toLowerCase());
+    return base === undefined ? undefined : `${base}${windowsVariable[2]}`;
+  }
+  if (/%[^%]+%/.test(clean)) return undefined;
+  const match = clean.match(/^\$(\w+)\b(.*)$/);
   if (!match) return clean;
   const base = vars.get(match[1].toLowerCase());
   return base === undefined ? undefined : `${base}${match[2]}`;
 }
 
-function cleanTargets(values: string[], vars: Map<string, string>): string[] {
-  return values.map(v => resolveToken(v, vars)).filter((v): v is string => Boolean(v)).map(v => v.replace(/^\d+/, "").replace(/^>/, "")).filter(v => v && !NULL_TARGETS.has(v.toLowerCase()) && !v.startsWith("&"));
+function staticDirectory(value: string, base: string | undefined, workerRoot: string, vars: Map<string, string>): string | undefined {
+  const resolved = resolveToken(value, vars);
+  if (resolved === undefined) return undefined;
+  return normalized(resolved, base ?? workerRoot);
+}
+
+function absolutePath(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("\\\\") || /^[a-zA-Z]:[\\/]/.test(value);
 }
 
 function redirectionTargets(command: string): string[] {
   const targets: string[] = [];
   let quote = "";
-  for (let i = 0; i < command.length; i += 1) {
-    const ch = command[i];
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
     if (quote) {
-      if (ch === "\\" && quote === '"' && i + 1 < command.length) i += 1;
-      else if (ch === quote) quote = "";
+      if (character === "\\" && quote === '"' && index + 1 < command.length) index += 1;
+      else if (character === quote) quote = "";
       continue;
     }
-    if (ch === "'" || ch === '"') { quote = ch; continue; }
-    if (ch !== ">") continue;
-    if (i > 0 && /\d/.test(command[i - 1])) i -= 1;
-    if (command[i] === ">" && command[i + 1] === ">") i += 1;
-    i += 1;
-    while (i < command.length && /\s/.test(command[i])) i += 1;
-    const start = i;
-    while (i < command.length && !/[\s;&|]/.test(command[i])) i += 1;
-    if (i > start) targets.push(command.slice(start, i));
-    i -= 1;
+    if (character === "'" || character === '"') { quote = character; continue; }
+    if (character !== ">") continue;
+    if (index > 0 && /\d/.test(command[index - 1])) index -= 1;
+    if (command[index] === ">" && command[index + 1] === ">") index += 1;
+    index += 1;
+    while (index < command.length && /\s/.test(command[index])) index += 1;
+    const start = index;
+    while (index < command.length && !/[\s;&|]/.test(command[index])) index += 1;
+    if (index > start) targets.push(command.slice(start, index));
+    index -= 1;
   }
   return targets;
 }
 
-function writeTargets(command: string): string[] {
-  const out: string[] = [];
-  const vars = assignments(command);
-  for (const body of unwrap(command)) {
-    out.push(...redirectionTargets(body));
-    for (const [segment] of splitSegments(body)) {
-      const ts = tokens(segment);
-      if (!ts.length) continue;
-      const verb = ts[0].toLowerCase();
-      if (COPY_VERBS.has(verb)) {
-        const positional = ts.slice(1).filter(t => !t.startsWith("-") && !t.startsWith("/"));
-        if (positional.length) out.push(positional.at(-1)!);
-        const destination = ts.findIndex(t => t.toLowerCase() === "-destination");
-        if (destination >= 0 && ts[destination + 1]) out[out.length - 1] = ts[destination + 1];
-      }
-      for (let i = 0; i < ts.length; i += 1) {
-        const t = ts[i];
-        if ((t === ">" || t === ">>") && ts[i + 1]) out.push(ts[++i]);
-        else if (t.startsWith(">") && !t.startsWith(">>") && t.length > 1) out.push(t.slice(1));
-        else if (t.startsWith(">>") && t.length > 2) out.push(t.slice(2));
-        else if (["out-file", "set-content", "add-content", "tee", "tee-object"].includes(t.toLowerCase())) {
-          const rest = ts.slice(i + 1); const low = rest.map(x => x.toLowerCase());
-          const flag = ["-path", "-filepath", "-literalpath"].find(f => low.includes(f));
-          if (flag && rest[low.indexOf(flag) + 1]) out.push(rest[low.indexOf(flag) + 1]);
-          else for (let j = 0; j < rest.length; j += 1) {
-            if (rest[j].startsWith("-")) { if (VALUE_FLAGS.has(rest[j].toLowerCase())) j += 1; continue; }
-            out.push(rest[j]); break;
-          }
-        }
-      }
-    }
-  }
-  return cleanTargets(out, vars);
+function shellTarget(value: string, state: DirectoryState, workerRoot: string, vars: Map<string, string>): ShellTarget {
+  const cleanValue = value.replace(/^\d+/, "").replace(/^>/, "");
+  const resolved = resolveToken(cleanValue, vars);
+  if (!cleanValue || NULL_TARGETS.has(cleanValue.toLowerCase()) || cleanValue.startsWith("&")) return { value: cleanValue, ignored: true };
+  if (resolved === undefined || state.unknown) return { value: cleanValue };
+  if (absolutePath(resolved)) return { value: cleanValue, resolved: normalized(resolved, workerRoot) };
+  if (state.current === undefined) return { value: cleanValue };
+  return { value: cleanValue, resolved: normalized(resolved, state.current) };
+}
+function commandBody(segment: string): string | undefined {
+  const ts = tokens(segment);
+  if (!ts.length) return undefined;
+  const head = executableName(ts[0]);
+  if (!NESTED_SHELLS.has(head)) return undefined;
+  const flag = ts.findIndex((token, index) => index > 0 && NESTED_SHELL_FLAGS.has(token.toLowerCase()));
+  if (flag < 0) return undefined;
+  let body = ts.slice(flag + 1).join(" ").trim();
+  if (body.startsWith('\\"') && body.endsWith('\\"')) body = body.slice(2, -2);
+  else if (body.length >= 2 && ((body.startsWith('"') && body.endsWith('"')) || (body.startsWith("'") && body.endsWith("'")))) body = body.slice(1, -1);
+  return body.replaceAll('\\"', '"').replaceAll('`"', '"') || undefined;
 }
 
-function deleteTargets(command: string): { targets: string[]; unresolved: boolean } {
-  const vars = assignments(command); const targets: string[] = []; let unresolved = false;
-  const bodies = unwrap(command).flatMap(body => splitSegments(body));
-  for (let i = 0; i < bodies.length; i += 1) {
-    const [segment, separator] = bodies[i]; const ts = tokens(segment); if (!ts.length || !DEL_VERBS.has(ts[0].toLowerCase())) continue;
-    let args: string[] = [];
-    for (let j = 1; j < ts.length; j += 1) {
-      const t = ts[j], low = t.toLowerCase();
-      if ((low === "-path" || low === "-literalpath") && ts[j + 1]) { args.push(...ts[++j].split(",")); continue; }
-      if (VALUE_FLAGS.has(low) || VALUE_FLAGS.has(low.split(":")[0])) { if (!t.includes(":")) j += 1; continue; }
-      if (t.startsWith("-") || t.startsWith("/")) continue;
-      args.push(...t.split(","));
-    }
-    if (args.length === 0 && separator === "|" && i > 0) {
-      const previous = tokens(bodies[i - 1][0]);
-      if (previous.length && ["get-childitem", "gci", "ls", "dir", "get-item", "gi"].includes(previous[0].toLowerCase())) args = previous.slice(1).filter(t => !t.startsWith("-"));
-    }
-    if (!args.length) unresolved = true; else targets.push(...cleanTargets(args, vars));
+function directoryArgument(ts: string[]): string | undefined {
+  const flag = ts.findIndex(token => ["-path", "-literalpath"].includes(token.toLowerCase()));
+  if (flag >= 0) return ts[flag + 1];
+  return ts.slice(1).find(token => !["/d", "-d"].includes(token.toLowerCase()) && !token.startsWith("-"));
+}
+
+function applyDirectoryChange(segment: string, state: DirectoryState, workerRoot: string, vars: Map<string, string>): void {
+  const ts = tokens(segment);
+  if (!ts.length) return;
+  const verb = executableName(ts[0]);
+  if (verb === "popd" || verb === "pop-location") {
+    const previous = state.stack.pop();
+    state.current = previous?.current;
+    state.unknown = previous?.unknown ?? false;
+    return;
   }
-  return { targets, unresolved };
+  if (!["cd", "chdir", "pushd", "set-location", "sl", "push-location"].includes(verb)) return;
+  if (verb === "pushd" || verb === "push-location") {
+    state.stack.push({ current: state.current, unknown: state.unknown });
+  }
+  const argument = directoryArgument(ts);
+  const current = argument === undefined ? undefined : staticDirectory(argument, state.current, workerRoot, vars);
+  state.current = current;
+  state.unknown = argument === undefined || current === undefined;
+}
+
+function collectShellTargets(command: string, initialDirectory: string | undefined, workerRoot: string): {
+  writes: ShellTarget[];
+  deletes: ShellTarget[];
+  unresolvedDelete: boolean;
+} {
+  const vars = assignments(command);
+  const writes: ShellTarget[] = [];
+  const deletes: ShellTarget[] = [];
+  let unresolvedDelete = false;
+  const scan = (body: string, initial: DirectoryState): void => {
+    const segments = splitSegments(body);
+    let previous: [string, string] | undefined;
+    for (const [segment, separator] of segments) {
+      const state: DirectoryState = { current: initial.current, unknown: initial.unknown, stack: [...initial.stack] };
+      applyDirectoryChange(segment, state, workerRoot, vars);
+      const ts = tokens(segment);
+      if (ts.length) {
+        for (const target of redirectionTargets(segment)) writes.push(shellTarget(target, state, workerRoot, vars));
+        const verb = ts[0].toLowerCase();
+        if (COPY_VERBS.has(verb)) {
+          const positional = ts.slice(1).filter(token => !token.startsWith("-") && !token.startsWith("/"));
+          let destination = positional.at(-1);
+          const destinationFlag = ts.findIndex(token => token.toLowerCase() === "-destination");
+          if (destinationFlag >= 0) destination = ts[destinationFlag + 1];
+          if (destination) writes.push(shellTarget(destination, state, workerRoot, vars));
+        }
+        for (let index = 0; index < ts.length; index += 1) {
+          const token = ts[index];
+          if (token === ">" || token === ">>") {
+            if (ts[index + 1]) writes.push(shellTarget(ts[++index], state, workerRoot, vars));
+          } else if (token.startsWith(">") && !token.startsWith(">>") && token.length > 1) {
+            writes.push(shellTarget(token.slice(1), state, workerRoot, vars));
+          } else if (token.startsWith(">>") && token.length > 2) {
+            writes.push(shellTarget(token.slice(2), state, workerRoot, vars));
+          } else if (["out-file", "set-content", "add-content", "tee", "tee-object"].includes(token.toLowerCase())) {
+            const rest = ts.slice(index + 1);
+            const low = rest.map(item => item.toLowerCase());
+            const flag = ["-path", "-filepath", "-literalpath"].find(item => low.includes(item));
+            if (flag && rest[low.indexOf(flag) + 1]) writes.push(shellTarget(rest[low.indexOf(flag) + 1], state, workerRoot, vars));
+            else {
+              for (let offset = 0; offset < rest.length; offset += 1) {
+                if (rest[offset].startsWith("-")) { if (VALUE_FLAGS.has(rest[offset].toLowerCase())) offset += 1; continue; }
+                writes.push(shellTarget(rest[offset], state, workerRoot, vars));
+                break;
+              }
+            }
+          }
+        }
+        if (DEL_VERBS.has(verb)) {
+          const args: string[] = [];
+          for (let index = 1; index < ts.length; index += 1) {
+            const token = ts[index], low = token.toLowerCase();
+            if ((low === "-path" || low === "-literalpath") && ts[index + 1]) { args.push(...ts[++index].split(",")); continue; }
+            if (VALUE_FLAGS.has(low) || VALUE_FLAGS.has(low.split(":")[0])) { if (!token.includes(":")) index += 1; continue; }
+            if (token.startsWith("-") || token.startsWith("/")) continue;
+            args.push(...token.split(","));
+          }
+          if (!args.length && separator === "|" && previous) {
+            const priorTokens = tokens(previous[0]);
+            if (priorTokens.length && ["get-childitem", "gci", "ls", "dir", "get-item", "gi"].includes(priorTokens[0].toLowerCase())) {
+              args.push(...priorTokens.slice(1).filter(token => !token.startsWith("-")));
+            }
+          }
+          if (!args.length) unresolvedDelete = true;
+          for (const target of args) deletes.push(shellTarget(target, state, workerRoot, vars));
+        }
+      }
+      const nested = commandBody(segment);
+      if (nested) scan(nested, { current: state.current, unknown: state.unknown, stack: [...state.stack] });
+      previous = [segment, separator];
+      initial.current = state.current;
+      initial.unknown = state.unknown;
+      initial.stack = state.stack;
+    }
+  };
+  scan(command, { current: initialDirectory, unknown: initialDirectory === undefined, stack: [] });
+  return { writes, deletes, unresolvedDelete };
+}
+
+function writeTargets(command: string, initialDirectory: string | undefined, workerRoot: string): ShellTarget[] {
+  return collectShellTargets(command, initialDirectory, workerRoot).writes;
+}
+
+function deleteTargets(command: string, initialDirectory: string | undefined, workerRoot: string): { targets: ShellTarget[]; unresolved: boolean } {
+  const result = collectShellTargets(command, initialDirectory, workerRoot);
+  return { targets: result.deletes, unresolved: result.unresolvedDelete };
 }
 
 /**
@@ -393,6 +473,30 @@ function protectedRoot(value: string, root: string, roots: string[]): string | u
     return candidate === base || candidate.startsWith(`${base}/`);
   });
 }
+const HARNESS_STATE_SEGMENTS = [".harness", ".commandcode", ".omp", ".pi"];
+
+function pathSegments(value: string): string[] {
+  return value.replaceAll("\\", "/").split("/").filter(Boolean).map(segment => segment.toLowerCase());
+}
+
+function tamperTarget(target: ShellTarget, workerRoot: string): boolean {
+  const candidate = target.resolved ?? target.value;
+  const configured = [process.env.UH_TOOL_GUARD_POLICY, process.env.UH_TOOL_GUARD_LOG].filter(
+    (value): value is string => Boolean(value),
+  );
+  if (configured.some(value => normalized(value, workerRoot) === normalized(candidate, workerRoot))) return true;
+  // Harness state inside the worker root is the protected_root class, which supervision already hard-stops.
+  if (target.resolved !== undefined && inside(candidate, workerRoot, ["."])) return false;
+  if (absolutePath(target.value)) return pathSegments(candidate).some(segment => HARNESS_STATE_SEGMENTS.includes(segment));
+  const segments = pathSegments(candidate);
+  for (let index = 0; index < segments.length; index += 1) {
+    if (!HARNESS_STATE_SEGMENTS.includes(segments[index])) continue;
+    const stateRoot = segments.slice(0, index + 1).join("/");
+    if (!inside(stateRoot, workerRoot, ["."]) && !inside(workerRoot, stateRoot, ["."])) return true;
+  }
+  return false;
+}
+
 function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = ""): ToolGuardDecision {
   const roots = policy.write_roots.join(", ");
   const text = className === "write_outside" ? `CONTRACT: write only under ${roots}. Put the file under ${policy.write_roots[0]} instead.`
@@ -402,6 +506,7 @@ function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = "")
     : className === "agent_client" ? "CONTRACT: no sub-agents. Workers do not start agents, agent CLIs or harness runs. Do the work yourself; if part of it exceeds your scope, end with ESCALATE: <what your orchestrator should delegate>."
     : className === "network_client" ? "CONTRACT: no network or agent clients. Everything you need is on disk; if it is not, end with BLOCKED: <what is missing>."
     : className === "containment_escape" ? "CONTRACT: no launches outside the supervised process tree. Run the work in the foreground of this run instead."
+    : className === "guard_tamper" ? "CONTRACT: the harness policy and its state are not yours to change."
     : `CONTRACT: ${target || "path"} belongs to the harness and is read-only.`;
   return { deny: { class: className, target: target || undefined, reason: text + SUFFIX } };
 }
@@ -453,12 +558,26 @@ export function decideToolCall(
   const args = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   const lowerTool = toolName.toLowerCase();
   const protectedPaths = [...DEFAULT_PROTECTED_PATHS, ...(policy as ToolGuardPolicy & { protected_paths?: string[] }).protected_paths ?? []];
-  const directTarget = ["file_path", "path", "directory", "cwd", "notebook_path"].map(k => args[k]).find(v => typeof v === "string" && v) as string | undefined;
+  const explicitDirectory = ["cwd", "workdir", "directory"].map(key => args[key]).find(
+    value => typeof value === "string" && value,
+  ) as string | undefined;
+  const directTarget = ["file_path", "path", "notebook_path", "directory", "cwd"].map(key => args[key]).find(
+    value => typeof value === "string" && value,
+  ) as string | undefined;
   if (WRITE_TOOLS.has(lowerTool) && directTarget) {
-    const protectedPath = protectedRoot(directTarget, workerRoot, protectedPaths);
+    const target = shellTarget(directTarget, {
+      current: explicitDirectory ? staticDirectory(explicitDirectory, workerRoot, workerRoot, new Map()) : normalized(workerRoot, workerRoot),
+      unknown: Boolean(explicitDirectory && staticDirectory(explicitDirectory, workerRoot, workerRoot, new Map()) === undefined),
+      stack: [],
+    }, workerRoot, new Map());
+    const candidate = target.resolved ?? target.value;
+    if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, directTarget);
+    const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);
-    if (DELETE_TOOLS.has(lowerTool) && !inside(directTarget, workerRoot, policy.write_roots)) return reason("delete_outside", policy, directTarget);
-    if (!DELETE_TOOLS.has(lowerTool) && !inside(directTarget, workerRoot, policy.write_roots)) return reason("write_outside", policy, directTarget);
+    if (!target.resolved || (DELETE_TOOLS.has(lowerTool) && !inside(candidate, workerRoot, policy.write_roots))) {
+      return reason(DELETE_TOOLS.has(lowerTool) ? "delete_outside" : "write_outside", policy, directTarget);
+    }
+    if (!DELETE_TOOLS.has(lowerTool) && !inside(candidate, workerRoot, policy.write_roots)) return reason("write_outside", policy, directTarget);
   }
   if (AGENT_TOOLS.has(lowerTool) && policy.agent_clients.length && !policy.allow_native_subagents) return reason("agent_client", policy);
   if (!SHELL_TOOLS.has(lowerTool)) return {};
@@ -470,17 +589,27 @@ export function decideToolCall(
   if (containmentEscapeInvoked(command)) return reason("containment_escape", policy);
   if (agentClientInvoked(command, new Set(policy.agent_clients.map(client => executableName(client))))) return reason("agent_client", policy);
   if (/\b(?:taskkill|stop-process|kill\s+-9)\b|\bformat\s+[a-z]:/i.test(command)) return reason("kill_or_format", policy);
-  const deletes = deleteTargets(command);
+  const vars = assignments(command);
+  const initialDirectory = explicitDirectory
+    ? staticDirectory(explicitDirectory, workerRoot, workerRoot, vars)
+    : normalized(workerRoot, workerRoot);
+  const deletes = deleteTargets(command, initialDirectory, workerRoot);
   for (const target of deletes.targets) {
-    const protectedPath = protectedRoot(target, workerRoot, protectedPaths);
+    if (target.ignored) continue;
+    const candidate = target.resolved ?? target.value;
+    if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, target.value);
+    const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);
-    if (!inside(target, workerRoot, policy.write_roots)) return reason("delete_outside", policy, target);
+    if (!target.resolved || !inside(candidate, workerRoot, policy.write_roots)) return reason("delete_outside", policy, target.value);
   }
   if (deletes.unresolved) return reason("delete_outside", policy);
-  for (const target of writeTargets(command)) {
-    const protectedPath = protectedRoot(target, workerRoot, protectedPaths);
+  for (const target of writeTargets(command, initialDirectory, workerRoot)) {
+    if (target.ignored) continue;
+    const candidate = target.resolved ?? target.value;
+    if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, target.value);
+    const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);
-    if (!inside(target, workerRoot, policy.write_roots)) return reason("write_outside", policy, target);
+    if (!target.resolved || !inside(candidate, workerRoot, policy.write_roots)) return reason("write_outside", policy, target.value);
   }
   return {};
 }
