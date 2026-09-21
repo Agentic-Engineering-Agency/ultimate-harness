@@ -40,7 +40,8 @@ export function nativeRuntimeRoute(value: unknown): RuntimeRoute | undefined {
   const requestRoute = type === "model_request_start" || type === "model_request_end";
   const messageRoute = ["message", "message_start", "message_end"].includes(type) &&
     message.role === "assistant";
-  if (!claudeInit && !claudeAssistant && !requestRoute && !messageRoute) return undefined;
+  const codexRoute = ["thread.started", "turn.started", "turn.completed"].includes(type);
+  if (!claudeInit && !claudeAssistant && !requestRoute && !messageRoute && !codexRoute) return undefined;
   const provider = message.provider ?? event.provider;
   const model = message.model ?? event.model;
   const providerId = typeof provider === "string" && provider ? provider : undefined;
