@@ -109,6 +109,7 @@ For a team, each worker requires an accepted `adapter` id and a non-empty `role`
 | `deny_package_installs` | Deny package-manager install or add commands. | `true` |
 | `deny_network_clients` | Deny network clients. | `true`, or `false` when `runtime_requirements.needs_network` is true and the field is omitted |
 | `agent_clients` | Executable names treated as agent clients. Always enforced; an explicit empty list is the only opt-out. | `["omp", "cmdc", "codex", "pi", "hermes", "aider", "gemini", "claude", "opencode", "qwen", "goose", "cursor-agent"]` |
+| `allow_native_subagents` | Lets the runtime use its own sub-agent tool (`task`, `agent`, ...). Agent CLIs and UH runs stay denied. Every delegated agent is still held to the assigned route: a different provider or model stops the run with `route_mismatch`. | `false` |
 
 The mission transform resolves a supplied mission block with `resolveToolGuardPolicy`; a worker block is retained as the worker's guard contract. The guard compares target paths only and does not inspect file content. Protected roots are a separate supervisor policy; their defaults are `.harness`, `.commandcode`, `.omp`, `.pi`, and `.git`. The adapter writes the resolved policy and the protected paths to `tool-guard.json` in each run directory. See [Tool Guard](../tool-guard.md) and [Native Runtime Events](./runtime-events.md).
 

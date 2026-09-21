@@ -48,6 +48,34 @@ export function nativeRuntimeRoute(value: unknown): RuntimeRoute | undefined {
   return providerId || modelId ? { provider: providerId, model: modelId } : undefined;
 }
 
+/**
+ * Routes of agents a runtime delegated to, read only from the structured
+ * `details.progress[]` / `details.jobs[]` metadata of native tool events.
+ * Tool arguments and tool text content are never read.
+ */
+export function nativeDelegatedRoutes(value: unknown): RuntimeRoute[] {
+  const event = nativeRuntimeEvent(value);
+  if (!event || !["tool_execution_update", "tool_execution_end"].includes(String(event.type))) return [];
+  const details = record(record(event.partialResult)?.details) ?? record(record(event.result)?.details);
+  if (!details) return [];
+  const routes: RuntimeRoute[] = [];
+  for (const entry of [details.progress, details.jobs].flatMap(list => Array.isArray(list) ? list : [])) {
+    const job = record(entry);
+    const resolved = typeof job?.resolvedModel === "string" ? job.resolvedModel.replace(/:[^:/]*$/, "") : undefined;
+    const identity = typeof job?.resolvedModelIdentity === "string" && job.resolvedModelIdentity ? job.resolvedModelIdentity : resolved;
+    if (!identity) continue;
+    const slash = identity.indexOf("/");
+    routes.push(slash > 0 ? { provider: identity.slice(0, slash), model: identity.slice(slash + 1) } : { model: identity });
+  }
+  return routes;
+}
+
+/** The first delegated route outside the assignment, rendered as `provider/model`. */
+export function delegatedRouteMismatch(value: unknown, expected: RuntimeRoute | undefined): string | undefined {
+  const route = nativeDelegatedRoutes(value).find(candidate => runtimeRouteMismatch(candidate, expected));
+  return route ? [route.provider, route.model].filter(Boolean).join("/") : undefined;
+}
+
 export function runtimeRouteMismatch(observed: RuntimeRoute | undefined, expected: RuntimeRoute | undefined): boolean {
   if (!expected) return false;
   return !!observed && ((observed.provider !== undefined && expected.provider !== undefined && observed.provider !== expected.provider) ||
@@ -333,6 +361,8 @@ export class RuntimeSupervision {
     const type = event.type;
     const route = nativeRuntimeRoute(event);
     if (runtimeRouteMismatch(route, this.expectedRoute)) return this.stop("Runtime reported a route outside the configured assignment", "route_mismatch");
+    const delegated = delegatedRouteMismatch(event, this.expectedRoute);
+    if (delegated) return this.stop(`Delegated agent ran on a route outside the configured assignment: ${delegated}`, "route_mismatch");
     if (route?.provider) this.observedRoute.provider = route.provider;
     if (route?.model) this.observedRoute.model = route.model;
     const session = event.sessionId ?? event.session_id ?? (type === "session" ? event.id : undefined);

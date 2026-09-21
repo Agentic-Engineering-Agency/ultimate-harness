@@ -38,6 +38,20 @@ after interruption. Missing counters remain unknown. Live usage is observational
 not a token/context budget. See [native events](./architecture/runtime-events.md)
 and [remaining runtime work](./ROADMAP.md#runtime-reliability-and-accounting).
 
+### oh-my-pi route isolation
+
+OMP resolves helper and sub-agent models from the operator's global `modelRoles`, and
+`task.eager` can make it delegate without being asked. `--model` pins only the top-level
+session. Each UH run therefore writes `omp-overlay.yml` into the run directory and passes it
+with `--config`; an overlay outranks OMP's project and global settings per key. The overlay
+pins the `default`, `smol`, `slow`, `plan`, `task`, `commit`, `advisor`, `tiny`, `vision` and
+`designer` roles to the assigned model, sets `task.eager: default`, disables the advisor, and
+sets `task.maxRecursionDepth` to `0`, which removes the native `task` tool. A mission whose guard
+sets `allow_native_subagents: true` gets depth `1` on the same pinned roles. Custom role names in
+the operator's settings are not known to UH; delegated-route attestation is the backstop for
+those. Behavior verified against oh-my-pi source at commit `3ed46dc`
+(`config/settings.ts` merge precedence, `task/types.ts` `canSpawnAtDepth`).
+
 ## Adapter Contracts
 
 All adapters should:
@@ -141,7 +155,7 @@ For guarded Command Code calls, a completed tool without guard-log evidence stop
 | `turn_limit` | The attempt reaches or exceeds `max_turns` during turn evaluation (`turn_start` or `turn_end`). | No |
 | `output_limit` | Output size exceeds `max_output_bytes`. | No |
 | `policy` | A write-class tool or shell mutation verb attempts to modify a protected root. | No |
-| `route_mismatch` | Runtime reports a provider or model route outside the expected assignment. | No |
+| `route_mismatch` | Runtime reports a provider or model route outside the expected assignment, at the top level or for a delegated sub-agent reported in native tool metadata. | No |
 | `route_unverified` | Runtime completes without attesting the configured provider or model route. | No |
 | `cancelled` | The attempt was cancelled by operator request (`uh mission cancel`, `SIGINT`, or `SIGTERM`). | No |
 | `runtime_error` | The runtime adapter terminates abnormally or encounters an unhandled runtime failure. | No |

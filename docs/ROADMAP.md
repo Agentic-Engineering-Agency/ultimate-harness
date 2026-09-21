@@ -105,9 +105,6 @@ Fixture checks do not establish live model behavior, and stale results do not
 establish the current revision. See [acceptance procedures](./runbooks/acceptance.md)
 and [verification](./verification/checks.md).
 
-The report renderer currently emits evidence links even when no evidence exists,
-and those paths are not relative to the generated document. Make absent evidence
-non-linking and resolve present artifact links correctly before publishing reports.
 The default no-evidence report is a registry view, not a portable evidence bundle.
 
 **v0.9.0 (current release, "Memory & adapter matrix" — [Linear UH-131 / UH-136 / UH-137](https://linear.app/agenticengineering-agency/team/UH/active); GitHub PRs #204–#206 / #214 / #215 / #216):** bundles everything merged to `dev` since v0.8.0. Ships a **native Anthropic adapter** (`anthropic`, `status: experimental`, #214) — the official, ToS-clean pay-per-token Messages-API path (`ANTHROPIC_API_KEY` env-only, blocked classification, graceful no-key checker, optional live-smoke CI job); **Honcho memory operations** (#215) — `honcho_search` / `honcho_remember` harness-side ops + per-mission `runtime_config.honcho_memory` opt-out on every Honcho-aware adapter; **team-run dogfood fixes** (#216) — UH-127 `passed_partial` verdict (no more false BLOCKED), UH-128 per-worker artifact-bleed fix, UH-129 `integration_report_path` default under `.harness/missions/<id>/team/`, UH-130 constraints-advisory warning; and **Phase-0 DX hardening** (#204–#206) — real `uh --version` from `package.json`, an opt-in PostHog telemetry primitive (unwired; UH-135 follow-up), adoption docs, a curated npm `files:` allowlist, and CI plugin gates. Will be published as `@agenticengineeringagency/ultimate-harness@0.9.0` on npm `latest` (tagged `v0.9.0` + `plugin-v0.9.0` on `main` via the dev→main release PR). See [`CHANGELOG.md`](../CHANGELOG.md) `[0.9.0]`.

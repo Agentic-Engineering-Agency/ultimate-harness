@@ -11,9 +11,19 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial, which let a networked worker start its own agents. Workers may not spawn agents; an explicit `guard.agent_clients: []` is now the only opt-out.
 - Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
 
+### Added
+
+- `guard.allow_native_subagents` (default `false`). Native sub-agent tools (`task`, `agent`, `subagent`, `spawn_agent`, `dispatch_agent`, `delegate`) are denied by tool name for every role; a denied worker is told to end with `ESCALATE: <what its orchestrator should delegate>`.
+- Delegated-agent route attestation. Supervision reads the structured `details.progress[]` / `details.jobs[]` metadata of native tool events and stops the run with `route_mismatch`, naming the route, when a sub-agent runs on a provider or model outside the assignment. Tool arguments and tool text are never read.
+- oh-my-pi runs now receive a per-run `omp-overlay.yml` through `--config`. It pins every OMP model role to the assigned model, sets `task.eager: default`, disables the advisor, and sets `task.maxRecursionDepth: 0` so the native `task` tool is not offered (`1` when the guard allows native sub-agents).
+
+- Project fleet policy. `fleet.routes` in `.harness/project.yaml` lists the models the project authorizes, per adapter and role. `uh mission run`, `run-all` and every `run-team` worker are refused before spawn when the assigned model is missing or outside the fleet. `--force` does not bypass it. A project without a `fleet` block is unchanged.
+
 ### Fixed
 
 - Tool Guard now judges agent clients by executable position instead of a whole-command text match. `codex.cmd`, `omp.exe`, path-qualified binaries, the PowerShell call operator, `env`/`xargs`/`pnpm dlx` launchers, `bash -c` bodies and command substitutions are denied; `grep -r omp src` and `cat docs/codex.md` are no longer false denials that consumed a worker's denial budget.
+- An oh-my-pi worker assigned `openai-codex/gpt-5.6-luna` spent tokens on `google-antigravity/gemini-3.7-flash` during a self-hosted run. The operator's global OMP settings (`task.eager: preferred`, `modelRoles.smol`) were inherited, `--model` pinned only the top-level session, the native `task` tool is not a shell tool so Tool Guard never judged it, and route attestation read only top-level messages. Replaying that run's `events.ndjson` through the corrected supervisor stops at event 380 of 4,529.
+- The acceptance report no longer links evidence that does not exist, and present evidence links resolve from `docs/acceptance/`. Implemented by a guarded `gpt-5.6-luna` worker that UH ran against its own repository.
 - Workers can no longer start paid runtimes through UH itself (`uh mission run`, `run-all`, `run-team`, `uh acceptance run`, or `node dist/cli.js ...`). Read-only UH commands stay available, and the Claude Code orchestrator role keeps its controller-command allowance.
 
 ## [0.11.0] — 2026-09-21

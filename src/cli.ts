@@ -25,6 +25,7 @@ import { dryRunPi, runPi } from "./adapters/pi.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
+import { assertFleetAdmission } from "./harness/fleet-policy.js";
 import { chooseAdapter, formatAutoRouteExplain } from "./harness/auto-route.js";
 import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabilities/index.js";
 import { forecastCost } from "./harness/cost-forecast.js";
@@ -1275,6 +1276,14 @@ missionCmd
         return;
       }
     }
+    try {
+      await assertFleetAdmission(root, filePath, runtime, extraRuntimeConfigOverrides);
+    } catch (err) {
+      console.error(`[BLOCKED] ${(err as Error).message}`);
+      console.error(`  authorize the route under fleet.routes in .harness/project.yaml; --force does not bypass spend authorization`);
+      process.exit(1);
+      return;
+    }
     console.log(`Running mission: ${filePath}`);
     console.log(`Runtime: ${runtime}`);
     if (opts.runId) {
@@ -1405,6 +1414,15 @@ missionCmd
       }
     }
     const canonicalMissionPath = path.join(root, ".harness", "missions", missionId, "mission.yaml");
+    for (const rt of requested) {
+      try {
+        await assertFleetAdmission(root, canonicalMissionPath, rt);
+      } catch (err) {
+        console.error(`[BLOCKED] ${rt}: ${(err as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
     if (opts.force !== true) {
       for (const rt of requested) {
         try {
@@ -1534,6 +1552,7 @@ missionCmd
           const wiring = RUNTIME_WIRINGS[adapter];
           if (!wiring) throw new Error(`Unknown adapter: ${adapter}`);
           void rt;
+          await assertFleetAdmission(root, missionPath, adapter);
           const recovery = await resolveRuntimeRecoveryPolicy(effectiveRoot, missionPath, adapter);
           return runWithRuntimeRecovery({
             root: runtimeOptions.artifactRoot, runtime: adapter, runId: runtimeOptions.runId,
