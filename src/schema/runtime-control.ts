@@ -20,7 +20,7 @@ export const ToolGuardPolicySchema = z.object({
   deny_git_mutations: z.boolean().default(true),
   deny_package_installs: z.boolean().default(true),
   deny_network_clients: z.boolean().default(true),
-  agent_clients: z.array(z.string().min(1)).default(["omp", "cmdc", "codex", "pi", "hermes", "aider", "gemini"]),
+  agent_clients: z.array(z.string().min(1)).default(["omp", "cmdc", "codex", "pi", "hermes", "aider", "gemini", "claude", "opencode", "qwen", "goose", "cursor-agent"]),
 }).strict();
 export type ToolGuardPolicy = z.infer<typeof ToolGuardPolicySchema>;
 
