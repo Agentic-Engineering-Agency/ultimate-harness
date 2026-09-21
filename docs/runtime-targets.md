@@ -237,3 +237,69 @@ For a running native OMP mission, the CLI handles `SIGINT` and `SIGTERM`, cancel
 The runtime result, run index, latest pointer, and terminal event report `cancelled`. The existing session schema has no `cancelled` state: its terminal representation is `failed` with exit code `143` and a finish timestamp. Mission mirrors update only for the selected run, and partial sandbox files remain available.
 
 An uncatchable OS force-kill cannot execute this finalization path.
+
+## Terminal Contract
+
+Hosts such as terminal multiplexers and desktop orchestrators run `uh` as an ordinary process in a managed terminal and wait on its output and exit code.
+
+### Mission Run Terminal Contract
+
+`uh mission run [file] [options]` executes a mission and reports settlement status to host environments.
+
+#### Quiet Mode (`--quiet`)
+- `--quiet`: Suppresses runtime stdout and stderr streams. All harness lifecycle messages, preflight checks, and settlement markers continue to print normally. Without `--quiet`, default behavior is unchanged.
+
+#### Settlement Line
+At the conclusion of a mission run, `uh mission run` always prints, as the **LAST line of stdout**, one machine-parseable settlement line:
+
+```
+UH_RESULT <single-line-json>
+```
+
+The payload is a JSON object with the following fields:
+- `mission_id` (string): The identifier of the mission.
+- `run_id` (string): The specific run identifier.
+- `runtime` (string): The active runtime adapter id.
+- `status` (string): Outcome status (`passed`, `failed`, `blocked`, or `cancelled`).
+- `stop_code` (string, optional): The stop code (e.g., `timeout`, `turn_limit`, `policy`), omitted when none.
+- `exit_code` (number): The process exit code for the run.
+- `run_dir` (string): Forward-slash relative path to the run directory from the project root (e.g. `.harness/missions/<mission_id>/runs/<run_id>`). Never contains absolute paths.
+
+#### Exit Codes
+`uh mission run` maps settlement outcomes to deterministic exit codes via `exitCodeForRun(status, stopCode)`:
+- `0` (`passed`): Mission run succeeded.
+- `1` (`failed`): Mission run failed or encountered an unhandled failure.
+- `2` (`blocked`): Mission run was blocked, including preflight checks, auto-route refusals, and fleet budget limits that print `[BLOCKED]`.
+- `130` (`cancelled`): Mission run was cancelled by the harness or via cancellation request.
+- `143`: Reserved for `SIGINT`/`SIGTERM` process termination.
+
+### Observatory Subcommands
+
+#### `uh observatory runs`
+Inspect indexed run history or compute performance summaries across run groups:
+
+```bash
+uh observatory runs [--mission <id>] [--group-by runtime|model|workflow_profile|stop_code] [--json]
+```
+
+- **Without `--group-by`**: Lists run records from `indexRuns`.
+  - Human output: A plain aligned table of runs showing `MISSION_ID`, `RUN_ID`, `RUNTIME`, `MODEL`, `WORKFLOW_PROFILE`, `STATUS`, `STOP_CODE`, `DURATION`, and `COST`.
+  - `--json`: Prints raw `RunRecord[]` array.
+  - Unknown/undefined metrics always render as `unknown`, never as `0` or `$0`.
+- **With `--group-by <dimension>`**: Aggregates runs with `summarizeRuns` across `runtime`, `model`, `workflow_profile`, or `stop_code`, identifying groups on the `paretoFrontier`.
+  - Human output: An aligned table displaying group summaries with a `PARETO` column marking frontier groups (`yes`/`no`).
+  - `--json`: Prints raw structures: `{ summaries, pareto_frontier }`.
+  - Missing values render as `unknown`, never as `0`.
+
+#### `uh observatory export`
+Export a mission run's distributed trace in OpenTelemetry (OTLP) format using `exportRunToOtlp`:
+
+```bash
+uh observatory export <mission-id> --otlp [--run-id <id>] [--out <file>] [--include-tool-targets]
+```
+
+- `<mission-id>`: Target mission identifier.
+- `--otlp`: Mandatory flag specifying OTLP trace export format.
+- `--run-id <id>`: Specific run to export; defaults to the mission's latest run when omitted.
+- `--out <file>`: Writes the JSON trace to the given file, which must resolve strictly inside the project root. When omitted, trace JSON outputs directly to `stdout`.
+- `--include-tool-targets`: Includes target paths/commands in tool execution spans.

@@ -7,7 +7,7 @@ import type { MissionDocument } from "./schema/mission.js";
 import { resolveRuntimeRecoveryPolicy, runWithRuntimeRecovery } from "./harness/runtime-recovery.js";
 import { initializeHarness } from "./harness/init.js";
 import { getStatus } from "./harness/status.js";
-import { assertSafeMissionId, createMission } from "./harness/mission.js";
+import { assertSafeMissionId, createMission, isPathWithin } from "./harness/mission.js";
 import { parseIssueRef, parseRequiredCheck, proposeMission, proposeMissionFromSpec, type ProposeIssueRef, type ProposeRequiredCheck } from "./harness/propose.js";
 import { DEFAULT_VERIFY_COMMAND_TIMEOUT_MS, verifyMission } from "./harness/verify.js";
 import { promoteMission, type PromoteDecision } from "./harness/promote.js";
@@ -42,7 +42,10 @@ import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
-import { readFile as readFileAsync, writeFile as writeFileAsync } from "node:fs/promises";
+import { readFile as readFileAsync, writeFile as writeFileAsync, readdir, mkdir } from "node:fs/promises";
+import { exitCodeForRun } from "./harness/exit-codes.js";
+import { indexRuns, summarizeRuns, paretoFrontier } from "./harness/experience-store.js";
+import { exportRunToOtlp, type OtlpTraceExport } from "./harness/otel-export.js";
 import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js";
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 import { installTelemetryHooks } from "./harness/telemetry.js";
@@ -478,6 +481,185 @@ observatoryCmd
     } catch (err) {
       console.error(`observatory snapshot unavailable: ${(err as Error).message}`);
       process.exitCode = 1;
+    }
+  });
+
+function renderAlignedTable(headers: string[], rows: string[][]): void {
+  const colWidths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)));
+  const headerLine = headers.map((h, i) => h.padEnd(colWidths[i])).join("  ");
+  const separatorLine = colWidths.map((w) => "-".repeat(w)).join("  ");
+  console.log(headerLine);
+  console.log(separatorLine);
+  for (const row of rows) {
+    console.log(row.map((cell, i) => cell.padEnd(colWidths[i])).join("  "));
+  }
+}
+
+observatoryCmd
+  .command("runs")
+  .description("List indexed runs or summarize run groups with Pareto frontier")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--mission <id>", "Filter by mission id")
+  .option("--group-by <dimension>", "Group runs by runtime, model, workflow_profile, or stop_code")
+  .option("--json", "Emit raw structures as JSON")
+  .action(async (opts: { root?: string; mission?: string; groupBy?: string; json?: boolean }) => {
+    try {
+      const root = resolveRoot(opts.root);
+      if (opts.groupBy !== undefined) {
+        const validDimensions = ["runtime", "model", "workflow_profile", "stop_code"] as const;
+        type ValidDimension = typeof validDimensions[number];
+        if (!validDimensions.includes(opts.groupBy as ValidDimension)) {
+          console.error(`Invalid --group-by: must be one of ${validDimensions.join(", ")}`);
+          process.exit(1);
+          return;
+        }
+        const groupBy = opts.groupBy as ValidDimension;
+        const records = await indexRuns(root, { missionId: opts.mission });
+        const summaries = summarizeRuns(records, groupBy);
+        const frontier = paretoFrontier(summaries);
+        const frontierSet = new Set(frontier);
+
+        if (opts.json) {
+          console.log(JSON.stringify({
+            summaries,
+            pareto_frontier: frontier,
+          }, null, 2));
+          return;
+        }
+
+        const headers = [groupBy.toUpperCase(), "RUNS", "PASSED", "SUCCESS_RATE", "MEAN_COST", "TOTAL_COST", "MEAN_DURATION", "PARETO"];
+        const rows = summaries.map((s) => {
+          const keyStr = s.key !== undefined && s.key !== null && s.key !== "" ? String(s.key) : "unknown";
+          const runsStr = String(s.runs);
+          const passedStr = String(s.passed);
+          const successRateStr = Number.isFinite(s.success_rate) ? `${(s.success_rate * 100).toFixed(1)}%` : "unknown";
+          const meanCostStr = s.mean_cost_usd !== undefined ? `$${s.mean_cost_usd.toFixed(4)}` : "unknown";
+          const totalCostStr = s.total_cost_usd !== undefined ? `$${s.total_cost_usd.toFixed(4)}` : "unknown";
+          const meanDurationStr = s.mean_duration_ms !== undefined ? `${Math.round(s.mean_duration_ms)}ms` : "unknown";
+          const paretoStr = frontierSet.has(s) ? "yes" : "no";
+          return [keyStr, runsStr, passedStr, successRateStr, meanCostStr, totalCostStr, meanDurationStr, paretoStr];
+        });
+
+        renderAlignedTable(headers, rows);
+        return;
+      }
+
+      const records = await indexRuns(root, { missionId: opts.mission });
+      if (opts.json) {
+        console.log(JSON.stringify(records, null, 2));
+        return;
+      }
+
+      const headers = ["MISSION_ID", "RUN_ID", "RUNTIME", "MODEL", "WORKFLOW_PROFILE", "STATUS", "STOP_CODE", "DURATION", "COST"];
+      const rows = records.map((r) => {
+        const missionStr = r.mission_id || "unknown";
+        const runStr = r.run_id || "unknown";
+        const runtimeStr = r.runtime || "unknown";
+        const modelStr = r.model || "unknown";
+        const workflowStr = r.workflow_profile || "unknown";
+        const statusStr = r.status || "unknown";
+        const stopCodeStr = r.stop_code || "unknown";
+        const durationStr = r.duration_ms !== undefined ? `${r.duration_ms}ms` : "unknown";
+        const costStr = r.cost_usd !== undefined ? `$${r.cost_usd}` : "unknown";
+        return [missionStr, runStr, runtimeStr, modelStr, workflowStr, statusStr, stopCodeStr, durationStr, costStr];
+      });
+
+      renderAlignedTable(headers, rows);
+    } catch (err) {
+      console.error(`[FAIL] observatory runs error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+observatoryCmd
+  .command("export")
+  .description("Export a mission run trace in OpenTelemetry (OTLP) format")
+  .argument("<mission-id>", "Mission id")
+  .option("--otlp", "Export trace in OpenTelemetry (OTLP) format (required)")
+  .option("--run-id <id>", "Specific run id (default: latest run)")
+  .option("--out <file>", "Output file path (must resolve inside project root)")
+  .option("--include-tool-targets", "Include tool targets in spans")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (missionId: string, opts: { otlp?: boolean; runId?: string; out?: string; includeToolTargets?: boolean; root?: string }) => {
+    if (!opts.otlp) {
+      console.error("uh observatory export requires --otlp");
+      process.exit(1);
+      return;
+    }
+    try {
+      const root = resolveRoot(opts.root);
+
+      let targetOutPath: string | undefined;
+      if (opts.out) {
+        targetOutPath = path.resolve(root, opts.out);
+        if (!isPathWithin(targetOutPath, path.resolve(root))) {
+          console.error(`--out path must resolve inside the project root: ${opts.out}`);
+          process.exit(1);
+          return;
+        }
+      }
+
+      let selectedRunId = opts.runId;
+      const missionRunsDirectory = path.join(root, ".harness", "missions", missionId, "runs");
+      if (!selectedRunId) {
+        const latestPointerPath = path.join(root, ".harness", "missions", missionId, "latest.json");
+        try {
+          const raw = await readFileAsync(latestPointerPath, "utf-8");
+          const parsed = JSON.parse(raw) as { run_id?: string };
+          if (parsed.run_id) {
+            selectedRunId = parsed.run_id;
+          }
+        } catch {
+          // latest.json absent or invalid
+        }
+      }
+
+      if (!selectedRunId) {
+        const indexPath = path.join(missionRunsDirectory, "index.json");
+        try {
+          const raw = await readFileAsync(indexPath, "utf-8");
+          const parsed = JSON.parse(raw) as { entries?: Array<{ run_id: string }> };
+          if (Array.isArray(parsed.entries) && parsed.entries.length > 0) {
+            selectedRunId = parsed.entries[parsed.entries.length - 1].run_id;
+          }
+        } catch {
+          // index.json absent or invalid
+        }
+      }
+
+      if (!selectedRunId) {
+        try {
+          const entries = await readdir(missionRunsDirectory, { withFileTypes: true });
+          const dirNames = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+          if (dirNames.length > 0) {
+            selectedRunId = dirNames[dirNames.length - 1];
+          }
+        } catch {
+          // runs directory absent
+        }
+      }
+
+      if (!selectedRunId) {
+        console.error(`No runs found for mission: ${missionId}`);
+        process.exit(1);
+        return;
+      }
+
+      const runDir = path.join(missionRunsDirectory, selectedRunId);
+      const trace: OtlpTraceExport = await exportRunToOtlp(runDir, {
+        includeToolTargets: opts.includeToolTargets === true,
+      });
+
+      const jsonStr = JSON.stringify(trace, null, 2);
+      if (targetOutPath) {
+        await mkdir(path.dirname(targetOutPath), { recursive: true });
+        await writeFileAsync(targetOutPath, jsonStr + "\n", "utf-8");
+      } else {
+        console.log(jsonStr);
+      }
+    } catch (err) {
+      console.error(`[FAIL] observatory export error: ${(err as Error).message}`);
+      process.exit(1);
     }
   });
 
@@ -1189,7 +1371,8 @@ missionCmd
   .option("--run-id <id>", "Explicit run id; auto-generated if omitted")
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string; auto?: boolean; explain?: boolean }) => {
+  .option("--quiet", "Do not print the runtime's stdout or stderr")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -1217,7 +1400,7 @@ missionCmd
         }
         if (!decision.adapter) {
           console.error(`[BLOCKED] auto-route: ${decision.reason}`);
-          process.exit(1);
+          process.exit(exitCodeForRun("blocked"));
           return;
         }
         runtime = decision.adapter;
@@ -1251,19 +1434,19 @@ missionCmd
       console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
       console.error(`  pass --force to bypass this safety check`);
-      process.exit(1);
+      process.exit(exitCodeForRun("blocked"));
       return;
     }
     const routing = await resolveSandboxMissionRoot(root, filePath, opts.sandbox);
     if (routing.error) {
       console.error(`[BLOCKED] sandbox routing failed:`);
       console.error(`  error: ${routing.error}`);
-      process.exit(1);
+      process.exit(exitCodeForRun("blocked"));
       return;
     }
     if (routing.sandbox?.backend === "container") {
       console.error(`[BLOCKED] container sandbox mission run requires an OpenSandbox adapter-execution bridge; refusing host execution for sandbox ${routing.sandbox.id}`);
-      process.exit(1);
+      process.exit(exitCodeForRun("blocked"));
       return;
     }
     let extraRuntimeConfigOverrides: Record<string, unknown> | undefined;
@@ -1272,7 +1455,7 @@ missionCmd
         extraRuntimeConfigOverrides = parseRuntimeConfigOverridesJson(opts.runtimeConfigOverrides);
       } catch (e) {
         console.error(`[BLOCKED] ${(e as Error).message}`);
-        process.exit(1);
+        process.exit(exitCodeForRun("blocked"));
         return;
       }
     }
@@ -1281,7 +1464,7 @@ missionCmd
     } catch (err) {
       console.error(`[BLOCKED] ${(err as Error).message}`);
       console.error(`  authorize the route under fleet.routes in .harness/project.yaml; --force does not bypass spend authorization`);
-      process.exit(1);
+      process.exit(exitCodeForRun("blocked"));
       return;
     }
     console.log(`Running mission: ${filePath}`);
@@ -1300,46 +1483,112 @@ missionCmd
     console.log("");
     let result: { exitCode: number; stdout: string; stderr: string; result?: { status?: string; errors?: string[] }; runId?: string };
     const cancellationController = new AbortController();
+    let recovery: { missionId: string; recovery: unknown };
     try {
-      const recovery = await resolveRuntimeRecoveryPolicy(routing.effectiveRoot, routing.missionPath, runtime, extraRuntimeConfigOverrides);
+      recovery = await resolveRuntimeRecoveryPolicy(routing.effectiveRoot, routing.missionPath, runtime, extraRuntimeConfigOverrides);
       result = await runWithRuntimeRecovery({
         root, runtime, runId, ...recovery, extraRuntimeConfigOverrides,
         cancellationSignal: cancellationController.signal,
         run: async (attempt) => {
           const uninstall = await installRuntimeCancelledEventHandler(root, routing.missionPath, runtime, attempt.runId, cancellationController);
           try {
-            return await wiring.run(routing.effectiveRoot, routing.missionPath, {
+            const runRes = await wiring.run(routing.effectiveRoot, routing.missionPath, {
               ...attempt, artifactRoot: root, cancellationSignal: cancellationController.signal,
             });
+            return { ...runRes, runId: attempt.runId };
           } finally { uninstall(); }
         },
       });
     } catch (err) {
       console.log("[FAIL] mission run error:");
       console.log(`  error: ${(err as Error).message}`);
-      process.exit(1);
+      process.exit(exitCodeForRun("failed"));
       return;
     }
+    const missionId = recovery.missionId;
+    const finalRunId = result.runId ?? runId;
+    const runDir = path.join(root, ".harness", "missions", missionId, "runs", finalRunId);
+    const relativeRunDir = path.relative(path.resolve(root), runDir).replace(/\\/g, "/");
+
     if (result.runId && (!opts.runId || result.runId !== runId)) {
       console.log(`Run id: ${result.runId}`);
     }
-    if (result.stdout) {
-      console.log(result.stdout);
+    if (!opts.quiet) {
+      if (result.stdout) {
+        console.log(result.stdout);
+      }
+      if (result.stderr) {
+        console.error(result.stderr);
+      }
     }
-    if (result.stderr) {
-      console.error(result.stderr);
+
+    let controlStatus: string | undefined;
+    let controlStopCode: string | undefined;
+    try {
+      const controlPath = path.join(runDir, "runtime-control.json");
+      const controlData = JSON.parse(await readFileAsync(controlPath, "utf8"));
+      controlStatus = controlData?.status;
+      controlStopCode = controlData?.stop_code;
+    } catch {
+      // artifact not present
     }
+
+    let resultYamlStatus: string | undefined;
+    let resultYamlStopCode: string | undefined;
+    try {
+      const resultPath = path.join(runDir, "runtime-result.yaml");
+      const resultData = parseYaml(await readFileAsync(resultPath, "utf8")) as Record<string, unknown>;
+      resultYamlStatus = typeof resultData?.status === "string" ? resultData.status : undefined;
+      resultYamlStopCode = typeof resultData?.stop_code === "string" ? resultData.stop_code : undefined;
+    } catch {
+      // artifact not present
+    }
+
+    let status: string;
+    if (result.exitCode === 130 || controlStopCode === "cancelled" || controlStatus === "cancelled" || resultYamlStatus === "cancelled") {
+      status = "cancelled";
+    } else if (wiring.surfaceBlocked && result.result?.status === "blocked") {
+      status = "blocked";
+    } else if (controlStatus === "blocked" || resultYamlStatus === "blocked") {
+      status = "blocked";
+    } else if (result.exitCode === 0 && (resultYamlStatus === "passed" || controlStatus === "passed" || result.result?.status === "passed" || (!resultYamlStatus && !controlStatus))) {
+      status = "passed";
+    } else {
+      status = controlStatus ?? resultYamlStatus ?? result.result?.status ?? (result.exitCode === 0 ? "passed" : "failed");
+    }
+
+    const finalStopCode = controlStopCode ?? resultYamlStopCode;
+    const runExitCode = exitCodeForRun(status, finalStopCode);
+
     if (wiring.surfaceBlocked && result.result?.status === "blocked") {
       console.log(`[BLOCKED] mission classified as blocked`);
       for (const e of result.result.errors ?? []) {
         console.log(`  error: ${e}`);
       }
-      process.exit(1);
     }
-    if (result.exitCode !== 0) {
+    else if (result.exitCode !== 0) {
       console.log(`[FAIL] mission exited with code ${result.exitCode}`);
-      process.exit(result.exitCode);
     }
+
+    const settlementPayload: {
+      mission_id: string;
+      run_id: string;
+      runtime: string;
+      status: string;
+      stop_code?: string;
+      exit_code: number;
+      run_dir: string;
+    } = {
+      mission_id: missionId,
+      run_id: finalRunId,
+      runtime,
+      status,
+      ...(finalStopCode ? { stop_code: finalStopCode } : {}),
+      exit_code: runExitCode,
+      run_dir: relativeRunDir,
+    };
+    console.log(`UH_RESULT ${JSON.stringify(settlementPayload)}`);
+    process.exit(runExitCode);
   });
 
 missionCmd
