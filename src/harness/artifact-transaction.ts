@@ -3,8 +3,42 @@ import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+
+const RETRYABLE_RENAME_CODES: Record<string, true> = { EPERM: true, EACCES: true, EBUSY: true };
+const DEFAULT_RENAME_ATTEMPTS = 10;
+const DEFAULT_RENAME_INITIAL_DELAY_MS = 10;
+const DEFAULT_RENAME_MAX_DELAY_MS = 200;
+
+export interface RenameRetryOptions {
+  attempts?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  delay?: (milliseconds: number) => Promise<void>;
+  rename?: typeof rename;
+}
+
+export async function renameWithRetry(from: string, to: string, options: RenameRetryOptions = {}): Promise<void> {
+  const attempts = options.attempts ?? DEFAULT_RENAME_ATTEMPTS;
+  const initialDelayMs = options.initialDelayMs ?? DEFAULT_RENAME_INITIAL_DELAY_MS;
+  const maxDelayMs = options.maxDelayMs ?? DEFAULT_RENAME_MAX_DELAY_MS;
+  const wait = options.delay ?? delay;
+  const replace = options.rename ?? rename;
+  let retryDelay = initialDelayMs;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await replace(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!RETRYABLE_RENAME_CODES[code ?? ""] || attempt >= attempts) throw error;
+      await wait(retryDelay);
+      retryDelay = Math.min(retryDelay * 2, maxDelayMs);
+    }
+  }
+}
+
 /** Atomic replacement with durable contents and unique staging files. */
-export async function writeAtomicArtifact(file: string, content: string): Promise<void> {
+export async function writeAtomicArtifact(file: string, content: string, options?: RenameRetryOptions): Promise<void> {
   const temporary = `${file}.${randomUUID()}.tmp`;
   const handle = await open(temporary, "wx");
   try {
@@ -12,7 +46,7 @@ export async function writeAtomicArtifact(file: string, content: string): Promis
       await handle.writeFile(content, "utf8");
       await handle.sync();
     } finally { await handle.close(); }
-    await rename(temporary, file);
+    await renameWithRetry(temporary, file, options);
   } finally { await rm(temporary, { force: true }); }
 }
 

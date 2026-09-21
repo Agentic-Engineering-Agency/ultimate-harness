@@ -54,6 +54,26 @@ test("local cancellation settles only the selected real child and preserves live
     await rm(root, { recursive: true, force: true });
   }
 });
+test("a failed periodic heartbeat does not stop an otherwise successful run", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-heartbeat-retry-"));
+  const startedAt = Date.now();
+  try {
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write(JSON.stringify({type:'session',id:'heartbeat'})+'\\n'+JSON.stringify({type:'run_end'})+'\\n'); setTimeout(()=>process.exit(0),1300)"],
+      cwd: root,
+      timeoutMs: 5000,
+      artifacts: { directory: path.join(root, "run"), missionId: "one", runId: "one", runtime: "fixture" },
+      persistArtifact: async (_file, content) => {
+        if (JSON.parse(content).status === "running" && Date.now() - startedAt > 500) throw new Error("simulated heartbeat failure");
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.supervisionStopCode).toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 10_000);
 
 test("real process with no progress is stopped without a provider call", async () => {
   const result = await runRuntimeProcess({ command: process.execPath,

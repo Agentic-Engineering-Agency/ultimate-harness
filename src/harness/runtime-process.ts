@@ -6,7 +6,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { writeAtomicArtifact } from "./artifact-transaction.js";
+import { renameWithRetry, writeAtomicArtifact } from "./artifact-transaction.js";
 import { RuntimeCancelRequestSchema, RuntimeControlSchema, RuntimeLimitsSchema, RuntimeRouteSchema, WindowsJobResultSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode } from "../schema/runtime-control.js";
 import { RuntimeSupervision } from "./runtime-supervision.js";
 import { resolveRuntimeCommand } from "./runtime-command.js";
@@ -43,7 +43,7 @@ async function writeGuardianConfig(output: string): Promise<void> {
   const temporary = `${destination}.${process.pid}-${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, GUARDIAN_CONFIG, { flag: "wx" });
-    try { await rename(temporary, destination); }
+    try { await renameWithRetry(temporary, destination); }
     catch (error) { if (!await pathExists(destination)) throw error; }
   } finally {
     await rm(temporary, { force: true }).catch(() => {});
@@ -89,7 +89,7 @@ async function prepareWindowsGuardian(jobDirectory: string, limits: RuntimeLimit
     try {
       await writeGuardianConfig(cachedGuardian);
       await compileGuardian(source, temporary, timeout);
-      try { await rename(temporary, cachedGuardian); }
+      try { await renameWithRetry(temporary, cachedGuardian); }
       catch (error) { if (!await pathExists(cachedGuardian)) throw error; }
       return { guardian: cachedGuardian, info: { mode: "cache", path: cachedGuardian } };
     } catch (error) {
@@ -117,6 +117,7 @@ export interface RuntimeProcessInput {
   getUsage?: () => RuntimeUsage | undefined;
   cancellationSignal?: AbortSignal;
   artifacts?: { directory: string; missionId: string; runId: string; runtime: string };
+  persistArtifact?: (file: string, content: string) => Promise<void>;
 }
 export interface RuntimeProcessOutput {
   stdout: string;
@@ -167,7 +168,8 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
   let guardianInfo: GuardianInfo | undefined;
   const persist = async (status: "running" | "passed" | "failed" | "cancelled"): Promise<void> => {
     if (!scope) return;
-    await writeAtomicArtifact(path.join(scope.directory, "runtime-control.json"), JSON.stringify(RuntimeControlSchema.parse({
+    const controlPath = path.join(scope.directory, "runtime-control.json");
+    await (input.persistArtifact ?? writeAtomicArtifact)(controlPath, JSON.stringify(RuntimeControlSchema.parse({
       schema_version: "uh.runtime-control.v0", mission_id: scope.missionId, run_id: scope.runId,
       runtime: scope.runtime, controller_pid: process.pid, started_at: new Date(started).toISOString(),
       heartbeat_at: new Date().toISOString(), status, permission_mode: input.permissionMode,
@@ -182,6 +184,14 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       usage: input.getUsage?.(),
       peak_memory_bytes: peakMemoryBytes, settlement_confirmed: settlementConfirmed,
     })));
+  };
+  let heartbeatPersistenceFailures = 0;
+  const persistHeartbeat = async (): Promise<void> => {
+    try {
+      await persist("running");
+    } catch {
+      heartbeatPersistenceFailures += 1;
+    }
   };
   if (scope) {
     await mkdir(scope.directory, { recursive: true });
@@ -321,7 +331,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         }
         if (!finished && Date.now() - lastHeartbeat >= 1000) {
           lastHeartbeat = Date.now();
-          enqueue(() => persist("running"));
+          enqueue(persistHeartbeat);
         }
       })().catch(() => stop("Runtime supervision failed")).finally(() => { polling = false; });
     }, 100);
