@@ -243,7 +243,6 @@ function toolTarget(event: Event, args: Event | undefined): string | undefined {
   if (typeof args?.command === "string") return args.command.slice(0, 120);
   return typeof event.command === "string" ? event.command.slice(0, 120) : undefined;
 }
-
 function guardDenialReason(event: Event): string | undefined {
   const find = (value: unknown, depth: number): string | undefined => {
     if (depth > 4) return undefined;
@@ -265,6 +264,37 @@ function guardDenialReason(event: Event): string | undefined {
   };
   return find(event.result, 0) ?? find(event.text, 0) ?? find(event.content, 0);
 }
+
+
+function guardTamperRecord(value: unknown, depth = 0): boolean {
+  if (depth > 4) return false;
+  if (Array.isArray(value)) return value.some(item => guardTamperRecord(item, depth + 1));
+  const item = record(value);
+  if (!item) return false;
+  if (item.class === "guard_tamper") return true;
+  return Object.values(item).some(child => guardTamperRecord(child, depth + 1));
+}
+
+function guardTamperEvent(event: Event): boolean {
+  if (!["tool_denied", "tool_hook_blocked", "tool_call_blocked"].includes(String(event.type))) return false;
+  return guardTamperRecord(event);
+}
+
+function guardLogEntries(logPath: string): { lines: number; tamper: boolean } {
+  if (!existsSync(logPath)) return { lines: 0, tamper: false };
+  try {
+    const entries = readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean);
+    return {
+      lines: entries.length,
+      tamper: entries.some(line => {
+        try { return guardTamperRecord(JSON.parse(line), 0); } catch { return false; }
+      }),
+    };
+  } catch {
+    return { lines: 0, tamper: false };
+  }
+}
+
 
 function claudeNativeEvents(event: Event): Event[] {
   const derived: Event[] = [];
@@ -453,11 +483,12 @@ export class RuntimeSupervision {
   private verifyGuardInvocation(id: string): void {
     if (this.permissionMode !== "guard" || !id || this.guardCompletedCalls.has(id)) return;
     this.guardCompletedCalls.add(id);
-    let lines = 0;
-    if (this.guardLogPath && existsSync(this.guardLogPath)) {
-      try { lines = readFileSync(this.guardLogPath, "utf8").split(/\r?\n/).filter(Boolean).length; } catch { lines = 0; }
+    const evidence = this.guardLogPath ? guardLogEntries(this.guardLogPath) : { lines: 0, tamper: false };
+    if (evidence.tamper) {
+      this.stop("Guard tamper attempted", "policy");
+      return;
     }
-    if (lines < this.guardCompletedCalls.size) {
+    if (evidence.lines < this.guardCompletedCalls.size) {
       this.guardArmed = false;
       const reason = this.hookCalls.has(id) ? "Guard hook ran but could not log" : "Guard hook did not run";
       this.stop(`${reason}; refusing to continue with permissions enabled`, "policy");
@@ -480,6 +511,7 @@ export class RuntimeSupervision {
   observe(value: unknown, now: number): string | undefined {
     const event = nativeRuntimeEvent(value);
     if (!event) return undefined;
+    if (guardTamperEvent(event)) return this.stop("Guard tamper attempted", "policy");
     const type = event.type;
     const route = nativeRuntimeRoute(event);
     if (runtimeRouteMismatch(route, this.expectedRoute)) return this.stop("Runtime reported a route outside the configured assignment", "route_mismatch");

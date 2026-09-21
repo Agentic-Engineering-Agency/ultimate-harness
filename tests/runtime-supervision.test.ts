@@ -1,3 +1,5 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { RuntimeSupervision, nativeRuntimeCompleted, runtimeRouteMismatch, runtimeTerminalFailure, sameRouteIdentifier } from "../src/harness/runtime-supervision.js";
 
@@ -225,7 +227,30 @@ describe("runtime supervision", () => {
     const turnReason = turns.failure;
     turns.observe({ type: "turn_end" }, 4);
     expect(turns.turns).toBe(1);
+
     expect(turns.failure).toBe(turnReason);
+  });
+  test("guard tamper in the guard log is a non-resumable policy stop", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "uh-guard-tamper-"));
+    const logPath = path.join(directory, "tool-guard.log");
+    writeFileSync(logPath, `${JSON.stringify({ class: "guard_tamper", tool: "shell_command" })}\n`);
+    try {
+      const run = new RuntimeSupervision({}, 0, undefined, "C:\\worker", "guard", logPath);
+      run.observe({ type: "tool_execution_start", toolCallId: "tamper", toolName: "shell_command", args: { command: "echo x" } }, 1);
+      run.observe({ type: "tool_execution_end", toolCallId: "tamper", result: { exitCode: 0 } }, 2);
+      expect(run.stopCode).toBe("policy");
+      expect(run.failure).toBe("Guard tamper attempted");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("native guard tamper denials stop before denial-budget accounting", () => {
+    const run = new RuntimeSupervision({ max_denials: 1 }, 0);
+    run.observe({ type: "tool_denied", toolCallId: "tamper", class: "guard_tamper" }, 1);
+    expect(run.stopCode).toBe("policy");
+    expect(run.failure).toBe("Guard tamper attempted");
+    expect(run.denials).toBe(0);
   });
   test("guard permission fails closed when completed tool has no guard-log evidence", () => {
     const run = new RuntimeSupervision({}, 0, undefined, "C:\\worker", "guard", "T:/missing-tool-guard.log");
