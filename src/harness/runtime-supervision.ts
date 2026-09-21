@@ -77,10 +77,27 @@ export function delegatedRouteMismatch(value: unknown, expected: RuntimeRoute | 
   return route ? [route.provider, route.model].filter(Boolean).join("/") : undefined;
 }
 
+/**
+ * Whether two provider or model identifiers name the same route. Comparison
+ * trims and lowercases (locale-independent), and reconciles an optional
+ * `provider/model` prefix: when exactly one side is prefixed, only the part
+ * after its last "/" is compared. Nothing else is normalized; there is no
+ * alias table and no partial or substring matching.
+ */
+export function sameRouteIdentifier(a: string, b: string): boolean {
+  const left = a.trim().toLowerCase();
+  const right = b.trim().toLowerCase();
+  if (left === right) return true;
+  const leftSlash = left.lastIndexOf("/");
+  const rightSlash = right.lastIndexOf("/");
+  if ((leftSlash >= 0) === (rightSlash >= 0)) return false;
+  return leftSlash >= 0 ? left.slice(leftSlash + 1) === right : right.slice(rightSlash + 1) === left;
+}
+
 export function runtimeRouteMismatch(observed: RuntimeRoute | undefined, expected: RuntimeRoute | undefined): boolean {
   if (!expected) return false;
-  return !!observed && ((observed.provider !== undefined && expected.provider !== undefined && observed.provider !== expected.provider) ||
-    (observed.model !== undefined && expected.model !== undefined && observed.model !== expected.model));
+  return !!observed && ((observed.provider !== undefined && expected.provider !== undefined && !sameRouteIdentifier(observed.provider, expected.provider)) ||
+    (observed.model !== undefined && expected.model !== undefined && !sameRouteIdentifier(observed.model, expected.model)));
 }
 export interface NativeCompletionFacts {
   nativeTerminal: boolean;
