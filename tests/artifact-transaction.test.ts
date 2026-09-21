@@ -1,10 +1,79 @@
 import { test, expect } from "vitest";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename as fsRename, writeFile, rm } from "node:fs/promises";
+import { openSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { withArtifactTransaction, writeAtomicArtifact } from "../src/harness/artifact-transaction.js";
 import { appendRunsIndexEntry, writeLatestPointer, readLatestPointer, ensureRunDir, mirrorRuntimeResultToLatest, pruneOldRuns } from "../src/harness/run-id.js";
+
+const retryError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+
+test("atomic artifact retries sharing failures and removes its staging file", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-atomic-retry-"));
+  const file = path.join(root, "state.json");
+  let attempts = 0;
+  try {
+    await writeFile(file, "old");
+    await writeAtomicArtifact(file, "new", {
+      delay: async () => {},
+      rename: async (from, to) => {
+        attempts += 1;
+        if (attempts < 3) throw retryError("EPERM");
+        await fsRename(from, to);
+      },
+    });
+    expect(attempts).toBe(3);
+    expect(await readFile(file, "utf8")).toBe("new");
+    expect((await readdir(root)).filter(name => name.endsWith(".tmp"))).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("atomic artifact preserves the old file after ten sharing failures", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-atomic-fail-"));
+  const file = path.join(root, "state.json");
+  try {
+    await writeFile(file, "old");
+    await expect(writeAtomicArtifact(file, "new", {
+      delay: async () => {},
+      rename: async () => { throw retryError("EPERM"); },
+    })).rejects.toMatchObject({ code: "EPERM" });
+    expect(await readFile(file, "utf8")).toBe("old");
+    expect((await readdir(root)).filter(name => name.endsWith(".tmp"))).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("atomic artifact throws non-retryable rename errors immediately", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-atomic-enospc-"));
+  try {
+    await expect(writeAtomicArtifact(path.join(root, "state.json"), "new", {
+      delay: async () => { throw new Error("delay should not run"); },
+      rename: async () => { throw retryError("ENOSPC"); },
+    })).rejects.toMatchObject({ code: "ENOSPC" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform !== "win32")("Windows open destination is retried until the reader closes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-atomic-windows-"));
+  const file = path.join(root, "state.json");
+  const handle = openSync(file, "w");
+  const closeTimer = setTimeout(() => closeSync(handle), 50);
+  let writeError: unknown;
+  try {
+    await writeFile(file, "old");
+    try {
+      await writeAtomicArtifact(file, "new");
+    } catch (error) {
+      writeError = error;
+    }
+    if (writeError) expect((writeError as NodeJS.ErrnoException).code).toMatch(/^(EPERM|EACCES|EBUSY)$/);
+    else expect(await readFile(file, "utf8")).toBe("new");
+  } finally {
+    clearTimeout(closeTimer);
+    try { closeSync(handle); } catch {}
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("concurrent sibling results and replay lineage survive canonical index updates", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "uh-index-transaction-"));
