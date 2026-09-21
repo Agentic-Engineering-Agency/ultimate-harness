@@ -1,0 +1,26 @@
+schema_version: uh.session-template.v0
+id: strict-sandbox
+title: Strict Sandbox Contained Execution
+tier: balanced
+containment: strict
+adapter: hermes
+runtime_config_overrides:
+  model: "<provider/model>"
+  thinking: low
+limits:
+  max_turns: 15
+  timeout_ms: 300000
+  stall_timeout_ms: 60000
+guard:
+  write_roots:
+    - src
+    - tests
+  deny_network_clients: true
+  allow_native_subagents: false
+  deny_git_mutations: true
+  deny_package_installs: true
+recovery:
+  max_resumes: 1
+  notes: Contained resumption within sandbox boundary.
+attempts: 1
+notes: Strict containment template enforcing bounded write roots, disabled native subagents, and disabled network access.
