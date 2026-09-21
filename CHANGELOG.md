@@ -4,6 +4,18 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team/UH/active); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
+## [Unreleased]
+
+### Changed
+
+- Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial, which let a networked worker start its own agents. Workers may not spawn agents; an explicit `guard.agent_clients: []` is now the only opt-out.
+- Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
+
+### Fixed
+
+- Tool Guard now judges agent clients by executable position instead of a whole-command text match. `codex.cmd`, `omp.exe`, path-qualified binaries, the PowerShell call operator, `env`/`xargs`/`pnpm dlx` launchers, `bash -c` bodies and command substitutions are denied; `grep -r omp src` and `cat docs/codex.md` are no longer false denials that consumed a worker's denial budget.
+- Workers can no longer start paid runtimes through UH itself (`uh mission run`, `run-all`, `run-team`, `uh acceptance run`, or `node dist/cli.js ...`). Read-only UH commands stay available, and the Claude Code orchestrator role keeps its controller-command allowance.
+
 ## [0.11.0] — 2026-09-21
 
 ### Added

@@ -61,6 +61,94 @@ function unwrap(command: string): string[] {
   return out;
 }
 
+const NESTED_SHELLS = new Set(["bash", "sh", "zsh", "dash", "powershell", "pwsh", "cmd"]);
+const NESTED_SHELL_FLAGS = new Set(["-command", "-c", "/c", "/k", "-lc"]);
+const LAUNCHERS = new Set(["&", ".", "npx", "bunx", "uvx", "pipx", "env", "sudo", "nohup", "time", "exec", "call", "start", "command", "xargs", "start-process", "saps"]);
+const PACKAGE_RUNNERS = new Set(["pnpm", "yarn", "npm", "bun"]);
+const PACKAGE_RUNNER_VERBS = new Set(["dlx", "exec", "x"]);
+const SCRIPT_HOSTS = new Set(["node", "bun", "deno", "tsx"]);
+const UH_SPAWN_OPERATIONS = new Set(["run", "run-all", "run-team"]);
+
+/** Executable identity of a command token: basename, lowercased, without a Windows launcher extension. */
+function executableName(token: string): string {
+  const base = token.replaceAll("\\", "/").split("/").at(-1) ?? "";
+  return base.toLowerCase().replace(/\.(?:exe|cmd|bat|com|ps1)$/, "");
+}
+
+/** Bodies of `$(...)` and backtick substitutions. Single-quoted text is literal and never scanned. */
+function substitutions(command: string): string[] {
+  const bodies: string[] = [];
+  let single = false;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (ch === "'") { single = !single; continue; }
+    if (single) continue;
+    if (ch === "$" && command[i + 1] === "(") {
+      let depth = 1, j = i + 2;
+      for (; j < command.length && depth > 0; j += 1) {
+        if (command[j] === "(") depth += 1;
+        else if (command[j] === ")") depth -= 1;
+      }
+      bodies.push(command.slice(i + 2, depth === 0 ? j - 1 : j));
+      i += 1;
+    } else if (ch === "`") {
+      const end = command.indexOf("`", i + 1);
+      if (end < 0) break;
+      bodies.push(command.slice(i + 1, end));
+      i = end;
+    }
+  }
+  return bodies;
+}
+
+/** A UH invocation that starts paid runtimes. Read-only UH commands such as `validate` and `status` are not spawns. */
+function uhSpawn(args: string[]): boolean {
+  const positional = args.filter(t => !t.startsWith("-")).map(t => t.toLowerCase());
+  if (positional[0] === "mission") return UH_SPAWN_OPERATIONS.has(positional[1] ?? "");
+  return positional[0] === "acceptance" && positional[1] === "run";
+}
+
+/**
+ * True when a command would start an agent client. Only executable positions are
+ * judged: the head of each shell segment, what a launcher or nested shell would
+ * run, and command substitutions. A client name that appears as an argument,
+ * a search pattern or a path is not an invocation.
+ */
+function agentClientInvoked(command: string, clients: ReadonlySet<string>, depth = 0): boolean {
+  if (!clients.size || depth > 4) return false;
+  for (const body of substitutions(command)) if (agentClientInvoked(body, clients, depth + 1)) return true;
+  for (const [segment] of splitSegments(command)) {
+    const ts = tokens(segment);
+    let i = 0;
+    while (i < ts.length) {
+      if (/^\w+=/.test(ts[i])) { i += 1; continue; }
+      const name = executableName(ts[i]);
+      if (clients.has(name)) return true;
+      if (name === "uh") { if (uhSpawn(ts.slice(i + 1))) return true; break; }
+      if (NESTED_SHELLS.has(name)) {
+        const flag = ts.findIndex((t, index) => index > i && NESTED_SHELL_FLAGS.has(t.toLowerCase()));
+        if (flag >= 0 && agentClientInvoked(ts.slice(flag + 1).join(" "), clients, depth + 1)) return true;
+        break;
+      }
+      if (SCRIPT_HOSTS.has(name)) {
+        const rest = ts.slice(i + 1).filter(t => !t.startsWith("-"));
+        if (rest[0]?.toLowerCase() === "run") rest.shift();
+        const script = (rest[0] ?? "").replaceAll("\\", "/").toLowerCase();
+        if ((script === "dist/cli.js" || script.endsWith("/dist/cli.js")) && uhSpawn(rest.slice(1))) return true;
+        if (!(PACKAGE_RUNNERS.has(name) && PACKAGE_RUNNER_VERBS.has((ts[i + 1] ?? "").toLowerCase()))) break;
+      }
+      if (PACKAGE_RUNNERS.has(name) && PACKAGE_RUNNER_VERBS.has((ts[i + 1] ?? "").toLowerCase())) { i += 2; }
+      else if (LAUNCHERS.has(name)) { i += 1; }
+      else break;
+      // Launcher flags may carry a value, so the token after a flag is judged as well as the next one.
+      let afterFlag = false;
+      while (i < ts.length && (ts[i].startsWith("-") || /^\w+=/.test(ts[i]))) { afterFlag = ts[i].startsWith("-"); i += 1; }
+      if (afterFlag && i + 1 < ts.length && clients.has(executableName(ts[i + 1]))) return true;
+    }
+  }
+  return false;
+}
+
 function assignments(command: string): Map<string, string> {
   const result = new Map<string, string>();
   for (const match of command.matchAll(/\$(\w+)\s*=\s*['"]([^'"]+)['"]/g)) result.set(match[1].toLowerCase(), match[2]);
@@ -302,9 +390,8 @@ export function decideToolCall(
   if (options.allowControllerCommands && isControllerCommand(command)) return {};
   if (policy.deny_git_mutations && gitMutation(command)) return reason("git_mutation", policy);
   if (policy.deny_package_installs && /\b(?:pip|pip3|uv|conda|npm|pnpm|yarn)\s+(?:install|add|i)\b/i.test(command)) return reason("package_install", policy);
-  const executableClients = policy.agent_clients.map(x => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
   if (policy.deny_network_clients && /\b(?:curl|wget|invoke-webrequest|iwr|invoke-restmethod|irm)\b/i.test(command)) return reason("network_client", policy);
-  if (policy.deny_network_clients && executableClients && new RegExp(`(?:^|[\\s"'])(${executableClients})(?:\\s|$)`, "i").test(command)) return reason("agent_client", policy);
+  if (agentClientInvoked(command, new Set(policy.agent_clients.map(client => executableName(client))))) return reason("agent_client", policy);
   if (/\b(?:taskkill|stop-process|kill\s+-9)\b|\bformat\s+[a-z]:/i.test(command)) return reason("kill_or_format", policy);
   const deletes = deleteTargets(command);
   for (const target of deletes.targets) {
