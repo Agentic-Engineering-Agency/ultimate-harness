@@ -318,6 +318,12 @@ export type SandboxMissionRoute = {
   effectiveRoot: string;
   missionPath: string;
   sandbox?: { id: string; path: string; backend: string };
+  /**
+   * Mission id read from the mission file while routing. Present whenever
+   * routing was attempted (`--no-sandbox` skips the read), so callers can
+   * name the mission in a refusal without parsing the file a second time.
+   */
+  missionId?: string;
   error?: string;
 };
 
@@ -361,22 +367,23 @@ export async function resolveSandboxMissionRoot(
   const sandbox = await findBoundSandbox(root, missionId);
   if (!sandbox) {
     const indexPath = sandboxesIndex(root);
-    if (!(await fileExists(indexPath))) return { effectiveRoot: root, missionPath };
+    if (!(await fileExists(indexPath))) return { effectiveRoot: root, missionPath, missionId };
     let index: SandboxesIndexDocument;
     try {
       index = await readIndex(root);
     } catch {
-      return { effectiveRoot: root, missionPath, error: "Sandbox registry is invalid; refusing host-root fallback." };
+      return { effectiveRoot: root, missionPath, missionId, error: "Sandbox registry is invalid; refusing host-root fallback." };
     }
     const hasInvalidBinding = index.sandboxes.some((entry) => entry.mission_id === missionId && entry.status !== "discarded");
     return hasInvalidBinding
-      ? { effectiveRoot: root, missionPath, error: `Sandbox binding for mission ${missionId} is invalid; refusing host-root fallback.` }
-      : { effectiveRoot: root, missionPath };
+      ? { effectiveRoot: root, missionPath, missionId, error: `Sandbox binding for mission ${missionId} is invalid; refusing host-root fallback.` }
+      : { effectiveRoot: root, missionPath, missionId };
   }
   return {
     effectiveRoot: sandbox.path,
     missionPath: path.join(sandbox.path, ".harness", "missions", missionId, "mission.yaml"),
     sandbox,
+    missionId,
   };
 }
 

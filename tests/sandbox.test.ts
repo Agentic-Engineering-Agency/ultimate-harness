@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -11,7 +12,7 @@ import {
 } from "node:fs/promises";
 import { join, normalize } from "node:path";
 import { tmpdir } from "node:os";
-import { parse } from "yaml";
+import { parse, stringify } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { getSandboxBackend, listSandboxBackends, runOpenSandboxCommand } from "../src/harness/sandbox-backends.js";
 import {
@@ -665,5 +666,124 @@ describe("container backend (#155 OpenSandbox)", () => {
       delete process.env.UH_OPENSANDBOX_CREATE_COMMAND;
       delete process.env.UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS;
     }
+  });
+});
+
+async function writeRoutingMission(root: string, id: string): Promise<string> {
+  const missionDir = join(root, ".harness", "missions", id);
+  await mkdir(missionDir, { recursive: true });
+  const missionPath = join(missionDir, "mission.yaml");
+  await writeFile(
+    missionPath,
+    stringify({
+      schema_version: "uh.mission.v0",
+      id,
+      title: `Routing mission ${id}`,
+      objective: "Exercise mission run sandbox routing",
+      workflow_profile: "spec-first-feature",
+    }),
+    "utf-8",
+  );
+  return missionPath;
+}
+
+function settlementLine(stdout: string): {
+  mission_id: string;
+  run_id: string;
+  runtime: string;
+  status: string;
+  exit_code: number;
+  run_dir: string;
+} {
+  const lines = stdout.trim().split(/\r?\n/);
+  const last = lines[lines.length - 1];
+  expect(last).toMatch(/^UH_RESULT /);
+  return JSON.parse(last.slice("UH_RESULT ".length));
+}
+
+describe("mission run sandbox routing", () => {
+  test("refuses a no-flag run in the project root when the mission has no bound sandbox", async () => {
+    const missionPath = await writeRoutingMission(TEST_ROOT, "sr-unbound");
+
+    const refusal = await runUhFailure([
+      "mission", "run", missionPath,
+      "--runtime", "hermes", "--force", "--root", TEST_ROOT,
+    ]);
+
+    expect(refusal.code).toBe(2);
+    expect(refusal.stderr).toContain(
+      '[BLOCKED] mission sr-unbound has no bound sandbox; create one with "uh sandbox create <sandbox-id> --mission sr-unbound" or pass --no-sandbox to run in the project root',
+    );
+    // Refused before the runtime was reached, so nothing else was reported.
+    expect(refusal.stdout).not.toContain("Running mission:");
+    expect(refusal.stdout).not.toContain("Adapter manifest not found");
+
+    const payload = settlementLine(refusal.stdout);
+    expect(payload).toMatchObject({
+      mission_id: "sr-unbound",
+      runtime: "hermes",
+      status: "blocked",
+      exit_code: 2,
+    });
+    expect(payload.run_id).toBeTruthy();
+    expect(payload.run_dir).toBe(`.harness/missions/sr-unbound/runs/${payload.run_id}`);
+
+    // The refusal created no run directory: the project root stays untouched.
+    await expect(stat(join(TEST_ROOT, ".harness", "missions", "sr-unbound", "runs"))).rejects.toThrow();
+  });
+
+  test("--no-sandbox keeps today's root execution and says so", async () => {
+    const missionPath = await writeRoutingMission(TEST_ROOT, "sr-explicit");
+
+    const result = await runUhFailure([
+      "mission", "run", missionPath,
+      "--runtime", "hermes", "--force", "--no-sandbox", "--root", TEST_ROOT,
+    ]);
+
+    expect(result.stdout).toContain("Running mission:");
+    expect(result.stdout).toContain("Sandbox: none (project root, --no-sandbox)");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("has no bound sandbox");
+    // Reached the adapter dispatch (no hermes manifest in this root) rather
+    // than being refused by routing — and no model is ever invoked.
+    expect(`${result.stdout}${result.stderr}`).toContain("Adapter manifest not found");
+  });
+
+  test("dry-run reports the routing decision and never blocks on a missing binding", async () => {
+    const missionPath = await writeRoutingMission(TEST_ROOT, "sr-dry");
+
+    const unbound = await runUhFailure([
+      "mission", "dry-run", missionPath,
+      "--runtime", "hermes", "--force", "--root", TEST_ROOT,
+    ]);
+    expect(unbound.stdout).toContain("Sandbox: none (project root)");
+    expect(`${unbound.stdout}${unbound.stderr}`).not.toContain("has no bound sandbox");
+    expect(unbound.stderr).not.toContain("[BLOCKED]");
+
+    const opted = await runUhFailure([
+      "mission", "dry-run", missionPath,
+      "--runtime", "hermes", "--force", "--no-sandbox", "--root", TEST_ROOT,
+    ]);
+    expect(opted.stdout).toContain("Sandbox: none (project root, --no-sandbox)");
+  });
+
+  test("a bound sandbox still routes the run and the dry-run into the worktree", async () => {
+    const missionPath = await writeRoutingMission(TEST_ROOT, "sr-bound");
+    const record = await createSandbox(TEST_ROOT, { id: "sr-sbx", missionId: "sr-bound" });
+    const worktreeAbs = join(TEST_ROOT, record.path);
+
+    const dryRun = await runUhFailure([
+      "mission", "dry-run", missionPath,
+      "--runtime", "hermes", "--force", "--root", TEST_ROOT,
+    ]);
+    expect(dryRun.stdout).toContain(`Sandbox: sr-sbx (${worktreeAbs})`);
+
+    const run = await runUhFailure([
+      "mission", "run", missionPath,
+      "--runtime", "hermes", "--force", "--root", TEST_ROOT,
+    ]);
+    expect(run.stdout).toContain(`Sandbox: sr-sbx (${worktreeAbs})`);
+    expect(`${run.stdout}${run.stderr}`).not.toContain("has no bound sandbox");
+    // The adapter lookup happened inside the sandbox worktree, not the root.
+    expect(`${run.stdout}${run.stderr}`).toContain(join("sr-sbx", "worktree"));
   });
 });

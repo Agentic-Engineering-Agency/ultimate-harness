@@ -389,7 +389,10 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   }
   const cli = options.cliPath ?? path.resolve(sourceRoot, "dist", "cli.js");
   const args = [cli, "mission", entry.shape === "team" ? "run-team" : "run", entry.shape === "team" ? missionId : path.join(missionDir, "mission.yaml"), "--root", runRoot];
-  if (entry.shape !== "team") args.push("--runtime", runtime, "--force");
+  // The campaign workspace has no bound sandbox by design, so the single-shape
+  // run must opt into root execution explicitly (pushed before the trailing
+  // --runtime-config-overrides pair, which the resume path below slices off).
+  if (entry.shape !== "team") args.push("--runtime", runtime, "--force", "--no-sandbox");
   if (model && entry.shape !== "team") args.push("--runtime-config-overrides", JSON.stringify({ model }));
   await configureAcceptanceSeed(runRoot);
   const cancelRunId = "20260101T000000Z-abcdef";

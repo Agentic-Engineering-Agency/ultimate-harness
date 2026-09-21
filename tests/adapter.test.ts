@@ -417,6 +417,9 @@ describe("uh mission run --runtime hermes", () => {
           "examples/missions/documentation-spine.yaml",
           "--root",
           TEST_ROOT,
+          // The example mission has no bound sandbox, so reaching the adapter
+          // requires opting into project-root execution explicitly.
+          "--no-sandbox",
         ],
         { cwd: process.cwd() }
       );
