@@ -9,13 +9,13 @@ import { fileURLToPath } from "node:url";
 import { relativeArtifactPath } from "../harness/artifact-paths.js";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
-import { registerRuntimeConfigSchema } from "../schema/adapter.js";
+import { registerRuntimeConfigSchema, type AdapterDocument } from "../schema/adapter.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow } from "../schema/workflow.js";
 import { RuntimePricingSchema, validateRuntimeResult, type RuntimeResultDocument } from "../schema/artifacts.js";
 import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, type RuntimeLimits, type RuntimeRecoveryDeadline, DEFAULT_PROTECTED_PATHS, ToolGuardArtifactSchema, type ToolGuardPolicy } from "../schema/runtime-control.js";
 import { estimateConfiguredCost, type RuntimeUsage } from "../harness/usage.js";
-import { runtimeRegistry } from "../harness/registry.js";
+import { runtimeRegistry, type AdapterCheckResult } from "../harness/registry.js";
 import { buildDispatchContext } from "../harness/dispatch-context.js";
 import { renderPrompt } from "../harness/render-prompt.js";
 import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides.js";
@@ -43,16 +43,59 @@ export const CommandCodeRuntimeConfigSchema = z.object({
 }).strict();
 registerRuntimeConfigSchema("command-code", CommandCodeRuntimeConfigSchema);
 const exec = promisify(execFile);
-runtimeRegistry.register("command-code", async (manifest) => {
-  const config = CommandCodeRuntimeConfigSchema.parse(manifest.config?.runtime_config);
+
+export type CommandCodeProbeRunner = (
+  command: string,
+  args: string[],
+) => Promise<{ stdout: string; stderr?: string }>;
+
+export function buildCommandCodeProbeArgs(cliArgs: string[] = []): string[] {
+  return [...cliArgs, "--version", "--no-auto-update"];
+}
+
+const ANSI_CSI_REGEX = /[\u001B\u009B]\[[0-9;?]*[ -/]*[@-~]/g;
+
+export function parseCommandCodeVersion(output: string): string | null {
+  const stripped = output.replace(ANSI_CSI_REGEX, "");
+  const lines = stripped.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const match = lines[i].match(/^v?(\d+\.\d+\.\d+(?:[-+a-zA-Z0-9_.]*[a-zA-Z0-9])?)$/);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+export async function checkCommandCode(
+  manifest: AdapterDocument,
+  root?: string,
+  probe?: CommandCodeProbeRunner,
+): Promise<AdapterCheckResult> {
+  const config = CommandCodeRuntimeConfigSchema.parse(manifest.config?.runtime_config ?? {});
   try {
-    const executable = await resolveRuntimeCommand(manifest.config?.cli_command || "cmdc", [...config.cli_args, "--version"]);
-    const result = await exec(executable.command, executable.args);
-    return { runtime: "command-code", found: true, version: result.stdout.trim(), errors: [] };
+    const probeArgs = buildCommandCodeProbeArgs(config.cli_args);
+    const executable = await resolveRuntimeCommand(manifest.config?.cli_command || "cmdc", probeArgs);
+    const result = probe
+      ? await probe(executable.command, executable.args)
+      : await exec(executable.command, executable.args);
+    const rawOutput = (result.stdout || result.stderr || "").toString();
+    const version = parseCommandCodeVersion(rawOutput);
+    if (!version) {
+      return {
+        runtime: "command-code",
+        found: false,
+        version: "",
+        errors: ["Command Code version not found in probe output"],
+      };
+    }
+    return { runtime: "command-code", found: true, version, errors: [] };
   } catch {
     return { runtime: "command-code", found: false, version: "", errors: ["Configured Command Code CLI could not be executed"] };
   }
-});
+}
+
+runtimeRegistry.register("command-code", checkCommandCode);
 export async function planCommandCodeRun(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown>; artifactRoot?: string } = {}) {
   const mission = validateMission(parse(await readFile(missionPath, "utf8")));
   const adapter = (await runtimeRegistry.load(root, "command-code")).document;
