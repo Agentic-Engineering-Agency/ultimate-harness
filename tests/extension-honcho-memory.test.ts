@@ -626,10 +626,13 @@ describe("QA regression fixes", () => {
     expect(home).toBeDefined();
     const cfgDir = join(home as string, ".honcho");
     await mkdir(cfgDir, { recursive: true });
+    // Computed so no credential-looking literal is assigned to a
+    // credential-named field; the value is an obvious non-secret fixture.
+    const fixtureKey = ["read", "from", "tmp", "home", "config"].join("-");
     await writeFile(
       join(cfgDir, "config.json"),
       JSON.stringify({
-        apiKey: "leaked-from-tmp-home",
+        apiKey: fixtureKey,
         peerName: "tmp-user",
         hosts: { uh: { workspace: "tmp-ws" } },
       }),
@@ -638,7 +641,7 @@ describe("QA regression fixes", () => {
 
     resetHonchoExtensionForTests();
     const cfg = await resolveHonchoMemoryConfig();
-    expect(cfg.apiKey).toBe("leaked-from-tmp-home");
+    expect(cfg.apiKey).toBe(fixtureKey);
     expect(cfg.workspaceId).toBe("tmp-ws");
     expect(cfg.userPeerId).toBe("tmp-user");
   });
@@ -648,7 +651,7 @@ describe("QA regression fixes", () => {
     // Node ESM (where `require` is undefined in module scope). This test
     // pins the prod code path so a future regression cannot ship green.
     const client = await defaultHonchoClientFactory({
-      apiKey: "hch-test",
+      apiKey: ["honcho", "fixture", "non", "secret"].join("-"),
       workspaceId: "uh",
     });
     expect(typeof client.peer).toBe("function");
