@@ -5,6 +5,42 @@ import { SHELL_TOOLS, WRITE_TOOLS } from "./tool-guard.js";
 type Event = Record<string, unknown>;
 const record = (value: unknown): Event | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Event : undefined;
+const THINKING_WINDOW_SIZE = 64;
+const THINKING_MIN_SAMPLE_LENGTH = 4_096;
+const THINKING_SAMPLE_LIMIT = 16_384;
+const THINKING_WINDOW_LIMIT = THINKING_SAMPLE_LIMIT - THINKING_WINDOW_SIZE + 1;
+
+function thinkingEventType(event: Event): string | undefined {
+  if (event.type === "thinking_delta" || event.type === "thinking_start" || event.type === "thinking_end") {
+    return event.type;
+  }
+  if (event.type !== "message_update") return undefined;
+  const assistantMessageEvent = record(event.assistantMessageEvent);
+  return typeof assistantMessageEvent?.type === "string" && assistantMessageEvent.type.startsWith("thinking")
+    ? assistantMessageEvent.type
+    : undefined;
+}
+
+function thinkingText(event: Event): string | undefined {
+  const source = event.type === "message_update" ? record(event.assistantMessageEvent) : event;
+  for (const key of ["delta", "text", "content"]) {
+    if (typeof source?.[key] === "string") return source[key] as string;
+  }
+  return undefined;
+}
+
+function thinkingWindowHash(text: string, start: number): number {
+  let hash = 2166136261;
+  for (let index = start; index < start + THINKING_WINDOW_SIZE; index++) {
+    hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
+  }
+  return hash >>> 0;
+}
+
+function maxThinkingMs(limits: RuntimeLimits): number | undefined {
+  return limits.max_thinking_ms ?? (limits.stall_timeout_ms === undefined ? undefined : limits.stall_timeout_ms * 4);
+}
+
 
 /** Normalize runtime envelopes without interpreting tool payloads as policy decisions. */
 export function nativeRuntimeEvent(value: unknown): Event | undefined {
@@ -289,6 +325,74 @@ export class RuntimeSupervision {
   terminal = false;
   failure?: string;
   terminalFailure?: string;
+  private thinkingStartedAt?: number;
+  private thinkingSampleLength = 0;
+  private thinkingWindowCount = 0;
+  private thinkingWindowCursor = 0;
+  private readonly thinkingWindowHashes: number[] = [];
+  private readonly thinkingWindowCounts = new Map<number, number>();
+  private thinkingMostFrequentWindows = 0;
+  private thinkingNonLive = false;
+
+  private resetThinking(): void {
+    this.thinkingStartedAt = undefined;
+    this.thinkingSampleLength = 0;
+    this.thinkingWindowCount = 0;
+    this.thinkingWindowCursor = 0;
+    this.thinkingWindowHashes.length = 0;
+    this.thinkingWindowCounts.clear();
+    this.thinkingMostFrequentWindows = 0;
+    this.thinkingNonLive = false;
+  }
+
+  private recordThinkingText(text: string): void {
+    this.thinkingSampleLength = Math.min(THINKING_SAMPLE_LIMIT, this.thinkingSampleLength + text.length);
+    const firstWindow = Math.max(0, text.length - THINKING_WINDOW_LIMIT - THINKING_WINDOW_SIZE + 1);
+    for (let start = firstWindow; start + THINKING_WINDOW_SIZE <= text.length; start++) {
+      const hash = thinkingWindowHash(text, start);
+      if (this.thinkingWindowCount === THINKING_WINDOW_LIMIT) {
+        const evicted = this.thinkingWindowHashes[this.thinkingWindowCursor];
+        const evictedCount = this.thinkingWindowCounts.get(evicted) ?? 0;
+        if (evictedCount <= 1) this.thinkingWindowCounts.delete(evicted);
+        else this.thinkingWindowCounts.set(evicted, evictedCount - 1);
+        this.thinkingWindowHashes[this.thinkingWindowCursor] = hash;
+        this.thinkingWindowCursor = (this.thinkingWindowCursor + 1) % THINKING_WINDOW_LIMIT;
+        if (evictedCount === this.thinkingMostFrequentWindows) {
+          this.thinkingMostFrequentWindows = 0;
+          for (const count of this.thinkingWindowCounts.values()) {
+            this.thinkingMostFrequentWindows = Math.max(this.thinkingMostFrequentWindows, count);
+          }
+        }
+      } else {
+        this.thinkingWindowHashes.push(hash);
+        this.thinkingWindowCount++;
+      }
+      const count = (this.thinkingWindowCounts.get(hash) ?? 0) + 1;
+      this.thinkingWindowCounts.set(hash, count);
+      this.thinkingMostFrequentWindows = Math.max(this.thinkingMostFrequentWindows, count);
+    }
+  }
+
+  private observeThinking(event: Event, now: number): boolean {
+    if (thinkingEventType(event) === undefined) return false;
+    this.thinkingStartedAt ??= now;
+    this.readyAt ??= now;
+    const text = thinkingText(event);
+    if (text) this.recordThinkingText(text);
+    if (!this.thinkingNonLive && this.thinkingSampleLength >= THINKING_MIN_SAMPLE_LENGTH &&
+      this.thinkingWindowCount > 0 &&
+      this.thinkingMostFrequentWindows * 100 > this.thinkingWindowCount * 30) {
+      this.thinkingNonLive = true;
+    }
+    if (!this.thinkingNonLive) this.lastProgressAt = now;
+    return true;
+  }
+
+  private markProgress(now: number): void {
+    this.resetThinking();
+    this.lastProgressAt = now;
+  }
+
   stopCode?: RuntimeStopCode;
   lastProgressAt: number;
   private observedRoute: RuntimeRoute = {};
@@ -335,7 +439,7 @@ export class RuntimeSupervision {
     if (id) this.countedDenials.add(id);
     this.denials++;
     if (id && reason) this.hookBlocks.set(id, reason);
-    this.lastProgressAt = now;
+    this.markProgress(now);
     if (this.limits.max_denials && this.denials >= this.limits.max_denials) {
       const name = id ? this.toolNames.get(id) : undefined;
       const target = id ? this.toolTargets.get(id) : undefined;
@@ -399,10 +503,11 @@ export class RuntimeSupervision {
       if (type === "run_end" || type === "result" || type === "agent_end") {
         this.terminal = true;
         this.terminalFailure ??= runtimeTerminalFailure(event);
-        this.lastProgressAt = now;
+        this.markProgress(now);
       }
       return this.failure;
     }
+    if (this.observeThinking(event, now)) return this.failure;
     if (type === "tool_queued" || type === "tool_execution_start" || type === "tool_running") {
       if (id) this.inflight.add(id);
       const args = toolArgs(event);
@@ -426,7 +531,7 @@ export class RuntimeSupervision {
         }
       }
       this.readyAt ??= now;
-      this.lastProgressAt = now;
+      this.markProgress(now);
     } else if (type === "tool_hooks") {
       const outcome = record(event.outcome);
       if (event.phase === "pre" && id) this.hookCalls.add(id);
@@ -451,32 +556,35 @@ export class RuntimeSupervision {
           this.stop(`The same command failed ${count} times: ${command.slice(0, 120)}`, "repeated_failure");
         }
       }
-      this.lastProgressAt = now;
+      this.markProgress(now);
     } else if (type === "tool_hook_blocked" || type === "tool_call_blocked" || type === "tool_denied") {
       this.inflight.delete(id);
       this.commands.delete(id);
       this.verifyGuardInvocation(id);
       this.countDenial(id, id ? this.hookBlocks.get(id) : undefined, now);
     } else if (type === "turn_start") {
+      this.markProgress(now);
       const deadline = this.deadlineReason(now);
       if (deadline) return deadline;
       if (this.limits.max_turns && this.turns >= this.limits.max_turns) this.stop("Turn limit reached", "turn_limit");
     } else if (type === "turn_end") {
       this.turns++;
-      this.lastProgressAt = now;
+      this.markProgress(now);
       if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
     } else if (type === "assistant" || (type === "system" && event.subtype === "init")) {
       this.readyAt ??= now;
-      this.lastProgressAt = now;
+      this.markProgress(now);
     } else if (type === "model_request_start" || type === "model_request_end" ||
       ((type === "message_start" || type === "message_end") && record(event.message)?.role === "assistant")) {
       this.readyAt ??= now;
-      this.lastProgressAt = now;
+      this.markProgress(now);
+    } else if (type === "message_end") {
+      this.markProgress(now);
     }
     if (type === "run_end" || type === "result" || type === "agent_end") {
       this.terminal = true;
       this.terminalFailure ??= runtimeTerminalFailure(event);
-      this.lastProgressAt = now;
+      this.markProgress(now);
     }
     // Text deltas are not progress: malformed repetitive output must not defeat a stall budget.
     return this.failure;
@@ -488,7 +596,16 @@ export class RuntimeSupervision {
     if (deadline) return deadline;
     if (this.limits.timeout_ms && now - this.startedAt >= this.limits.timeout_ms) return this.stop("Runtime wall-time limit reached", "timeout");
     if (!this.terminal && this.readyAt === undefined && this.limits.startup_timeout_ms && now - this.startedAt >= this.limits.startup_timeout_ms) return this.stop("Runtime readiness deadline exceeded", "startup");
-    if (!this.terminal && (this.readyAt !== undefined || !this.limits.startup_timeout_ms) && this.inflight.size === 0 && this.limits.stall_timeout_ms && now - this.lastProgressAt >= this.limits.stall_timeout_ms) return this.stop("Runtime stalled without an in-flight tool", "stall");
+    if (!this.terminal && (this.readyAt !== undefined || !this.limits.startup_timeout_ms) && this.inflight.size === 0) {
+      const thinkingLimit = maxThinkingMs(this.limits);
+      if (this.thinkingStartedAt !== undefined && thinkingLimit !== undefined &&
+        now - this.thinkingStartedAt >= thinkingLimit) {
+        return this.stop("Reasoning exceeded max_thinking_ms without a tool call or message", "stall");
+      }
+      if (this.limits.stall_timeout_ms && now - this.lastProgressAt >= this.limits.stall_timeout_ms) {
+        return this.stop("Runtime stalled without an in-flight tool", "stall");
+      }
+    }
     return undefined;
   }
 }

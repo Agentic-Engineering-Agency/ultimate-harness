@@ -147,7 +147,7 @@ For guarded Command Code calls, a completed tool without guard-log evidence stop
 | Stop code | Trigger | Resumable |
 | --- | --- | --- |
 | `startup` | Wall time exceeds `startup_timeout_ms` before the runtime shows readiness: a tool starts or the model responds. A session banner alone is not readiness. | Yes |
-| `stall` | Time since last progress event exceeds `stall_timeout_ms` while no tool is in flight (`inflight.size === 0`). | Yes |
+| `stall` | Time since last progress event exceeds `stall_timeout_ms` while no tool is in flight (`inflight.size === 0`), or an uninterrupted reasoning stretch reaches `max_thinking_ms` (defaulting to `4 * stall_timeout_ms`). | Yes |
 | `timeout` | Attempt wall time exceeds `timeout_ms`. | Yes |
 | `deadline` | A configured `recovery.on_deadline` grace window begins before `timeout_ms` or `max_turns` is exhausted; the stop reason reports the budget remaining for the grace attempt. The same code is used if the bounded grace attempt itself exceeds its grace budget. | One grace attempt only |
 | `repeated_failure` | The identical shell command fails `max_repeated_failures` times (non-zero exit code or error result). | Yes |
@@ -227,7 +227,7 @@ The supervisor monitors tool calls to prevent accidental or unauthorized modific
 
 ### Stall and Turn Rules
 
-- **Stall rule**: The stall timeout (`stall_timeout_ms`) measures elapsed time since the last progress event. Stalls are checked only when no tool is in flight (`inflight.size === 0`). While a tool is executing, the stall timer is paused. Streaming text deltas do not count as progress events, preventing repetitive token generation loops from evading stall detection.
+- **Reasoning rule:** `thinking_delta`, `thinking_start`, `thinking_end`, and native `message_update` thinking events count as liveness. Reasoning is tracked as an uninterrupted stretch until a tool event, turn boundary, or message end; `max_thinking_ms` bounds that stretch, and defaults to four times `stall_timeout_ms`. Once the stretch has seen 4,096 characters, a repeated 64-character window occurring in more than 30% of the bounded 16,384-character sample makes it non-live, so it no longer refreshes the stall clock. Reasoning text is never persisted or logged. Text deltas remain non-progress.
 - **Turn limit rule**: When `max_turns` is configured, turn counts are evaluated at `turn_start` (`turns >= max_turns`) and `turn_end` (`turns > max_turns`). Exceeding the turn limit halts the run with `stop_code: "turn_limit"`.
 
 ## Native OMP Interruption

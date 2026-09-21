@@ -53,6 +53,7 @@ export const RuntimeLimitsSchema = z.object({
   memory_mb: z.number().int().positive().optional(),
   startup_timeout_ms: z.number().int().positive().optional(),
   stall_timeout_ms: z.number().int().positive().optional(),
+  max_thinking_ms: z.number().int().positive().optional(),
   max_turns: z.number().int().positive().optional(),
   max_denials: z.number().int().positive().optional(),
   max_repeated_failures: z.number().int().positive().optional(),
