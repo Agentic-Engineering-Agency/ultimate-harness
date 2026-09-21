@@ -37,10 +37,10 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and seven wir
 | `pi` | active | Drives the vanilla `pi` agent CLI (`pi --print --mode json --no-session`) — the base CLI that oh-my-pi extends. `config.cli_command` overridable. See [`docs/runbooks/pi-setup.md`](./docs/runbooks/pi-setup.md). |
 | `anthropic` | experimental | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY` (env-only, never the manifest); a missing key makes `uh adapter check anthropic` degrade gracefully. Shipped v0.9.0 (#214); graduation to `active` pending live-smoke. |
 
-Unreleased development also includes native `command-code` and `claude-code`
-adapters, runtime supervision and recovery improvements, and semantic evaluation
-during verification and independent review. These changes are not a completed
-1.0 release. See [Unreleased changes](./CHANGELOG.md#unreleased),
+Unreleased development (v0.11.0) includes native `command-code` and `claude-code`
+adapters, runtime supervision and recovery improvements, platform neutrality fixes,
+and semantic evaluation during verification and independent review. These changes
+are an intermediate milestone towards 1.0. See [Changelog](./CHANGELOG.md),
 [runtime limitations](./docs/runtime-targets.md), and the
 [1.0 roadmap](./docs/ROADMAP.md#10--integrated-execution-lifecycle).
 

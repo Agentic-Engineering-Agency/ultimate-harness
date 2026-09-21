@@ -169,24 +169,68 @@ function deleteTargets(command: string): { targets: string[]; unresolved: boolea
  * Linux CI as they do on Windows.
  */
 function normalized(value: string, root: string): string {
-  const raw = value.replaceAll("\\", "/");
-  const base = root.replaceAll("\\", "/").replace(/\/+$/, "");
-  const absolute = /^[a-zA-Z]:\//.test(raw) || raw.startsWith("/");
+  const isWindows = /^[a-zA-Z]:[\\/]/.test(root) || root.startsWith("\\\\") || /^[a-zA-Z]:[\\/]/.test(value);
+  let raw = isWindows ? value.replaceAll("\\", "/") : value;
+  let base = isWindows ? root.replaceAll("\\", "/") : root;
+
+  if (isWindows) {
+    base = base.replace(/\/+$/, "");
+    // Windows drive-relative syntax like "C:foo" or "C:..\bar"
+    const driveRel = raw.match(/^([a-zA-Z]):(?!\/)(.*)/);
+    if (driveRel) {
+      const drive = driveRel[1].toLowerCase();
+      const rest = driveRel[2];
+      const baseDrive = base.match(/^([a-zA-Z]):/);
+      if (baseDrive && baseDrive[1].toLowerCase() === drive) {
+        raw = `${base}/${rest}`;
+      } else {
+        raw = `${drive}:/${rest}`;
+      }
+    }
+  } else {
+    base = base.replace(/\/+$/, "");
+    if (base === "") base = "/";
+  }
+
+  const isAbs = /^[a-zA-Z]:\//.test(raw) || raw.startsWith("/");
+  let combined = isAbs ? raw : (base === "/" ? `/${raw}` : `${base}/${raw}`);
+
+  let prefix = "";
+  if (/^[a-zA-Z]:\//.test(combined)) {
+    prefix = combined.slice(0, 3).toLowerCase();
+    combined = combined.slice(3);
+  } else if (combined.startsWith("/")) {
+    prefix = "/";
+    combined = combined.slice(1);
+  }
+
   const segments: string[] = [];
-  for (const segment of (absolute ? raw : `${base}/${raw}`).split("/")) {
+  for (const segment of combined.split("/")) {
     if (segment === "" || segment === ".") continue;
     if (segment === "..") { segments.pop(); continue; }
-    segments.push(segment.toLowerCase());
+    segments.push(isWindows ? segment.toLowerCase() : segment);
   }
-  return segments.join("/");
+  return prefix + segments.join("/");
 }
 function inside(value: string, root: string, roots: string[]): boolean {
   const candidate = normalized(value, root);
-  return roots.some(r => { const base = normalized(r, root); return candidate === base || candidate.startsWith(`${base}/`); });
+  return roots.some(r => {
+    const base = normalized(r, root);
+    if (base === "/" || /^[a-zA-Z]:\/$/.test(base)) {
+      return candidate === base || candidate.startsWith(base);
+    }
+    return candidate === base || candidate.startsWith(`${base}/`);
+  });
 }
 function protectedRoot(value: string, root: string, roots: string[]): string | undefined {
   const candidate = normalized(value, root);
-  return roots.find(r => { const base = normalized(r, root); return candidate === base || candidate.startsWith(`${base}/`); });
+  return roots.find(r => {
+    const base = normalized(r, root);
+    if (base === "/" || /^[a-zA-Z]:\/$/.test(base)) {
+      return candidate === base || candidate.startsWith(base);
+    }
+    return candidate === base || candidate.startsWith(`${base}/`);
+  });
 }
 function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = ""): ToolGuardDecision {
   const roots = policy.write_roots.join(", ");
