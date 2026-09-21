@@ -6,7 +6,8 @@ import path from "node:path";
 import { stringify, parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
-import { runCommandCode, planCommandCodeRun } from "../src/adapters/command-code.js";
+import { runCommandCode, planCommandCodeRun, checkCommandCode, buildCommandCodeProbeArgs, parseCommandCodeVersion } from "../src/adapters/command-code.js";
+import { validateAdapter, type AdapterDocument } from "../src/schema/adapter.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "uh-command-code-"));
@@ -183,4 +184,96 @@ test("guard policy artifacts and Command Code hook preserve existing settings", 
     const settingsAfterSecond = parse(await readFile(settingsPath, "utf8")) as { hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> } };
     expect(settingsAfterSecond.hooks.PreToolUse.filter(entry => entry.hooks.some(hook => hook.command.includes("tool-guard")))).toHaveLength(1);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("buildCommandCodeProbeArgs passes --no-auto-update together with --version", () => {
+  const defaultArgs = buildCommandCodeProbeArgs();
+  expect(defaultArgs).toContain("--no-auto-update");
+  expect(defaultArgs).toContain("--version");
+
+  const customArgs = buildCommandCodeProbeArgs(["--profile", "custom"]);
+  expect(customArgs).toEqual(["--profile", "custom", "--version", "--no-auto-update"]);
+});
+
+test("parseCommandCodeVersion parses valid versions and ignores update banner", () => {
+  // Output: "1.60.0"
+  expect(parseCommandCodeVersion("1.60.0")).toBe("1.60.0");
+  expect(parseCommandCodeVersion("  1.60.0 \n")).toBe("1.60.0");
+
+  // ANSI-colored "Updated 1.54.1 -> 1.60.0" line followed by "1.60.0"
+  const bannerAndVersion = "\u001b[32mUpdated 1.54.1 -> 1.60.0\u001b[0m\n1.60.0";
+  expect(parseCommandCodeVersion(bannerAndVersion)).toBe("1.60.0");
+
+  // Output with no version returns null
+  const onlyBanner = "\u001b[32mUpdated 1.54.1 -> 1.60.0\u001b[0m";
+  expect(parseCommandCodeVersion(onlyBanner)).toBeNull();
+  expect(parseCommandCodeVersion("")).toBeNull();
+  expect(parseCommandCodeVersion("some unparseable output")).toBeNull();
+});
+
+test("checkCommandCode probe asserts --no-auto-update in args and parses versions correctly", async () => {
+  const manifest: AdapterDocument = validateAdapter({
+    schema_version: "uh.adapter.v0",
+    id: "command-code",
+    name: "Command Code",
+    description: "Native Command Code execution",
+    runtime: "command-code",
+    capabilities: ["cli-execution"],
+    config: {
+      cli_command: "cmdc",
+      runtime_config: {
+        cli_args: ["--extra-flag"],
+      },
+    },
+  });
+
+  let capturedCommand = "";
+  let capturedArgs: string[] = [];
+
+  // 1. Output: "1.60.0"
+  const result1 = await checkCommandCode(manifest, undefined, async (cmd, args) => {
+    capturedCommand = cmd;
+    capturedArgs = args;
+    return { stdout: "1.60.0\n", stderr: "" };
+  });
+  expect(capturedArgs).toContain("--no-auto-update");
+  expect(capturedArgs).toContain("--version");
+  expect(capturedArgs.slice(-3)).toEqual(["--extra-flag", "--version", "--no-auto-update"]);
+  expect(result1).toEqual({
+    runtime: "command-code",
+    found: true,
+    version: "1.60.0",
+    errors: [],
+  });
+
+  // 2. ANSI-colored "Updated 1.54.1 -> 1.60.0" line followed by "1.60.0"
+  const result2 = await checkCommandCode(manifest, undefined, async () => {
+    return { stdout: "\u001b[32mUpdated 1.54.1 -> 1.60.0\u001b[0m\n1.60.0\n", stderr: "" };
+  });
+  expect(result2).toEqual({
+    runtime: "command-code",
+    found: true,
+    version: "1.60.0",
+    errors: [],
+  });
+
+  // 3. Output with no version reports not found rather than a wrong version
+  const result3 = await checkCommandCode(manifest, undefined, async () => {
+    return { stdout: "\u001b[32mUpdated 1.54.1 -> 1.60.0\u001b[0m\n", stderr: "" };
+  });
+  expect(result3.found).toBe(false);
+  expect(result3.version).toBe("");
+  expect(result3.errors.length).toBeGreaterThan(0);
+  expect(result3.errors[0]).toMatch(/version/i);
+
+  // 4. Exec error reports not found
+  const result4 = await checkCommandCode(manifest, undefined, async () => {
+    throw new Error("Command failed");
+  });
+  expect(result4).toEqual({
+    runtime: "command-code",
+    found: false,
+    version: "",
+    errors: ["Configured Command Code CLI could not be executed"],
+  });
 });
