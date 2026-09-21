@@ -19,9 +19,24 @@ import { recoveryPrompt } from "../src/harness/runtime-recovery.js";
 import { waitForTerminated } from "./process-state.js";
 
 const TEST_ROOT = "/tmp/uh-test-oh-my-pi-adapter";
+const SNAPSHOT_ROOT = join(TEST_ROOT, "snapshot");
+const SNAPSHOT_DIST = join(SNAPSHOT_ROOT, "dist");
+let previousDist: string | undefined;
+let previousCache: string | undefined;
 
 async function cleanup() {
   try { await rm(TEST_ROOT, { recursive: true, force: true }); } catch {}
+}
+
+function restoreSnapshotEnv() {
+  if (previousDist === undefined) delete process.env.UH_HARNESS_DIST; else process.env.UH_HARNESS_DIST = previousDist;
+  if (previousCache === undefined) delete process.env.UH_RUNTIME_SNAPSHOT_CACHE; else process.env.UH_RUNTIME_SNAPSHOT_CACHE = previousCache;
+}
+
+async function writeSnapshotHook() {
+  const hook = join(SNAPSHOT_DIST, "extensions", "tool-guard", "omp.js");
+  await mkdir(path.dirname(hook), { recursive: true });
+  await writeFile(hook, "export default function () {}\n");
 }
 
 async function writeOhMyPiManifest(overrides = "", mode = "json") {
@@ -79,8 +94,16 @@ test.beforeEach(async () => {
   await mkdir(TEST_ROOT, { recursive: true });
   await initializeHarness(TEST_ROOT);
   await writeOhMyPiManifest();
+  await writeSnapshotHook();
+  previousDist = process.env.UH_HARNESS_DIST;
+  previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
+  process.env.UH_HARNESS_DIST = SNAPSHOT_DIST;
+  process.env.UH_RUNTIME_SNAPSHOT_CACHE = join(SNAPSHOT_ROOT, "cache");
 });
-test.afterEach(cleanup);
+test.afterEach(async () => {
+  restoreSnapshotEnv();
+  await cleanup();
+});
 
 describe("uh adapter check oh-my-pi", () => {
   test("returns valid check result when omp is installed", async () => {
@@ -651,6 +674,9 @@ test("guard policy artifact and explicit extension are added only for guarded mi
   expect(result.result?.status).toBe("blocked");
   expect(seenInput?.args).toContain("-e");
   expect(seenInput?.args.some(value => /tool-guard[\\/]+omp\.js/.test(value))).toBe(true);
+  const hookArg = seenInput!.args[seenInput!.args.indexOf("-e") + 1];
+  expect(hookArg.startsWith(path.resolve(join(SNAPSHOT_ROOT, "cache")))).toBe(true);
+  expect(hookArg).not.toContain(join("snapshot", "dist"));
   expect(seenInput?.env?.UH_TOOL_GUARD_POLICY).toContain("tool-guard.json");
   expect(parse(await readFile(join(missionDir, "runs", "guarded-run", "tool-guard.json"), "utf8"))).toMatchObject({ schema_version: "uh.tool-guard.v0", write_roots: ["out"] });
 });

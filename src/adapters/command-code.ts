@@ -5,7 +5,6 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { relativeArtifactPath } from "../harness/artifact-paths.js";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
@@ -21,6 +20,7 @@ import { renderPrompt } from "../harness/render-prompt.js";
 import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides.js";
 import { generateRunId, appendRunsIndexEntry, writeLatestPointer, mirrorRuntimeResultToLatest } from "../harness/run-id.js";
 import { runRuntimeProcess, type RuntimeProcessInput, type RuntimeProcessOutput } from "../harness/runtime-process.js";
+import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
 import { nativeRuntimeCompleted, nativeRuntimeEvent, nativeRuntimeRoute, runtimeRouteMismatch, runtimeTerminalFailure } from "../harness/runtime-supervision.js";
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { captureDiffWithUntracked } from "../harness/diff-capture.js";
@@ -195,9 +195,7 @@ export async function runCommandCode(root: string, missionPath: string, options:
     const hooks = settings.hooks && typeof settings.hooks === "object" && !Array.isArray(settings.hooks)
       ? settings.hooks as Record<string, unknown> : {};
     const preToolUse = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : [];
-    const hookPath = process.env.UH_HARNESS_DIST
-      ? path.join(process.env.UH_HARNESS_DIST, "extensions", "tool-guard", "cmdc-hook.js")
-      : fileURLToPath(new URL("../../dist/extensions/tool-guard/cmdc-hook.js", import.meta.url));
+    const hookPath = await snapshotGuardHook("extensions/tool-guard/cmdc-hook.js");
     const retainedHooks = preToolUse.filter((entry) => {
       if (!entry || typeof entry !== "object" || !Array.isArray((entry as Record<string, unknown>).hooks)) return true;
       const nested = (entry as Record<string, unknown>).hooks as unknown[];

@@ -1,4 +1,4 @@
-import { test, expect } from "vitest";
+import { test, expect, beforeEach, afterEach } from "vitest";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,6 +20,30 @@ async function fixture() {
     runtime_config_overrides: { model: "qwen/qwen3.8-flash", resume_session: "existing-session", permission_mode: "yolo" } }));
   return { root, missionPath };
 }
+
+// The guard hook is published into a content-addressed cache from the build
+// output. Point both at a temporary fixture so the suite neither needs a real
+// build nor writes to the per-user cache.
+let snapshotRoot: string;
+let previousDist: string | undefined;
+let previousCache: string | undefined;
+
+beforeEach(async () => {
+  snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-command-code-snapshot-"));
+  const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "cmdc-hook.js");
+  await mkdir(path.dirname(hook), { recursive: true });
+  await writeFile(hook, "export default function () {}\n");
+  previousDist = process.env.UH_HARNESS_DIST;
+  previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
+  process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");
+  process.env.UH_RUNTIME_SNAPSHOT_CACHE = path.join(snapshotRoot, "cache");
+});
+
+afterEach(async () => {
+  if (previousDist === undefined) delete process.env.UH_HARNESS_DIST; else process.env.UH_HARNESS_DIST = previousDist;
+  if (previousCache === undefined) delete process.env.UH_RUNTIME_SNAPSHOT_CACHE; else process.env.UH_RUNTIME_SNAPSHOT_CACHE = previousCache;
+  await rm(snapshotRoot, { recursive: true, force: true });
+});
 
 test("refuses a mission without an explicit model assignment", async () => {
   const { root, missionPath } = await fixture();
@@ -175,6 +199,7 @@ test("guard policy artifacts and Command Code hook preserve existing settings", 
     const quotedHookPath = hookCommand.match(/"([^"]*tool-guard[\\/]+cmdc-hook\.js)"/i)?.[1];
     expect(quotedHookPath).toBeDefined();
     expect(existsSync(quotedHookPath!)).toBe(true);
+    expect(quotedHookPath!.startsWith(process.env.UH_RUNTIME_SNAPSHOT_CACHE!)).toBe(true);
     expect(await readFile(path.join(root, ".commandcode", ".gitignore"), "utf8")).toBe("*\n");
     await runCommandCode(root, missionPath, {
       runId: "guarded-run-two",

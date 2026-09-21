@@ -6,7 +6,11 @@ import { initializeHarness } from "../src/harness/init.js";
 import { planOhMyPiRun, runOhMyPi, type OhMyPiRunner } from "../src/adapters/oh-my-pi.js";
 
 const ROOT = "/tmp/uh-test-omp-route-overlay";
+const SNAPSHOT_ROOT = join(ROOT, "snapshot");
+const SNAPSHOT_DIST = join(SNAPSHOT_ROOT, "dist");
 const MODEL = "openai-codex/gpt-5.6-luna";
+let previousDist: string | undefined;
+let previousCache: string | undefined;
 
 async function mission(id: string, extra = ""): Promise<string> {
   const dir = join(ROOT, ".harness", "missions", id);
@@ -40,8 +44,19 @@ config:
   runtime_config:
     mode: json
 `, "utf-8");
+  const hook = join(SNAPSHOT_DIST, "extensions", "tool-guard", "omp.js");
+  await mkdir(join(SNAPSHOT_DIST, "extensions", "tool-guard"), { recursive: true });
+  await writeFile(hook, "export default function () {}\n");
+  previousDist = process.env.UH_HARNESS_DIST;
+  previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
+  process.env.UH_HARNESS_DIST = SNAPSHOT_DIST;
+  process.env.UH_RUNTIME_SNAPSHOT_CACHE = join(SNAPSHOT_ROOT, "cache");
 });
-afterEach(() => rm(ROOT, { recursive: true, force: true }));
+afterEach(async () => {
+  if (previousDist === undefined) delete process.env.UH_HARNESS_DIST; else process.env.UH_HARNESS_DIST = previousDist;
+  if (previousCache === undefined) delete process.env.UH_RUNTIME_SNAPSHOT_CACHE; else process.env.UH_RUNTIME_SNAPSHOT_CACHE = previousCache;
+  await rm(ROOT, { recursive: true, force: true });
+});
 
 describe("oh-my-pi route overlay", () => {
   test("an assigned model pins every role and removes the native sub-agent tool", async () => {
