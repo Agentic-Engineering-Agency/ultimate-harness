@@ -16,6 +16,7 @@ import {
   type OhMyPiRunner,
 } from "../src/adapters/oh-my-pi.js";
 import { recoveryPrompt } from "../src/harness/runtime-recovery.js";
+import { waitForTerminated } from "./process-state.js";
 
 const TEST_ROOT = "/tmp/uh-test-oh-my-pi-adapter";
 
@@ -70,40 +71,6 @@ verification:
     "utf-8",
   );
   return { missionDir, missionPath };
-}
-
-/**
- * A killed process whose parent has already exited is re-parented and stays
- * visible as a zombie until init reaps it. In a container whose PID 1 does not
- * reap orphans that can last indefinitely, and `process.kill(pid, 0)` succeeds
- * for a zombie, so pid existence alone cannot prove the tree was terminated.
- */
-async function isTerminated(pid: number): Promise<boolean> {
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return true;
-  }
-  if (process.platform !== "linux") return false;
-  try {
-    const stat = await readFile(`/proc/${pid}/stat`, "utf-8");
-    // The comm field can contain spaces and parentheses, so the state is the
-    // field after the last ")".
-    return stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
-  } catch {
-    return true; // Exited between the existence probe and the state read.
-  }
-}
-
-/** Poll for termination instead of asserting on one instant of reaping. */
-async function waitForTerminated(pid: number, timeoutMs = 5000): Promise<void> {
-  const start = Date.now();
-  while (!(await isTerminated(pid))) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`process ${pid} was still running ${timeoutMs}ms after cancellation`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
 }
 
 beforeAll(cleanup);
