@@ -31,9 +31,8 @@ end-to-end acceptance.
 
 #### Runtime reliability and accounting
 
-- Resolve native model identity compatibility without weakening route checks.
-  Claude context suffixes and Qwen case/provider-prefix variants can differ from
-  configured identifiers.
+- Resolve Claude context-suffix model identity without weakening route checks.
+  Case and provider-prefix variants are reconciled; suffix variants are not.
 - Distinguish native permission refusal from UH hook denial. A hook allow does not
   bypass native permissions; compound shell commands may still be refused.
 - Validate Claude coordinator isolation against inherited settings, memory, skills

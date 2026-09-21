@@ -6,25 +6,39 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 
 ## [Unreleased]
 
-### Changed
-
-- Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial, which let a networked worker start its own agents. Workers may not spawn agents; an explicit `guard.agent_clients: []` is now the only opt-out.
-- Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
-
 ### Added
 
 - `guard.allow_native_subagents` (default `false`). Native sub-agent tools (`task`, `agent`, `subagent`, `spawn_agent`, `dispatch_agent`, `delegate`) are denied by tool name for every role; a denied worker is told to end with `ESCALATE: <what its orchestrator should delegate>`.
 - Delegated-agent route attestation. Supervision reads the structured `details.progress[]` / `details.jobs[]` metadata of native tool events and stops the run with `route_mismatch`, naming the route, when a sub-agent runs on a provider or model outside the assignment. Tool arguments and tool text are never read.
-- oh-my-pi runs now receive a per-run `omp-overlay.yml` through `--config`. It pins every OMP model role to the assigned model, sets `task.eager: default`, disables the advisor, and sets `task.maxRecursionDepth: 0` so the native `task` tool is not offered (`1` when the guard allows native sub-agents).
-
+- oh-my-pi runs receive a per-run `omp-overlay.yml` through `--config`. It pins every OMP model role to the assigned model, sets `task.eager: default`, disables the advisor, and sets `task.maxRecursionDepth: 0` so the native `task` tool is not offered (`1` when the guard allows native sub-agents).
 - Project fleet policy. `fleet.routes` in `.harness/project.yaml` lists the models the project authorizes, per adapter and role. `uh mission run`, `run-all` and every `run-team` worker are refused before spawn when the assigned model is missing or outside the fleet. `--force` does not bypass it. A project without a `fleet` block is unchanged.
+- Codex adapter: optional `runtime_config.model`, passed to `codex exec`, with route attestation through the shared supervised process runner. Without a configured model behavior is unchanged.
+- `containment_escape` guard class: launches that leave the supervised process tree are denied (`Win32_Process.Create` through WMI or CIM, scheduled tasks, services, `setsid`, `systemd-run`, `disown`, `at`, `batch`, `crontab` edits, backgrounded `nohup`). Read-only forms such as `schtasks /query` stay allowed.
+- `guard_tamper` guard class: writes to the guard policy or log, or to harness state outside the worker root, are denied and stop the run with `policy`.
+- `limits.max_thinking_ms`: reasoning output counts as liveness for the stall check, bounded by this budget (default four times `stall_timeout_ms`). Repetitive reasoning is detected from window frequencies and does not count as live. Reasoning text is never persisted.
+- Experience store: a read-only index over settled runs with grouping by runtime, model, workflow profile or stop code, and a success-rate versus cost Pareto frontier. Unknown cost, tokens and durations stay unknown.
+- OpenTelemetry export: `uh observatory export <mission> --otlp` writes one run as OTLP/JSON following the GenAI semantic conventions (`invoke_agent`, `chat`, `execute_tool`) with deterministic ids. Tool arguments, results, message text and prompts are never exported; tool targets are opt-in.
+- `uh observatory runs [--mission] [--group-by] [--json]`.
+- Terminal contract for `uh mission run`: `--quiet`, a final single-line `UH_RESULT {json}` without absolute paths, and exit codes 0 passed, 1 failed, 2 blocked, 130 cancelled.
+
+### Changed
+
+- Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.
+- Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
+- `uh mission run` refuses to run in the project root when no sandbox is bound to the mission, unless `--no-sandbox` is passed. `uh mission dry-run` prints the routing.
+- Team and sandbox worktrees are created with `git worktree add --lock --reason` and unlocked before removal. UH no longer runs a global `git worktree prune`.
+- Provider and model identifiers are compared case-insensitively for route attestation and fleet admission, with an optional provider prefix reconciled. There is no alias table and no partial matching.
 
 ### Fixed
 
-- Tool Guard now judges agent clients by executable position instead of a whole-command text match. `codex.cmd`, `omp.exe`, path-qualified binaries, the PowerShell call operator, `env`/`xargs`/`pnpm dlx` launchers, `bash -c` bodies and command substitutions are denied; `grep -r omp src` and `cat docs/codex.md` are no longer false denials that consumed a worker's denial budget.
-- An oh-my-pi worker assigned `openai-codex/gpt-5.6-luna` spent tokens on `google-antigravity/gemini-3.7-flash` during a self-hosted run. The operator's global OMP settings (`task.eager: preferred`, `modelRoles.smol`) were inherited, `--model` pinned only the top-level session, the native `task` tool is not a shell tool so Tool Guard never judged it, and route attestation read only top-level messages. Replaying that run's `events.ndjson` through the corrected supervisor stops at event 380 of 4,529.
-- The acceptance report no longer links evidence that does not exist, and present evidence links resolve from `docs/acceptance/`. Implemented by a guarded `gpt-5.6-luna` worker that UH ran against its own repository.
+- Tool Guard judges agent clients by executable position instead of a whole-command text match. `codex.cmd`, `omp.exe`, path-qualified binaries, the PowerShell call operator, `env`/`xargs`/`pnpm dlx` launchers, `bash -c` bodies and command substitutions are denied; `grep -r omp src` and `cat docs/codex.md` are no longer false denials that consumed a worker's denial budget.
 - Workers can no longer start paid runtimes through UH itself (`uh mission run`, `run-all`, `run-team`, `uh acceptance run`, or `node dist/cli.js ...`). Read-only UH commands stay available, and the Claude Code orchestrator role keeps its controller-command allowance.
+- A runtime that resolves helper or sub-agent models from operator-global settings could spend on a route other than the assigned one, because only the top-level session was pinned and attested. Roles are now pinned per run and delegated routes are attested.
+- Tool Guard resolved every relative write target against the worker root, so a command that changed directory first (`cd <elsewhere> && Set-Content <relative path>`) wrote outside the sandbox. Directory changes are tracked through a command, including nested shell bodies and an explicit `cwd` on the tool input; an unresolvable directory change denies every later write in that command.
+- A concurrent reader could fail a run: replacing `runtime-control.json` by rename fails on Windows while any process has the file open, and the failed heartbeat stopped the run with `controller_error`. Renames retry with bounded backoff, a periodic heartbeat that cannot be persisted no longer stops the run, and terminal writes stay strict.
+- Team worker commits swept in files the harness writes into the worker root (the Command Code hook configuration, the worktree-local ignore file, a tracked audit log). Commits now exclude the protected roots by pathspec, and a worker that touched only harness state produces no commit.
+- The Command Code health probe ran the CLI without `--no-auto-update`, so an adapter check could start a self-update that replaced the runtime while another run was launching it.
+- The acceptance report no longer links evidence that does not exist, and present evidence links resolve from `docs/acceptance/`.
 
 ## [0.11.0] — 2026-09-21
 
