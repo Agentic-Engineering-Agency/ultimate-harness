@@ -1,5 +1,5 @@
 import { mapResourceWaves, workerConcurrency } from "./runtime-resources.js";
-import type { RuntimeLimits, TeamResourceLimits } from "../schema/runtime-control.js";
+import { DEFAULT_PROTECTED_PATHS, type RuntimeLimits, type TeamResourceLimits } from "../schema/runtime-control.js";
 import type { TeamWorker } from "../schema/mission.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
@@ -361,6 +361,24 @@ function isSafeSegment(value: string): boolean {
 /* Default git ops (real `git` CLI)                                           */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * A worker commit must contain only the worker's own work. `.harness`,
+ * `.commandcode`, `.omp`, and `.pi` hold harness-owned artifacts the harness
+ * itself writes into the worker root — derived/re-seeded mission packets, the
+ * Command Code hook configuration (absolute local paths), the worktree-local
+ * `.harness/.gitignore`, per-run session state, and the audit log. `.git` is
+ * dropped because git never stages its own metadata directory.
+ *
+ * These are applied as pathspec exclusions so tracked and untracked files
+ * alike stay out of the commit — an ignore rule cannot cover a file the
+ * repository already tracks. A worker that produced nothing else therefore has
+ * nothing staged and no commit is created. A tracked protected file the worker
+ * (or harness) modified is left unstaged, never reset or restored.
+ */
+const COMMIT_PROTECTED_EXCLUDES = DEFAULT_PROTECTED_PATHS
+  .filter((protectedPath) => protectedPath !== ".git")
+  .map((protectedPath) => `:(exclude)${protectedPath}`);
+
 export const defaultGitOps: GitOps = {
   async addWorktree(root, branch, worktreePath, baseRef) {
     // Lock the registration so a `git worktree prune` run elsewhere (another
@@ -439,8 +457,14 @@ export const defaultGitOps: GitOps = {
     } catch { /* best-effort */ }
   },
   async commitAll(cwd, message) {
-    await execFileP("git", ["add", "-A"], { cwd });
-    const { stdout } = await execFileP("git", ["status", "--porcelain"], { cwd });
+    // Stage only the worker's own work. The protected roots are excluded by
+    // pathspec, so a tracked or untracked harness-owned file is never staged
+    // and a worker that produced nothing else stages nothing.
+    await execFileP("git", ["add", "-A", "--", ".", ...COMMIT_PROTECTED_EXCLUDES], { cwd });
+    // Any residual protected-root changes stay in the worktree unstaged (the
+    // worktree is discarded or retained as evidence), so gate the commit on the
+    // INDEX being non-empty rather than on the worktree being clean.
+    const { stdout } = await execFileP("git", ["diff", "--cached", "--name-only"], { cwd });
     if (stdout.trim().length === 0) return;
     await execFileP("git", [
       "-c", "user.email=uh-team@example.com",
