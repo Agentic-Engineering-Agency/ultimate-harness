@@ -269,9 +269,26 @@ The payload is a JSON object with the following fields:
 `uh mission run` maps settlement outcomes to deterministic exit codes via `exitCodeForRun(status, stopCode)`:
 - `0` (`passed`): Mission run succeeded.
 - `1` (`failed`): Mission run failed or encountered an unhandled failure.
-- `2` (`blocked`): Mission run was blocked, including preflight checks, auto-route refusals, and fleet budget limits that print `[BLOCKED]`.
+- `2` (`blocked`): Mission run was blocked, including preflight checks, auto-route refusals, missing-sandbox refusals, and fleet budget limits that print `[BLOCKED]`.
 - `130` (`cancelled`): Mission run was cancelled by the harness or via cancellation request.
 - `143`: Reserved for `SIGINT`/`SIGTERM` process termination.
+
+#### Sandbox Routing
+
+Every mission run and dry-run prints one `Sandbox:` line naming where execution goes, so the routing decision is visible before anything is spawned or spent:
+
+- Bound sandbox: `Sandbox: <sandbox-id> (<worktree path>)`.
+- `--no-sandbox`: `Sandbox: none (project root, --no-sandbox)`.
+
+`uh mission run` refuses to fall back to the project root silently. When sandbox routing was requested (that is, `--no-sandbox` was absent) and the mission has no bound sandbox, it exits before creating a run directory or spawning a process:
+
+```
+[BLOCKED] mission <id> has no bound sandbox; create one with "uh sandbox create <sandbox-id> --mission <id>" or pass --no-sandbox to run in the project root
+```
+
+Exit code is `2` (`blocked`) and the settlement line is still the last stdout line, with `status: "blocked"`, the `run_id` that would have been used, and the `run_dir` that was deliberately not created. Root execution is only reachable through an explicit `--no-sandbox`, because a guarded worker running in the project root edits the operator's live working tree.
+
+`uh mission dry-run` prints the same `Sandbox:` line and never blocks on a missing binding — it shows `Sandbox: none (project root)` and continues. `uh mission run-all` and `uh mission run-team` are unaffected: they create and clean up their own worktrees instead of using sandbox routing, and `uh acceptance run` passes `--no-sandbox` because each campaign creates its own isolated workspace.
 
 ### Observatory Subcommands
 

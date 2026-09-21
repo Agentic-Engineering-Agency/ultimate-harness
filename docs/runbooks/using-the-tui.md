@@ -189,6 +189,13 @@ so empty states stay distinguishable from load errors.
   `.harness/missions/<id>/events.ndjson` for live updates.
 - `Esc` cancels without starting.
 
+With the default `[auto-route]`, a mission that has no bound sandbox is refused
+before the runtime starts: the child exits `2` with `[BLOCKED] mission <id> has
+no bound sandbox; ...`. Either bind one from the Sandboxes pane
+(`uh sandbox create <sandbox-id> --mission <id>`) or `Tab` to `[no-sandbox]` to
+run in the project root. See
+[runtime-targets.md](../runtime-targets.md#sandbox-routing).
+
 While a run is active, the mission detail's right pane swaps to a
 **Live events** ScrollBox that auto-scrolls to the bottom:
 

@@ -31,7 +31,7 @@ import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabil
 import { forecastCost } from "./harness/cost-forecast.js";
 import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
 import { COST_CLASSES } from "./schema/adapter-capabilities.js";
-import { resolveSandboxMissionRoot } from "./harness/sandbox.js";
+import { resolveSandboxMissionRoot, type SandboxMissionRoute } from "./harness/sandbox.js";
 import { finalizeRuntimeCancelledRun } from "./harness/runtime-events.js";
 import { cancelLocalMissionRun, cancelMissionRunViaPlugin, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
@@ -153,6 +153,20 @@ async function enforceRuntimePreflight(
   if (force) return;
   await enforceRuntimeCapabilities(root, missionPath, runtime, false);
   await assertRuntimeRequirements(missionPath, runtime);
+}
+
+/**
+ * The `Sandbox:` line that `mission run` and `mission dry-run` print, so the
+ * routing decision is always visible. `useSandbox` is whether sandbox routing
+ * was requested (i.e. `--no-sandbox` was absent).
+ */
+function sandboxRouteLine(routing: SandboxMissionRoute, useSandbox: boolean): string {
+  if (routing.sandbox) {
+    return `Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`;
+  }
+  return useSandbox
+    ? "Sandbox: none (project root)"
+    : "Sandbox: none (project root, --no-sandbox)";
 }
 
 async function installRuntimeCancelledEventHandler(
@@ -1336,9 +1350,9 @@ missionCmd
       process.exit(1);
       return;
     }
-    if (routing.sandbox) {
-      console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
-    }
+    // Dry-run never blocks on a missing binding: it only shows where the run
+    // would go before anything is spent.
+    console.log(sandboxRouteLine(routing, opts.sandbox));
     const result = await wiring.dryRun(routing.effectiveRoot, routing.missionPath);
     if (result.errors.length > 0) {
       console.log("[FAIL] dry-run errors:");
@@ -1449,6 +1463,28 @@ missionCmd
       process.exit(exitCodeForRun("blocked"));
       return;
     }
+    if (opts.sandbox && !routing.sandbox) {
+      // A guarded worker running in the project root edits the operator's live
+      // working tree, so root execution is only reachable through an explicit
+      // --no-sandbox. Refuse before any run directory or process exists.
+      const blockedMissionId = routing.missionId ?? "unknown";
+      console.error(`[BLOCKED] mission ${blockedMissionId} has no bound sandbox; create one with "uh sandbox create <sandbox-id> --mission ${blockedMissionId}" or pass --no-sandbox to run in the project root`);
+      const blockedRunId = opts.runId ?? generateRunId();
+      const blockedRunDir = path.relative(
+        path.resolve(root),
+        path.join(root, ".harness", "missions", blockedMissionId, "runs", blockedRunId),
+      ).replace(/\\/g, "/");
+      console.log(`UH_RESULT ${JSON.stringify({
+        mission_id: blockedMissionId,
+        run_id: blockedRunId,
+        runtime,
+        status: "blocked",
+        exit_code: exitCodeForRun("blocked"),
+        run_dir: blockedRunDir,
+      })}`);
+      process.exit(exitCodeForRun("blocked"));
+      return;
+    }
     let extraRuntimeConfigOverrides: Record<string, unknown> | undefined;
     if (opts.runtimeConfigOverrides !== undefined) {
       try {
@@ -1472,9 +1508,7 @@ missionCmd
     if (opts.runId) {
       console.log(`Run id: ${opts.runId}`);
     }
-    if (routing.sandbox) {
-      console.log(`Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`);
-    }
+    console.log(sandboxRouteLine(routing, opts.sandbox));
     if (extraRuntimeConfigOverrides) {
       const keys = Object.keys(extraRuntimeConfigOverrides);
       console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
