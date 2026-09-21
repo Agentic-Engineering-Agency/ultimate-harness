@@ -67,6 +67,7 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 - [Overview](./architecture/overview.md)
 - [Entities](./architecture/entities.md)
 - [Runtime adapter contract](./architecture/runtime-adapter-contract.md)
+- [Delegation and containment](./architecture/delegation-and-containment.md)
 - [Codex adapter design](./architecture/adapter-codex.md)
 - [Hermes proxy adapter design](./architecture/adapter-hermes-proxy.md)
 - [TUI architecture](./architecture/tui.md)
