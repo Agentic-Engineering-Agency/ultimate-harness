@@ -4,7 +4,8 @@ import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
 
 export type ToolGuardClass =
   | "write_outside" | "git_mutation" | "delete_outside" | "kill_or_format"
-  | "package_install" | "network_client" | "agent_client" | "protected_root";
+  | "package_install" | "network_client" | "agent_client" | "protected_root"
+  | "containment_escape";
 export type ToolGuardDecision = { deny?: { reason: string; class: ToolGuardClass; target?: string } };
 
 const SUFFIX = " Do not retry this by another route; record it in your final message and continue with the rest of the task.";
@@ -146,6 +147,76 @@ function agentClientInvoked(command: string, clients: ReadonlySet<string>, depth
       let afterFlag = false;
       while (i < ts.length && (ts[i].startsWith("-") || /^\w+=/.test(ts[i]))) { afterFlag = ts[i].startsWith("-"); i += 1; }
       if (afterFlag && i + 1 < ts.length && clients.has(executableName(ts[i + 1]))) return true;
+    }
+  }
+  return false;
+}
+
+const CONTAINMENT_SCHEDULERS = new Set(["setsid", "systemd-run", "disown", "at", "batch"]);
+const CONTAINMENT_TASK_SERVICES = new Set(["register-scheduledtask", "start-scheduledtask", "new-service", "start-service"]);
+
+/** Whether the arguments of a `wmic` invocation request `Win32_Process.Create`. */
+function wmicCreatesProcess(args: string[]): boolean {
+  const low = args.map(t => t.toLowerCase());
+  return low.some((t, i) => t === "process" && low[i + 1] === "call" && low[i + 2] === "create");
+}
+
+/** Whether a WMI process-creation cmdlet names both `Win32_Process` and `Create`. */
+function cimMethodCreatesProcess(name: string, args: string[]): boolean {
+  if (name !== "invoke-cimmethod" && name !== "invoke-wmimethod") return false;
+  return args.some(t => t.toLowerCase().includes("win32_process"))
+    && args.some(t => { const low = t.toLowerCase(); return low === "create" || low.endsWith(":create"); });
+}
+
+/** Whether the executable `name` with these arguments would launch outside the supervised tree. */
+function containmentSpawnerInvoked(name: string, args: string[]): boolean {
+  if (CONTAINMENT_SCHEDULERS.has(name) || CONTAINMENT_TASK_SERVICES.has(name)) return true;
+  if (name === "crontab") return (args[0] ?? "").toLowerCase() !== "-l";
+  if (name === "sc") return args.some(t => { const low = t.toLowerCase(); return low === "create" || low === "start"; });
+  if (name === "schtasks") return args.some(t => /^[-/](?:create|run)$/i.test(t));
+  if (name === "wmic") return wmicCreatesProcess(args);
+  return cimMethodCreatesProcess(name, args);
+}
+
+/**
+ * True when a command would launch a process outside the supervised job or
+ * process tree: WMI process creation, scheduled tasks, services, and detached
+ * or scheduled POSIX launches. Executable positions are judged exactly the way
+ * agent clients are judged: the head of each shell segment, what a launcher or
+ * nested shell would run, and command substitutions. A launch name that
+ * appears as an argument, a search pattern or a path is not an invocation.
+ */
+function containmentEscapeInvoked(command: string, depth = 0): boolean {
+  if (depth > 4) return false;
+  for (const body of substitutions(command)) if (containmentEscapeInvoked(body, depth + 1)) return true;
+  const bodies = splitSegments(command);
+  for (let s = 0; s < bodies.length; s += 1) {
+    const [segment] = bodies[s];
+    const ts = tokens(segment);
+    if (!ts.length) continue;
+    // The [wmiclass] cast is the executable position of PowerShell WMI object construction.
+    if (ts.some(t => /\[wmiclass\]/i.test(t)) && /win32_process/i.test(segment) && /\.create\s*\(/i.test(segment)) return true;
+    const backgrounded = s + 1 < bodies.length && bodies[s + 1][1] === "&";
+    let i = 0;
+    while (i < ts.length) {
+      if (/^\w+=/.test(ts[i])) { i += 1; continue; }
+      const name = executableName(ts[i]);
+      // nohup stays in the process group exactly until its segment is backgrounded.
+      if (name === "nohup" && backgrounded) return true;
+      if (containmentSpawnerInvoked(name, ts.slice(i + 1))) return true;
+      if (NESTED_SHELLS.has(name)) {
+        const flag = ts.findIndex((t, index) => index > i && NESTED_SHELL_FLAGS.has(t.toLowerCase()));
+        if (flag >= 0 && containmentEscapeInvoked(ts.slice(flag + 1).join(" "), depth + 1)) return true;
+        break;
+      }
+      if (SCRIPT_HOSTS.has(name) && !(PACKAGE_RUNNERS.has(name) && PACKAGE_RUNNER_VERBS.has((ts[i + 1] ?? "").toLowerCase()))) break;
+      if (PACKAGE_RUNNERS.has(name) && PACKAGE_RUNNER_VERBS.has((ts[i + 1] ?? "").toLowerCase())) { i += 2; }
+      else if (LAUNCHERS.has(name)) { i += 1; }
+      else break;
+      // Launcher flags may carry a value, so the token after a flag is judged as well as the next one.
+      let afterFlag = false;
+      while (i < ts.length && (ts[i].startsWith("-") || /^\w+=/.test(ts[i]))) { afterFlag = ts[i].startsWith("-"); i += 1; }
+      if (afterFlag && i + 1 < ts.length && containmentSpawnerInvoked(executableName(ts[i + 1]), ts.slice(i + 2))) return true;
     }
   }
   return false;
@@ -330,6 +401,7 @@ function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = "")
     : className === "package_install" ? "CONTRACT: no package installs. Use what is installed; if a dependency is missing, end with BLOCKED: <dependency>."
     : className === "agent_client" ? "CONTRACT: no sub-agents. Workers do not start agents, agent CLIs or harness runs. Do the work yourself; if part of it exceeds your scope, end with ESCALATE: <what your orchestrator should delegate>."
     : className === "network_client" ? "CONTRACT: no network or agent clients. Everything you need is on disk; if it is not, end with BLOCKED: <what is missing>."
+    : className === "containment_escape" ? "CONTRACT: no launches outside the supervised process tree. Run the work in the foreground of this run instead."
     : `CONTRACT: ${target || "path"} belongs to the harness and is read-only.`;
   return { deny: { class: className, target: target || undefined, reason: text + SUFFIX } };
 }
@@ -395,6 +467,7 @@ export function decideToolCall(
   if (policy.deny_git_mutations && gitMutation(command)) return reason("git_mutation", policy);
   if (policy.deny_package_installs && /\b(?:pip|pip3|uv|conda|npm|pnpm|yarn)\s+(?:install|add|i)\b/i.test(command)) return reason("package_install", policy);
   if (policy.deny_network_clients && /\b(?:curl|wget|invoke-webrequest|iwr|invoke-restmethod|irm)\b/i.test(command)) return reason("network_client", policy);
+  if (containmentEscapeInvoked(command)) return reason("containment_escape", policy);
   if (agentClientInvoked(command, new Set(policy.agent_clients.map(client => executableName(client))))) return reason("agent_client", policy);
   if (/\b(?:taskkill|stop-process|kill\s+-9)\b|\bformat\s+[a-z]:/i.test(command)) return reason("kill_or_format", policy);
   const deletes = deleteTargets(command);
