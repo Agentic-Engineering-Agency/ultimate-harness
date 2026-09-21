@@ -4,7 +4,7 @@ All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded
 
 Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team/UH/active); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
-## [Unreleased]
+## [0.11.0] — 2026-09-21
 
 ### Added
 

@@ -15,7 +15,9 @@ let TEST_ROOT: string;
 const execFileP = promisify(execFile);
 
 async function runUh(args: string[]) {
-  return execFileP(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], { cwd: process.cwd() });
+  const env = { ...process.env };
+  delete env.TYPESAFE_API_KEY;
+  return execFileP(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], { cwd: process.cwd(), env });
 }
 
 async function runUhFailure(args: string[]) {

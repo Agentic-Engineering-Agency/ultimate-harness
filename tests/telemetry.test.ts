@@ -195,6 +195,44 @@ describe("optional PostHog telemetry", () => {
     expect(called).toBe(false);
   });
 
+  test("normalizes and resolves bracketed IPv6 host correctly", async () => {
+    const calls: { host: string; options?: unknown }[] = [];
+    const mockLookup = async (host: string, options?: unknown) => {
+      calls.push({ host, options });
+      return [{ address: "2606:4700::1111", family: 6 as const }];
+    };
+    let fetchedUrl: URL | undefined;
+    const mockFetch = async (url: URL) => {
+      fetchedUrl = url;
+      return new Response(null, { status: 200 });
+    };
+    await captureCommandOutcome(
+      { enabled: true, apiKey: FIXTURE_API_KEY, host: "https://[2606:4700::1111]" },
+      { command: "uh status", status: "success", exitCode: 0, durationMs: 1, version: "1.2.3" },
+      mockFetch as unknown as typeof fetch,
+      mockLookup as unknown as typeof dnsLookup,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].host).toBe("2606:4700::1111");
+    expect(fetchedUrl?.toString()).toBe("https://[2606:4700::1111]/capture/");
+  });
+
+  test("stalled DNS lookup times out gracefully", async () => {
+    const hangingLookup = () => new Promise<never>(() => {});
+    let fetched = false;
+    const mockFetch = async () => {
+      fetched = true;
+      return new Response(null, { status: 200 });
+    };
+    await captureCommandOutcome(
+      { enabled: true, apiKey: FIXTURE_API_KEY, host: "https://hanging.example.com" },
+      { command: "uh status", status: "success", exitCode: 0, durationMs: 1, version: "1.2.3" },
+      mockFetch as unknown as typeof fetch,
+      hangingLookup as unknown as typeof dnsLookup,
+    );
+    expect(fetched).toBe(false);
+  }, 5000);
+
   test("installTelemetryHooks adds no exit listener when telemetry is disabled", () => {
     const before = process.listenerCount("exit");
     // No opt-in env => disabled => must not register a process 'exit' beacon.

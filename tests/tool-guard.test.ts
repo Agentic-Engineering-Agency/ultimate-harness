@@ -62,6 +62,7 @@ describe("per-tool guard", () => {
     ["git commit path", "shell_command", { command: "git -C C:/other commit -am x" }, "git_mutation"],
     ["agent command", "shell_command", { command: "omp -p hello" }, "agent_client"],
     ["credential read", "read_file", { file_path: "C:\\Users\\example\\.claude\\.credentials.json" }, undefined],
+    ["drive relative outside write", "write_file", { file_path: "C:..\\secret.txt", content: "x" }, "write_outside"],
   ] as const)("ported launcher case: %s", (_name, tool, input, expected) => {
     expect(decision(tool, input)?.class).toBe(expected);
   });
@@ -93,3 +94,8 @@ describe("per-tool guard", () => {
     expect(decision("shell_command", { command: "git log --grep=commit" })).toBeUndefined();
     expect(decision("shell_command", { command: "git commit -am x" })?.class).toBe("git_mutation");
   });
+
+test("posix filesystem root write root allows subpaths", () => {
+  const posixPolicy = { ...resolveToolGuardPolicy({ write_roots: ["."] }), protected_paths: [] };
+  expect(decideToolCall(posixPolicy, "write_file", { file_path: "/tmp/allowed.txt", content: "x" }, "/").deny).toBeUndefined();
+});
