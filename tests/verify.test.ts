@@ -9,6 +9,7 @@ import { initializeHarness } from "../src/harness/init.js";
 import { getStatus } from "../src/harness/status.js";
 import { validateFile } from "../src/harness/validate.js";
 import { verifyMission } from "../src/harness/verify.js";
+import { waitForTerminated } from "./process-state.js";
 
 let TEST_ROOT: string;
 const execFileP = promisify(execFile);
@@ -206,9 +207,10 @@ describe("uh verify", () => {
       expect(childPid).toBeGreaterThan(0);
       expect(result.status).toBe("failed");
       expect(result.checks_failed).toBe(1);
-      await expect.poll(() => {
-        try { process.kill(childPid!, 0); return true; } catch { return false; }
-      }).toBe(false);
+      // The child is stopped, not merely reported failed. Assert on the
+      // process state rather than on the pid being reaped: a reparented zombie
+      // under a non-reaping init would never disappear from the pid table.
+      await waitForTerminated(childPid);
     } finally {
       if (childPid !== undefined) {
         try { process.kill(childPid, "SIGKILL"); } catch { /* already stopped */ }
