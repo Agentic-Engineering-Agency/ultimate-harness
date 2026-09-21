@@ -2,13 +2,13 @@ import { assertIndependentReviewExecution } from "../harness/independent-review-
 import { prepareRuntimeResume, recoveryPrompt, persistRuntimeRecovery, type RuntimeResume } from "../harness/runtime-recovery.js";
 import { claimRuntimeAttempt } from "../harness/runtime-attempt.js";
 import { runRuntimeProcess, type RuntimeProcessInput } from "../harness/runtime-process.js";
+import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
 import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, RuntimeRouteSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode, type RuntimeRecoveryDeadline, type ToolGuardPolicy, DEFAULT_PROTECTED_PATHS, ToolGuardArtifactSchema } from "../schema/runtime-control.js";
 import { delegatedRouteMismatch, nativeRuntimeCompleted, nativeRuntimeRoute, runtimeRouteMismatch } from "../harness/runtime-supervision.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, appendFile, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import {
   type MissionArtifactContext,
   getMissionArtifactContext,
@@ -428,7 +428,7 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
   }
   args.push("--mode", mode);
   if (mission.guard) {
-    args.push("-e", fileURLToPath(new URL("../../dist/extensions/tool-guard/omp.js", import.meta.url)));
+    args.push("-e", await snapshotGuardHook("extensions/tool-guard/omp.js"));
   }
   const resumeSession = resume?.sessionId ?? runtimeConfig.resume_session;
   if (resumeSession) {

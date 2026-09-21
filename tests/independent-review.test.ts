@@ -1,5 +1,5 @@
-import { test, expect } from "vitest";
-import { mkdtemp, readFile, writeFile, chmod, rm } from "node:fs/promises";
+import { test, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, mkdir, readFile, writeFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -22,6 +22,30 @@ async function fixture() {
     expectedOutputs: ["answer.txt"], completionCriteria: ["Answer equals 42"] });
   return root;
 }
+
+// The guard hook is published into a content-addressed cache from the build
+// output. Point both at a temporary fixture so the suite neither needs a real
+// build nor writes to the per-user cache.
+let snapshotRoot: string;
+let previousDist: string | undefined;
+let previousCache: string | undefined;
+
+beforeEach(async () => {
+  snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-independent-review-snapshot-"));
+  const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "cmdc-hook.js");
+  await mkdir(path.dirname(hook), { recursive: true });
+  await writeFile(hook, "export default function () {}\n");
+  previousDist = process.env.UH_HARNESS_DIST;
+  previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
+  process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");
+  process.env.UH_RUNTIME_SNAPSHOT_CACHE = path.join(snapshotRoot, "cache");
+});
+
+afterEach(async () => {
+  if (previousDist === undefined) delete process.env.UH_HARNESS_DIST; else process.env.UH_HARNESS_DIST = previousDist;
+  if (previousCache === undefined) delete process.env.UH_RUNTIME_SNAPSHOT_CACHE; else process.env.UH_RUNTIME_SNAPSHOT_CACHE = previousCache;
+  await rm(snapshotRoot, { recursive: true, force: true });
+});
 
 // The adapter spawns `cli_command` directly, so the fixture must be a real
 // executable on POSIX: shebang plus the exec bit set below.

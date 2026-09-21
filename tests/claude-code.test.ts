@@ -1,4 +1,4 @@
-import { test, expect } from "vitest";
+import { test, expect, beforeEach, afterEach } from "vitest";
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -41,6 +41,30 @@ function flag(args: string[], name: string): string {
   return args[index + 1];
 }
 
+// The guard hook is published into a content-addressed cache from the build
+// output. Point both at a temporary fixture so the suite neither needs a real
+// build nor writes to the per-user cache.
+let snapshotRoot: string;
+let previousDist: string | undefined;
+let previousCache: string | undefined;
+
+beforeEach(async () => {
+  snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-claude-code-snapshot-"));
+  const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "claude-code-hook.js");
+  await mkdir(path.dirname(hook), { recursive: true });
+  await writeFile(hook, "export default function () {}\n");
+  previousDist = process.env.UH_HARNESS_DIST;
+  previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
+  process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");
+  process.env.UH_RUNTIME_SNAPSHOT_CACHE = path.join(snapshotRoot, "cache");
+});
+
+afterEach(async () => {
+  if (previousDist === undefined) delete process.env.UH_HARNESS_DIST; else process.env.UH_HARNESS_DIST = previousDist;
+  if (previousCache === undefined) delete process.env.UH_RUNTIME_SNAPSHOT_CACHE; else process.env.UH_RUNTIME_SNAPSHOT_CACHE = previousCache;
+  await rm(snapshotRoot, { recursive: true, force: true });
+});
+
 function successStream(): string {
   return [
     { type: "system", subtype: "init", session_id: "sess-1", model: MODEL },
@@ -71,6 +95,10 @@ test("worker plan embeds guard settings, exact model route, and stream flags", a
     const settings = JSON.parse(flag(plan.args, "--settings"));
     expect(settings.hooks.PreToolUse[0].matcher).toBe("*");
     expect(settings.permissions).toBeUndefined();
+    const hookCommand = settings.hooks.PreToolUse[0].hooks[0].command as string;
+    const snapshotHook = hookCommand.match(/"([^"]*tool-guard[\\/]+claude-code-hook\.js)"/i)?.[1]?.replace(/\\\\/g, "\\");
+    expect(snapshotHook).toBeDefined();
+    expect(snapshotHook!.startsWith(process.env.UH_RUNTIME_SNAPSHOT_CACHE!)).toBe(true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

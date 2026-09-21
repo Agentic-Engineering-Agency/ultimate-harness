@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { registerRuntimeConfigSchema } from "../schema/adapter.js";
@@ -29,6 +28,7 @@ import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides
 import { runtimeRegistry } from "../harness/registry.js";
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { runRuntimeProcess, type RuntimeProcessInput, type RuntimeProcessOutput } from "../harness/runtime-process.js";
+import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
 import {
   nativeRuntimeCompleted,
   nativeRuntimeEvent,
@@ -171,16 +171,10 @@ function streamedClaudeUsage(events: Record<string, unknown>[], model?: string):
   })).usage;
 }
 
-function hookPath(): string {
-  return process.env.UH_HARNESS_DIST
-    ? path.join(process.env.UH_HARNESS_DIST, "extensions", "tool-guard", "claude-code-hook.js")
-    : fileURLToPath(new URL("../../dist/extensions/tool-guard/claude-code-hook.js", import.meta.url));
-}
-
-function claudeSettings(role: ClaudeCodeRole): string {
+function claudeSettings(role: ClaudeCodeRole, hookPath: string): string {
   const settings: Record<string, unknown> = {
     hooks: {
-      PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `${JSON.stringify(process.execPath)} ${JSON.stringify(hookPath())}`, timeout: 10 }] }],
+      PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `${JSON.stringify(process.execPath)} ${JSON.stringify(hookPath)}`, timeout: 10 }] }],
     },
   };
   if (role === "orchestrator") settings.permissions = { allow: ["Bash(uh *)", "Bash(node *dist/cli.js*)"] };
@@ -245,7 +239,7 @@ export async function planClaudeCodeRun(root: string, missionPath: string, optio
   if (config.effort) args.push("--effort", config.effort);
   const effectiveMaxTurns = grace && deadline ? deadline.grace_turns + 1 : config.max_turns;
   if (effectiveMaxTurns) args.push("--max-turns", String(effectiveMaxTurns));
-  if (guard) args.push("--settings", claudeSettings(config.role));
+  if (guard) args.push("--settings", claudeSettings(config.role, await snapshotGuardHook("extensions/tool-guard/claude-code-hook.js")));
   return {
     command: adapter.config?.cli_command || "claude",
     args,
