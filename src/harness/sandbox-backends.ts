@@ -78,6 +78,20 @@ async function gitStatusPorcelain(worktreePath: string): Promise<string[]> {
 }
 
 /**
+ * `git worktree unlock <path>`, tolerating the "is not locked" no-op. A
+ * worktree created before locking existed (or already unlocked) reports that
+ * message, which must not abort teardown.
+ */
+async function unlockWorktree(root: string, worktreePath: string): Promise<void> {
+  try {
+    await runGit(root, ["worktree", "unlock", worktreePath]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/is not locked/i.test(message)) throw err;
+  }
+}
+
+/**
  * Default backend: a `git worktree` sharing the project's object store on a
  * dedicated `sandbox/<id>` branch. Cheap, but ties the sandbox to the parent
  * repo's worktree registry and branch namespace.
@@ -87,19 +101,32 @@ export class GitWorktreeBackend implements SandboxBackend {
 
   async materialize(ctx: SandboxMaterializeContext): Promise<SandboxMaterializeResult> {
     const branch = `sandbox/${ctx.sandboxId}`;
-    await runGit(ctx.root, ["worktree", "add", "-b", branch, ctx.worktreePath, ctx.baseRef]);
+    // Lock the registration so a `git worktree prune` run elsewhere (another
+    // controller, or a removable/network volume that is briefly unmounted)
+    // cannot delete this worktree's administrative entry behind our back.
+    // No run id is in scope here, so the branch name is the lock identifier.
+    await runGit(ctx.root, [
+      "worktree", "add", "--lock", "--reason", `uh:${branch}`, "-b", branch, ctx.worktreePath, ctx.baseRef,
+    ]);
     return { branch, base_ref: ctx.baseRef };
   }
 
   async teardown(ctx: SandboxTeardownContext, opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
     if (await fileExists(ctx.worktreePath)) {
+      await unlockWorktree(ctx.root, ctx.worktreePath);
       const removeArgs = ["worktree", "remove"];
       if (opts.force) removeArgs.push("--force");
       removeArgs.push(ctx.worktreePath);
       await runGit(ctx.root, removeArgs);
     } else {
-      // Worktree directory was deleted out-of-band; prune the registration.
-      await runGit(ctx.root, ["worktree", "prune"]);
+      // The directory vanished out-of-band (deleted, or a removable/network
+      // volume is unmounted). Drop only THIS registration: unlock, then a
+      // forced remove. We never run a global `git worktree prune` — that would
+      // also delete every other worktree whose directory is missing right now,
+      // including ones owned by other controllers. If git still refuses, leave
+      // the orphan in place; `git worktree list` surfaces it to the operator.
+      try { await runGit(ctx.root, ["worktree", "unlock", ctx.worktreePath]); } catch { /* tolerated */ }
+      try { await runGit(ctx.root, ["worktree", "remove", "--force", ctx.worktreePath]); } catch { /* tolerated */ }
     }
 
     let branchRemoved = false;

@@ -164,9 +164,13 @@ export interface VerifyMissionLike {
 export type TeamVerifier = (root: string, missionId: string) => Promise<VerifyMissionLike>;
 
 export interface GitOps {
-  /** `git worktree add -b <branch> <path> <baseRef>` */
+  /** `git worktree add --lock --reason uh:<branch> -b <branch> <path> <baseRef>` */
   addWorktree: (root: string, branch: string, worktreePath: string, baseRef: string) => Promise<void>;
-  /** `git worktree remove --force <path>` (silent on missing). */
+  /**
+   * `git worktree unlock <path>` (tolerating "is not locked") then
+   * `git worktree remove [--force] <path>`. Never prunes globally, and is
+   * silent when the worktree is already gone.
+   */
   removeWorktree: (root: string, worktreePath: string) => Promise<void>;
   /** Run `git merge <branch>` in `cwd`. Returns a structured outcome; never throws on conflicts. */
   merge: (cwd: string, branch: string) => Promise<MergeOutcome>;
@@ -359,19 +363,28 @@ function isSafeSegment(value: string): boolean {
 
 export const defaultGitOps: GitOps = {
   async addWorktree(root, branch, worktreePath, baseRef) {
-    await execFileP("git", ["worktree", "add", "-b", branch, worktreePath, baseRef], { cwd: root });
+    // Lock the registration so a `git worktree prune` run elsewhere (another
+    // controller, or a removable/network volume that is briefly unmounted)
+    // cannot delete this worktree's administrative entry behind our back. No
+    // run id is in scope here, so the branch name is the lock identifier.
+    await execFileP("git", ["worktree", "add", "--lock", "--reason", `uh:${branch}`, "-b", branch, worktreePath, baseRef], { cwd: root });
   },
   async removeWorktree(root, worktreePath) {
-    if (!(await fileExists(worktreePath))) {
-      try { await execFileP("git", ["worktree", "prune"], { cwd: root }); } catch { /* tolerated */ }
-      return;
-    }
+    // A locked worktree refuses `remove` until it is unlocked; an already
+    // unlocked one reports "is not locked", a no-op we tolerate. We NEVER run
+    // `git worktree prune` here: it deletes the registration of every worktree
+    // whose directory is missing at that instant — other controllers'
+    // worktrees, or ones parked on a removable/network volume — leaving their
+    // directories "not a git repository" even when they come back. When this
+    // worktree's directory was deleted out of band we drop only its own
+    // registration; if git still refuses we leave the orphan for
+    // `git worktree list` to surface.
+    try {
+      await execFileP("git", ["worktree", "unlock", worktreePath], { cwd: root });
+    } catch { /* tolerated: not locked, or already unregistered */ }
     try {
       await execFileP("git", ["worktree", "remove", "--force", worktreePath], { cwd: root });
-    } catch {
-      // Best-effort; orphans surface via `git worktree list`.
-      try { await execFileP("git", ["worktree", "prune"], { cwd: root }); } catch { /* tolerated */ }
-    }
+    } catch { /* best-effort; orphans surface via `git worktree list` */ }
   },
   async merge(cwd, branch) {
     try {
