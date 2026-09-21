@@ -20,13 +20,13 @@ Baseline command:
 
 ```text
 codex exec \
-  --sandbox workspace-write \
   --cd <sandbox-path> \
+  --sandbox workspace-write \
   --json \
   --output-last-message <mission-dir>/runtime-final.txt \
   --skip-git-repo-check \
+  [-m <model>] \
   "<mission-prompt>"
-```
 
 Flag rationale:
 
@@ -212,19 +212,19 @@ The Codex adapter does not run verification itself. After `collect`, it:
 Mission `verification.review_gates[]` are passed through unchanged and
 surface in the review step that follows verification.
 
-## Default flags
-
-The manifest's `config` block carries the runtime defaults. They are
-overridable per-mission via workflow profiles.
-
 | Config field        | Default              | Notes                                                  |
 | ------------------- | -------------------- | ------------------------------------------------------ |
 | `cli_command`       | `codex`              | Resolved through `PATH`.                               |
 | `default_toolsets`  | `[]`                 | Codex tool surface is controlled in `~/.codex/config`. |
 | `default_provider`  | `""`                 | Unused; provider is configured in Codex itself.        |
-| `default_model`     | `""`                 | Empty means "let Codex pick its configured default".   |
+| `default_model`     | `""`                 | Used when no mission runtime model override is set.    |
 | `worktree_mode`     | `true`               | Codex always runs in an allocated worktree.            |
 | `pass_session_id`   | `false`              | Codex assigns its own thread id; the adapter records it.|
+
+`runtime_config.model` overrides `config.default_model`. A non-empty effective
+model is passed as `-m <model>` and becomes the expected route; the structured
+Codex event stream must attest that route. When no model is configured, the
+adapter emits no model flag and does not enforce route attestation.
 
 Hard-coded launch flags (not in the manifest because they are part of the
 adapter contract, not user policy):

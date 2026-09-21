@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, appendFile, copyFile } from "node:fs/promises";
@@ -45,6 +44,8 @@ import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-mes
 import { buildDispatchContext } from "../harness/dispatch-context.js";
 import { renderPrompt } from "../harness/render-prompt.js";
 import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides.js";
+import { runRuntimeProcess, type RuntimeProcessOutput } from "../harness/runtime-process.js";
+import { nativeRuntimeRoute, runtimeRouteMismatch } from "../harness/runtime-supervision.js";
 
 
 export type CheckResult = {
@@ -73,6 +74,7 @@ export type CodexRunPlan = {
   session_id_passthrough: boolean;
   errors: string[];
   mission: MissionDocument;
+  expectedRoute?: { model: string };
   /**
    * UH-137 — resolved Honcho opt-out for this mission. `false` when
    * `runtime_config.honcho_memory: false`; otherwise `true`. When `false`,
@@ -84,33 +86,19 @@ export type CodexRunPlan = {
 
 /**
  * Input the adapter hands to a Codex runner.
- *
- * Runners are responsible for invoking the configured CLI with the given
- * arguments inside `cwd`. They MUST honor `timeoutMs` when set; on expiry,
- * return `timedOut: true` and a non-zero exit code. The default runner uses
- * `child_process.spawn`; tests inject deterministic stubs.
  */
 export interface CodexRunnerInput {
   command: string;
   args: string[];
   cwd: string;
   timeoutMs?: number;
+  expectedRoute?: { model: string };
 }
 
 /**
  * Output a Codex runner returns to the adapter.
- *
- * Errors are surfaced explicitly rather than swallowed: a spawn failure sets
- * `spawnError`; a timeout sets `timedOut`. The adapter translates these into
- * `failed` runtime-result entries with explicit `errors[]` items.
  */
-export interface CodexRunnerOutput {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  timedOut: boolean;
-  spawnError?: string;
-}
+export interface CodexRunnerOutput extends RuntimeProcessOutput {}
 
 export type CodexRunner = (input: CodexRunnerInput) => Promise<CodexRunnerOutput>;
 
@@ -206,6 +194,7 @@ runtimeRegistry.register("codex", codexRuntimeChecker);
  * instead of being silently dropped.
  */
 export const CodexRuntimeConfigSchema = z.object({
+  model: z.string().optional().default(""),
   sandbox_mode: z
     .enum(["read-only", "workspace-write", "danger-full-access"])
     .optional()
@@ -220,19 +209,15 @@ export const CodexRuntimeConfigSchema = z.object({
   // configured. false -> all Honcho activity is skipped for this mission.
   honcho_memory: z.boolean().optional(),
 }).strict();
-
 export type CodexRuntimeConfig = z.infer<typeof CodexRuntimeConfigSchema>;
-
 registerRuntimeConfigSchema("codex", CodexRuntimeConfigSchema);
 
 /** Extract the strongly-typed Codex `runtime_config` from an adapter manifest. */
 export function getCodexRuntimeConfig(adapter: AdapterDocument): CodexRuntimeConfig {
   return CodexRuntimeConfigSchema.parse(adapter.config?.runtime_config ?? {});
 }
-
 /**
  * Convenience wrapper that mirrors the CLI's codex check.
- *
  * - With `root`: dispatches through the registry so manifest errors and CLI
  *   errors share the same structured shape.
  * - Without `root`: probes the codex CLI directly (used in environments
@@ -334,6 +319,10 @@ export async function planCodexRun(root: string, missionPath: string, options: P
     errors.push("Codex assigns its own thread id; set pass_session_id: false");
   }
 
+  const configuredModel = runtimeConfig.model.trim();
+  const manifestDefaultModel = typeof config?.default_model === "string" ? config.default_model.trim() : "";
+  const model = configuredModel || manifestDefaultModel || undefined;
+  const expectedRoute = model ? { model } : undefined;
   const sandboxMode = runtimeConfig.sandbox_mode;
   // approval_policy is retained in the runtime_config schema for backward
   // compatibility with manifests written against UH-23 / codex-cli <0.130,
@@ -348,7 +337,6 @@ export async function planCodexRun(root: string, missionPath: string, options: P
   // for this mission (enrich here + record in collectCodexSession). Default ON;
   // the honcho-memory extension itself no-ops when Honcho env is unconfigured.
   const honchoMemoryEnabled = runtimeConfig.honcho_memory !== false;
-
   const ctx = buildDispatchContext(mission, workflow);
   const basePrompt = renderPrompt(ctx);
   ctx.memoryBlock = honchoMemoryEnabled
@@ -365,6 +353,7 @@ export async function planCodexRun(root: string, missionPath: string, options: P
     "--output-last-message",
     finalMessagePath,
     "--skip-git-repo-check",
+    ...(model ? ["-m", model] : []),
     prompt,
   ];
 
@@ -377,6 +366,7 @@ export async function planCodexRun(root: string, missionPath: string, options: P
     session_id_passthrough: false,
     errors,
     mission,
+    expectedRoute,
     honchoMemoryEnabled,
   };
 }
@@ -387,43 +377,14 @@ export async function planCodexRun(root: string, missionPath: string, options: P
  * `timedOut` on the returned record so the adapter can translate them into a
  * `failed` runtime-result with explicit errors.
  */
-export const defaultCodexRunner: CodexRunner = (input) => {
-  return new Promise((resolve) => {
-    const child = spawn(input.command, input.args, {
-      cwd: input.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    let timer: NodeJS.Timeout | undefined;
-
-    const finalize = (exitCode: number, spawnError?: string): void => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode, timedOut, spawnError });
-    };
-
-    if (typeof input.timeoutMs === "number" && input.timeoutMs > 0) {
-      timer = setTimeout(() => {
-        timedOut = true;
-        try { child.kill("SIGKILL"); } catch { /* child already exited */ }
-      }, input.timeoutMs);
-    }
-
-    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on("close", (code: number | null) => {
-      finalize(timedOut ? 1 : code ?? 1);
-    });
-    child.on("error", (err: Error) => {
-      finalize(1, err.message);
-    });
+export const defaultCodexRunner: CodexRunner = (input) =>
+  runRuntimeProcess({
+    command: input.command,
+    args: input.args,
+    cwd: input.cwd,
+    timeoutMs: input.timeoutMs,
+    expectedRoute: input.expectedRoute,
   });
-};
 
 /**
  * Default diff collector. Delegates to `captureDiffWithUntracked`
@@ -521,7 +482,20 @@ export async function runCodex(
       args: plan.args,
       cwd: root,
       timeoutMs: options.timeoutMs,
+      expectedRoute: plan.expectedRoute,
     });
+    if (plan.expectedRoute && runnerResult.supervisionStopCode === undefined) {
+      const observed = parseCodexJsonlStream(runnerResult.stdout).events
+        .map(nativeRuntimeRoute)
+        .find(route => route !== undefined);
+      if (runtimeRouteMismatch(observed, plan.expectedRoute)) {
+        runnerResult = {
+          ...runnerResult,
+          exitCode: runnerResult.exitCode === 0 ? 1 : runnerResult.exitCode,
+          supervisionStopCode: "route_mismatch",
+        };
+      }
+    }
 
     const collectDiff = options.collectDiff ?? defaultDiffCollector;
     const diff = await collectDiff(root);
@@ -650,10 +624,24 @@ export async function collectCodexSession(
     }
   }
 
+  const observedRoutes = parsedStream.events
+    .map(nativeRuntimeRoute)
+    .filter((route): route is { model?: string; provider?: string } => route !== undefined);
+  const routeModels = new Set(observedRoutes.map(route => route.model).filter((value): value is string => Boolean(value)));
+  const routeProviders = new Set(observedRoutes.map(route => route.provider).filter((value): value is string => Boolean(value)));
+  const observedModel = routeModels.size === 1 ? routeModels.values().next().value : undefined;
+  const observedProvider = routeProviders.size === 1 ? routeProviders.values().next().value : undefined;
+  if (plan.expectedRoute && observedRoutes.some(route => runtimeRouteMismatch(route, plan.expectedRoute))) {
+    errors.push("Runtime reported a route outside the configured assignment");
+  }
+  if (plan.expectedRoute && !observedModel && runnerResult.supervisionStopCode !== "route_mismatch") {
+    errors.push("Runtime did not attest the configured route");
+  }
+
   let status: RuntimeResultStatus;
   if (runnerResult.spawnError) {
     status = "failed";
-  } else if (runnerResult.timedOut) {
+  } else if (runnerResult.timedOut || runnerResult.supervisionStopCode) {
     status = "failed";
   } else if (quotaError) {
     status = "blocked";
@@ -661,6 +649,8 @@ export async function collectCodexSession(
     status = "failed";
   } else if (finalMessageMissing) {
     status = "blocked";
+  } else if (errors.length > 0) {
+    status = "failed";
   } else {
     status = "passed";
   }
@@ -696,6 +686,8 @@ export async function collectCodexSession(
       stdout_path: relativeArtifactPath(root, artifacts.stdoutPath),
       stderr_path: relativeArtifactPath(root, artifacts.stderrPath),
       diff_path: relativeArtifactPath(root, artifacts.diffPath),
+      ...(observedProvider ? { provider: observedProvider } : {}),
+      ...(observedModel ? { model: observedModel } : {}),
       errors,
     };
     result = validateRuntimeResult(draft);
