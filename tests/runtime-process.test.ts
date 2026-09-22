@@ -3,9 +3,12 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { runRuntimeProcess, type RuntimeProcessOutput } from "../src/harness/runtime-process.js";
 import { cancelLocalMissionRun } from "../src/harness/mission-cancel.js";
+
+const execFileAsync = promisify(execFile);
 
 // Real child processes and filesystem visibility cannot be driven by Vitest's fake clock.
 async function waitForFile(file: string, predicate: (text: string) => boolean) {
@@ -372,3 +375,89 @@ test.skipIf(process.platform !== "win32")("Windows-only guardian honors cancella
   }
 }, 20000);
 
+/** One process-table row, used only to judge the guardian's own tree. */
+interface WindowsProcessRow { pid: number; ppid: number; name: string; command: string; }
+const CONSOLE_HOST = /^(conhost|OpenConsole)\.exe$/i;
+
+/** Enumerates the machine's process table once; callers narrow it to a tree. */
+async function listWindowsProcesses(): Promise<WindowsProcessRow[]> {
+  const script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress";
+  const { stdout } = await execFileAsync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    { windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  const parsed = JSON.parse(stdout.trim() || "[]") as Array<Record<string, unknown>> | Record<string, unknown>;
+  return (Array.isArray(parsed) ? parsed : [parsed]).map(row => ({
+    pid: Number(row.ProcessId), ppid: Number(row.ParentProcessId), name: String(row.Name),
+    command: row.CommandLine === undefined || row.CommandLine === null ? "" : String(row.CommandLine),
+  }));
+}
+
+/** Expands a root pid to its observed descendants across every sample. */
+function observedDescendants(root: number, samples: WindowsProcessRow[][]): Set<number> {
+  const tree = new Set<number>([root]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const sample of samples) for (const row of sample) {
+      if (tree.has(row.ppid) && !tree.has(row.pid)) { tree.add(row.pid); grew = true; }
+    }
+  }
+  return tree;
+}
+
+/**
+ * The Windows guardian must attach the worker and every descendant that
+ * inherits a console to one windowless pseudoconsole. Without it, a console
+ * program in the worker's pipeline makes Windows allocate a console, and a
+ * default terminal (Windows Terminal) turns that handoff into a visible
+ * window. The worker here spawns the console pipeline without `windowsHide`:
+ * `CREATE_NO_WINDOW` is itself a request for a fresh, non-headless console,
+ * which no parent can override, so it would defeat the very guarantee under
+ * test. This test judges only the guardian's own process tree, never the whole
+ * machine: the operator may open terminals at any time and the default terminal
+ * differs between machines. A window never fails a run; this is the only place
+ * that asserts none can arise.
+ */
+test.skipIf(process.platform !== "win32")("Windows-only guardian runs the worker tree in one headless pseudoconsole (non-Windows skips because the guardian requires PowerShell)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-pseudoconsole-"));
+  const worker = [
+    "const fs=require('node:fs');",
+    "const {spawn}=require('node:child_process');",
+    // A pipeline through a console program, kept alive long enough to sample the tree.
+    "const cmd=spawn('cmd.exe',['/d','/s','/c','echo HEADLESS_MARKER 2>&1 | findstr HEADLESS_MARKER & ping -n 12 127.0.0.1 > nul']);",
+    "console.log(JSON.stringify({type:'session',id:'pseudoconsole'}));",
+    "fs.writeFileSync('tree.json', JSON.stringify({worker:process.pid,guardian:process.ppid,cmd:cmd.pid}));",
+    "cmd.stdout.on('data',d=>process.stdout.write(d));",
+    "cmd.stderr.on('data',d=>process.stderr.write(d));",
+    "cmd.on('exit',()=>process.exit(0));",
+    "setTimeout(()=>process.exit(0),25000);",
+  ].join("");
+  const running = runRuntimeProcess({
+    command: process.execPath, args: ["-e", worker], cwd: root,
+    limits: { timeout_ms: 30000 },
+    artifacts: { directory: path.join(root, "run"), missionId: "one", runId: "pseudoconsole", runtime: "fixture" },
+  });
+  const samples: WindowsProcessRow[][] = [];
+  try {
+    const topology = JSON.parse(await waitForFile(path.join(root, "tree.json"), text => Boolean(text.trim()))) as { guardian: number };
+    while (!(await Promise.race([running.then(() => true), delay(50).then(() => false)]))) {
+      samples.push(await listWindowsProcesses());
+    }
+    const result = await running;
+    const tree = observedDescendants(topology.guardian, samples);
+    // One row per distinct process, so repeated samples cannot inflate a report.
+    const rows = [...new Map(samples.flat().filter(row => tree.has(row.pid))
+      .map(row => [`${row.pid}|${row.ppid}|${row.name}`, row])).values()];
+    // The guardian's own pseudoconsole host is the only console host it may
+    // create, and it is headless; anything else in the tree allocated a console.
+    const headlessHosts = rows.filter(row => CONSOLE_HOST.test(row.name) && row.ppid === topology.guardian && row.command.includes("--headless"));
+    const offenders = rows.filter(row => CONSOLE_HOST.test(row.name) && row.ppid !== topology.guardian);
+    expect(headlessHosts.length).toBeGreaterThan(0);
+    expect(offenders).toEqual([]);
+    expect(result.pseudoconsole).toBe(true);
+    expect(result.stdout).toContain("HEADLESS_MARKER");
+    expect(result.settlementConfirmed).toBe(true);
+    expect(result.exitCode).toBe(0);
+  } finally {
+    await running;
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+}, 60000);

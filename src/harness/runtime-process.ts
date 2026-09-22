@@ -149,6 +149,8 @@ export interface RuntimeProcessOutput {
   nativeTerminal?: boolean;
   nativeTerminalFailure?: string;
   supervisionStopCode?: RuntimeStopCode;
+  /** Windows only: whether the guardian attached a windowless pseudoconsole instead of the CREATE_NO_WINDOW fallback. */
+  pseudoconsole?: boolean;
 }
 
 /** Only accepts the ChildProcess handle allocated by this runner; never searches by title/PID. */
@@ -177,7 +179,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
   let outputLimitReached = false;
   let timedOut = false, cancelled = false, stopReason: string | undefined;
   let stopCode: RuntimeStopCode | undefined;
-  let peakMemoryBytes: number | undefined, settlementConfirmed: boolean | undefined;
+  let peakMemoryBytes: number | undefined, settlementConfirmed: boolean | undefined, pseudoconsole: boolean | undefined;
   let writes = Promise.resolve();
   let streamError: string | undefined;
   let lastHeartbeat = 0;
@@ -432,7 +434,14 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         await persistDigest();
         if (process.platform === "win32") {
           try {
-            const job = WindowsJobResultSchema.parse(JSON.parse((await readFile(path.join(jobDirectory!, "windows-job-result.json"), "utf8")).replace(/^\uFEFF/, "")));
+            const receipt = JSON.parse((await readFile(path.join(jobDirectory!, "windows-job-result.json"), "utf8")).replace(/^\uFEFF/, "")) as Record<string, unknown>;
+            // The guardian records whether it attached a headless pseudoconsole;
+            // the settled contract itself is still validated field by field.
+            pseudoconsole = receipt.pseudoconsole === true;
+            const job = WindowsJobResultSchema.parse({
+              exit_code: receipt.exit_code, peak_memory_bytes: receipt.peak_memory_bytes,
+              controller_lost: receipt.controller_lost, settled: receipt.settled,
+            });
             peakMemoryBytes = job.peak_memory_bytes;
             settlementConfirmed = job.settled;
           } catch { settlementConfirmed = false; }
@@ -456,7 +465,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         resolve({ stdout, stderr, exitCode: spawnError && exitCode === 0 ? 1 : exitCode, timedOut,
           cancelled, spawnError: spawnError ?? (stopCode === "policy" ? stopReason : reportedStreamFailure ?? stopReason), sessionId: supervisor.sessionId, peakMemoryBytes, settlementConfirmed,
           outputTruncated: outputLimitReached, nativeTerminal: supervisor.terminal, nativeTerminalFailure: supervisor.terminalFailure,
-          supervisionStopCode: supervisor.stopCode });
+          supervisionStopCode: supervisor.stopCode, pseudoconsole });
       })();
     });
   });
