@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileExists } from "./mission.js";
 import { runRuntimeProcess } from "./runtime-process.js";
@@ -55,6 +55,9 @@ export interface SandboxBackend {
   /** Porcelain list of dirty paths in the working copy. */
   collectDirtyChanges(worktreePath: string): Promise<string[]>;
 }
+
+/** Injectable git seam: every backend runs git through this signature. */
+export type GitRunner = (cwd: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
 async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   try {
@@ -156,16 +159,40 @@ export class GitWorktreeBackend implements SandboxBackend {
  */
 export class DirectoryBackend implements SandboxBackend {
   readonly name = "directory";
+  private readonly git: GitRunner;
+
+  constructor(git: GitRunner = runGit) {
+    this.git = git;
+  }
 
   async materialize(ctx: SandboxMaterializeContext): Promise<SandboxMaterializeResult> {
-    // Local clone (hard-linked objects) of the project into the sandbox dir.
-    await runGit(ctx.root, ["clone", "--local", "--quiet", "--", ctx.root, ctx.worktreePath]);
+    await this.clone(ctx);
     if (ctx.baseRef && ctx.baseRef !== "HEAD") {
-      await runGit(ctx.worktreePath, ["checkout", "--quiet", ctx.baseRef]);
+      await this.git(ctx.worktreePath, ["checkout", "--quiet", ctx.baseRef]);
     }
     const branch = `sandbox/${ctx.sandboxId}`;
-    await runGit(ctx.worktreePath, ["checkout", "--quiet", "-b", branch]);
+    await this.git(ctx.worktreePath, ["checkout", "--quiet", "-b", branch]);
     return { branch, base_ref: ctx.baseRef };
+  }
+
+  /**
+   * `git clone --local` hard-links the object store to keep the clone cheap.
+   * That only works when the sandbox shares a filesystem with the repository:
+   * for a linked worktree whose common git directory lives on another drive, or
+   * a network share, git fails with "failed to create link ... Improper link".
+   * On that failure only, remove the partial target directory and retry once
+   * without hardlinks. Any other clone failure is reported as-is.
+   */
+  private async clone(ctx: SandboxMaterializeContext): Promise<void> {
+    const target = ["--quiet", "--", ctx.root, ctx.worktreePath];
+    try {
+      await this.git(ctx.root, ["clone", "--local", ...target]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/failed to create link/i.test(message)) throw err;
+      await rm(ctx.worktreePath, { recursive: true, force: true });
+      await this.git(ctx.root, ["clone", "--no-hardlinks", ...target]);
+    }
   }
 
   async teardown(_ctx: SandboxTeardownContext, _opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {

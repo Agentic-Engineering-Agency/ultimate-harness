@@ -312,7 +312,7 @@ describe("sandbox module", () => {
   test("createSandbox seeds the bound mission directory into the worktree (UH-29)", async () => {
     // Pre-create an uncommitted mission directory on the host.
     const missionDir = join(TEST_ROOT, ".harness", "missions", "smoke");
-    await execFileP("mkdir", ["-p", missionDir]);
+    await mkdir(missionDir, { recursive: true });
     await writeFile(
       join(missionDir, "mission.yaml"),
       "schema_version: uh.mission.v0\nid: smoke\nname: Smoke\nworkflow_profile: research-docs\n",
@@ -368,6 +368,79 @@ describe("sandbox module", () => {
         ),
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("sandbox index resilience", () => {
+  const indexPath = () => join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+
+  test("treats a missing index file and directory as an empty registry (fresh clone)", async () => {
+    // A fresh clone may carry none of the sandboxes runtime state.
+    await rm(join(TEST_ROOT, ".harness", "sandboxes"), { recursive: true, force: true });
+
+    expect(await listSandboxes(TEST_ROOT)).toEqual([]);
+    await expect(getSandboxStatus(TEST_ROOT, "ghost")).rejects.toThrow(/Sandbox not found: ghost/);
+    await expect(discardSandbox(TEST_ROOT, "ghost")).rejects.toThrow(/Sandbox not found: ghost/);
+
+    const record = await createSandbox(TEST_ROOT, { id: "fresh", missionId: "demo" });
+    expect(record).toMatchObject({ id: "fresh", branch: "sandbox/fresh" });
+
+    // `create` wrote a new valid index on demand, with the canonical schema.
+    const indexDoc = parse(await readFile(indexPath(), "utf-8")) as {
+      schema_version: string;
+      sandboxes: Array<{ id: string; mission_id: string }>;
+    };
+    expect(indexDoc.schema_version).toBe("uh.sandboxes-index.v0");
+    expect(indexDoc.sandboxes).toMatchObject([{ id: "fresh", mission_id: "demo" }]);
+
+    const info = await getSandboxStatus(TEST_ROOT, "fresh");
+    expect(info).toMatchObject({ id: "fresh", branch: "sandbox/fresh", dirty: false });
+
+    const discarded = await discardSandbox(TEST_ROOT, "fresh");
+    expect(discarded).toMatchObject({ id: "fresh", branch: "sandbox/fresh" });
+
+    const after = parse(await readFile(indexPath(), "utf-8")) as { sandboxes: unknown[] };
+    expect(after.sandboxes).toEqual([]);
+    expect(await listSandboxes(TEST_ROOT)).toEqual([]);
+  });
+
+  test("a missing index file alone is enough for list, status and discard", async () => {
+    await rm(indexPath(), { force: true });
+    // The sandboxes directory survives; only the runtime index file is gone.
+    await expect(stat(join(TEST_ROOT, ".harness", "sandboxes"))).resolves.toBeTruthy();
+
+    expect(await listSandboxes(TEST_ROOT)).toEqual([]);
+    await expect(getSandboxStatus(TEST_ROOT, "ghost")).rejects.toThrow(/Sandbox not found: ghost/);
+    await expect(discardSandbox(TEST_ROOT, "ghost")).rejects.toThrow(/Sandbox not found: ghost/);
+    await expect(stat(indexPath())).rejects.toThrow();
+  });
+
+  test("refuses an invalid index and leaves it byte-identical", async () => {
+    await writeFile(indexPath(), "schema_version: uh.sandboxes-index.v0\nsandboxes: not-a-list\n", "utf-8");
+    const before = await readFile(indexPath());
+
+    await expect(listSandboxes(TEST_ROOT)).rejects.toThrow(/Sandboxes index is invalid/);
+    await expect(getSandboxStatus(TEST_ROOT, "any")).rejects.toThrow(/Sandboxes index is invalid/);
+    await expect(discardSandbox(TEST_ROOT, "any")).rejects.toThrow(/Sandboxes index is invalid/);
+    await expect(
+      createSandbox(TEST_ROOT, { id: "any", missionId: "demo" }),
+    ).rejects.toThrow(/Sandboxes index is invalid/);
+
+    // Never overwritten: byte-identical, and the refused create left no partial state.
+    expect((await readFile(indexPath())).equals(before)).toBe(true);
+    await expect(stat(join(TEST_ROOT, ".harness", "sandboxes", "any"))).rejects.toThrow();
+  });
+
+  test("refuses an index with invalid YAML and leaves it byte-identical", async () => {
+    await writeFile(indexPath(), "sandboxes: [\n", "utf-8");
+    const before = await readFile(indexPath());
+
+    await expect(listSandboxes(TEST_ROOT)).rejects.toThrow(/invalid YAML/);
+    await expect(
+      createSandbox(TEST_ROOT, { id: "any", missionId: "demo" }),
+    ).rejects.toThrow(/invalid YAML/);
+
+    expect((await readFile(indexPath())).equals(before)).toBe(true);
   });
 });
 
