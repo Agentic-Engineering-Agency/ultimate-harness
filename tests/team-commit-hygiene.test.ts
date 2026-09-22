@@ -285,6 +285,48 @@ describe("worker commit hygiene", () => {
     expect(worktreeStatus).toMatch(/package-lock\.json/);
   });
 
+  test("a worker whose only changes are outside its write roots produces no commit and is reported as touching no files", async () => {
+    await initGitRepo(ROOT);
+    await seedMissionPacket(ROOT, "team-mission", "guard:\n  write_roots:\n    - src\n");
+    const headBefore = (await git(ROOT, ["rev-parse", "HEAD"])).trim();
+
+    const runner = (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      // A child process wrote only outside the roots — nothing the worker owns.
+      await writeFile(join(root, "temp-result.json"), "{}\n", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(singleWorkerMission("team-mission"), ROOT, {
+      runnerFor: runner,
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("succeeded");
+
+    // The empty in-roots path list stages nothing, so no commit was created.
+    expect((await git(ROOT, ["rev-parse", backend.plan.branch])).trim()).toBe(headBefore);
+    expect(await changedFiles(ROOT, "HEAD", backend.plan.branch)).toEqual([]);
+
+    expect(backend.filesTouched).toEqual([]);
+    expect(backend.outOfRoots).toEqual({ paths: ["temp-result.json"], total: 1 });
+    const state = JSON.parse(await readFile(
+      join(ROOT, ".harness", "missions", "team-mission", "runs", result.runId!, "team-state.json"),
+      "utf-8",
+    ));
+    expect(state.workers[0].out_of_roots).toEqual({ paths: ["temp-result.json"], total: 1 });
+
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toMatch(/Files touched: 0/);
+    expect(report).toMatch(/Not committed \(outside write roots\): 1 path\(s\)/);
+    expect(report).toContain("`temp-result.json`");
+
+    // The stray file remains on disk, unstaged, as evidence.
+    const worktreeStatus = await git(backend.plan.worktreePath, ["status", "--porcelain", "--untracked-files=all"]);
+    expect(worktreeStatus).toMatch(/temp-result\.json/);
+  });
+
   test("a declared output outside the write roots is still committed", async () => {
     await initGitRepo(ROOT);
     await seedMissionPacket(ROOT, "team-mission", [

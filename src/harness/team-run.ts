@@ -184,8 +184,9 @@ export interface GitOps {
    * Stage + commit uncommitted changes in `cwd`, no-op when the staged index is
    * empty. `stagePaths` restricts staging to exactly those paths — an empty
    * array stages nothing — so a worker whose only changes fall outside its
-   * write roots produces no commit. When omitted, the whole worktree is staged
-   * minus the protected roots (the salvage / legacy callers).
+   * write roots produces no commit. Both the worker commit and the salvage
+   * commit route through it. When omitted (a stub gitOps that cannot enumerate
+   * the worktree), the whole worktree is staged minus the protected roots.
    */
   commitAll: (cwd: string, message: string, stagePaths?: readonly string[]) => Promise<void>;
   /**
@@ -1144,7 +1145,13 @@ export async function runTeamMission(
         ? relativeArtifactPath(root, path.join(context.artifactRoot, ".harness", "missions", workerMissionId, "runs", context.runId, "runtime-result.yaml"))
         : null;
       // A failed worker may still hold a complete change: salvage evaluates and
-      // (only when both pass) commits it, but the leader never merges it.
+      // (only when both pass) commits it, but the leader never merges it. Both
+      // the salvage commit and the settled worker's commit stage exactly the
+      // paths inside the worker's write roots (or its declared outputs) — so
+      // compute that scope's inputs once here.
+      const commitWorkerSpec = slot.plan.spec ?? { role: slot.plan.role, adapter: slot.plan.adapter as TeamWorker["adapter"] };
+      const commitBasePacket = workerMissionPackets.get(slot.plan.id)?.packet ?? canonicalPacket;
+      const commitWriteRoots = resolveWorkerWriteRoots(commitWorkerSpec, commitBasePacket);
       let salvageStopCode: string | undefined;
       let salvageRecord: WorkerSalvage | undefined;
       if (status === "failed") {
@@ -1159,25 +1166,25 @@ export async function runTeamMission(
           artifactRoot: context.artifactRoot,
           runId: context.runId,
           expectedOutputs: salvageOutputs?.files,
+          writeRoots: commitWriteRoots,
         });
         salvageStopCode = evaluated.stopCode;
         salvageRecord = evaluated.record;
         if (salvageRecord) canonicalWorker.salvage = salvageRecord;
+        if (evaluated.outOfRoots) canonicalWorker.out_of_roots = evaluated.outOfRoots;
       }
       // Classify the worktree's changed paths before committing: only paths
       // inside the worker's resolved write roots (or its declared outputs) are
       // staged. A child process — a build — can write outside those roots with
       // the tool guard none the wiser, so those paths stay unstaged and are
       // recorded as out_of_roots.
-      let outOfRoots: WorkerOutcome["outOfRoots"];
+      let outOfRoots: WorkerOutcome["outOfRoots"] = canonicalWorker.out_of_roots;
       let stagePaths: string[] | undefined;
       if (status === "succeeded") {
-        const workerSpec = slot.plan.spec ?? { role: slot.plan.role, adapter: slot.plan.adapter as TeamWorker["adapter"] };
-        const basePacket = workerMissionPackets.get(slot.plan.id)?.packet ?? canonicalPacket;
         const scope = await resolveWorkerCommitScope({
           gitOps,
           worktreePath: slot.plan.worktreePath,
-          writeRoots: resolveWorkerWriteRoots(workerSpec, basePacket),
+          writeRoots: commitWriteRoots,
           expectedOutputs: expectedOutputs?.files ?? [],
         });
         stagePaths = scope.stagePaths;
@@ -1426,12 +1433,16 @@ function classifyRuntimeStatus(res: TeamRuntimeRunResult): WorkerOutcome["status
  *
  * A worker is only considered when its stop code means it ran out of budget or
  * was halted by safety (`turn_limit`, `timeout`, `deadline`, `stall`, `policy`)
- * AND its worktree holds changes outside the protected roots. Its own declared
- * outputs are re-checked with the output verification, and the worker mission's
+ * AND its worktree holds changes inside its write roots (or its declared
+ * outputs) that are not protected — the same scope the worker commit honors, so
+ * a stray temp file at the repository root is never salvaged into a commit and
+ * is instead reported as `out_of_roots`. Its own declared outputs are re-checked
+ * with the output verification, and the worker mission's
  * `verification.required_checks` are run in the worker worktree through the same
- * verifier the leader uses. The worktree is committed to the worker branch — with
- * the existing commit hygiene — only when both passed. The record is always
- * surfaced so an operator can take it deliberately; the leader never merges it.
+ * verifier the leader uses. The worktree is committed to the worker branch —
+ * staging exactly the in-roots paths — only when both passed. The record is
+ * always surfaced so an operator can take it deliberately; the leader never
+ * merges it.
  */
 async function evaluateWorkerSalvage(args: {
   gitOps: GitOps;
@@ -1443,19 +1454,28 @@ async function evaluateWorkerSalvage(args: {
   artifactRoot: string;
   runId: string;
   expectedOutputs: readonly string[] | undefined;
-}): Promise<{ stopCode?: string; record?: WorkerSalvage }> {
+  writeRoots: readonly string[];
+}): Promise<{
+  stopCode?: string;
+  record?: WorkerSalvage;
+  outOfRoots?: WorkerOutcome["outOfRoots"];
+}> {
   const stopCode = await readWorkerStopCode(args.artifactRoot, args.workerMissionId, args.runId);
   if (stopCode === undefined || !SALVAGE_STOP_CODES.has(stopCode)) return { stopCode };
-  // Without a way to inspect the worktree we cannot tell salvageable work from
-  // harness-owned churn, so we record nothing rather than guess.
-  if (!args.gitOps.dirtyPaths) return { stopCode };
-  let dirty: string[];
-  try {
-    dirty = await args.gitOps.dirtyPaths(args.worktreePath);
-  } catch {
-    return { stopCode };
-  }
-  const eligible = dirty.some((entry) => !isProtectedPath(entry, DEFAULT_PROTECTED_PATHS));
+  // Partition the stopped worktree exactly like a settled worker's commit: only
+  // paths inside the write roots or declared outputs are stageable; the rest
+  // stay unstaged and are surfaced as out_of_roots on the same footing. An
+  // undefined scope means the worktree could not be inspected at all (a stub
+  // gitOps without `dirtyPaths`, or one that threw) — we cannot tell salvageable
+  // work from harness-owned churn, so we record nothing rather than guess.
+  const { stagePaths, outOfRoots } = await resolveWorkerCommitScope({
+    gitOps: args.gitOps,
+    worktreePath: args.worktreePath,
+    writeRoots: args.writeRoots,
+    expectedOutputs: args.expectedOutputs ?? [],
+  });
+  if (stagePaths === undefined) return { stopCode };
+  const eligible = stagePaths.length > 0;
   let outputsPassed = false;
   let checksPassed = false;
   if (eligible) {
@@ -1474,13 +1494,14 @@ async function evaluateWorkerSalvage(args: {
     }
     if (outputsPassed && checksPassed) {
       try {
-        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`);
+        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`, stagePaths);
       } catch { /* best-effort: the record still points at the branch for a human */ }
     }
   }
   return {
     stopCode,
     record: { eligible, outputs_passed: outputsPassed, checks_passed: checksPassed, branch: args.branch },
+    ...(outOfRoots ? { outOfRoots } : {}),
   };
 }
 
@@ -1671,9 +1692,12 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
     lines.push("");
   }
   // Stopped-but-verified work: a failed worker whose stop code permitted
-  // salvage and whose worktree held non-protected changes. The leader never
-  // merges these automatically — the section exists so a human can take the
-  // branch deliberately (a policy stop always requires a human).
+  // salvage and whose worktree held changes inside its write roots. The leader
+  // never merges these automatically — the section exists so a human can take
+  // the branch deliberately (a policy stop always requires a human). Paths the
+  // stopped worker left outside its roots were never salvaged into the commit,
+  // so they are listed here too: a branch marked "committed" holds only the
+  // in-roots subset.
   const salvaged = args.workers.filter((outcome) => outcome.salvage?.eligible === true);
   lines.push("## Verified work from stopped workers");
   lines.push("");
@@ -1686,6 +1710,10 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
       const stop = outcome.stopCode ? `\`${outcome.stopCode}\`` : "_unknown_";
       const verdict = salvage.outputs_passed && salvage.checks_passed ? "committed" : "not committed";
       lines.push(`- \`${outcome.plan.id}\` — stop ${stop}, branch \`${salvage.branch}\`, outputs \`${salvage.outputs_passed ? "passed" : "failed"}\`, checks \`${salvage.checks_passed ? "passed" : "failed"}\` (${verdict})`);
+      if (outcome.outOfRoots && outcome.outOfRoots.total > 0) {
+        lines.push(`  - not committed (outside write roots): ${outcome.outOfRoots.total} path(s)`);
+        for (const p of outcome.outOfRoots.paths) lines.push(`    - \`${p}\``);
+      }
     }
     lines.push("");
     lines.push("> Not merged: the leader never integrates a failed worker automatically. Take this branch deliberately.");
