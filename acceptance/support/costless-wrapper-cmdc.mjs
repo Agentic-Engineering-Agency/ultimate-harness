@@ -1,4 +1,4 @@
-import { accessSync } from "node:fs";
+import { accessSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -15,7 +15,24 @@ function resolveExecutable(command) {
   }
   return command;
 }
-const result = spawnSync(resolveExecutable("cmdc"), process.argv.slice(2), { encoding: "utf8", shell: false });
+
+function resolveCmdEntry(cmdPath) {
+  if (!/\.cmd$/i.test(cmdPath)) return null;
+  let content;
+  try { content = readFileSync(cmdPath, "utf8"); } catch { return null; }
+  const matches = [...content.matchAll(/"%(?:~)?dp0%\\([^"]+\.(?:mjs|js))"/gi)];
+  if (matches.length === 0) return null;
+  const entry = matches[matches.length - 1][1];
+  return path.join(path.dirname(cmdPath), ...entry.split(/[\\/]/));
+}
+
+const args = process.argv.slice(2);
+const resolved = resolveExecutable("cmdc");
+const entry = resolveCmdEntry(resolved);
+const needsShell = process.platform === "win32" && entry === null && /\.(cmd|bat)$/i.test(resolved);
+const result = entry
+  ? spawnSync(process.execPath, [entry, ...args], { encoding: "utf8" })
+  : spawnSync(resolved, args, { encoding: "utf8", shell: needsShell });
 const stdout = result.stdout ?? "";
 function stripUsage(value) {
   if (!value || typeof value !== "object") return value;
