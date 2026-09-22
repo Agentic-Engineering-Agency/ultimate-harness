@@ -62,7 +62,7 @@ describe("acceptance evidence", () => {
     await writeFile(path.join(root, "acceptance", "evidence", "C1", "latest.json"), JSON.stringify({
       schema_version: "uh.acceptance-evidence.v0", capability: "C1", outcome: "passed", checked_at: "2026-09-15T00:00:00.000Z", harness_commit: "unknown", runtime: "oh-my-pi", provider: "unknown", model: "unknown", cost_usd: "unknown", workspace: "T:/tmp/run", run_ids: [], mission_id: "c1", expected: { status: "passed" }, observed: { status: "passed" }, fact_sources: {}, mismatches: [], artifact_root: "T:/tmp/run/.harness",
     }) + "\n");
-    const report = await renderAcceptanceReport(root, new Date("2026-09-15T00:00:00.000Z"));
+    const report = await renderAcceptanceReport(root, new Date("2026-09-15T00:00:00.000Z"), { evidenceRoot: path.join(root, "acceptance", "evidence") });
     expect(report).toContain("[latest](../../acceptance/evidence/C1/latest.json)");
     expect(report).toContain("| S1 | S1 | Resource wave baseline | unproven | — | oh-my-pi | — | — | — |");
   });
@@ -74,7 +74,7 @@ describe("acceptance evidence", () => {
     await writeFile(path.join(root, "acceptance", "evidence", "C1", "latest.json"), JSON.stringify({
       schema_version: "uh.acceptance-evidence.v0", capability: "C1", outcome: "passed", checked_at: "2026-09-15T00:00:00.000Z", harness_commit: "unknown", runtime: "oh-my-pi", provider: "unknown", model: "unknown", cost_usd: "unknown", workspace: "T:/tmp/run", run_ids: [], mission_id: "c1", expected: { status: "passed" }, observed: { status: "passed" }, fact_sources: {}, mismatches: [], artifact_root: "T:/tmp/run/.harness",
     }) + "\n");
-    const report = await renderAcceptanceReport(root, new Date("2026-09-15T00:00:00.000Z"));
+    const report = await renderAcceptanceReport(root, new Date("2026-09-15T00:00:00.000Z"), { evidenceRoot: path.join(root, "acceptance", "evidence") });
     expect(report).toContain("| C1 | Per-worker contracts |");
   });
 
@@ -171,7 +171,7 @@ describe("acceptance evidence", () => {
     await writeFile(path.join(root, "acceptance", "evidence", "R10-stall", "latest.json"), JSON.stringify({
       schema_version: "uh.acceptance-evidence.v0", capability: "R10-stall", outcome: "failed", checked_at: "2026-09-15T00:00:00.000Z", harness_commit: "abc", runtime: "oh-my-pi", provider: "unknown", model: "unknown", cost_usd: "unknown", workspace: "T:/tmp/run", run_ids: ["001"], mission_id: "r10", expected: { status: "passed" }, observed: { status: "failed" }, fact_sources: {}, mismatches: [{ field: "status", expected: "passed", observed: "failed" }], artifact_root: "T:/tmp/run/.harness",
     }) + "\n");
-    const report = await renderAcceptanceReport(root, new Date("2026-09-15T00:00:00.000Z"));
+    const report = await renderAcceptanceReport(root, new Date("2026-09-15T00:00:00.000Z"), { evidenceRoot: path.join(root, "acceptance", "evidence") });
     expect(report).toContain("| R10-stall | R10 | Stall recovery | failed |");
   });
 
@@ -189,7 +189,7 @@ describe("acceptance evidence", () => {
       schema_version: "uh.acceptance-evidence.v0", capability: "C1", outcome: "passed", checked_at: "2026-09-15T00:00:00.000Z", harness_commit: "unknown", runtime: "oh-my-pi", provider: "unknown", model: "unknown", cost_usd: "unknown", workspace: "T:/tmp/run", run_ids: [], mission_id: "c1", expected: { status: "passed" }, observed: { status: "passed" }, fact_sources: {}, mismatches: [], artifact_root: "T:/tmp/run/.harness",
     }) + "\n");
     const now = new Date("2026-09-15T00:00:00.000Z");
-    expect(await renderAcceptanceReport(root, now)).toContain("| C1 | C1 | Per-worker contracts | proven |");
+    expect(await renderAcceptanceReport(root, now, { evidenceRoot: path.join(root, "acceptance", "evidence") })).toContain("| C1 | C1 | Per-worker contracts | proven |");
     const emptyEvidence = await mkdtemp(path.join(tmpdir(), "acceptance-drift-empty-"));
     expect(await renderAcceptanceReport(root, now, { evidenceRoot: emptyEvidence })).toContain("| C1 | C1 | Per-worker contracts | unproven |");
   });
@@ -239,7 +239,8 @@ describe("command-code fleet registry entries", () => {
   });
 
   test("renders the command-code fleet entries in the generated report", async () => {
-    const report = await renderAcceptanceReport(process.cwd());
+    const emptyEvidence = await mkdtemp(path.join(tmpdir(), "acceptance-fleet-evidence-"));
+    const report = await renderAcceptanceReport(process.cwd(), new Date(), { evidenceRoot: emptyEvidence });
     expect(report).toContain("| C1-cmdc | C1 | Per-worker contracts | unproven | — | command-code | qwen/qwen3.8-flash | — | — |");
     expect(report).toContain("| S3-unknown-cost-cmdc | S3 | Unknown cost admission | unproven | — | command-code | qwen/qwen3.8-flash | — | — |");
     expect(report).toContain("| R10-stall-cmdc | R10 | Stall recovery | fixture_only | — | command-code | qwen/qwen3.8-flash | — | — |");
