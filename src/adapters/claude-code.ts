@@ -29,6 +29,7 @@ import { runtimeRegistry } from "../harness/registry.js";
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { runRuntimeProcess, type RuntimeProcessInput, type RuntimeProcessOutput } from "../harness/runtime-process.js";
 import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
+import { armGuard, guardArmStopReceipt, GUARD_ARM_LOG_NAME, type GuardArmingFailure, type GuardArmingInput, type GuardArmingResult } from "../harness/guard-arming.js";
 import {
   nativeRuntimeCompleted,
   nativeRuntimeEvent,
@@ -310,6 +311,8 @@ export async function dryRunClaudeCode(root: string, missionPath: string, option
 export interface ClaudeCodeRunOptions {
   runner?: (input: RuntimeProcessInput) => Promise<RuntimeProcessOutput>;
   collectDiff?: (cwd: string) => Promise<{ patch: string; errors?: string[] }>;
+  /** Pre-launch guard arming seam; defaults to the real arming check. */
+  armGuard?: (input: GuardArmingInput) => Promise<GuardArmingResult>;
   runId?: string;
   artifactRoot?: string;
   timeoutMs?: number;
@@ -342,6 +345,7 @@ export async function runClaudeCode(root: string, missionPath: string, options: 
   await appendMissionEvent(artifacts, { event: "runtime.started", runtime: "claude-code", mission_id: plan.mission.id, run_id: runId, timestamp: startedAt });
 
   let guardEnv: NodeJS.ProcessEnv | undefined;
+  let guardArmFailure: GuardArmingFailure | undefined;
   if (plan.guard) {
     const effectiveLimits = { ...plan.config.limits, ...(plan.config.max_turns ? { max_turns: plan.config.max_turns } : {}), ...options.limits };
     const protectedPaths = effectiveLimits.protected_paths ?? DEFAULT_PROTECTED_PATHS;
@@ -356,6 +360,13 @@ export async function runClaudeCode(root: string, missionPath: string, options: 
     const logPath = path.join(artifacts.runDir, "tool-guard.log");
     await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
+    const arming = await (options.armGuard ?? armGuard)({
+      runtime: "claude-code",
+      policyPath,
+      logPath: path.join(artifacts.runDir, GUARD_ARM_LOG_NAME),
+      hookCommand: [process.execPath, await snapshotGuardHook("extensions/tool-guard/claude-code-hook.js")],
+    });
+    if (!arming.ok) guardArmFailure = arming;
   }
 
   let partial = "";
@@ -380,7 +391,10 @@ export async function runClaudeCode(root: string, missionPath: string, options: 
   };
 
   let output: RuntimeProcessOutput;
-  try {
+  if (guardArmFailure) {
+    await writeArtifactFile(artifacts.missionDir, path.join(artifacts.runDir, "runtime-control.json"), JSON.stringify(guardArmStopReceipt({ missionId: plan.mission.id, runId, runtime: "claude-code", reason: guardArmFailure.reason }), null, 2));
+    output = { stdout: "", stderr: "", exitCode: 1, timedOut: false, spawnError: guardArmFailure.reason, supervisionStopCode: "policy" };
+  } else try {
     output = await (options.runner ?? runRuntimeProcess)({
       command: plan.command,
       args: plan.args,

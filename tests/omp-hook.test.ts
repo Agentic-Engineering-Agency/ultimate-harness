@@ -7,8 +7,9 @@ import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
 import { runOhMyPi } from "../src/adapters/oh-my-pi.js";
 import registerOhMyPiGuard from "../src/extensions/tool-guard/omp.js";
+import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
-type ToolCallEvent = { toolName?: string; input?: unknown };
+type ToolCallEvent = { toolName?: string; input?: unknown; toolCallId?: string };
 type ToolCallHandler = (event: ToolCallEvent) => unknown;
 
 /** Register the extension with a stand-in `pi` and return its tool_call handler. */
@@ -45,7 +46,7 @@ beforeEach(async () => {
   snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-omp-hook-snapshot-"));
   const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "omp.js");
   await mkdir(path.dirname(hook), { recursive: true });
-  await writeFile(hook, "export default function () {}\n");
+  await writeGuardHookFixture(hook);
   previousDist = process.env.UH_HARNESS_DIST;
   previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
   process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");
@@ -85,21 +86,24 @@ describe("oh-my-pi guard extension", () => {
       const handler = captureToolCall();
 
       // A read is allowed.
-      const allowedRead = await handler({ toolName: "read_file", input: { file_path: path.join(root, "out", "allowed.txt") } });
+      const allowedRead = await handler({ toolName: "read_file", toolCallId: "omp-read-1", input: { file_path: path.join(root, "out", "allowed.txt") } });
       expect(allowedRead).toBeUndefined();
 
       // A write outside the write roots is denied and logged.
-      const deniedWrite = await handler({ toolName: "write_file", input: { file_path: path.join(root, "outside", "unauthorized.txt") } }) as { block?: boolean; reason?: string };
+      const deniedWrite = await handler({ toolName: "write_file", toolCallId: "omp-write-out-2", input: { file_path: path.join(root, "outside", "unauthorized.txt") } }) as { block?: boolean; reason?: string };
       expect(deniedWrite.block).toBe(true);
       expect(deniedWrite.reason).toContain("CONTRACT: write only under out");
 
       // A write inside the write roots is allowed.
-      const allowedWrite = await handler({ toolName: "write_file", input: { file_path: path.join(root, "out", "inside.txt") } });
+      const allowedWrite = await handler({ toolName: "write_file", toolCallId: "omp-write-in-3", input: { file_path: path.join(root, "out", "inside.txt") } });
       expect(allowedWrite).toBeUndefined();
 
+      // Every decision, allow or deny, is logged with the runtime's call id.
       const entries = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(l => JSON.parse(l) as Record<string, unknown>);
-      expect(entries).toHaveLength(1);
-      expect(entries[0]).toMatchObject({ tool: "write_file", class: "write_outside" });
+      expect(entries).toHaveLength(3);
+      expect(entries.map(entry => entry.class)).toEqual(["allow", "write_outside", "allow"]);
+      expect(entries.map(entry => entry.call_id)).toEqual(["omp-read-1", "omp-write-out-2", "omp-write-in-3"]);
+      expect(entries[1]).toMatchObject({ tool: "write_file", class: "write_outside" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

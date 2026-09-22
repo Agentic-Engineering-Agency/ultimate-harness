@@ -15,6 +15,7 @@ import {
   planClaudeCodeRun,
   runClaudeCode,
 } from "../src/adapters/claude-code.js";
+import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
 const MODEL = DEFAULT_CLAUDE_CODE_MODEL;
 
@@ -52,7 +53,7 @@ beforeEach(async () => {
   snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-claude-code-snapshot-"));
   const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "claude-code-hook.js");
   await mkdir(path.dirname(hook), { recursive: true });
-  await writeFile(hook, "export default function () {}\n");
+  await writeGuardHookFixture(hook);
   previousDist = process.env.UH_HARNESS_DIST;
   previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
   process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");
