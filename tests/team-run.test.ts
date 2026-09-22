@@ -1021,6 +1021,93 @@ describe("runTeamMission — fake gitOps", () => {
   });
 });
 
+/* ------------------------------------------- command-code cost admission */
+
+describe("runTeamMission — command-code worker cost admission", () => {
+  beforeEach(async () => {
+    await seedMissionPacket(ROOT, "team-mission");
+  });
+
+  const pricesYaml = [
+    "schema_version: uh.prices.v0",
+    "models:",
+    "  qwen/qwen3.8-flash:",
+    "    input_usd_per_million: 2",
+    "    output_usd_per_million: 8",
+    "    cache_read_usd_per_million: 0.4",
+    "    cache_write_usd_per_million: 1",
+    '    source: "test placeholder, not a real price"',
+  ].join("\n") + "\n";
+
+  const passingVerifier = async (): Promise<VerifyMissionLike> => ({
+    status: "passed", path: "/fake/verification.yaml", checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+    acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+  });
+
+  /** A command-code worker whose native stream reports usage but no price. */
+  function commandCodeRunner(stream: string) {
+    return (_adapter: string) => async (
+      _runtime: string,
+      _workerRoot: string,
+      _missionPath: string,
+      context: { artifactRoot: string; runId: string },
+    ): Promise<TeamRuntimeRunResult> => {
+      const runDir = join(context.artifactRoot, ".harness", "missions", "team-mission", "runs", context.runId);
+      await mkdir(runDir, { recursive: true });
+      await writeFile(join(runDir, "runtime-result.yaml"), [
+        "schema_version: uh.runtime-result.v0",
+        "mission_id: team-mission",
+        "runtime: command-code",
+        "status: passed",
+        "started_at: 2026-09-22T00:00:00.000Z",
+        "finished_at: 2026-09-22T00:01:00.000Z",
+        "prompt_path: prompt.md",
+        "stdout_path: stdout.log",
+        "stderr_path: stderr.log",
+        "errors: []",
+      ].join("\n") + "\n", "utf-8");
+      await writeFile(join(runDir, "events.ndjson"), stream, "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+  }
+
+  async function runThreeWorkerTeam(stream: string): Promise<{ dispatched: string[]; result: Awaited<ReturnType<typeof runTeamMission>> }> {
+    const dispatched: string[] = [];
+    const runner = commandCodeRunner(stream);
+    const packet = mission("team-mission", { workers: [{ role: "worker", adapter: "command-code", count: 3 }] });
+    packet.team.resources = { max_parallel: 2, max_cost_usd: 2, worker_cost_reservation_usd: 1 };
+    const result = await runTeamMission(packet, ROOT, {
+      gitOps: fakeGitOps({ branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() }, { write: async () => undefined }),
+      runnerFor: adapter => async (runtime, workerRoot, missionPath, context) => {
+        dispatched.push(basename(workerRoot));
+        return runner(adapter)(runtime, workerRoot, missionPath, context);
+      },
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+    return { dispatched, result };
+  }
+
+  const usageStream = () => readFile(join(process.cwd(), "tests", "fixtures", "runtime-events", "command-code-usage.ndjson"), "utf-8");
+
+  test("a price table makes the third worker admissible on estimated cost", async () => {
+    await writeFile(join(ROOT, ".harness", "prices.yaml"), pricesYaml, "utf-8");
+    const { dispatched, result } = await runThreeWorkerTeam(await usageStream());
+    expect(dispatched).toHaveLength(3);
+    expect(result.workers.every((w) => w.status === "succeeded")).toBe(true);
+    expect(result.status).toBe("passed");
+  });
+
+  test("without a price table the third worker is still blocked with the existing reason", async () => {
+    const { dispatched, result } = await runThreeWorkerTeam(await usageStream());
+    expect(dispatched).toEqual(["worker-1", "worker-2"]);
+    const third = result.workers.find((w) => w.plan.id === "worker-3");
+    expect(third?.status).toBe("blocked");
+    expect(third?.errorMessage).toMatch(/Completed worker cost is unknown/);
+    expect(result.status).toBe("blocked");
+  });
+});
+
 /* ------------------------------------------------------- constraints (UH-130) */
 
 describe("warnConstraintsAreAdvisory (UH-130)", () => {
