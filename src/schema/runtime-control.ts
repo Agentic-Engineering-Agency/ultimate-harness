@@ -60,15 +60,18 @@ export type AppliedToolGuardPolicy = ToolGuardPolicy & {
   controller_commands?: boolean;
 };
 
-/** Extract applied policy from an artifact, isolating policy fields from metadata. */
+/**
+ * Extract applied policy from an artifact, isolating policy fields from metadata.
+ * The policy fields are read through `ToolGuardPolicySchema`'s own shape, so a key
+ * added to the schema is applied rather than dropped; the metadata fields
+ * (`worker_root`, `protected_paths`, `controller_commands`) are added explicitly.
+ */
 export function policyFromArtifact(artifact: ToolGuardArtifact): AppliedToolGuardPolicy {
+  const source = artifact as Record<string, unknown>;
+  const fields: Record<string, unknown> = {};
+  for (const key of Object.keys(ToolGuardPolicySchema.shape)) fields[key] = source[key];
   return {
-    write_roots: artifact.write_roots,
-    deny_git_mutations: artifact.deny_git_mutations,
-    deny_package_installs: artifact.deny_package_installs,
-    deny_network_clients: artifact.deny_network_clients,
-    agent_clients: artifact.agent_clients,
-    allow_native_subagents: artifact.allow_native_subagents,
+    ...ToolGuardPolicySchema.parse(fields),
     worker_root: artifact.worker_root,
     protected_paths: artifact.protected_paths,
     controller_commands: artifact.controller_commands,
