@@ -316,7 +316,7 @@ function guardTamperEvent(event: Event): boolean {
   return guardTamperRecord(event);
 }
 
-type GuardEvidenceEntry = { tool?: string; target?: string };
+type GuardEvidenceEntry = { call_id?: string; tool?: string; target?: string };
 
 function guardLogEntries(logPath: string): { lines: number; tamper: boolean; entries: GuardEvidenceEntry[] } {
   if (!existsSync(logPath)) return { lines: 0, tamper: false, entries: [] };
@@ -330,6 +330,7 @@ function guardLogEntries(logPath: string): { lines: number; tamper: boolean; ent
         if (guardTamperRecord(parsed, 0)) tamper = true;
         const item = record(parsed);
         entries.push({
+          call_id: typeof item?.call_id === "string" && item.call_id ? item.call_id : undefined,
           tool: typeof item?.tool === "string" && item.tool ? item.tool : undefined,
           target: typeof item?.target === "string" && item.target ? item.target : undefined,
         });
@@ -340,18 +341,6 @@ function guardLogEntries(logPath: string): { lines: number; tamper: boolean; ent
     return { lines: 0, tamper: false, entries: [] };
   }
 }
-
-/**
- * Whether a guard-log target can be evidence for the target the supervisor
- * observed for a call. The supervisor truncates shell targets and the hooks
- * sometimes log a resolved sub-target of a command, so a containment in either
- * direction counts. A target unknown on either side matches by tool name alone.
- */
-function guardTargetMatches(logged: string | undefined, observed: string | undefined): boolean {
-  if (logged === undefined || observed === undefined) return true;
-  return logged === observed || logged.includes(observed) || observed.includes(logged);
-}
-
 
 function claudeNativeEvents(event: Event): Event[] {
   const derived: Event[] = [];
@@ -561,14 +550,12 @@ export class RuntimeSupervision {
       this.stop("Guard tamper attempted", "policy");
       return;
     }
-    const name = this.toolNames.get(id);
-    const target = this.toolTargets.get(id);
-    // When every guard-log line records a tool name, evidence matches the call
-    // itself; otherwise the comparison falls back to counting totals.
-    const matchable = name !== undefined && evidence.entries.length > 0 &&
-      evidence.entries.every(entry => entry.tool !== undefined);
-    const hasCallEvidence = !matchable ||
-      evidence.entries.some(entry => entry.tool === name && guardTargetMatches(entry.target, target));
+    // When log lines carry call IDs, evidence matches the call by call_id: a
+    // completed, runtime-executed call is missing evidence only if no line has its
+    // call id. When lines carry no call ids (older hooks), fall back to comparing
+    // totals (native refusals are excluded because they are never added to guardCompletedCalls).
+    const hasCallIds = evidence.entries.some(entry => entry.call_id !== undefined);
+    const hasCallEvidence = !hasCallIds || evidence.entries.some(entry => entry.call_id === id);
     if (evidence.lines >= this.guardCompletedCalls.size && hasCallEvidence) {
       this.guardArmed = true;
     } else {

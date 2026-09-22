@@ -77,14 +77,13 @@ When a guard is active, each native adapter writes both artifacts in the run dir
 | `protected_paths` | Array of non-empty protected-root strings used by the run. |
 | `write_roots`, `deny_git_mutations`, `deny_package_installs`, `deny_network_clients`, `agent_clients` | The resolved `ToolGuardPolicy` fields and defaults described above. |
 
-`.harness/missions/<mission>/runs/<run_id>/tool-guard.log` is newline-delimited JSON. Each denial line has:
+`.harness/missions/<mission>/runs/<run_id>/tool-guard.log` is newline-delimited JSON. Each line has:
 
 ```json
-{"ts":"<ISO timestamp>","tool":"<tool name>","class":"<ToolGuardClass>","target":"<target or tool fallback>","reason":"<exact denial reason>"}
+{"ts":"<ISO timestamp>","call_id":"<call id>","tool":"<tool name>","class":"<ToolGuardClass | allow>","target":"<target or tool fallback>","reason":"<exact denial reason>"}
 ```
 
-The OMP and Command Code writers use the same field names and append one line per denied decision. `target` contains the resolved decision target when one exists; otherwise `toolTargetForLog` supplies the tool name as a fallback.
-
+`call_id` is optional and records the runtime tool call or tool use identifier when provided by the runtime hook (such as Command Code or Claude Code PreToolUse). For allowed calls, `class` is `"allow"` and `reason` is omitted. The OMP, Claude Code, and Command Code writers use the same field names. `target` contains the resolved decision target when one exists; otherwise `toolTargetForLog` supplies the tool name as a fallback.
 ## Denials and the runtime denial budget
 
 The supervisor does not infer a denial from arbitrary model text. It counts either a native hook-block event (`tool_hook_blocked`, `tool_call_blocked`, or `tool_denied`) or a completed tool result whose recursively inspected `result`, `text`, or `content` contains a string beginning with `CONTRACT:`. A call ID is counted once even if the same denied result is observed more than once. On each counted denial, the supervisor records the hook text and updates progress; when `max_denials` is reached, it stops with `stop_code: "denial_budget"` and a reason in the form `<count> hook-denied calls; last: <tool> <target>: <hook reason>`.
