@@ -17,8 +17,11 @@ import {
   type RunDigestCall,
   type RunDigestCallStatus,
   type RunDigestCurrentActivity,
+  type RunDigestEfficiency,
   type RunDigestErrorClass,
   type RunDigestGuardClass,
+  type RunDigestLongRunningTool,
+  type RunDigestToolOutputBytes,
   type RunDigestUsage,
 } from "../schema/run-digest.js";
 import {
@@ -43,6 +46,12 @@ export const RUN_DIGEST_FILES_LIMIT = 50;
 export const RUN_DIGEST_DENIALS_LIMIT = 100;
 /** The last assistant text is never longer than this many characters. */
 export const LAST_ASSISTANT_TEXT_LIMIT = 600;
+/** A call still in flight with no end event or output for this long is a loop signal. */
+export const LONG_RUNNING_TOOL_MS = 5 * 60 * 1000;
+/** The context snapshot is taken at the first request, the request after five, and the last. */
+const CONTEXT_AFTER_FIVE = 5;
+/** The efficiency block measures output bytes for each projection kind. */
+const EMPTY_OUTPUT_BYTES: RunDigestToolOutputBytes = { read: 0, write: 0, shell: 0, other: 0 };
 
 const OUTSIDE = "<outside>";
 const UNKNOWN_TARGET = "unknown";
@@ -249,6 +258,67 @@ function firstPathValue(args: Event | undefined): string | undefined {
   return undefined;
 }
 
+/**
+ * oh-my-pi names a line range inside `args.path` (`src/a.ts:18-28`); Command
+ * Code carries it in `offset`/`limit`. Split it so a write target is the bare
+ * path and a read key can name the range it read. A path with no numeric range
+ * suffix is left intact.
+ */
+function splitPathRange(value: string): { path: string; range?: string } {
+  const trimmed = value.trim();
+  const match = /^(.*?):(\d+)(?:-(\d+))?$/.exec(trimmed);
+  if (!match || !match[1]) return { path: trimmed };
+  const start = match[2]!;
+  return { path: match[1], range: match[3] ? `${start}-${match[3]}` : start };
+}
+
+/** The line range a call read, from an explicit suffix or from `offset`/`limit`. */
+function rangeFromArgs(args: Event | undefined, inline?: string): string {
+  if (inline !== undefined) return inline;
+  if (!args) return "";
+  const offset = numberOf(args.offset) ?? numberOf(args.start_line) ?? numberOf(args.startLine);
+  const limit = numberOf(args.limit) ?? numberOf(args.end_line) ?? numberOf(args.endLine);
+  if (offset === undefined && limit === undefined) return "";
+  return `${offset ?? ""}:${limit ?? ""}`;
+}
+
+interface CallTarget {
+  target: string;
+  range: string;
+}
+
+/** The relative target and the line range a call names, without ever publishing an absolute path. */
+function callTargetInfo(args: Event | undefined, kind: ToolCallKind, workingDirectory?: string): CallTarget {
+  if (kind === "shell") {
+    const command = typeof args?.command === "string" ? args.command : typeof args?.cmd === "string" ? args.cmd : "";
+    return { target: executableName(shellExecutable(command)), range: "" };
+  }
+  const value = firstPathValue(args);
+  if (value !== undefined) {
+    const split = splitPathRange(value);
+    return { target: relativeRunTarget(split.path, workingDirectory), range: rangeFromArgs(args, split.range) };
+  }
+  if (typeof args?.pattern === "string" && args.pattern.trim()) return { target: PATTERN_TARGET, range: "" };
+  return { target: UNKNOWN_TARGET, range: "" };
+}
+
+/** The bytes of tool output a completed call produced, from its text result. */
+function outputTextOf(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(outputTextOf).join("");
+  const item = record(value);
+  if (!item) return "";
+  if (typeof item.text === "string") return item.text;
+  if (item.content !== undefined) return outputTextOf(item.content);
+  return "";
+}
+
+function toolOutputBytes(event: Event): number {
+  const raw = event.result ?? event.output ?? event.content;
+  const text = outputTextOf(raw);
+  return text.length === 0 ? 0 : Buffer.byteLength(text, "utf8");
+}
+
 /* -------------------------------------------------------------------------- */
 /* Target resolution                                                          */
 /* -------------------------------------------------------------------------- */
@@ -316,14 +386,7 @@ export function relativeRunTarget(value: string, workingDirectory?: string): str
 }
 
 function projectCallTarget(args: Event | undefined, kind: ToolCallKind, workingDirectory?: string): string {
-  if (kind === "shell") {
-    const command = typeof args?.command === "string" ? args.command : typeof args?.cmd === "string" ? args.cmd : "";
-    return executableName(shellExecutable(command));
-  }
-  const value = firstPathValue(args);
-  if (value !== undefined) return relativeRunTarget(value, workingDirectory);
-  if (typeof args?.pattern === "string" && args.pattern.trim()) return PATTERN_TARGET;
-  return UNKNOWN_TARGET;
+  return callTargetInfo(args, kind, workingDirectory).target;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -403,13 +466,20 @@ export function lastAssistantText(events: Iterable<unknown>): string | undefined
 /* Usage                                                                      */
 /* -------------------------------------------------------------------------- */
 
-/** Command Code names token counters in camelCase; canonical usage uses snake_case. */
+/**
+ * Command Code names token counters in camelCase; oh-my-pi names them in short
+ * camelCase (`input`, `output`, `cacheRead`, `cacheWrite`); canonical usage uses
+ * snake_case. Every spelling of the same counter maps to one canonical field.
+ */
 const TOKEN_FIELDS = [
-  { canonical: "input_tokens", aliases: ["inputTokens", "input_tokens"] },
-  { canonical: "output_tokens", aliases: ["outputTokens", "output_tokens"] },
-  { canonical: "cache_read_tokens", aliases: ["cacheReadTokens", "cache_read_tokens"] },
-  { canonical: "cache_write_tokens", aliases: ["cacheWriteTokens", "cache_write_tokens"] },
+  { canonical: "input_tokens", aliases: ["inputTokens", "input_tokens", "input", "prompt_tokens"] },
+  { canonical: "output_tokens", aliases: ["outputTokens", "output_tokens", "output", "completion_tokens"] },
+  { canonical: "cache_read_tokens", aliases: ["cacheReadTokens", "cache_read_tokens", "cacheRead", "cache_read"] },
+  { canonical: "cache_write_tokens", aliases: ["cacheWriteTokens", "cache_write_tokens", "cacheWrite", "cache_write"] },
 ] as const;
+
+/** The aliases of the input counter, which is the context size of a model request. */
+const INPUT_TOKEN_KEYS = TOKEN_FIELDS[0].aliases;
 
 function numberOf(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
@@ -427,6 +497,20 @@ function firstNumber(source: Event | undefined, keys: readonly string[]): number
 /** The usage object an event may carry at the top level, on its message, or on its result. */
 function usageObjectOf(event: Event): Event | undefined {
   return record(event.usage) ?? record(record(event.message)?.usage) ?? record(record(event.result)?.usage);
+}
+
+/**
+ * oh-my-pi appends one run-level `runtime.usage` event (carrying the counters at
+ * the top level) after the run finishes. It is named in the `event` field, not
+ * in `type`, so it survives the native-event unwrap as the event itself.
+ */
+function isRuntimeUsageEvent(event: Event, type: string): boolean {
+  return type === "runtime.usage" || event.event === "runtime.usage";
+}
+
+/** The usage object of a `runtime.usage` event: its `usage` object, or the event itself. */
+function runtimeUsageObjectOf(event: Event): Event | undefined {
+  return record(event.usage) ?? event;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -483,6 +567,8 @@ interface PendingCall {
   tool: string;
   args: Event | undefined;
   startedMs: number;
+  /** The timestamp of the last event that referenced this call; the stall clock resets here. */
+  lastSeenMs: number;
 }
 
 interface ActivityState {
@@ -510,10 +596,24 @@ export class RunDigestBuilder {
   private readonly hookCalls = new Set<string>();
   private readonly hookBlocks = new Map<string, string>();
   private readonly requestUsages: Event[] = [];
+  private readonly runtimeUsages: Event[] = [];
   private readonly turnEndUsages: Event[] = [];
   private sawModelRequestEnd = false;
   private nativeRefusals = 0;
   private lastAssistantRaw: string | undefined;
+  // Efficiency accumulators. Each is only published once it has been measured.
+  private readonly requestContexts: number[] = [];
+  private readonly turnToolCallCounts: number[] = [];
+  private callsInTurn = 0;
+  private completedCalls = 0;
+  private readCalls = 0;
+  private reReads = 0;
+  private readonly readKeys = new Set<string>();
+  private readonly outputBytes: RunDigestToolOutputBytes = { ...EMPTY_OUTPUT_BYTES };
+  private toolTimeMs = 0;
+  private modelTimeMs = 0;
+  private modelRequestsMeasured = 0;
+  private modelRequestStartedAt: number | undefined;
 
   constructor(private readonly options: RunDigestOptions) {
     const startedAt = options.startedAt ?? Date.now();
@@ -531,22 +631,41 @@ export class RunDigestBuilder {
   }
 
   private observeUsage(event: Event, type: string): void {
-    if (type === "model_request_end") this.sawModelRequestEnd = true;
+    if (type === "model_request_end") {
+      this.sawModelRequestEnd = true;
+      const usage = usageObjectOf(event);
+      if (!usage) return;
+      this.requestUsages.push(usage);
+      // The input of a model request is the context the model was given.
+      const context = firstNumber(usage, INPUT_TOKEN_KEYS);
+      if (context !== undefined) this.requestContexts.push(context);
+      return;
+    }
+    // oh-my-pi reports one run-level usage event; Command Code reports per request
+    // and repeats the same object on `turn_end` (summing both would double count).
+    if (isRuntimeUsageEvent(event, type)) {
+      const usage = runtimeUsageObjectOf(event);
+      if (usage) this.runtimeUsages.push(usage);
+      return;
+    }
     const usage = usageObjectOf(event);
-    if (!usage) return;
-    if (type === "model_request_end") this.requestUsages.push(usage);
-    else if (type === "turn_end") this.turnEndUsages.push(usage);
+    if (usage && type === "turn_end") this.turnEndUsages.push(usage);
   }
 
   observe(value: unknown, now: number): void {
     const event = nativeRuntimeEvent(value);
     if (!event) return;
     const type = typeof event.type === "string" ? event.type : "";
-    if (!type) return;
+    const usageEvent = isRuntimeUsageEvent(event, type);
+    if (!type && !usageEvent) return;
     const id = eventCallId(event);
     const timestamp = eventTimestamp(event) ?? now;
 
     this.observeUsage(event, type);
+    // Any event that references an in-flight call is output; the stall clock resets here.
+    const inflight = id ? this.pending.get(id) : undefined;
+    if (inflight) inflight.lastSeenMs = timestamp;
+    if (!type) return;
     const assistant = assistantTextFromEvent(event);
     if (assistant !== undefined) this.lastAssistantRaw = assistant;
 
@@ -564,15 +683,35 @@ export class RunDigestBuilder {
       return;
     }
 
+    // A model request is one round trip: its duration is model time, distinct from tool time.
+    if (type === "model_request_start") {
+      this.modelRequestStartedAt = timestamp;
+      return;
+    }
+    if (type === "model_request_end") {
+      if (this.modelRequestStartedAt !== undefined) {
+        this.modelTimeMs += Math.max(0, timestamp - this.modelRequestStartedAt);
+        this.modelRequestsMeasured += 1;
+      }
+      this.modelRequestStartedAt = undefined;
+      return;
+    }
+
     const nativeTurns = numberOf(event.num_turns) ?? numberOf(record(event.result)?.num_turns);
     if (nativeTurns !== undefined && Number.isInteger(nativeTurns)) this.turns = Math.max(this.turns, nativeTurns);
-    if (type === "turn_end") this.turns += 1;
+    if (type === "turn_end") {
+      this.turns += 1;
+      this.turnToolCallCounts.push(this.callsInTurn);
+      this.callsInTurn = 0;
+    }
 
     if (START_TYPES.has(type)) {
       const args = eventArgs(event);
       const name = eventToolName(event);
       const existing = id ? this.pending.get(id) : undefined;
-      const pending: PendingCall | undefined = existing ?? (id && name ? { tool: name, args, startedMs: timestamp } : undefined);
+      // A call registers once; Command Code repeats it at `tool_running` with no arguments.
+      if (!existing) this.callsInTurn += 1;
+      const pending: PendingCall | undefined = existing ?? (id && name ? { tool: name, args, startedMs: timestamp, lastSeenMs: timestamp } : undefined);
       if (pending) {
         if (!pending.args && args) pending.args = args;
         if (!pending.tool && name) pending.tool = name;
@@ -602,7 +741,19 @@ export class RunDigestBuilder {
     this.pending.delete(id);
     const tool = start.tool || eventToolName(event) || UNKNOWN_TARGET;
     const kind = classifyToolKind(tool);
-    const target = projectCallTarget(start.args, kind, this.options.workingDirectory);
+    const info = callTargetInfo(start.args, kind, this.options.workingDirectory);
+    const target = info.target;
+    const durationMs = Math.max(0, Math.round(timestamp - start.startedMs));
+    this.completedCalls += 1;
+    this.toolTimeMs += durationMs;
+    this.outputBytes[kind] += toolOutputBytes(event);
+    if (kind === "read") {
+      this.readCalls += 1;
+      // A re-read repeats one `(path, line range)`; a different range of the same file is new.
+      const key = `${target}\u0000${info.range}`;
+      if (this.readKeys.has(key)) this.reReads += 1;
+      else this.readKeys.add(key);
+    }
     const denied = DENY_TYPES.has(type) || event.denied === true || event.is_denied === true || containsContract(event);
     const verdict = denied ? { status: "denied" as const, error_class: "denied" as const } : projectStatus(event);
     this.recent.push({
@@ -612,7 +763,7 @@ export class RunDigestBuilder {
       status: verdict.status,
       error_class: verdict.error_class,
       started_at: new Date(start.startedMs).toISOString(),
-      duration_ms: Math.max(0, Math.round(timestamp - start.startedMs)),
+      duration_ms: durationMs,
     });
     if (this.recent.length > RUN_DIGEST_RECENT_CALLS) this.recent.shift();
     if (this.pending.size === 0 && this.activity.kind === "tool") this.setActivity("idle", timestamp);
@@ -630,7 +781,9 @@ export class RunDigestBuilder {
   }
 
   private usageTotals(): RunDigestUsage {
-    const chosen = this.sawModelRequestEnd ? this.requestUsages : this.turnEndUsages;
+    const chosen = this.sawModelRequestEnd
+      ? this.requestUsages
+      : this.runtimeUsages.length > 0 ? this.runtimeUsages : this.turnEndUsages;
     const totals = new Map<string, number>();
     const incomplete = new Set<string>();
     let measured = false;
@@ -664,7 +817,27 @@ export class RunDigestBuilder {
     return { kind: this.activity.kind, since };
   }
 
-  private loopSignals(): RunDigest["loop_signals"] {
+  /**
+   * Calls still in flight with no end event and no output for more than the
+   * stall window. A hung child pipeline (a reader that never saw end of input)
+   * is otherwise indistinguishable from a long-but-productive call.
+   */
+  private longRunningTools(now: number): RunDigestLongRunningTool[] {
+    const stalled: RunDigestLongRunningTool[] = [];
+    for (const call of this.pending.values()) {
+      const silentMs = now - call.lastSeenMs;
+      if (silentMs <= LONG_RUNNING_TOOL_MS) continue;
+      const kind = classifyToolKind(call.tool);
+      stalled.push({
+        tool: call.tool,
+        target: callTargetInfo(call.args, kind, this.options.workingDirectory).target,
+        minutes: Math.floor(silentMs / 60_000),
+      });
+    }
+    return stalled;
+  }
+
+  private loopSignals(now: number): RunDigest["loop_signals"] {
     const calls: ProjectedToolCall[] = this.recent.map((call) => ({
       tool: call.tool,
       kind: call.kind,
@@ -678,7 +851,33 @@ export class RunDigestBuilder {
       generated_at: new Date(this.options.startedAt ?? Date.now()).toISOString(),
       calls,
     };
-    return deterministicLoopSignals(window);
+    return { ...deterministicLoopSignals(window), long_running_tools: this.longRunningTools(now) };
+  }
+
+  /** The measured efficiency of the attempt so far; each field is omitted until it is measured. */
+  private efficiency(): RunDigestEfficiency {
+    const result: RunDigestEfficiency = {};
+    if (this.requestContexts.length > 0) {
+      result.context_tokens_first = this.requestContexts[0]!;
+      if (this.requestContexts.length > CONTEXT_AFTER_FIVE) {
+        result.context_tokens_after_five = this.requestContexts[CONTEXT_AFTER_FIVE]!;
+      }
+      result.context_tokens_last = this.requestContexts[this.requestContexts.length - 1]!;
+    }
+    if (this.turnToolCallCounts.length > 0) {
+      const single = this.turnToolCallCounts.filter((count) => count === 1).length;
+      result.single_tool_turn_share = single / this.turnToolCallCounts.length;
+    }
+    if (this.readCalls > 0) {
+      result.read_calls = this.readCalls;
+      result.re_read_calls = this.reReads;
+    }
+    if (this.completedCalls > 0) {
+      result.tool_output_bytes = { ...this.outputBytes };
+      result.tool_time_ms = this.toolTimeMs;
+    }
+    if (this.modelRequestsMeasured > 0) result.model_time_ms = this.modelTimeMs;
+    return result;
   }
 
   /** Build the bounded, validated digest document as of `now`. */
@@ -694,7 +893,8 @@ export class RunDigestBuilder {
       denials: [...this.denials],
       native_refusals: this.nativeRefusals,
       usage: this.usageTotals(),
-      loop_signals: this.loopSignals(),
+      efficiency: this.efficiency(),
+      loop_signals: this.loopSignals(now),
       ...(this.lastAssistantRaw !== undefined
         ? { last_assistant_text: sanitizeReportText(this.lastAssistantRaw).slice(0, LAST_ASSISTANT_TEXT_LIMIT) }
         : {}),

@@ -11,6 +11,7 @@ import {
 } from "../schema/artifacts.js";
 import { RuntimeControlSchema, RuntimeRecoveryRecordSchema, type RuntimeControl } from "../schema/runtime-control.js";
 import { CanonicalTeamStateSchema, type CanonicalTeamState } from "../schema/team.js";
+import { RunDigestSchema, type RunDigestEfficiency } from "../schema/run-digest.js";
 import { readNativeCostFacts, resolveRunCost, tokenTotalsFromUsage, type RunTokenTotals } from "./runtime-accounting.js";
 import { canonicalRouteIdentifier } from "./runtime-supervision.js";
 import { loadOperatorPriceTable, type OperatorPriceTable } from "./cost-table.js";
@@ -55,6 +56,20 @@ export type RunRecord = {
   team?: { mission_id: string; role: string };
   /** Experiment provenance, from `experiment.json` in the run directory when present. */
   experiment?: { id: string; arm: string; split: string };
+  /** The run's efficiency block, from `run-digest.json` when it carries one. */
+  efficiency?: RunDigestEfficiency;
+};
+
+/** The median of each efficiency field across the runs of one group. */
+export type EfficiencyMedians = {
+  context_tokens_first?: number;
+  context_tokens_after_five?: number;
+  context_tokens_last?: number;
+  single_tool_turn_share?: number;
+  read_calls?: number;
+  re_read_calls?: number;
+  model_time_ms?: number;
+  tool_time_ms?: number;
 };
 
 export type RunGroupSummary = {
@@ -67,6 +82,8 @@ export type RunGroupSummary = {
   mean_cost_usd: number | undefined;
   mean_duration_ms: number | undefined;
   cache_read_share: number | undefined;
+  /** Medians of the runs' efficiency fields; a field with no measurement is omitted. */
+  efficiency_medians?: EfficiencyMedians;
 };
 
 type Usage = {
@@ -116,7 +133,7 @@ async function indexRun(
   team?: { mission_id: string; role: string },
 ): Promise<RunRecord | undefined> {
   const runRoot = path.join(missionRoot, "runs", runId);
-  const [resultRaw, controlRaw, recoveryRaw, verificationRaw, workflowProfile, templateRaw, experimentRaw] = await Promise.all([
+  const [resultRaw, controlRaw, recoveryRaw, verificationRaw, workflowProfile, templateRaw, experimentRaw, digestRaw] = await Promise.all([
     readYamlFile(path.join(runRoot, "runtime-result.yaml")),
     readJsonFile(path.join(runRoot, "runtime-control.json")),
     readJsonFile(path.join(runRoot, "runtime-recovery.json")),
@@ -124,6 +141,7 @@ async function indexRun(
     readMissionWorkflow(path.join(missionRoot, "mission.yaml")),
     readJsonFile(path.join(runRoot, "session-template.json")),
     readJsonFile(path.join(runRoot, "experiment.json")),
+    readJsonFile(path.join(runRoot, "run-digest.json")),
   ]);
   let result: RuntimeResultDocument | undefined;
   let control: RuntimeControl | undefined;
@@ -141,6 +159,12 @@ async function indexRun(
   const experiment = experimentId !== undefined && experimentArm !== undefined && experimentSplit !== undefined
     ? { id: experimentId, arm: experimentArm, split: experimentSplit }
     : undefined;
+  // The digest is a convenience index; a missing or malformed one contributes no efficiency medians.
+  let efficiency: RunDigestEfficiency | undefined;
+  if (digestRaw !== undefined) {
+    const parsedDigest = RunDigestSchema.safeParse(digestRaw);
+    if (parsedDigest.success) efficiency = parsedDigest.data.efficiency;
+  }
   if (!result && !control) return undefined;
 
   const usage = usageOf(result, control);
@@ -188,6 +212,7 @@ async function indexRun(
     peak_memory_bytes: control?.peak_memory_bytes,
     ...(team !== undefined ? { team } : {}),
     ...(experiment !== undefined ? { experiment } : {}),
+    ...(efficiency !== undefined ? { efficiency } : {}),
   };
 }
 
@@ -290,6 +315,7 @@ export function summarizeRuns(records: RunRecord[], groupBy: RunGroupDimension):
     const cacheRead = cacheRuns.reduce((sum, run) => sum + run.cache_read_tokens!, 0);
     const cacheWrite = cacheRuns.reduce((sum, run) => sum + run.cache_write_tokens!, 0);
     const cacheTotal = input + cacheRead + cacheWrite;
+    const efficiency_medians = efficiencyMedians(runs);
     return {
       key, runs: runs.length, passed: runs.filter(run => run.status === "passed").length,
       success_rate: runs.filter(run => run.status === "passed").length / runs.length,
@@ -298,8 +324,40 @@ export function summarizeRuns(records: RunRecord[], groupBy: RunGroupDimension):
       mean_cost_usd: costs.length ? costs.reduce((sum, cost) => sum + cost, 0) / costs.length : undefined,
       mean_duration_ms: durations.length ? durations.reduce((sum, value) => sum + value, 0) / durations.length : undefined,
       cache_read_share: cacheRuns.length && cacheTotal > 0 ? cacheRead / cacheTotal : cacheRuns.length ? 0 : undefined,
+      ...(efficiency_medians !== undefined ? { efficiency_medians } : {}),
     };
   });
+}
+
+/** The median of a numeric sample, or `undefined` when nothing was measured. */
+function median(values: number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** The efficiency fields that get a per-group median. */
+const EFFICIENCY_MEDIAN_FIELDS = [
+  "context_tokens_first", "context_tokens_after_five", "context_tokens_last",
+  "single_tool_turn_share", "read_calls", "re_read_calls", "model_time_ms", "tool_time_ms",
+] as const satisfies readonly (keyof EfficiencyMedians)[];
+
+/** Median each measured efficiency field across a group's runs; unmeasured fields are omitted. */
+function efficiencyMedians(runs: RunRecord[]): EfficiencyMedians | undefined {
+  const medians: EfficiencyMedians = {};
+  let measured = false;
+  for (const field of EFFICIENCY_MEDIAN_FIELDS) {
+    const samples = runs
+      .map((run) => run.efficiency?.[field])
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    const value = median(samples);
+    if (value !== undefined) {
+      medians[field] = value;
+      measured = true;
+    }
+  }
+  return measured ? medians : undefined;
 }
 
 export function paretoFrontier(summaries: RunGroupSummary[]): RunGroupSummary[] {

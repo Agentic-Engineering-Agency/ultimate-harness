@@ -16,6 +16,7 @@ timestamps are rebased. Streaming delta events are dropped.
 | `command-code-native-turn-cap.ndjson` | Command Code | The model emits a final assistant message, then the runtime's own turn cap ends the run: the terminal `result` carries `stopReason: "max_turns"` (and the matching `subtype: "error_max_turns"`) with `num_turns: 2`. |
 | `command-code-native-unknown-tool.ndjson` | Command Code | A completed `shell_command` followed by a `shell` call the runtime denies natively (`tool_denied` without any `tool_hooks` event), so the guard hook never ran for it. |
 | `oh-my-pi-healthy.ndjson` | oh-my-pi | A run using `tool_execution_start` / `tool_execution_end` with arguments under `args`. |
+| `oh-my-pi-efficiency.ndjson` | oh-my-pi | A run whose `edit` and `write` calls name their target in `args.path` (`src/schema/runtime-control.ts:18-28`) and whose run-level `runtime.usage` event carries the token counters. Exercises files-written and usage parity. |
 
 The literal `Exit code: <n>` lines of Command Code shell results are kept
 verbatim in the fixtures that exist to exercise them; all other text stays
