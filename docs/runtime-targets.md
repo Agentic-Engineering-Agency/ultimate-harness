@@ -156,13 +156,13 @@ For guarded Command Code calls, a completed tool without guard-log evidence stop
 | `deadline` | A configured `recovery.on_deadline` grace window begins before `timeout_ms` or `max_turns` is exhausted; the stop reason reports the budget remaining for the grace attempt. The same code is used if the bounded grace attempt itself exceeds its grace budget. | One grace attempt only |
 | `repeated_failure` | The identical shell command fails `max_repeated_failures` times (non-zero exit code or error result). | Yes |
 | `denial_budget` | Hook events are observed, or completed tool results carry `CONTRACT:` reasons, until the denial count reaches `max_denials`. | Yes |
-| `turn_limit` | The attempt reaches or exceeds `max_turns` during turn evaluation (`turn_start` or `turn_end`). | No |
+| `turn_limit` | The attempt reaches or exceeds `max_turns` during turn evaluation (`turn_start` or `turn_end`), or the runtime's own native turn cap ends the run: a terminal `result` event with `stopReason: "max_turns"` settles as `turn_limit`, with the stop reason naming the native cap and the turn count. | No |
 | `output_limit` | Output size exceeds `max_output_bytes`. | No |
 | `policy` | A write-class tool or shell mutation verb attempts to modify a protected root. | No |
 | `route_mismatch` | Runtime reports a provider or model route outside the expected assignment, at the top level or for a delegated sub-agent reported in native tool metadata. | No |
 | `route_unverified` | Runtime completes without attesting the configured provider or model route. | No |
 | `cancelled` | The attempt was cancelled by operator request (`uh mission cancel`, `SIGINT`, or `SIGTERM`). | No |
-| `runtime_error` | The runtime adapter terminates abnormally or encounters an unhandled runtime failure. | No |
+| `runtime_error` | The runtime adapter terminates abnormally or encounters an unhandled runtime failure. A native terminal stop whose reason is not a recognized budget cap settles here, and the native reason is always copied into `stop_reason` (never empty). | No |
 | `controller_error` | The harness controller encounters an internal execution error. | No |
 | `controller_lost` | The controller or launcher process terminates unexpectedly before settlement. Requires explicit manual resume via `resume_from_run` (which reconciles settlement first); not automatically resumed in the recovery loop. | Manual only |
 
@@ -172,6 +172,23 @@ Completion requires clean native terminal facts and the runtime final-message se
 When a run has a completed native terminal event and a valid sentinel, a later non-zero launcher exit does not overturn the passed native result. The result records the code and sets `exit_code_ignored_reason` to `runtime exited non-zero after completed native terminal event`. A non-zero exit before clean native completion remains a failure; an exit-zero run without a native terminal event or parseable final sentinel is not passed.
 
 The native terminal event is runtime-specific: oh-my-pi emits `agent_end`; Command Code emits `run_end` and `result`. See [Native Runtime Events](./architecture/runtime-events.md).
+
+### Native turn and time caps
+
+Mission `limits.max_turns` and `limits.timeout_ms` are enforced by UH supervision for every runtime. Some runtimes also impose their own native caps; where a native flag exists it must be reachable from the mission's `limits`, and where a native default applies silently it must be recorded in the plan. Audit as of the turn-cap fix:
+
+| Runtime | Native turn cap | Mission `limits.max_turns` reaches it | Native default recording | Native time cap | Native terminal stop mapping |
+| --- | --- | --- | --- | --- | --- |
+| `command-code` | `--max-turns` flag; print mode caps at 100 turns by default (exit 8) | Yes — precedence: explicit top-level `max_turns`, else `limits.max_turns`, else no flag | `native_default_turn_cap: 100` recorded on the plan (visible in dry-run) when neither field is configured | none — no native flag; `limits.timeout_ms` is UH-supervised | `stopReason: "max_turns"` → `turn_limit`; `max_time`/`timeout` → `timeout`; any other failing native stop → `runtime_error` with the native reason copied into `stop_reason` |
+| `claude-code` | `--max-turns` flag; no cap when the flag is absent | Yes — same precedence as command-code | n/a (no native default cap) | none — UH-supervised | failing native stops → `runtime_error` with the native reason copied |
+| `oh-my-pi` | none | enforced by UH supervision (`turn_start`/`turn_end`) | n/a | none — UH-supervised | `error`/`aborted` → `runtime_error` with the reason copied |
+| `codex` | none | enforced by UH supervision | n/a | none — UH-supervised | failing native stops → `runtime_error` with the reason copied |
+| `hermes` | none | enforced by UH supervision | n/a | none — UH-supervised | — |
+| `hermes-proxy` | none | enforced by UH supervision | n/a | `request_timeout_ms` per HTTP request (adapter config, not `limits`) | — |
+| `openrouter` | none | enforced by UH supervision | n/a | `request_timeout_ms` per HTTP request (adapter config, not `limits`) | — |
+| `anthropic` | none | enforced by UH supervision | n/a | `request_timeout_ms` per HTTP request (adapter config, not `limits`); `max_tokens` is a per-response output cap configured via `runtime_config.max_tokens` | — |
+| `pi` | none | enforced by UH supervision | n/a | none — UH-supervised | — |
+| `acp` | none set by UH; an ACP agent may stop itself with `max_turn_requests` | UH supervision; the agent's own cap is not configurable from `limits` | n/a | `timeout_ms` per request (adapter config, not `limits`) | `max_tokens`/`max_turn_requests` → `blocked`; `refusal` → failed; `cancelled` → cancelled |
 
 
 ### Recovery Policy

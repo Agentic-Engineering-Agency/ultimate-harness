@@ -65,6 +65,25 @@ export function runtimeTerminalFailure(event: Event): string | undefined {
   return undefined;
 }
 
+/** Native terminal stop reasons that are budget caps, mapped to UH stop codes. */
+const NATIVE_BUDGET_STOP_REASONS: Record<string, RuntimeStopCode> = {
+  max_turns: "turn_limit",
+  max_time: "timeout",
+  timeout: "timeout",
+};
+
+/** The native stopReason of a terminal event, scanning the same records as `runtimeTerminalFailure`. */
+export function nativeTerminalStopReason(event: Event): string | undefined {
+  const records = [event, record(event.result), record(event.message),
+    ...(Array.isArray(event.messages) ? event.messages.map(record).filter(item => item?.role !== "toolResult") : [])];
+  for (const item of records) {
+    if (!item) continue;
+    const reason = item.stopReason ?? item.stop_reason;
+    if (typeof reason === "string" && reason) return reason;
+  }
+  return undefined;
+}
+
 /** Read native route metadata, never model-looking text inside tool payloads. */
 export function nativeRuntimeRoute(value: unknown): RuntimeRoute | undefined {
   const event = nativeRuntimeEvent(value);
@@ -504,6 +523,32 @@ export class RuntimeSupervision {
     return this.failure;
   }
 
+  /**
+   * Map a native terminal stop onto a UH stop code before generic failure
+   * classification: budget caps settle as their own stop code (so salvage
+   * sees them), every other native failure settles as `runtime_error` with
+   * the native reason copied into the stop reason, never empty.
+   */
+  private stopFromNativeTerminal(event: Event): void {
+    if (this.failure) return;
+    const reason = nativeTerminalStopReason(event);
+    const budgetCode = reason ? NATIVE_BUDGET_STOP_REASONS[reason] : undefined;
+    if (budgetCode) {
+      if (budgetCode === "turn_limit") {
+        const nativeTurns = event.num_turns ?? record(event.result)?.num_turns;
+        const count = typeof nativeTurns === "number" && Number.isInteger(nativeTurns) && nativeTurns > 0
+          ? nativeTurns
+          : this.turns > 0 ? this.turns : undefined;
+        this.stop(`Native turn cap (${reason}) reached${count === undefined ? "" : ` after ${count} turns`}`, "turn_limit");
+      } else {
+        this.stop(`Native time cap (${reason}) reached`, budgetCode);
+      }
+      return;
+    }
+    const failure = runtimeTerminalFailure(event);
+    if (failure) this.stop(failure, "runtime_error");
+  }
+
   get stopReason(): RuntimeStopCode | undefined {
     return this.stopCode;
   }
@@ -615,6 +660,7 @@ export class RuntimeSupervision {
     }
     if (type === "run_end" || type === "result" || type === "agent_end") {
       this.terminal = true;
+      this.stopFromNativeTerminal(event);
       this.terminalFailure ??= runtimeTerminalFailure(event);
       this.markProgress(now);
     }

@@ -128,6 +128,8 @@ interface WorkerScript {
   files: Record<string, string>;
   /** Stop code to record on the worker's runtime control receipt. */
   stopCode?: string;
+  /** Optional stop reason to record alongside the stop code. */
+  stopReason?: string;
 }
 
 /** Mirror of the team-run fake runner, plus a control-receipt writer. */
@@ -158,6 +160,7 @@ function makeRunner(scripts: Record<string, WorkerScript>, repo: FakeRepo) {
           heartbeat_at: "2026-01-01T00:00:01.000Z",
           status: "failed",
           stop_code: script.stopCode,
+          ...(script.stopReason !== undefined ? { stop_reason: script.stopReason } : {}),
           turns: 3,
           denials: 0,
           inflight_tools: 0,
@@ -227,6 +230,40 @@ describe("team salvage", () => {
     expect(report).toContain("## Verified work from stopped workers");
     expect(report).toContain("turn_limit");
     expect(report).toContain(backend.plan.branch);
+  });
+
+  test("a worker stopped by the native turn cap with a green tree is salvage eligible", async () => {
+    await seedMissionPacket(ROOT, "team-mission");
+    const repo = emptyRepo();
+    // The receipt shape the supervision fix writes when a native runtime ends
+    // on its own turn cap: stop_code turn_limit plus the native stop reason.
+    const runner = makeRunner({
+      backend: {
+        files: { "out/artifact.txt": "complete\n" },
+        stopCode: "turn_limit",
+        stopReason: "Native turn cap (max_turns) reached after 3 turns",
+      },
+    }, repo);
+
+    const result = await runTeamMission(mission("team-mission", { expected_outputs: { files: ["out/artifact.txt"] } }), ROOT, {
+      runnerFor: runner,
+      gitOps: fakeGitOps(repo),
+      verifier: verifierFor(PASSING),
+      retainOnSuccess: true,
+    });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("failed");
+    expect(backend.stopCode).toBe("turn_limit");
+    expect(backend.salvage).toEqual({
+      eligible: true,
+      outputs_passed: true,
+      checks_passed: true,
+      branch: backend.plan.branch,
+    });
+    expect(repo.commits.some((commit) => commit.cwd === backend.plan.worktreePath)).toBe(true);
+    expect(repo.merges).not.toContain(backend.plan.branch);
+    expect(backend.integrated).toBe(false);
   });
 
   test("a stopped worker whose checks fail is eligible but produces no commit", async () => {
