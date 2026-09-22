@@ -23,6 +23,7 @@ import {
   type VerifyMissionLike,
   type WorkerOutcome,
 } from "../src/harness/team-run.js";
+import type { TeamResourceLimits } from "../src/schema/runtime-control.js";
 import { projectDeliveryObservatory } from "../src/harness/delivery-observatory/project.js";
 import { verifyMission, warnConstraintsAreAdvisory } from "../src/harness/verify.js";
 import { initializeHarness } from "../src/harness/init.js";
@@ -1071,11 +1072,14 @@ describe("runTeamMission — command-code worker cost admission", () => {
     };
   }
 
-  async function runThreeWorkerTeam(stream: string): Promise<{ dispatched: string[]; result: Awaited<ReturnType<typeof runTeamMission>> }> {
+  async function runThreeWorkerTeam(
+    stream: string,
+    resources: TeamResourceLimits = { max_parallel: 2, max_cost_usd: 2, worker_cost_reservation_usd: 1 },
+  ): Promise<{ dispatched: string[]; result: Awaited<ReturnType<typeof runTeamMission>> }> {
     const dispatched: string[] = [];
     const runner = commandCodeRunner(stream);
     const packet = mission("team-mission", { workers: [{ role: "worker", adapter: "command-code", count: 3 }] });
-    packet.team.resources = { max_parallel: 2, max_cost_usd: 2, worker_cost_reservation_usd: 1 };
+    packet.team.resources = resources;
     const result = await runTeamMission(packet, ROOT, {
       gitOps: fakeGitOps({ branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() }, { write: async () => undefined }),
       runnerFor: adapter => async (runtime, workerRoot, missionPath, context) => {
@@ -1089,6 +1093,14 @@ describe("runTeamMission — command-code worker cost admission", () => {
   }
 
   const usageStream = () => readFile(join(process.cwd(), "tests", "fixtures", "runtime-events", "command-code-usage.ndjson"), "utf-8");
+
+  async function readTeamState(runId: string): Promise<{
+    admission_blocked_reason?: string;
+    admission_notes?: string[];
+    status: string;
+  }> {
+    return JSON.parse(await readFile(join(ROOT, ".harness", "missions", "team-mission", "runs", runId, "team-state.json"), "utf-8"));
+  }
 
   test("a price table makes the third worker admissible on estimated cost", async () => {
     await writeFile(join(ROOT, ".harness", "prices.yaml"), pricesYaml, "utf-8");
@@ -1105,6 +1117,46 @@ describe("runTeamMission — command-code worker cost admission", () => {
     expect(third?.status).toBe("blocked");
     expect(third?.errorMessage).toMatch(/Completed worker cost is unknown/);
     expect(result.status).toBe("blocked");
+    const state = await readTeamState(result.runId!);
+    expect(state.admission_notes).toBeUndefined();
+  });
+
+  test("unknown_cost=admit dispatches the later wave and records the admission note", async () => {
+    const { dispatched, result } = await runThreeWorkerTeam(await usageStream(), {
+      max_parallel: 2, max_cost_usd: 2, worker_cost_reservation_usd: 1, unknown_cost: "admit",
+    });
+    expect(dispatched).toEqual(["worker-1", "worker-2", "worker-3"]);
+    expect(result.workers.every((w) => w.status === "succeeded")).toBe(true);
+    expect(result.status).toBe("passed");
+    const note = "wave 2 admitted with unknown cost by policy unknown_cost=admit";
+    const state = await readTeamState(result.runId!);
+    expect(state.admission_blocked_reason).toBeUndefined();
+    expect(state.admission_notes).toEqual([note]);
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain(note);
+  });
+
+  test("unknown_cost=admit does not stop known costs from exhausting the budget", async () => {
+    await writeFile(join(ROOT, ".harness", "prices.yaml"), [
+      "schema_version: uh.prices.v0",
+      "models:",
+      "  qwen/qwen3.8-flash:",
+      "    input_usd_per_million: 1000",
+      "    output_usd_per_million: 4000",
+      "    cache_read_usd_per_million: 500",
+      "    cache_write_usd_per_million: 1000",
+      '    source: "test placeholder, not a real price"',
+    ].join("\n") + "\n", "utf-8");
+    const { dispatched, result } = await runThreeWorkerTeam(await usageStream(), {
+      max_parallel: 2, max_cost_usd: 60, worker_cost_reservation_usd: 30, unknown_cost: "admit",
+    });
+    expect(dispatched).toEqual(["worker-1", "worker-2"]);
+    const third = result.workers.find((w) => w.plan.id === "worker-3");
+    expect(third?.status).toBe("blocked");
+    expect(third?.errorMessage).toMatch(/Remaining team cost budget cannot reserve another worker/);
+    expect(result.status).toBe("blocked");
+    const state = await readTeamState(result.runId!);
+    expect(state.admission_notes).toBeUndefined();
   });
 });
 

@@ -463,6 +463,8 @@ entries:
       - src/harness/team-run.ts
       - src/harness/runtime-resources.ts
       - src/schema/team.ts
+    real_mission: not_applicable
+    reason: Budget exhaustion needs known completed cost, which this fleet does not report; a command-code wave can only be refused for unknown cost or admitted under unknown_cost=admit, never priced down to an exhausted budget.
     expected:
       status: blocked
       workers:

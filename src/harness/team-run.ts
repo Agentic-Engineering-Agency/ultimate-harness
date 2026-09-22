@@ -903,6 +903,7 @@ export async function runTeamMission(
   // parallel — that's where the wall-clock win is.
   let setupQueue = Promise.resolve();
   const launchedWorkers = new Set<string>();
+  const admissionNotes: string[] = [];
   const workerOutcomes: WorkerOutcome[] = await mapResourceWaves(plan.workers, mission.team.resources ?? {}, async (wp): Promise<WorkerOutcome> => {
     const slot: { plan: WorkerPlan; setupError?: Error } = { plan: wp };
     const setup = setupQueue.then(async () => {
@@ -1110,6 +1111,11 @@ export async function runTeamMission(
       return { plan: worker, exitCode: 1, status: "blocked", errorMessage: reason, filesTouched: [],
         finalSentinel: "", merge: null, integrated: false, runId: context.runId, artifactScope: canonicalWorker.artifact_scope };
     },
+    onAdmission: async (note) => {
+      admissionNotes.push(note);
+      canonicalState.admission_notes = [...admissionNotes];
+      await persistState();
+    },
   });
 
   // ------------------------------------------------------------------- leader
@@ -1162,6 +1168,7 @@ export async function runTeamMission(
     leaderReady,
     leaderError,
     integrationReportPath: plan.integrationReportPath,
+    admissionNotes,
   });
 
   // ------------------------------------------------------------- verification
@@ -1465,6 +1472,7 @@ interface WriteReportArgs {
   leaderReady: boolean;
   leaderError: string | null;
   integrationReportPath: string;
+  admissionNotes: string[];
 }
 
 async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
@@ -1479,6 +1487,7 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
     lines.push("");
     lines.push(`> **Leader setup failed:** ${args.leaderError ?? "unknown error"}`);
   }
+  for (const note of args.admissionNotes) lines.push(`- Cost admission: ${note}`);
   lines.push("");
   lines.push("## Workers");
   lines.push("");

@@ -35,6 +35,11 @@ export async function mapBounded<T, R>(items: readonly T[], concurrency: number,
 /**
  * Re-admit only after a whole wave settles. Cost reservations govern admission,
  * not provider billing: an in-flight worker can exceed its reservation.
+ *
+ * An unknown completed cost blocks further paid admission unless the team opted
+ * into `unknown_cost: "admit"`. Opting in never prices unknown spend as zero: it
+ * simply lets the next wave through, and every wave admitted that way is reported
+ * through `onAdmission` so the caller can record it explicitly.
  */
 export async function mapResourceWaves<T, R>(
   items: readonly T[], input: TeamResourceLimits, action: (item: T) => Promise<R>,
@@ -42,12 +47,15 @@ export async function mapResourceWaves<T, R>(
     costOf: (result: R, item: T) => Promise<number | undefined>;
     blocked: (item: T, reason: string) => Promise<R>;
     availableBytes?: () => number;
+    onAdmission?: (note: string) => Promise<void> | void;
   },
 ): Promise<R[]> {
   const limits = TeamResourceLimitsSchema.parse(input);
   const results: R[] = [];
   let completedCost = 0;
   let blockedReason: string | undefined;
+  let waveNumber = 0;
+  let unknownCostOutstanding = false;
   while (results.length < items.length && !blockedReason) {
     let slots: number;
     try { slots = workerConcurrency(items.length - results.length, limits, (options.availableBytes ?? freemem)()); }
@@ -56,17 +64,26 @@ export async function mapResourceWaves<T, R>(
       slots = Math.min(slots, Math.floor((limits.max_cost_usd - completedCost) / limits.worker_cost_reservation_usd!));
       if (slots < 1) { blockedReason = "Remaining team cost budget cannot reserve another worker"; break; }
     }
+    waveNumber += 1;
+    if (unknownCostOutstanding) {
+      await options.onAdmission?.(`wave ${waveNumber} admitted with unknown cost by policy unknown_cost=admit`);
+    }
     const wave = items.slice(results.length, results.length + slots);
     const completed = await mapBounded(wave, slots, action);
     results.push(...completed);
+    unknownCostOutstanding = false;
     if (limits.max_cost_usd !== undefined) {
       for (let index = 0; index < completed.length; index++) {
         let cost: number | undefined;
         try { cost = await options.costOf(completed[index], wave[index]); }
         catch { blockedReason = "Completed worker cost accounting is unavailable"; break; }
         if (cost === undefined || !Number.isFinite(cost) || cost < 0 || !Number.isFinite(completedCost + cost)) {
-          blockedReason = "Completed worker cost is unknown; refusing further paid admission";
-          break;
+          if (limits.unknown_cost === "block") {
+            blockedReason = "Completed worker cost is unknown; refusing further paid admission";
+            break;
+          }
+          unknownCostOutstanding = true;
+          continue;
         }
         completedCost += cost;
       }

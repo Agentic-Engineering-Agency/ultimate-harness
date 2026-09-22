@@ -384,14 +384,18 @@ describe("command-code fleet registry entries", () => {
       expect(sibling.model).toBe("qwen/qwen3.8-flash");
       expect(sibling.capability).toBe(registry.entries[id].capability);
       expect(sibling.expected).toEqual(registry.entries[id].expected);
-      expect(sibling.real_mission).toBe(registry.entries[id].real_mission);
+      if (id === "S3-budget-exhausted") {
+        expect(sibling.real_mission, "budget exhaustion needs a known cost this fleet does not report").toBe("not_applicable");
+      } else {
+        expect(sibling.real_mission).toBe(registry.entries[id].real_mission);
+      }
     }
     for (const [id, entry] of Object.entries(registry.entries)) {
       if (!id.endsWith("-cmdc")) continue;
       expect(registry.entries[id.slice(0, -"-cmdc".length)], `${id} must mirror a registry entry`).toBeDefined();
-      if (id === "R10-stall-cmdc") {
-        expect(entry.real_mission).toBe("not_applicable");
-        expect(entry.reason).toMatch(/print mode/);
+      if (entry.real_mission === "not_applicable") {
+        expect(entry.reason.length, `${id} must say why it is fixture-only`).toBeGreaterThan(0);
+        if (id === "R10-stall-cmdc") expect(entry.reason).toMatch(/print mode/);
       } else {
         expect(entry.real_mission).toBe("real");
         await expect(access(path.join(process.cwd(), "acceptance", entry.mission))).resolves.toBeUndefined();
