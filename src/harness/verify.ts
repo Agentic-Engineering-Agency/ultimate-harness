@@ -4,6 +4,7 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 import { validateMission, type MissionDocument } from "../schema/mission.js";
 import { validateVerificationResult, type VerificationResultDocument } from "../schema/artifacts.js";
+import { RuntimeControlSchema } from "../schema/runtime-control.js";
 import { promoteMission } from "./promote.js";
 import { harnessDir, missionsDir, projectYaml } from "./paths.js";
 import { validateFile } from "./validate.js";
@@ -13,11 +14,32 @@ import { findBoundSandbox } from "./sandbox.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
 import { collectIndependentReview } from "./independent-review.js";
 import { recordAcceptanceDecision } from "./decision-receipts.js";
+import { readLatestPointer } from "./run-id.js";
+import { relativeArtifactPath } from "./artifact-paths.js";
+import type { SystemOneCriterion } from "./typesafe.js";
 import { isDeepStrictEqual } from "node:util";
 
 const SNIPPET_LIMIT = 800;
 const TIMEOUT_KILL_GRACE_MS = 100;
 export const DEFAULT_VERIFY_COMMAND_TIMEOUT_MS = 30_000;
+
+/**
+ * The harness-established facts a non-deterministic acceptance criterion may
+ * expose to System One: declared expected-output paths and statuses, and the
+ * names and statuses of the required checks. Never file contents, diff text,
+ * command output, absolute paths, or the mission prompt.
+ */
+type CriterionEvidence = {
+  expected_outputs: Array<{ path: string; status: string }>;
+  required_checks: Array<{ name: string; status: string }>;
+};
+
+/**
+ * The per-criterion projection `evaluateThreeVerdict` consumes. The shared
+ * `SystemOneCriterion` contract has no field for `evidence`, so this local
+ * intersection carries it without widening the shared contract.
+ */
+type ProjectedCriterion = SystemOneCriterion & { evidence?: CriterionEvidence };
 
 export type VerifyMissionOptions = {
   commandTimeoutMs?: number;
@@ -124,6 +146,8 @@ export async function verifyMission(root: string, missionId: string, options: Ve
 
   const checks: VerificationResultDocument["checks"] = [];
   const findings: NonNullable<VerificationResultDocument["findings"]> = [];
+  const requiredCheckEvidence: Array<{ name: string; status: string }> = [];
+  const expectedOutputEvidence: Array<{ path: string; status: string }> = [];
   let executableChecks = 0;
 
   for (const check of mission.verification.required_checks) {
@@ -134,12 +158,14 @@ export async function verifyMission(root: string, missionId: string, options: Ve
         status: "blocked",
         notes: "no command configured",
       });
+      requiredCheckEvidence.push({ name: check.name, status: "blocked" });
       continue;
     }
 
     executableChecks += 1;
     const executed = await runCheck(effectiveRoot, check.name, check.command, commandTimeoutMs, sandboxRunner);
     checks.push(executed.check);
+    requiredCheckEvidence.push({ name: check.name, status: executed.check.status });
     if (executed.finding) {
       findings.push(executed.finding);
     }
@@ -209,6 +235,7 @@ export async function verifyMission(root: string, missionId: string, options: Ve
     const checked = await verifyExpectedArtifact(effectiveRoot, expected);
     checks.push(checked);
     executableChecks++;
+    expectedOutputEvidence.push({ path: relativeArtifactPath(effectiveRoot, path.resolve(effectiveRoot, expected.path)), status: checked.status });
     if (checked.status !== "passed") findings.push({ severity: "error", message: `Required output failed verification: ${expected.path}` });
   }
   if (canonicalMission?.independent_review) {
@@ -299,6 +326,35 @@ export async function verifyMission(root: string, missionId: string, options: Ve
       : checks.length > 0 && checks.every((check) => check.status === "passed") && executableChecks > 0
         ? "passed"
         : "blocked";
+
+  // UH progressive decisions: hand System One one atomic entry per declared
+  // acceptance criterion. A criterion the harness already decided carries its
+  // deterministic status and is never asked of the provider; the rest carry
+  // only evidence the harness established. `tamper` is a deterministic fact,
+  // never a provider answer.
+  const acceptanceById = new Map(acceptanceResults.map((result) => [result.id, result]));
+  const criteria: ProjectedCriterion[] = mission.acceptance_criteria.map((ac) => {
+    const result = acceptanceById.get(ac.id);
+    if (ac.check_command) {
+      return {
+        id: ac.id,
+        status: result?.status === "passed" ? "passed" : "failed",
+        exit_code: result?.exit_code,
+        check_command: ac.check_command,
+      };
+    }
+    return {
+      id: ac.id,
+      description: ac.description,
+      ...(ac.severity ? { severity: ac.severity } : {}),
+      evidence: {
+        expected_outputs: expectedOutputEvidence,
+        required_checks: requiredCheckEvidence,
+      },
+    };
+  });
+  const tamper = await readRunControlPolicyStop(effectiveRoot, missionId);
+
   await recordAcceptanceDecision({
     missionDir, missionId, consumer: "verification", from: status,
     state: {
@@ -316,6 +372,8 @@ export async function verifyMission(root: string, missionId: string, options: Ve
         })),
         findings: findings.map(finding => ({ severity: finding.severity })),
       },
+      criteria,
+      tamper,
     },
     prompt: "Assess consistency of the verification disposition with the supplied check and acceptance summaries. Raw outputs and source diffs are not included; do not infer that unreported checks or scope protections passed.",
     apply: gate => {
@@ -435,6 +493,24 @@ async function readMissionAtLocation(missionPath: string): Promise<MissionDocume
     throw new Error(`Mission has wrong schema_version: expected uh.mission.v0, got ${validation.schema_version}`);
   }
   return validateMission(parse(await readFile(missionPath, "utf-8")));
+}
+
+/**
+ * Deterministic tamper fact for System One: the latest run control receipt
+ * stopped with the `policy` stop code (a Tool Guard, protected-path, or
+ * containment stop). No provider input contributes, and a missing or
+ * unreadable receipt is not tamper.
+ */
+async function readRunControlPolicyStop(root: string, missionId: string): Promise<boolean> {
+  const latest = await readLatestPointer(root, missionId);
+  if (!latest) return false;
+  try {
+    const controlPath = path.join(missionsDir(root), missionId, "runs", latest.run_id, "runtime-control.json");
+    const control = RuntimeControlSchema.parse(JSON.parse(await readFile(controlPath, "utf-8")));
+    return control.stop_code === "policy";
+  } catch {
+    return false;
+  }
 }
 
 type CommandRunMetrics = SandboxCommandRunResult;
