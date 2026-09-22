@@ -91,40 +91,61 @@ uh mission cancel --mission <mission-id> --run-id <run-id> --root <project>
 `uh ps` tells you *which* runs exist and their verdict. `uh report` answers the
 follow-up — "what is this run doing right now?" — for one run, in under a second
 and without spending a token. It reads only what is already on disk (the run's
-`runtime-control.json` and its `events.ndjson`) and never starts a controller or
-calls a model.
+`runtime-control.json`, its `run-digest.json`, and, for older runs, its
+`events.ndjson`) and never starts a controller or calls a model.
 
 ```bash
 # One run, by id or by a unique prefix of one.
 uh report 20260922T101500Z-a1b2c3
 uh report 20260922T101500Z-a1b2
 
-# Machine-readable, plus the projection knobs.
+# Machine-readable, plus the projection knob.
 uh report 20260922T101500Z-a1b2c3 --json
 uh report 20260922T101500Z-a1b2c3 --last 20   # project the last 20 tool calls (default: 10)
-uh report 20260922T101500Z-a1b2c3 --full      # read the whole events.ndjson, not just its last 256 KB
 ```
+
+### The live run digest
+
+The supervisor already consumes every native event as it arrives. It reduces the
+same stream — incrementally, with no second parse of the file — into
+`run-digest.json`, written next to `runtime-control.json` on the heartbeat
+cadence and once at settlement (never per event). The digest carries the run's
+runtime, its turn count, what it is doing **now**, its last 12 completed tool
+calls, the files it wrote, its denials and native refusals, the tokens it spent,
+the deterministic loop signals over its recent calls, and its last assistant
+text (bounded and scrubbed).
+
+`uh report` renders from that digest when it is present, so the report stays
+instant no matter how large `events.ndjson` grows — a 6.7 MB stream of reasoning
+and text deltas costs the same as a tiny one. An **older run that has no digest**
+falls back to reading the whole `events.ndjson` once and projecting it; that
+fallback is only for runs started before the digest existed.
 
 A report carries:
 
-- **Mission, team role, runtime and model** — the run's identity, from the live-run
-  registry and its control file. (A registered run records its model; a
-  pre-registry run discovered by scan may not have one.)
+- **Mission, team role, runtime and model** — the run's identity. The runtime
+  comes from the run's `runtime-session.yaml` or its digest, never guessed from
+  the shape of the event stream; the model comes from the live-run registry.
 - **Liveness verdict** — the same `live` / `orphaned` / `stale` / `settled`
   decision `uh ps` makes, against the same process lister.
-- **Elapsed, turns, denials** — elapsed is `started_at` to the settled time (or
-  now); turns and the denial count come from `runtime-control.json`.
+- **Elapsed, turns, denials and native refusals** — elapsed is `started_at` to
+  the settled time (or now); turns come from the digest (or `runtime-control.json`
+  for a run without one).
+- **Current activity** — what the run is doing now: `reasoning since 18:18:02
+  (78,541 chars)`, `tool since 18:18:02 (read_file src/harness/team-run.ts)`, or
+  `idle`. Shown for a run that carries a digest.
 - **Denials, with guard class and target** — each denial in the stream, reduced to
   its guard class (`write_outside`, `git_mutation`, `package_install`,
-  `network_client`, and the other `ToolGuardClass` values, or `denied` when the
-  stream disclosed no finer class) and its **relative** target.
+  `network_client`, `virtual_device`, and the other `ToolGuardClass` values, or
+  `denied` when the stream disclosed no finer class) and its **relative** target.
+  A call the runtime denied natively, without ever invoking the guard hook, is
+  counted separately as a native refusal.
 - **Tokens and cost** — reported when the stream carries them; otherwise `null`
   with a `tokens_unknown_reason` / `cost_unknown_reason`. Cost is never guessed:
   a price the runtime reported is `reported`, a harness estimate from
   `.harness/prices.yaml` is `estimated`, and anything else stays unknown.
-- **Activity** — the last N completed tool calls, projected with the same
-  `projectActivity` the loop probe uses: tool, kind, target, ok, error class and
-  the age of the completion.
+- **Activity** — the last N completed tool calls: tool, kind, target, ok, error
+  class and the age of the completion.
 - **Loop signals** — `identical_repeats`, `alternating_pairs` and
   `distinct_targets` over that window, computed deterministically with no model.
 - **Files written so far** — the distinct write targets that completed
@@ -133,15 +154,11 @@ A report carries:
   characters and scrubbed of recognizable credentials.
 
 Two guarantees hold for every field: no absolute path and no credential is ever
-printed. Guard targets and written files are resolved relative to the run's
-working directory (or to the bounded placeholders `<outside>` / `<pattern>` /
-`unknown`), and the assistant text is passed through a conservative key/token
-redactor before it is bounded.
-
-By default only the **last 256 KB** of `events.ndjson` is read — the tail is
-where the current window lives, and it keeps the answer instant even on a huge
-log. `--full` reads the whole file when you need the history the tail dropped
-(for example, an early usage event that prices the run).
+printed. Targets are resolved against the run's **working directory** in all the
+forms Command Code emits — an absolute path with a leading slash before a drive
+letter (`/C:/run/src/a.ts`), backslash separators, and mixed-case drive letters —
+and anything outside it (or a pure search query) is shown as the bounded
+placeholder `<outside>` / `<pattern>` / `unknown`.
 
 Exit codes: `0` on success, `1` when the run cannot be resolved (unknown or
 ambiguous id) or the report itself fails.
