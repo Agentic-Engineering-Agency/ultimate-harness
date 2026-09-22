@@ -189,6 +189,56 @@ async function createFixtureRuns(missionId = "mission-alpha") {
   );
 }
 
+async function createArmRuns(missionId: string, arms: Array<{ template: string; passed: number; failed: number; cost?: number }>) {
+  const missionDir = join(TEST_ROOT, ".harness", "missions", missionId);
+  const runsDir = join(missionDir, "runs");
+  await mkdir(runsDir, { recursive: true });
+  await writeFile(
+    join(missionDir, "mission.yaml"),
+    stringify({
+      schema_version: "uh.mission.v0",
+      id: missionId,
+      title: "Arm Comparison Mission",
+      workflow_profile: "spec-first-feature",
+      objective: "Compare two session templates",
+    }),
+    "utf-8",
+  );
+
+  for (const armSpec of arms) {
+    for (const [index, status] of Array.from({ length: armSpec.passed + armSpec.failed }, (_, i) => (i < armSpec.passed ? "passed" : "failed")).entries()) {
+      const runId = `${armSpec.template}-${status}-${index}`;
+      const runDir = join(runsDir, runId);
+      await mkdir(runDir, { recursive: true });
+      await writeFile(
+        join(runDir, "runtime-result.yaml"),
+        stringify({
+          schema_version: "uh.runtime-result.v0",
+          mission_id: missionId,
+          runtime: "hermes",
+          status,
+          started_at: "2026-09-21T10:00:00.000Z",
+          finished_at: "2026-09-21T10:00:02.000Z",
+          prompt_path: "prompt.md",
+          stdout_path: "stdout.log",
+          stderr_path: "stderr.log",
+          provider: "provider-a",
+          model: "model-a",
+          usage: armSpec.cost === undefined
+            ? { source: "runtime", input_tokens: 100, output_tokens: 20 }
+            : { source: "runtime", input_tokens: 100, output_tokens: 20, cost_usd: armSpec.cost, cost_basis: "provider_reported" },
+        }),
+        "utf-8",
+      );
+      await writeFile(
+        join(runDir, "session-template.json"),
+        JSON.stringify({ template_id: armSpec.template, tier: armSpec.template, containment: "standard", overridden_by_mission: [] }),
+        "utf-8",
+      );
+    }
+  }
+}
+
 describe("uh observatory runs", () => {
   test("lists runs in JSON format matching RunRecord shape", async () => {
     await createFixtureRuns("mission-alpha");
@@ -508,5 +558,174 @@ describe("uh mission run terminal contract", () => {
     // With --quiet, runtime prompt/query output should be suppressed
     expect(res.stdout).not.toContain("=== Rendered mission prompt ===");
     expect(res.stdout).not.toContain("=== End mission prompt ===");
+  });
+});
+
+describe("uh observatory compare", () => {
+  const COMPARE_MISSION = "compare-mission";
+
+  type ComparisonJson = {
+    by: string;
+    a_value: string;
+    b_value: string;
+    comparison: {
+      a: { runs: number; passed: number; success_rate: number; interval: { low: number; high: number }; known_cost_runs: number; total_cost_usd?: number; mean_cost_usd?: number; cost_per_success_usd?: number; mean_duration_ms?: number };
+      b: ComparisonJson["comparison"]["a"];
+      delta_success_rate: number;
+      intervals_overlap: boolean;
+      cheaper_per_success: string;
+      verdict: string;
+    };
+    plain_repeats_of_weaker: {
+      arm: string;
+      value: string;
+      baseline_success_rate: number;
+      target_success_rate: number;
+      attempts?: number;
+      reaches_target: boolean;
+      mean_cost_usd?: number;
+      total_cost_usd?: number;
+    };
+  };
+
+  async function createTemplateArms() {
+    await createArmRuns(COMPARE_MISSION, [
+      { template: "strict", passed: 9, failed: 1, cost: 2 },
+      { template: "loose", passed: 2, failed: 8, cost: 1 },
+      { template: "opaque", passed: 1, failed: 4 },
+    ]);
+  }
+
+  test("compares two template arms on outcome and cost in JSON", async () => {
+    await createTemplateArms();
+
+    const { stdout } = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "template", "--a", "strict", "--b", "loose", "--json"]);
+    const parsed = JSON.parse(stdout) as ComparisonJson;
+
+    expect(parsed.by).toBe("template");
+    expect(parsed.a_value).toBe("strict");
+    expect(parsed.b_value).toBe("loose");
+    expect(parsed.comparison.a).toMatchObject({ runs: 10, passed: 9, success_rate: 0.9, known_cost_runs: 10, total_cost_usd: 20, mean_cost_usd: 2, mean_duration_ms: 2000 });
+    expect(parsed.comparison.a.cost_per_success_usd).toBeCloseTo(20 / 9, 10);
+    expect(parsed.comparison.a.interval.low).toBeCloseTo(0.5958, 3);
+    expect(parsed.comparison.a.interval.high).toBeCloseTo(0.9821, 3);
+    expect(parsed.comparison.b.interval.low).toBeCloseTo(0.0567, 3);
+    expect(parsed.comparison.b.interval.high).toBeCloseTo(0.5098, 3);
+    expect(parsed.comparison.b).toMatchObject({ runs: 10, passed: 2, success_rate: 0.2, mean_cost_usd: 1, cost_per_success_usd: 5 });
+    expect(parsed.comparison.delta_success_rate).toBeCloseTo(0.7, 10);
+    expect(parsed.comparison.intervals_overlap).toBe(false);
+    expect(parsed.comparison.cheaper_per_success).toBe("a");
+    expect(parsed.comparison.verdict).toBe("a_better");
+
+    // 11 plain runs of the 20% arm reach 91.4%, clearing the strict arm's 90%.
+    expect(parsed.plain_repeats_of_weaker).toMatchObject({ arm: "b", value: "loose", attempts: 11, reaches_target: true, mean_cost_usd: 1 });
+    expect(parsed.plain_repeats_of_weaker.total_cost_usd).toBeCloseTo(11, 10);
+  });
+
+  test("reads the same arms by tier and reports a clear gap as no_clear_difference when intervals overlap", async () => {
+    await createTemplateArms();
+
+    const { stdout } = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "tier", "--a", "loose", "--b", "opaque", "--json"]);
+    const parsed = JSON.parse(stdout) as ComparisonJson;
+    expect(parsed.comparison.verdict).toBe("no_clear_difference");
+    expect(parsed.comparison.intervals_overlap).toBe(true);
+    expect(parsed.comparison.delta_success_rate).toBe(0);
+
+    const plain = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "tier", "--a", "loose", "--b", "opaque"]);
+    expect(plain.stdout).toContain("both arms pass at 20.0%");
+  });
+
+  test("prints both arms, a one-sentence verdict, and the plain-repeats cost", async () => {
+    await createTemplateArms();
+
+    const { stdout } = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "template", "--a", "strict", "--b", "loose"]);
+    expect(stdout).toMatch(/ARM\s+VALUE\s+RUNS\s+PASSED\s+SUCCESS_RATE\s+WILSON_95\s+KNOWN_COST_RUNS\s+MEAN_COST\s+TOTAL_COST\s+COST_PER_SUCCESS\s+MEAN_DURATION/);
+
+    const strictLine = stdout.split("\n").find((line) => line.includes("strict"));
+    expect(strictLine).toContain("59.6% - 98.2%");
+    const looseLine = stdout.split("\n").find((line) => line.includes("loose"));
+    expect(looseLine).toContain("5.7% - 51.0%");
+
+    const verdict = stdout.split("\n").find((line) => line.startsWith("Verdict:"));
+    expect(verdict).toBeDefined();
+    expect(verdict).toContain("a_better");
+    // One sentence: a single terminal period and no sentence break inside.
+    expect((verdict ?? "").split(". ").length).toBe(1);
+    expect((verdict ?? "").endsWith(".")).toBe(true);
+
+    const repeats = stdout.split("\n").find((line) => line.startsWith("Plain repeats:"));
+    expect(repeats).toContain("11 plain repeat(s) of loose at 20.0% would match strict's 90.0%");
+    expect(repeats).toContain("$11.00");
+    expect(repeats).toContain("$1.0000 mean cost per run");
+    expect(stdout).not.toMatch(/\$0(?:\.0+)?(?:\s|$)/);
+  });
+
+  test("keeps unpriced arm cost unknown instead of reading it as free", async () => {
+    await createTemplateArms();
+
+    const { stdout } = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "template", "--a", "strict", "--b", "opaque"]);
+    const opaqueLine = stdout.split("\n").find((line) => line.includes("opaque"));
+    expect(opaqueLine).toBeDefined();
+    expect(opaqueLine).toContain("unknown");
+    expect(opaqueLine).not.toMatch(/\$0(?:\.0+)?(?:\s|$)/);
+
+    const cost = stdout.split("\n").find((line) => line.startsWith("Cost:"));
+    expect(cost).toContain("cheaper per success is unknown");
+
+    const repeats = stdout.split("\n").find((line) => line.startsWith("Plain repeats:"));
+    expect(repeats).toContain("cost unknown because opaque's mean cost per run is unknown");
+
+    const { stdout: json } = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "template", "--a", "strict", "--b", "opaque", "--json"]);
+    const parsed = JSON.parse(json) as ComparisonJson;
+    expect(parsed.comparison.b.known_cost_runs).toBe(0);
+    expect(parsed.comparison.b.total_cost_usd).toBeUndefined();
+    expect(parsed.comparison.b.mean_cost_usd).toBeUndefined();
+    expect(parsed.comparison.b.cost_per_success_usd).toBeUndefined();
+    expect(parsed.comparison.cheaper_per_success).toBe("unknown");
+    expect(parsed.plain_repeats_of_weaker.total_cost_usd).toBeUndefined();
+  });
+
+  test("reports insufficient_data for a thin arm and says plainly when repeats cannot help", async () => {
+    await createArmRuns(COMPARE_MISSION, [
+      { template: "thin", passed: 4, failed: 0, cost: 1 },
+      { template: "never", passed: 0, failed: 6, cost: 1 },
+    ]);
+
+    const thin = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "template", "--a", "thin", "--b", "never"]);
+    expect(thin.stdout).toMatch(/Verdict: insufficient_data/);
+    expect(thin.stdout).toContain("at least 5 per arm");
+    // A perfect 4-of-4 is still not allowed to look like a winner.
+    expect(thin.stdout.split("\n").find((line) => line.includes("thin"))).toContain("100.0%");
+    expect(thin.stdout).toContain("none of never's runs passed");
+    expect(thin.stdout).not.toMatch(/\$0(?:\.0+)?(?:\s|$)/);
+
+    const both = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "template", "--a", "never", "--b", "never"]);
+    expect(both.stdout).toMatch(/Verdict: no_clear_difference/);
+    expect(both.stdout).toContain("cheaper per success is unknown");
+    expect(both.stdout).toContain("neither arm passed a run");
+  });
+
+  test("rejects an unsupported dimension and a missing arm value", async () => {
+    await createTemplateArms();
+
+    const badDimension = await runUhFailure(["observatory", "compare", "--root", TEST_ROOT, "--by", "status", "--a", "strict", "--b", "loose"]);
+    expect(`${badDimension.stdout}${badDimension.stderr}`).toMatch(/Invalid --by: must be one of template, tier, model, runtime/);
+
+    const missingArm = await runUhFailure(["observatory", "compare", "--root", TEST_ROOT, "--by", "template", "--a", "strict"]);
+    expect(`${missingArm.stdout}${missingArm.stderr}`).toMatch(/requires --a <value> and --b <value>/);
+  });
+
+  test("scopes the comparison to one mission with --mission", async () => {
+    await createTemplateArms();
+    await createArmRuns("other-mission", [{ template: "strict", passed: 0, failed: 10, cost: 2 }]);
+
+    const scoped = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--mission", COMPARE_MISSION, "--by", "template", "--a", "strict", "--b", "loose", "--json"]);
+    expect((JSON.parse(scoped.stdout) as ComparisonJson).comparison.a.runs).toBe(10);
+
+    const unscoped = await runUh(["observatory", "compare", "--root", TEST_ROOT, "--by", "template", "--a", "strict", "--b", "loose", "--json"]);
+    const parsed = JSON.parse(unscoped.stdout) as ComparisonJson;
+    expect(parsed.comparison.a.runs).toBe(20);
+    expect(parsed.comparison.a.passed).toBe(9);
+    expect(parsed.comparison.verdict).toBe("no_clear_difference");
   });
 });
