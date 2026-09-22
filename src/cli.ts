@@ -1958,6 +1958,38 @@ missionCmd
     }
   });
 
+// uh mission check — validate a packet's read_first refs, write roots,
+// "Change only" constraints, grounding claims, and runtime_config_overrides
+// before anything is launched. Never starts a runtime and never writes to
+// .harness (see src/harness/mission-check.ts).
+missionCmd
+  .command("check")
+  .description("Validate a mission packet (paths, write roots, grounding, runtime overrides) without launching a runtime")
+  .argument("<file>", "Mission packet path (mission.yaml)")
+  .option("--runtime <runtime>", "Runtime id to validate runtime_config_overrides against (single-shape default: hermes)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the check results as JSON")
+  .action(async (file: string, opts: { runtime?: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const { checkMissionPackets, renderMissionCheckLines } = await import("./harness/mission-check.js");
+    let result: import("./harness/mission-check.js").MissionCheckResult;
+    try {
+      result = await checkMissionPackets({ root, missionPath: file, runtime: opts.runtime });
+    } catch (err) {
+      console.error(`[FAIL] mission check error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      for (const line of renderMissionCheckLines(result)) console.log(line);
+    }
+    if (!result.ok) {
+      process.exit(1);
+    }
+  });
+
 missionCmd
   .command("dry-run")
   .description("Show what command would be executed without running it")
