@@ -69,7 +69,6 @@ export async function createSandbox(
 ): Promise<SandboxRecord> {
   assertSafeSandboxId(opts.id);
   assertSafeMissionId(opts.missionId);
-  await requireSandboxesIndex(root);
 
   const sandboxesRoot = path.resolve(sandboxesDir(root));
   await rejectSymlinkIfExists(sandboxesRoot, "Sandboxes directory");
@@ -146,7 +145,6 @@ export async function createSandbox(
 }
 
 export async function listSandboxes(root: string): Promise<SandboxIndexEntry[]> {
-  await requireSandboxesIndex(root);
   const index = await readIndex(root);
   return [...index.sandboxes];
 }
@@ -156,7 +154,6 @@ export async function getSandboxStatus(
   id: string,
 ): Promise<SandboxStatusInfo> {
   assertSafeSandboxId(id);
-  await requireSandboxesIndex(root);
   const index = await readIndex(root);
   const entry = index.sandboxes.find((s) => s.id === id);
   if (!entry) {
@@ -184,7 +181,6 @@ export async function discardSandbox(
   opts: DiscardSandboxOptions = {},
 ): Promise<DiscardSandboxResult> {
   assertSafeSandboxId(id);
-  await requireSandboxesIndex(root);
   const index = await readIndex(root);
   const entryIndex = index.sandboxes.findIndex((s) => s.id === id);
   if (entryIndex === -1) {
@@ -232,18 +228,19 @@ export async function discardSandbox(
   };
 }
 
-async function requireSandboxesIndex(root: string): Promise<void> {
+/**
+ * Read the sandboxes index. A missing file is an empty registry: the index is
+ * runtime state that every run rewrites, so a project may stop tracking it and a
+ * fresh clone must still work — `create` writes a new valid index on demand. A
+ * present-but-invalid index is never treated as empty: it fails loudly and is
+ * never overwritten, so a corrupt registry cannot be silently discarded.
+ */
+async function readIndex(root: string): Promise<SandboxesIndexDocument> {
   const indexPath = sandboxesIndex(root);
   await rejectSymlinkIfExists(indexPath, "Sandboxes index");
   if (!(await fileExists(indexPath))) {
-    throw new Error(
-      `Sandboxes index missing: ${indexPath}. Run 'uh init' first.`,
-    );
+    return { schema_version: "uh.sandboxes-index.v0", sandboxes: [] };
   }
-}
-
-async function readIndex(root: string): Promise<SandboxesIndexDocument> {
-  const indexPath = sandboxesIndex(root);
   const raw = await readFile(indexPath, "utf-8");
   let parsed: unknown;
   try {
@@ -267,6 +264,7 @@ async function writeIndex(
   doc: SandboxesIndexDocument,
 ): Promise<void> {
   const indexPath = sandboxesIndex(root);
+  await mkdir(path.dirname(indexPath), { recursive: true });
   await writeFile(indexPath, stringify(doc), "utf-8");
 }
 
