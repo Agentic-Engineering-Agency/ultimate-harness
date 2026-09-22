@@ -1990,6 +1990,55 @@ missionCmd
     }
   });
 
+// uh mission put — the coordinator's allowed path to persist a whole packet.
+// An orchestrator may only run controller commands and may not write under
+// .harness (protected), so `mission create`/`new` and `propose` (a subset of
+// the fields) are not enough. This runs checkMissionPackets first and writes
+// nothing on failure, installs atomically, refuses an existing target without
+// --replace, and refuses --replace while a live run of the mission exists
+// (see src/harness/mission-put.ts).
+missionCmd
+  .command("put")
+  .description("Validate and install mission packet(s) into .harness/missions/<id>/mission.yaml")
+  .argument("<files...>", "Mission packet path(s) (mission.yaml)")
+  .option("--replace", "Overwrite an installed packet (refused while the mission has a live run)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the put result as JSON")
+  .action(async (files: string[], opts: { replace?: boolean; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const { putMissionPackets } = await import("./harness/mission-put.js");
+    const { renderMissionCheckLines } = await import("./harness/mission-check.js");
+    let result: import("./harness/mission-put.js").PutMissionPacketsResult;
+    try {
+      result = await putMissionPackets({ root, packetPaths: files, replace: opts.replace === true });
+    } catch (err) {
+      console.error(`[FAIL] mission put error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (!result.ok) {
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        if (result.checks) for (const line of renderMissionCheckLines(result.checks)) console.log(line);
+        console.error(`[FAIL] mission put refused: ${result.reason}`);
+      }
+      process.exit(1);
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    for (const packet of result.installed) {
+      console.log(`Installed mission ${packet.mission_id}`);
+      console.log(`  path: ${packet.path}`);
+      console.log(`  sha256: ${packet.sha256}`);
+    }
+    console.log(`[OK] ${result.installed.length} packet(s) installed; ${result.auditLines.length} audit event(s) appended`);
+  });
+
 missionCmd
   .command("dry-run")
   .description("Show what command would be executed without running it")

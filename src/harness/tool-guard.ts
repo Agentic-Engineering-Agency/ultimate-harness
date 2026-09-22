@@ -59,7 +59,10 @@ const LAUNCHERS = new Set(["&", ".", "npx", "bunx", "uvx", "pipx", "env", "sudo"
 const PACKAGE_RUNNERS = new Set(["pnpm", "yarn", "npm", "bun"]);
 const PACKAGE_RUNNER_VERBS = new Set(["dlx", "exec", "x"]);
 const SCRIPT_HOSTS = new Set(["node", "bun", "deno", "tsx"]);
-const UH_SPAWN_OPERATIONS = new Set(["run", "run-all", "run-team"]);
+/** `uh mission` verbs only a controller may run: they start or install runs. */
+const UH_CONTROLLER_MISSION_OPERATIONS = new Set(["put", "run", "run-all", "run-team"]);
+/** Top-level `uh` verbs only a controller may run: they drive the fleet. */
+const UH_CONTROLLER_OPERATIONS = new Set(["experiment", "kill", "ps", "report", "resume", "steer"]);
 
 /** Executable identity of a command token: basename, lowercased, without a Windows launcher extension. */
 function executableName(token: string): string {
@@ -93,11 +96,18 @@ function substitutions(command: string): string[] {
   return bodies;
 }
 
-/** A UH invocation that starts paid runtimes. Read-only UH commands such as `validate` and `status` are not spawns. */
-function uhSpawn(args: string[]): boolean {
+/**
+ * A UH invocation a worker may not run: one that starts paid runtimes (`uh
+ * mission run`, `run-all`, `run-team`, `uh acceptance run`) or drives the
+ * controller plane (`uh ps`, `uh report`, `uh steer`, `uh resume`, `uh kill`,
+ * `uh experiment`, `uh mission put`). Read-only UH commands such as `validate`,
+ * `status` and `mission check` are not controller invocations.
+ */
+function uhControllerInvoked(args: string[]): boolean {
   const positional = args.filter(t => !t.startsWith("-")).map(t => t.toLowerCase());
-  if (positional[0] === "mission") return UH_SPAWN_OPERATIONS.has(positional[1] ?? "");
-  return positional[0] === "acceptance" && positional[1] === "run";
+  if (positional[0] === "mission") return UH_CONTROLLER_MISSION_OPERATIONS.has(positional[1] ?? "");
+  if (positional[0] === "acceptance") return positional[1] === "run";
+  return UH_CONTROLLER_OPERATIONS.has(positional[0] ?? "");
 }
 
 /**
@@ -116,7 +126,7 @@ function agentClientInvoked(command: string, clients: ReadonlySet<string>, depth
       if (/^\w+=/.test(ts[i])) { i += 1; continue; }
       const name = executableName(ts[i]);
       if (clients.has(name)) return true;
-      if (name === "uh") { if (uhSpawn(ts.slice(i + 1))) return true; break; }
+      if (name === "uh") { if (uhControllerInvoked(ts.slice(i + 1))) return true; break; }
       if (NESTED_SHELLS.has(name)) {
         const flag = ts.findIndex((t, index) => index > i && NESTED_SHELL_FLAGS.has(t.toLowerCase()));
         if (flag >= 0 && agentClientInvoked(ts.slice(flag + 1).join(" "), clients, depth + 1)) return true;
@@ -126,7 +136,7 @@ function agentClientInvoked(command: string, clients: ReadonlySet<string>, depth
         const rest = ts.slice(i + 1).filter(t => !t.startsWith("-"));
         if (rest[0]?.toLowerCase() === "run") rest.shift();
         const script = (rest[0] ?? "").replaceAll("\\", "/").toLowerCase();
-        if ((script === "dist/cli.js" || script.endsWith("/dist/cli.js")) && uhSpawn(rest.slice(1))) return true;
+        if ((script === "dist/cli.js" || script.endsWith("/dist/cli.js")) && uhControllerInvoked(rest.slice(1))) return true;
         if (!(PACKAGE_RUNNERS.has(name) && PACKAGE_RUNNER_VERBS.has((ts[i + 1] ?? "").toLowerCase()))) break;
       }
       if (PACKAGE_RUNNERS.has(name) && PACKAGE_RUNNER_VERBS.has((ts[i + 1] ?? "").toLowerCase())) { i += 2; }
@@ -575,6 +585,18 @@ function gitMutation(command: string): boolean {
 }
 export type ControllerGuardOptions = { allowControllerCommands?: boolean };
 
+/**
+ * Top-level `uh` operations an orchestrator may run. Observability and control
+ * verbs (`ps`, `report`, `steer`, `resume`, `kill`, `experiment`) sit alongside
+ * the mission, acceptance and authoring commands; a worker that runs one of the
+ * controller-only verbs is denied as an `agent_client`.
+ */
+const CONTROLLER_OPERATIONS = new Set([
+  "acceptance", "adapter", "experiment", "init", "kill", "mission", "observatory",
+  "propose", "ps", "report", "resume", "sandbox", "skill", "spec", "status", "steer",
+  "validate", "verify",
+]);
+
 function isControllerCommand(command: string): boolean {
   if (!command || /[\r\n;&|`<>]/.test(command)) return false;
   const commandTokens = tokens(command);
@@ -591,7 +613,7 @@ function isControllerCommand(command: string): boolean {
     return false;
   }
   const operation = commandTokens[argumentIndex]?.toLowerCase();
-  if (!operation || !new Set(["acceptance", "adapter", "init", "mission", "observatory", "propose", "sandbox", "skill", "spec", "status", "validate", "verify"]).has(operation)) return false;
+  if (!operation || !CONTROLLER_OPERATIONS.has(operation)) return false;
   return !commandTokens.some(token => /^(?:--force|--yolo|--dangerously|--bypass|--permission-prompts(?:=|$))/i.test(token));
 }
 
