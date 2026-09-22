@@ -1,5 +1,5 @@
 import { mapResourceWaves, workerConcurrency } from "./runtime-resources.js";
-import { DEFAULT_PROTECTED_PATHS, type RuntimeLimits, type TeamResourceLimits } from "../schema/runtime-control.js";
+import { DEFAULT_PROTECTED_PATHS, RuntimeControlSchema, type RuntimeLimits, type TeamResourceLimits } from "../schema/runtime-control.js";
 import type { TeamWorker } from "../schema/mission.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
@@ -180,6 +180,13 @@ export interface GitOps {
   deleteBranch: (root: string, branch: string) => Promise<void>;
   /** Stage + commit any uncommitted changes in `cwd`. No-op when worktree is clean. */
   commitAll: (cwd: string, message: string) => Promise<void>;
+  /**
+   * List the paths with uncommitted changes (staged, unstaged, untracked) in a
+   * worktree, relative to the worktree root. Used to decide whether a stopped
+   * worker produced salvageable work outside the protected roots. Optional so
+   * existing test doubles stay valid; when absent, salvage cannot be evaluated.
+   */
+  dirtyPaths?: (cwd: string) => Promise<string[]>;
 }
 
 export interface MergeOutcome {
@@ -231,6 +238,41 @@ export interface WorkerOutcome {
   runId?: string;
   artifactScope?: string;
   runtimeResult?: RuntimeResultDocument;
+  /** Stop code from the worker's runtime control receipt, when one was read. */
+  stopCode?: string;
+  /** Salvage record for a failed worker whose stop code permits salvage. */
+  salvage?: WorkerSalvage;
+}
+
+/** A worker's salvage record (see `CanonicalWorkerSalvageSchema`). */
+export type WorkerSalvage = NonNullable<CanonicalTeamWorker["salvage"]>;
+
+/**
+ * Stop codes that mean a worker ran out of budget or was halted by safety,
+ * rather than failing on its own merits. A worker stopped by one of these may
+ * still hold a complete, verifiable change in its worktree.
+ */
+const SALVAGE_STOP_CODES = new Set(["turn_limit", "timeout", "deadline", "stall", "policy"]);
+
+/** True when `candidate` equals or lives under any protected root. */
+function isProtectedPath(candidate: string, protectedRoots: readonly string[]): boolean {
+  const normalized = candidate.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "").toLowerCase();
+  if (normalized.length === 0) return true;
+  return protectedRoots.some((root) => {
+    const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    return normalized === normalizedRoot || normalized.startsWith(`${normalizedRoot}/`);
+  });
+}
+
+/** Read the stop code off a worker run's persisted runtime control receipt. */
+async function readWorkerStopCode(artifactRoot: string, missionId: string, runId: string): Promise<string | undefined> {
+  const controlPath = path.join(artifactRoot, ".harness", "missions", missionId, "runs", runId, "runtime-control.json");
+  try {
+    const control = RuntimeControlSchema.parse(JSON.parse(await readFile(controlPath, "utf-8")));
+    return control.stop_code;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -471,6 +513,23 @@ export const defaultGitOps: GitOps = {
       "-c", "user.name=uh team worker",
       "commit", "-m", message,
     ], { cwd });
+  },
+  async dirtyPaths(cwd) {
+    // `--porcelain` keeps the output stable across git versions and locales.
+    // Untracked files are included so a worker that only created new files is
+    // still seen as having produced work.
+    const { stdout } = await execFileP("git", ["status", "--porcelain", "--untracked-files=all"], { cwd });
+    return stdout
+      .split("\n")
+      .map((line) => line.replace(/\r$/, ""))
+      .filter((line) => line.length > 3)
+      // `<XY> <path>`; a rename/copy is rendered as `<old> -> <new>`, so keep
+      // the destination path.
+      .map((line) => line.slice(3))
+      .map((entry) => (entry.includes(" -> ") ? entry.slice(entry.lastIndexOf(" -> ") + 4) : entry))
+      .map((entry) => entry.replace(/^"(.*)"$/, "$1"))
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
   },
 };
 
@@ -935,6 +994,27 @@ export async function runTeamMission(
       canonicalWorker.runtime_result_path = runtimeResult
         ? relativeArtifactPath(root, path.join(context.artifactRoot, ".harness", "missions", workerMissionId, "runs", context.runId, "runtime-result.yaml"))
         : null;
+      // A failed worker may still hold a complete change: salvage evaluates and
+      // (only when both pass) commits it, but the leader never merges it.
+      let salvageStopCode: string | undefined;
+      let salvageRecord: WorkerSalvage | undefined;
+      if (status === "failed") {
+        const salvageOutputs = canonicalWorker.contract?.expected_outputs ?? slot.plan.spec?.expected_outputs;
+        const evaluated = await evaluateWorkerSalvage({
+          gitOps,
+          verifier: options.verifier,
+          worktreePath: slot.plan.worktreePath,
+          branch: slot.plan.branch,
+          workerId: slot.plan.id,
+          workerMissionId,
+          artifactRoot: context.artifactRoot,
+          runId: context.runId,
+          expectedOutputs: salvageOutputs?.files,
+        });
+        salvageStopCode = evaluated.stopCode;
+        salvageRecord = evaluated.record;
+        if (salvageRecord) canonicalWorker.salvage = salvageRecord;
+      }
       await persistState();
       let commitErr: string | null = null;
       if (status === "succeeded") {
@@ -956,6 +1036,8 @@ export async function runTeamMission(
         runId: context.runId,
         artifactScope: canonicalWorker.artifact_scope,
         runtimeResult,
+        ...(salvageStopCode !== undefined ? { stopCode: salvageStopCode } : {}),
+        ...(salvageRecord ? { salvage: salvageRecord } : {}),
       };
     } catch (err) {
       canonicalWorker.status = "error";
@@ -1157,6 +1239,70 @@ function classifyRuntimeStatus(res: TeamRuntimeRunResult): WorkerOutcome["status
   return "failed";
 }
 
+/**
+ * Decide whether a worker that settled as `failed` left salvageable work, and
+ * if so, verify it in place.
+ *
+ * A worker is only considered when its stop code means it ran out of budget or
+ * was halted by safety (`turn_limit`, `timeout`, `deadline`, `stall`, `policy`)
+ * AND its worktree holds changes outside the protected roots. Its own declared
+ * outputs are re-checked with the output verification, and the worker mission's
+ * `verification.required_checks` are run in the worker worktree through the same
+ * verifier the leader uses. The worktree is committed to the worker branch — with
+ * the existing commit hygiene — only when both passed. The record is always
+ * surfaced so an operator can take it deliberately; the leader never merges it.
+ */
+async function evaluateWorkerSalvage(args: {
+  gitOps: GitOps;
+  verifier: TeamVerifier | undefined;
+  worktreePath: string;
+  branch: string;
+  workerId: string;
+  workerMissionId: string;
+  artifactRoot: string;
+  runId: string;
+  expectedOutputs: readonly string[] | undefined;
+}): Promise<{ stopCode?: string; record?: WorkerSalvage }> {
+  const stopCode = await readWorkerStopCode(args.artifactRoot, args.workerMissionId, args.runId);
+  if (stopCode === undefined || !SALVAGE_STOP_CODES.has(stopCode)) return { stopCode };
+  // Without a way to inspect the worktree we cannot tell salvageable work from
+  // harness-owned churn, so we record nothing rather than guess.
+  if (!args.gitOps.dirtyPaths) return { stopCode };
+  let dirty: string[];
+  try {
+    dirty = await args.gitOps.dirtyPaths(args.worktreePath);
+  } catch {
+    return { stopCode };
+  }
+  const eligible = dirty.some((entry) => !isProtectedPath(entry, DEFAULT_PROTECTED_PATHS));
+  let outputsPassed = false;
+  let checksPassed = false;
+  if (eligible) {
+    outputsPassed = true;
+    for (const outputPath of args.expectedOutputs ?? []) {
+      const check = await verifyExpectedArtifact(args.worktreePath, { path: outputPath });
+      if (check.status !== "passed") { outputsPassed = false; break; }
+    }
+    if (args.verifier) {
+      try {
+        const verification = await args.verifier(args.worktreePath, args.workerMissionId);
+        checksPassed = verification.status === "passed";
+      } catch {
+        checksPassed = false;
+      }
+    }
+    if (outputsPassed && checksPassed) {
+      try {
+        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`);
+      } catch { /* best-effort: the record still points at the branch for a human */ }
+    }
+  }
+  return {
+    stopCode,
+    record: { eligible, outputs_passed: outputsPassed, checks_passed: checksPassed, branch: args.branch },
+  };
+}
+
 async function seedMissionPacket(canonicalMissionDir: string, worktreePath: string, missionId: string): Promise<void> {
   const target = path.join(worktreePath, ".harness", "missions", missionId);
   // When the worktree was branched off a ref that pre-dates the mission, the
@@ -1323,6 +1469,27 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
       lines.push("- Leader merge: not attempted");
     }
     lines.push(`- Summary: ${oneLineSummary(outcome.finalSentinel)}`);
+    lines.push("");
+  }
+  // Stopped-but-verified work: a failed worker whose stop code permitted
+  // salvage and whose worktree held non-protected changes. The leader never
+  // merges these automatically — the section exists so a human can take the
+  // branch deliberately (a policy stop always requires a human).
+  const salvaged = args.workers.filter((outcome) => outcome.salvage?.eligible === true);
+  lines.push("## Verified work from stopped workers");
+  lines.push("");
+  if (salvaged.length === 0) {
+    lines.push("_(none)_");
+    lines.push("");
+  } else {
+    for (const outcome of salvaged) {
+      const salvage = outcome.salvage!;
+      const stop = outcome.stopCode ? `\`${outcome.stopCode}\`` : "_unknown_";
+      const verdict = salvage.outputs_passed && salvage.checks_passed ? "committed" : "not committed";
+      lines.push(`- \`${outcome.plan.id}\` — stop ${stop}, branch \`${salvage.branch}\`, outputs \`${salvage.outputs_passed ? "passed" : "failed"}\`, checks \`${salvage.checks_passed ? "passed" : "failed"}\` (${verdict})`);
+    }
+    lines.push("");
+    lines.push("> Not merged: the leader never integrates a failed worker automatically. Take this branch deliberately.");
     lines.push("");
   }
   const report = lines.join("\n");
