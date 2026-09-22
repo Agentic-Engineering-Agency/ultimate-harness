@@ -486,6 +486,53 @@ program
     }
   });
 
+// uh kill — stop any run from the project root and prove it is dead.
+program
+  .command("kill")
+  .description("Stop live runs by id (or unique prefix), role, mission, team, --all, or --orphans")
+  .argument("[run-id]", "Run id, or a unique prefix of one")
+  .option("--role <role>", "Every team worker with this role")
+  .option("--mission <id>", "Every run of this mission, including its team workers")
+  .option("--team <id>", "A team: its workers first, then the team controller")
+  .option("--all", "Every live run discovered from the project root")
+  .option("--orphans", "Every run whose controller pid is gone")
+  .option("--force", "Skip the cancellation request and terminate the owned process tree immediately")
+  .option("--wait-ms <ms>", "How long to wait for a graceful exit before forcing (default: 10000)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the kill report as JSON")
+  .action(async (runId: string | undefined, opts: {
+    role?: string; mission?: string; team?: string; all?: boolean; orphans?: boolean;
+    force?: boolean; waitMs?: string; root?: string; json?: boolean;
+  }) => {
+    const root = resolveRoot(opts.root);
+    const waitMs = opts.waitMs === undefined ? undefined : Number.parseInt(opts.waitMs, 10);
+    if (waitMs !== undefined && (!Number.isFinite(waitMs) || waitMs < 0)) {
+      console.error(`[FAIL] --wait-ms must be a non-negative integer of milliseconds, got: ${opts.waitMs}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const { killRuns, formatKillReport } = await import("./harness/kill.js");
+      const report = await killRuns(root, {
+        ...(runId !== undefined ? { runId } : {}),
+        ...(opts.role !== undefined ? { role: opts.role } : {}),
+        ...(opts.mission !== undefined ? { missionId: opts.mission } : {}),
+        ...(opts.team !== undefined ? { teamId: opts.team } : {}),
+        ...(opts.all === true ? { all: true } : {}),
+        ...(opts.orphans === true ? { orphans: true } : {}),
+        ...(opts.force === true ? { force: true } : {}),
+        ...(waitMs !== undefined ? { waitMs } : {}),
+      });
+      if (opts.json) console.log(JSON.stringify(report, null, 2));
+      else console.log(formatKillReport(report));
+      process.exit(report.exit_code);
+    } catch (err) {
+      console.error(`[FAIL] kill error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
 // uh acceptance — real runtime evidence, separate from test and fixture status.
 const acceptanceCmd = program.command("acceptance").description("Run and inspect real runtime acceptance evidence");
 
