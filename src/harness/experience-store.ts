@@ -50,6 +50,8 @@ export type RunRecord = {
   cost_unknown_reason?: string;
   /** Team context when this run was a worker dispatched by `run-team`. */
   team?: { mission_id: string; role: string };
+  /** Experiment provenance, from `experiment.json` in the run directory when present. */
+  experiment?: { id: string; arm: string; split: string };
 };
 
 export type RunGroupSummary = {
@@ -111,13 +113,14 @@ async function indexRun(
   team?: { mission_id: string; role: string },
 ): Promise<RunRecord | undefined> {
   const runRoot = path.join(missionRoot, "runs", runId);
-  const [resultRaw, controlRaw, recoveryRaw, verificationRaw, workflowProfile, templateRaw] = await Promise.all([
+  const [resultRaw, controlRaw, recoveryRaw, verificationRaw, workflowProfile, templateRaw, experimentRaw] = await Promise.all([
     readYamlFile(path.join(runRoot, "runtime-result.yaml")),
     readJsonFile(path.join(runRoot, "runtime-control.json")),
     readJsonFile(path.join(runRoot, "runtime-recovery.json")),
     readYamlFile(path.join(runRoot, "verification.yaml")),
     readMissionWorkflow(path.join(missionRoot, "mission.yaml")),
     readJsonFile(path.join(runRoot, "session-template.json")),
+    readJsonFile(path.join(runRoot, "experiment.json")),
   ]);
   let result: RuntimeResultDocument | undefined;
   let control: RuntimeControl | undefined;
@@ -128,6 +131,13 @@ async function indexRun(
   try { if (recoveryRaw !== undefined) recovery = RuntimeRecoveryRecordSchema.parse(recoveryRaw); } catch { /* partial artifact */ }
   try { if (verificationRaw !== undefined) verification = validateVerificationResult(verificationRaw); } catch { /* partial artifact */ }
   const templateRecord = templateRaw !== null && typeof templateRaw === "object" ? templateRaw as Record<string, unknown> : undefined;
+  const experimentRecord = experimentRaw !== null && typeof experimentRaw === "object" ? experimentRaw as Record<string, unknown> : undefined;
+  const experimentId = optionalString(experimentRecord?.id);
+  const experimentArm = optionalString(experimentRecord?.arm);
+  const experimentSplit = optionalString(experimentRecord?.split);
+  const experiment = experimentId !== undefined && experimentArm !== undefined && experimentSplit !== undefined
+    ? { id: experimentId, arm: experimentArm, split: experimentSplit }
+    : undefined;
   if (!result && !control) return undefined;
 
   const usage = usageOf(result, control);
@@ -172,6 +182,7 @@ async function indexRun(
     verification_status: verification?.status,
     peak_memory_bytes: control?.peak_memory_bytes,
     ...(team !== undefined ? { team } : {}),
+    ...(experiment !== undefined ? { experiment } : {}),
   };
 }
 
