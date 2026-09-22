@@ -1,11 +1,24 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify } from "yaml";
 import { indexRuns, paretoFrontier, summarizeRuns } from "../src/harness/experience-store.js";
 
 let root: string;
+
+const usageFixture = () => readFile(path.join(process.cwd(), "tests", "fixtures", "runtime-events", "command-code-usage.ndjson"), "utf8");
+
+const pricesYaml = [
+  "schema_version: uh.prices.v0",
+  "models:",
+  "  qwen/qwen3.8-flash:",
+  "    input_usd_per_million: 2",
+  "    output_usd_per_million: 8",
+  "    cache_read_usd_per_million: 0.4",
+  "    cache_write_usd_per_million: 1",
+  '    source: "test placeholder, not a real price"',
+].join("\n") + "\n";
 
 afterEach(async () => {
   if (root) await rm(root, { recursive: true, force: true });
@@ -130,7 +143,7 @@ async function putArtifact(filePath: string, value: unknown | string) {
   await writeFile(filePath, typeof value === "string" ? value : filePath.endsWith(".yaml") ? stringify(value) : JSON.stringify(value), "utf8");
 }
 
-type TeamWorkerFixture = { id: string; role: string; missionId?: string; runId: string; status?: string; model?: string; cost?: number };
+type TeamWorkerFixture = { id: string; role: string; missionId?: string; runId: string; status?: string; model?: string; cost?: number; events?: string };
 
 /**
  * A team parent under `.harness/missions/<id>/team/` with one artifact scope
@@ -182,6 +195,9 @@ async function putTeamRun(missionId: string, parentRunId: string, workers: TeamW
       ...(worker.model ? { model: worker.model } : {}),
       ...(worker.cost !== undefined ? { cost_usd: worker.cost, cost_basis: "provider_reported" } : {}),
     });
+    if (worker.events !== undefined) {
+      await putArtifact(path.join(workerMissionRoot, "runs", worker.runId, "events.ndjson"), worker.events);
+    }
   }
 }
 
@@ -229,6 +245,32 @@ describe("experience store — team worker runs", () => {
     expect(record?.cost_usd).toBeUndefined();
     expect(record?.cost_source).toBeUndefined();
     expect(record?.cost_unknown_reason).toMatch(/command-code/i);
+  });
+
+  test("indexes native token totals and operator-priced cost for a Command Code worker", async () => {
+    root = await mkdtemp(path.join(tmpdir(), "uh-experience-team-usage-"));
+    await putTeamRun("team-1", "parent-1", [{ id: "worker-a", role: "worker-a", runId: "run-wa", events: await usageFixture() }]);
+    await writeFile(path.join(root, ".harness", "prices.yaml"), pricesYaml, "utf8");
+
+    const record = (await indexRuns(root)).find((candidate) => candidate.run_id === "run-wa");
+    expect(record?.cost_usd).toBeCloseTo(0.0901648, 12);
+    expect(record?.cost_source).toBe("estimated");
+    expect(record?.cost_unknown_reason).toBeUndefined();
+    expect(record?.token_totals).toEqual({ input: 39076, output: 580, cache_read: 18432, cache_write: 0 });
+    // The stream names the model even though the result document does not.
+    expect(record?.model).toBe("Qwen/Qwen3.8-Flash");
+  });
+
+  test("records token totals independent of price when no table entry prices the model", async () => {
+    root = await mkdtemp(path.join(tmpdir(), "uh-experience-team-unpriced-"));
+    await putTeamRun("team-1", "parent-1", [{ id: "worker-a", role: "worker-a", runId: "run-wa", events: await usageFixture() }]);
+
+    const record = (await indexRuns(root)).find((candidate) => candidate.run_id === "run-wa");
+    expect(record?.cost_usd).toBeUndefined();
+    expect(record?.cost_source).toBeUndefined();
+    expect(record?.cost_unknown_reason).toMatch(/Qwen\/Qwen3\.8-Flash/);
+    expect(record?.cost_unknown_reason).toMatch(/prices\.yaml/);
+    expect(record?.token_totals).toEqual({ input: 39076, output: 580, cache_read: 18432, cache_write: 0 });
   });
 
   test("does not double count a run reachable through its own mission", async () => {

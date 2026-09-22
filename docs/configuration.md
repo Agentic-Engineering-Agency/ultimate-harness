@@ -52,6 +52,29 @@ Use `.env.example` as a placeholder reference only. Real values should come from
 | `HONCHO_TOOL_PREVIEW_LENGTH` | Per-snippet char cap for `honcho_search`. Defaults to 500. |
 | `TYPESAFE_API_KEY` | Enables TypeSafe System One judgments in verification and independent-review collection. Recommendations can harden a result but cannot override deterministic failure or authorize promotion. See [progressive decisions](./architecture/progressive-decisions.md) for limitations. |
 
+## Operator Price Table
+
+`.harness/prices.yaml` (schema `uh.prices.v0`) is the operator-maintained price table the harness uses to estimate a run's cost when its native event stream reports token counts but no price. The harness never ships or invents a price: a model missing from the table keeps its cost unknown, with the reason naming the model and this file.
+
+```yaml
+# .harness/prices.yaml
+schema_version: uh.prices.v0
+models:
+  # Model ids match case-insensitively against the model the native stream reports.
+  # <provider>/<model-id>:
+  #   input_usd_per_million: <USD per million input tokens>
+  #   output_usd_per_million: <USD per million output tokens>
+  #   cache_read_usd_per_million: <USD per million cache-read tokens>
+  #   cache_write_usd_per_million: <USD per million cache-write tokens>
+  #   source: <where these numbers came from, e.g. the provider's published list price and the date you verified it>
+```
+
+- All four rate fields are USD per million tokens.
+- `source` is required and records the provenance of the numbers; fill it in.
+- A missing or malformed table prices nothing: runs whose cost cannot be resolved stay unknown rather than being estimated from a guessed rate.
+- A stream whose token counters are partially reported is never priced from the partial measurement.
+- Command Code runs price from their native `model_request_end` usage; team admission (`run-team`) treats an estimated cost the same as a reported one when reserving team budget.
+
 ## Runtime Config Overrides
 
 Missions can override adapter defaults without editing shared manifests:

@@ -8,13 +8,29 @@ import { assertWritableArtifact } from "../adapters/_artifact-context.js";
 import { assertSafeMissionId } from "./mission.js";
 import { assertValidRunId } from "./run-id.js";
 import { aggregateRuntimeUsage, isUsageNumber, type RuntimeAccountingFacts, type RuntimeUsage } from "./usage.js";
+import { estimateOperatorCost, loadOperatorPriceTable, operatorPriceFor, type OperatorPriceTable } from "./cost-table.js";
+
+/** Token totals a run record carries: the sums of what its native stream measured. */
+export type RunTokenTotals = { input?: number; output?: number; cache_read?: number; cache_write?: number };
+
+/** Project canonical usage counters onto the run-record token totals; undefined when nothing was measured. */
+export function tokenTotalsFromUsage(usage: Pick<RuntimeUsage, "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_write_tokens"> | undefined): RunTokenTotals | undefined {
+  if (!usage) return undefined;
+  const totals: RunTokenTotals = {};
+  if (isUsageNumber(usage.input_tokens)) totals.input = usage.input_tokens;
+  if (isUsageNumber(usage.output_tokens)) totals.output = usage.output_tokens;
+  if (isUsageNumber(usage.cache_read_tokens)) totals.cache_read = usage.cache_read_tokens;
+  if (isUsageNumber(usage.cache_write_tokens)) totals.cache_write = usage.cache_write_tokens;
+  return Object.keys(totals).length > 0 ? totals : undefined;
+}
 
 /** Account for each recorded native recovery attempt once, including failures and missing measurements. */
 export async function readRuntimeAccounting(root: string, missionId: string, runIds: string[]): Promise<{ facts: RuntimeAccountingFacts; attemptRunIds: string[]; receipts: Array<{ runId: string; digest: string }> }> {
   assertSafeMissionId(missionId);
   const missionDir = path.join(root, ".harness", "missions", missionId);
+  const priceTable = await loadOperatorPriceTable(root);
   const seen = new Set<string>();
-  const results: Array<RuntimeResultDocument | undefined> = [];
+  const results: Array<RuntimeAccountingFacts | undefined> = [];
   const receipts: Array<{ runId: string; digest: string }> = [];
   for (const initialRunId of runIds) {
     let runId: string | undefined = initialRunId;
@@ -33,7 +49,7 @@ export async function readRuntimeAccounting(root: string, missionId: string, run
         const raw = await readFile(resultPath, "utf8");
         const result = RuntimeResultSchema.parse(parse(raw));
         if (result.mission_id !== missionId) throw new Error("Runtime accounting identity mismatch");
-        results.push(result);
+        results.push(await runtimeAccountingFacts(result, directory, priceTable));
         receipts.push({ runId, digest: `sha256:${createHash("sha256").update(raw).digest("hex")}` });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -49,6 +65,36 @@ export async function readRuntimeAccounting(root: string, missionId: string, run
     }
   }
   return { facts: aggregateRuntimeUsage(results), attemptRunIds: [...seen], receipts };
+}
+
+/**
+ * The accounting facts one recorded run contributes: its own reported usage and
+ * cost when it has them, otherwise the tokens and price resolved from its
+ * native event stream and the operator price table.
+ */
+async function runtimeAccountingFacts(result: RuntimeResultDocument, runDir: string, priceTable: OperatorPriceTable | undefined): Promise<RuntimeAccountingFacts> {
+  const resultCostUsd = isUsageNumber(result.cost_usd)
+    ? result.cost_usd
+    : isUsageNumber(result.usage?.cost_usd) ? result.usage?.cost_usd : undefined;
+  const native = result.runtime === "command-code" ? await readNativeCostFacts(runDir) : undefined;
+  const resolved = resolveRunCost({
+    runtime: result.runtime,
+    resultCostUsd,
+    resultCostBasis: result.cost_basis
+      ?? (result.cost_usd === undefined || result.cost_usd === result.usage?.cost_usd ? result.usage?.cost_basis : undefined),
+    native,
+    priceTable,
+  });
+  const estimatedFromTable = resolved.cost_source === "estimated" && resultCostUsd === undefined;
+  const basis = estimatedFromTable ? "configured_estimate" : result.cost_basis
+    ?? (result.cost_usd === undefined || result.cost_usd === result.usage?.cost_usd ? result.usage?.cost_basis : undefined);
+  return {
+    provider: result.provider,
+    model: result.model ?? native?.model,
+    usage: result.usage ?? native?.usage,
+    ...(resolved.cost_usd !== undefined ? { cost_usd: resolved.cost_usd } : {}),
+    ...(basis !== undefined ? { cost_basis: basis } : {}),
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -103,17 +149,19 @@ function usageObjectOf(event: Record<string, unknown>): Record<string, unknown> 
 /**
  * Reduce a native event stream to the tokens and price it discloses.
  *
- * Real Command Code streams carry a `model_request_end` event per request with
- * `usage.inputTokens` and friends and no price anywhere; the reduced fixtures
- * under `tests/fixtures/runtime-events/` (and the acceptance "costless" wrapper)
- * carry no usage at all. Both cases must stay unknown rather than be priced from
- * a guessed rate.
+ * Real Command Code streams carry a `model_request_end` event per model call
+ * with `usage.inputTokens` and friends, and the same usage object repeated on
+ * the matching `turn_end` — summing both would double count, so `turn_end` is
+ * consulted only when the stream has no `model_request_end` at all. A `result`
+ * event may carry a price; it never contributes token counts. Reduced fixtures
+ * under `tests/fixtures/runtime-events/` carry no usage anywhere. Every case
+ * without a price must stay unknown rather than be priced from a guessed rate.
  */
 export function nativeCostFactsFromEvents(lines: Iterable<string>): NativeCostFacts {
-  const totals = new Map<string, number>();
-  const incomplete = new Set<string>();
   const models = new Set<string>();
-  let tokenCounts = false;
+  const requestUsages: Array<Record<string, unknown>> = [];
+  const turnEndUsages: Array<Record<string, unknown>> = [];
+  let sawModelRequestEnd = false;
   let reportedCost: number | undefined;
   for (const line of lines) {
     const trimmed = line.trim();
@@ -122,13 +170,28 @@ export function nativeCostFactsFromEvents(lines: Iterable<string>): NativeCostFa
     try { parsed = JSON.parse(trimmed); } catch { continue; }
     const event = asRecord(parsed);
     if (!event) continue;
+    const type = typeof event.type === "string" ? event.type : undefined;
+    if (type === "model_request_end") sawModelRequestEnd = true;
     const model = typeof event.model === "string" ? event.model : asRecord(event.message)?.model;
     if (typeof model === "string") models.add(model);
     const usage = usageObjectOf(event);
+    if (usage) {
+      if (type === "model_request_end") requestUsages.push(usage);
+      else if (type === "turn_end") turnEndUsages.push(usage);
+    }
+    const eventCost = firstNumber(event, ["cost_usd", "total_cost_usd"])
+      ?? firstNumber(usage, ["cost_usd", "costUsd", "total_cost_usd"]);
+    if (eventCost !== undefined) reportedCost = eventCost;
+  }
+  const chosen = sawModelRequestEnd ? requestUsages : turnEndUsages;
+  const totals = new Map<string, number>();
+  const incomplete = new Set<string>();
+  let tokenCounts = false;
+  for (const usage of chosen) {
     // A usage object with no token counter (e.g. a terminal record that only
     // carries a price) is not a token measurement and must not invalidate the
     // counters other events reported.
-    const counted = usage ? TOKEN_FIELDS.map((field) => [field.canonical, firstNumber(usage, field.aliases)] as const) : [];
+    const counted = TOKEN_FIELDS.map((field) => [field.canonical, firstNumber(usage, field.aliases)] as const);
     if (counted.some(([, value]) => value !== undefined)) {
       tokenCounts = true;
       for (const [canonical, value] of counted) {
@@ -136,9 +199,6 @@ export function nativeCostFactsFromEvents(lines: Iterable<string>): NativeCostFa
         if (!incomplete.has(canonical)) totals.set(canonical, (totals.get(canonical) ?? 0) + value);
       }
     }
-    const eventCost = firstNumber(event, ["cost_usd", "total_cost_usd"])
-      ?? firstNumber(usage, ["cost_usd", "costUsd", "total_cost_usd"]);
-    if (eventCost !== undefined) reportedCost = eventCost;
   }
   const facts: NativeCostFacts = {};
   if (tokenCounts) facts.token_counts = true;
@@ -171,6 +231,7 @@ export function resolveRunCost(input: {
   resultCostUsd?: number;
   resultCostBasis?: string;
   native?: NativeCostFacts;
+  priceTable?: OperatorPriceTable;
 }): ResolvedRunCost {
   if (isUsageNumber(input.resultCostUsd)) {
     return {
@@ -183,7 +244,20 @@ export function resolveRunCost(input: {
   }
   const model = input.native?.model;
   if (input.native?.token_counts) {
-    return { cost_unknown_reason: `native stream reported token counts but no price${model ? ` for ${model}` : ""}` };
+    const price = operatorPriceFor(input.priceTable, model);
+    if (price) {
+      const estimate = estimateOperatorCost({
+        input: input.native.usage?.input_tokens,
+        output: input.native.usage?.output_tokens,
+        cache_read: input.native.usage?.cache_read_tokens,
+        cache_write: input.native.usage?.cache_write_tokens,
+      }, price);
+      if (estimate !== undefined) return { cost_usd: estimate, cost_source: "estimated" };
+      return { cost_unknown_reason: `native stream token counts are incomplete for ${model}; refusing to price from partial measurements` };
+    }
+    return {
+      cost_unknown_reason: `native stream reported token counts but no price${model ? ` for ${model}` : ""}; add the model to .harness/prices.yaml`,
+    };
   }
   if (input.runtime === "command-code") {
     return { cost_unknown_reason: "command-code native stream carries neither usage counters nor a price" };
