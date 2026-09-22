@@ -43,11 +43,23 @@ async function assignedRoute(root: string, missionPath: string, runtime: string,
   };
 }
 
+/** The project's fleet policy, or undefined when the project declares none. */
+export async function loadFleetPolicy(root: string): Promise<FleetPolicy | undefined> {
+  const projectPath = projectYaml(root);
+  if (!(await fileExists(projectPath))) return undefined;
+  return validateProject(parse(await readFile(projectPath, "utf8"))).fleet;
+}
+
+/** The adapters the fleet authorizes at all, or undefined when it declares none. */
+export function authorizedFleetAdapters(fleet: FleetPolicy | undefined): string[] | undefined {
+  if (!fleet || fleet.routes.length === 0) return undefined;
+  return [...new Set(fleet.routes.map((route) => route.adapter))];
+}
+
 /** Refuses a run outside the project fleet before any process is spawned. `--force` does not bypass it. */
 export async function assertFleetAdmission(root: string, missionPath: string, runtime: string, extraOverrides?: Record<string, unknown>): Promise<void> {
-  const projectPath = projectYaml(root);
-  if (!(await fileExists(projectPath))) return;
-  const fleet = validateProject(parse(await readFile(projectPath, "utf8"))).fleet;
+  const fleet = await loadFleetPolicy(root);
+  if (!fleet) return;
   const refusal = decideFleetAdmission(fleet, { adapter: runtime, ...(await assignedRoute(root, missionPath, runtime, extraOverrides)) });
   if (refusal) throw new Error(`Fleet policy refuses this run: ${refusal}`);
 }

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import { DecisionReceiptSchema, type DecisionReceipt } from "../schema/decisions.js";
+import { DecisionReceiptSchema, type DecisionAuthorizer, type DecisionProvider, type DecisionProviderStatus, type DecisionReceipt, type DecisionRecommendation, type DecisionStatus } from "../schema/decisions.js";
 import { assertWritableArtifact } from "../adapters/_artifact-context.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { evaluateThreeVerdict, type SystemOneState, type ThreeVerdictOutcome, type ThreeVerdictResult } from "./typesafe.js";
@@ -103,6 +103,67 @@ export async function recordAcceptanceDecision(options: {
   await appendFile(eventsPath, JSON.stringify({ type: "decision.recorded", mission_id: options.missionId,
     run_id: options.runId, decision_id: receipt.decision_id, consumer: options.consumer,
     status: receipt.status, provider_status: receipt.provider_status, applied,
+    state_transition: receipt.state_transition, timestamp: receipt.created_at }) + "\n");
+  return receipt;
+}
+
+/** The already-composed runtime-selection receipt fields, minus the server-owned identity and timestamp. */
+export interface RouteDecisionRecord {
+  missionId: string;
+  runId?: string;
+  status: DecisionStatus;
+  provider_status: DecisionProviderStatus;
+  authorizer: DecisionAuthorizer;
+  applied: boolean;
+  deterministic_fallback?: boolean;
+  human_required: boolean;
+  confidence?: number;
+  recommendation?: DecisionRecommendation;
+  provider?: DecisionProvider;
+  input_sha256: string;
+  response_sha256?: string;
+  reason: string;
+  state_transition: DecisionReceipt["state_transition"];
+}
+
+/**
+ * Persist a `uh.decision-receipt.v0` runtime-selection receipt and its
+ * `decision.recorded` event. Only the composed decision is written — never the
+ * provider prompt, raw answers, or the mission packet.
+ */
+export async function recordRouteDecision(missionDir: string, record: RouteDecisionRecord): Promise<DecisionReceipt> {
+  const receipt = DecisionReceiptSchema.parse({
+    schema_version: "uh.decision-receipt.v0",
+    decision_id: `runtime-selection-${randomUUID()}`,
+    mission_id: record.missionId,
+    run_id: record.runId,
+    kind: "runtime-selection",
+    status: record.status,
+    provider_status: record.provider_status,
+    authorizer: record.authorizer,
+    applied: record.applied,
+    deterministic_fallback: record.deterministic_fallback,
+    human_required: record.human_required,
+    confidence: record.confidence,
+    recommendation: record.recommendation,
+    provider: record.provider,
+    input_sha256: record.input_sha256,
+    response_sha256: record.response_sha256,
+    reason: record.reason,
+    state_transition: record.state_transition,
+    created_at: new Date().toISOString(),
+  });
+  const directory = path.join(missionDir, "decision-receipts");
+  await assertWritableArtifact(missionDir, directory);
+  await mkdir(directory, { recursive: true });
+  const receiptPath = path.join(directory, `${receipt.decision_id}.json`);
+  await assertWritableArtifact(missionDir, receiptPath);
+  await writeAtomicArtifact(receiptPath, JSON.stringify(receipt, null, 2));
+  const eventsPath = path.join(missionDir, "events.ndjson");
+  await assertWritableArtifact(missionDir, eventsPath);
+  await appendFile(eventsPath, JSON.stringify({ type: "decision.recorded", kind: "runtime-selection",
+    mission_id: record.missionId, run_id: record.runId, decision_id: receipt.decision_id,
+    status: receipt.status, provider_status: receipt.provider_status, applied: record.applied,
     state_transition: receipt.state_transition, timestamp: receipt.created_at }) + "\n");
   return receipt;
 }

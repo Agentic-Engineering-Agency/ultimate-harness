@@ -155,7 +155,7 @@ function validateAnswer(question: Question, answer: unknown): TypeSafeAnswer | u
       const levels = question.criteria;
       const score = record.score;
       if (!Array.isArray(levels) || levels.length === 0) return undefined;
-      if (typeof score !== "number" || !Number.isInteger(score) || score < 0 || score >= levels.length) return undefined;
+      if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > levels.length - 1) return undefined;
       return { score };
     }
   }

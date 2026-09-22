@@ -12,7 +12,8 @@ Ultimate Harness is runtime-agnostic: mission packets and verification artifacts
 | oh-my-pi | `oh-my-pi` | Local CLI | Opt-in OMP route with documented posture. |
 | Command Code | `command-code` | Local CLI | Print-mode runner; requires a guard or explicit `runtime_config.permission_mode`. `runtime_config.role: orchestrator` arms harness-only controller commands. |
 | Claude Code | `claude-code` | Native CLI with stream JSON | Worker guard required; integrated coordinator acceptance remains incomplete. |
-| Anthropic Messages API | `anthropic` | Local HTTP API | Experimental native Anthropic Messages API adapter. |
+| Anthropic Messages API | `anthropic` | Local HTTP API | Native Anthropic Messages API adapter. |
+| Agent-Client Protocol | `acp` | Local stdio (JSON-RPC 2.0) | Standard ACP v1 runner for headless agent processes (OpenHands, Zed, custom). See [runbook](./runbooks/acp-setup.md). |
 
 Command Code print-mode missions must declare a `guard` block or an explicit `runtime_config.permission_mode`; without either, planning refuses before process spawn, including custom CLI commands. See [Tool Guard](./tool-guard.md) for the permission-mode and hook boundary.
 

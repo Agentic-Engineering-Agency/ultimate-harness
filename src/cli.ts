@@ -26,8 +26,8 @@ import { dryRunAcp, runAcp } from "./adapters/acp.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
-import { assertFleetAdmission } from "./harness/fleet-policy.js";
-import { chooseAdapter, formatAutoRouteExplain } from "./harness/auto-route.js";
+import { assertFleetAdmission, loadFleetPolicy, authorizedFleetAdapters } from "./harness/fleet-policy.js";
+import { chooseAdapter, chooseSemanticRoute, formatAutoRouteExplain, formatSemanticRouteSummary, type SemanticRouteDecision } from "./harness/auto-route.js";
 import { CAPABILITIES, listAdapterIds, type AdapterId } from "./adapters/capabilities/index.js";
 import { forecastCost } from "./harness/cost-forecast.js";
 import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
@@ -163,6 +163,43 @@ async function enforceRuntimePreflight(
   if (force) return;
   await enforceRuntimeCapabilities(root, missionPath, runtime, false);
   await assertRuntimeRequirements(missionPath, runtime);
+}
+
+/**
+ * UH-101 semantic routing seam. Combines deterministic eligibility with a
+ * bounded TypeSafe System One recommendation over installed adapters, applying
+ * the project fleet as a Level 0 prefilter. Returns the composed decision so the
+ * caller can print it and act on `adapter` (null means no route was authorized).
+ */
+async function evaluateSemanticRoute(options: {
+  root: string;
+  missionPath: string;
+  force: boolean;
+  auto: boolean;
+  explain: boolean;
+  runId?: string;
+}): Promise<SemanticRouteDecision> {
+  const installed = (await runtimeRegistry.list(options.root))
+    .map((entry) => entry.id)
+    .filter((id): id is AdapterId => id in CAPABILITIES);
+  const mission = await loadMissionFile(options.missionPath);
+  const fleetAdapters = authorizedFleetAdapters(await loadFleetPolicy(options.root));
+  const decision = await chooseSemanticRoute({
+    mission,
+    available: installed,
+    force: options.force,
+    auto: options.auto,
+    ...(fleetAdapters ? { fleetAdapters } : {}),
+    missionDir: missionDir(options.root, mission.id),
+    missionId: mission.id,
+    ...(options.runId ? { runId: options.runId } : {}),
+  });
+  if (options.explain) {
+    console.log(formatAutoRouteExplain({ adapter: decision.adapter, reason: decision.reason, candidates: decision.candidates }));
+    console.log("");
+  }
+  console.log(formatSemanticRouteSummary(decision));
+  return decision;
 }
 
 /**
@@ -1498,9 +1535,22 @@ missionCmd
   .option("--force", "Bypass mission capability matching and runtime_requirements for this runtime")
   .option("--template <id>", "Adopt a session template from .harness/templates/<id>.yaml")
   .option("--runtime-config-overrides <json>", "JSON object of runtime_config overrides applied on top of the template and mission file")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; template?: string; runtimeConfigOverrides?: string }) => {
+  .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
+  .option("--explain", "With --auto, print the adapter decision matrix")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; template?: string; runtimeConfigOverrides?: string; auto?: boolean; explain?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
+
+    if (opts.auto && opts.runtime) {
+      console.error("[FAIL] --auto and --runtime are mutually exclusive");
+      process.exit(1);
+      return;
+    }
+    if (opts.auto && opts.template !== undefined) {
+      console.error("[BLOCKED] --auto cannot be combined with --template");
+      process.exit(exitCodeForRun("blocked"));
+      return;
+    }
 
     let extraRuntimeConfigOverrides: Record<string, unknown> | undefined;
     if (opts.runtimeConfigOverrides !== undefined) {
@@ -1529,7 +1579,42 @@ missionCmd
       };
     }
 
-    const runtime = templateAdoption ? templateAdoption.runtime : (opts.runtime || "hermes");
+    let runtime = templateAdoption ? templateAdoption.runtime : (opts.runtime || "hermes");
+    let semanticModel: string | undefined;
+    let routeRequested = opts.auto === true;
+    if (!routeRequested && !opts.runtime && !templateAdoption) {
+      try {
+        routeRequested = (await loadMissionFile(filePath)).decision_policy?.enabled === true;
+      } catch {
+        routeRequested = false;
+      }
+    }
+    if (routeRequested) {
+      try {
+        const decision = await evaluateSemanticRoute({
+          root,
+          missionPath: filePath,
+          force: opts.force === true,
+          auto: opts.auto === true,
+          explain: opts.explain === true,
+        });
+        if (!decision.adapter) {
+          console.error(`[BLOCKED] auto-route: ${decision.reason}`);
+          process.exit(exitCodeForRun("blocked"));
+          return;
+        }
+        runtime = decision.adapter;
+        if (decision.model) semanticModel = decision.model;
+        console.log(`Auto-routed to: ${runtime} — ${decision.reason}`);
+      } catch (err) {
+        console.error(`[FAIL] auto-route error: ${(err as Error).message}`);
+        process.exit(1);
+        return;
+      }
+    }
+    if (semanticModel && !(extraRuntimeConfigOverrides && "model" in extraRuntimeConfigOverrides)) {
+      extraRuntimeConfigOverrides = { ...(extraRuntimeConfigOverrides ?? {}), model: semanticModel };
+    }
     const wiring = RUNTIME_WIRINGS[runtime];
     if (!wiring) {
       console.error(`Unknown runtime: ${runtime}`);
@@ -1627,28 +1712,36 @@ missionCmd
       }
     }
     let runtime = templateAdoption ? templateAdoption.runtime : (opts.runtime || "hermes");
-    if (opts.auto) {
+    let semanticModel: string | undefined;
+    // Route when `--auto` is passed, or when an unpinned mission activates its
+    // own `decision_policy`; an explicit `--runtime`/`--template` always wins.
+    let routeRequested = opts.auto === true;
+    if (!routeRequested && !opts.runtime && !templateAdoption) {
       try {
-        const installed = (await runtimeRegistry.list(root))
-          .map((entry) => entry.id)
-          .filter((id): id is AdapterId => id in CAPABILITIES);
-        const mission = await loadMissionFile(filePath);
-        // --force bypasses runtime_requirements in the preflight below, so it
-        // must also bypass the auto-route requirements filter; otherwise
-        // `--auto --force` would still be blocked here.
-        const decision = chooseAdapter(mission, installed, CAPABILITIES, {
-          ignoreRequirements: opts.force === true,
+        routeRequested = (await loadMissionFile(filePath)).decision_policy?.enabled === true;
+      } catch {
+        routeRequested = false;
+      }
+    }
+    if (routeRequested) {
+      try {
+        // --force bypasses runtime_requirements in the preflight below, so the
+        // routing seam waives the same requirements filter.
+        const decision = await evaluateSemanticRoute({
+          root,
+          missionPath: filePath,
+          force: opts.force === true,
+          auto: opts.auto === true,
+          explain: opts.explain === true,
+          runId: opts.runId,
         });
-        if (opts.explain) {
-          console.log(formatAutoRouteExplain(decision));
-          console.log("");
-        }
         if (!decision.adapter) {
           console.error(`[BLOCKED] auto-route: ${decision.reason}`);
           process.exit(exitCodeForRun("blocked"));
           return;
         }
         runtime = decision.adapter;
+        if (decision.model) semanticModel = decision.model;
         console.log(`Auto-routed to: ${runtime} — ${decision.reason}`);
       } catch (err) {
         console.error(`[FAIL] auto-route error: ${(err as Error).message}`);
@@ -1733,6 +1826,11 @@ missionCmd
         ...templateAdoption.runtimeConfigOverrides,
         ...(extraRuntimeConfigOverrides ?? {}),
       };
+    }
+    // A semantic model recommendation applies only when no explicit CLI override
+    // already pins the model.
+    if (semanticModel && !(extraRuntimeConfigOverrides && "model" in extraRuntimeConfigOverrides)) {
+      extraRuntimeConfigOverrides = { ...(extraRuntimeConfigOverrides ?? {}), model: semanticModel };
     }
     try {
       await assertFleetAdmission(root, filePath, runtime, extraRuntimeConfigOverrides);
