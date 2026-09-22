@@ -18,7 +18,8 @@ guard:
   deny_package_installs: true
   deny_network_clients: true
 runtime_config_overrides:
-  limits: { max_turns: 12 }
+  max_turns: 40
+  limits: { max_turns: 40 }
 verification:
   required_checks:
     - name: noop

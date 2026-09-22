@@ -1,8 +1,9 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
+import type { ChildProcess } from "node:child_process";
 import { AcceptanceEvidenceSchema, AcceptanceRegistrySchema } from "../src/schema/acceptance.js";
 import { validateMission } from "../src/schema/mission.js";
 import { applyTeamMissionOverrides, classifyAcceptance, collectFacts, compareAcceptanceFacts, loadAcceptanceRegistry, renderAcceptanceReport, runAcceptance, wrapperMechanismUnavailable } from "../src/harness/acceptance.js";
@@ -89,6 +90,42 @@ describe("acceptance evidence", () => {
     expect(facts.observed.stop_code).toBe("stall");
     expect(facts.fact_sources.status).toBe("last");
     expect(facts.fact_sources.stop_code).toBe("first");
+  });
+
+  test("reads tool_guard_lines from the run's guard log without a terminal result", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-guardlog-"));
+    const runDir = path.join(root, ".harness", "missions", "fixture", "runs", "001");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "tool-guard.log"), ["blocked:a", "blocked:b", "blocked:c", ""].join("\n"));
+    const expected = { status: "failed", required_records: { tool_guard_lines: 3 } } as const;
+    const facts = await collectFacts(root, "fixture", expected);
+    expect(facts.observed.tool_guard_lines).toBe(3);
+    expect(facts.fact_sources.tool_guard_lines).toBe("first");
+    expect(compareAcceptanceFacts(expected, facts.observed)).toEqual([]);
+  });
+
+  test("prefers the guard log of the latest run that has one", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-guardlog-"));
+    const runsRoot = path.join(root, ".harness", "missions", "fixture", "runs");
+    await mkdir(path.join(runsRoot, "001"), { recursive: true });
+    await mkdir(path.join(runsRoot, "002"), { recursive: true });
+    await writeFile(path.join(runsRoot, "001", "tool-guard.log"), ["blocked:a", "blocked:b", "blocked:c", ""].join("\n"));
+    await writeFile(path.join(runsRoot, "002", "tool-guard.log"), ["blocked:a", "blocked:b", "blocked:c", "blocked:d", "blocked:e"].join("\n"));
+    const facts = await collectFacts(root, "fixture");
+    expect(facts.runIds).toEqual(["001", "002"]);
+    expect(facts.observed.tool_guard_lines).toBe(5);
+    expect(facts.fact_sources.tool_guard_lines).toBe("last");
+  });
+
+  test("keeps the last available guard log when later runs lack one", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-guardlog-"));
+    const runsRoot = path.join(root, ".harness", "missions", "fixture", "runs");
+    await mkdir(path.join(runsRoot, "001"), { recursive: true });
+    await mkdir(path.join(runsRoot, "002"), { recursive: true });
+    await writeFile(path.join(runsRoot, "001", "tool-guard.log"), ["blocked:a", "blocked:b", "blocked:c", ""].join("\n"));
+    const facts = await collectFacts(root, "fixture");
+    expect(facts.observed.tool_guard_lines).toBe(3);
+    expect(facts.fact_sources.tool_guard_lines).toBe("first");
   });
 
   test("renders failed evidence for attempted fixture-only missions", async () => {
@@ -232,5 +269,94 @@ describe("acceptance runtime override honesty", () => {
     const persisted = JSON.parse(await readFile(path.join(root, "acceptance", "evidence", "G2", "latest.json"), "utf8")) as { observed: { reason?: string }; outcome: string };
     expect(persisted.outcome).toBe("failed");
     expect(persisted.observed.reason).toBe("wrapper_unavailable");
+  });
+});
+
+const spawnCalls = vi.hoisted(() => [] as { args: string[]; env: NodeJS.ProcessEnv | undefined }[]);
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const { EventEmitter } = await import("node:events");
+  const spawn = (...spawnArgs: unknown[]) => {
+    const [, args, options] = spawnArgs as [string, string[], { env?: NodeJS.ProcessEnv } | undefined];
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() }) as unknown as ChildProcess;
+    spawnCalls.push({ args: [...args], env: options?.env ? { ...options.env } : undefined });
+    queueMicrotask(() => child.emit("close", 0, null));
+    return child;
+  };
+  return { ...actual, spawn };
+});
+
+describe("acceptance support shim PATH", () => {
+  test("prepends the copied support directory to PATH only for the support_shim entry", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-shim-"));
+    for (const name of ["shim", "plain"]) {
+      await mkdir(path.join(root, "acceptance", "missions", name), { recursive: true });
+      await writeFile(
+        path.join(root, "acceptance", "missions", name, "mission.yaml"),
+        ["schema_version: uh.mission.v0", "id: shim-fixture", "title: Fixture", "workflow_profile: bugfix-contained", "objective: Create out/report.txt.", ""].join("\n"),
+        "utf8",
+      );
+    }
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), [
+      "schema_version: uh.acceptance-registry.v0",
+      "entries:",
+      "  G1-cmdc-hook-broken:",
+      "    title: Command Code broken guard hook",
+      "    capability: G1",
+      "    mission: missions/shim/mission.yaml",
+      "    shape: single",
+      "    runtime: command-code",
+      "    support_shim: cmdc.cmd",
+      "    expected: { status: failed, stop_code: policy, resumed: false, required_records: { guard_armed: false } }",
+      "  G1-cmdc-shell-policy:",
+      "    title: Command Code shell protected-path policy",
+      "    capability: G1",
+      "    mission: missions/plain/mission.yaml",
+      "    shape: single",
+      "    runtime: command-code",
+      "    expected: { status: failed, stop_code: policy, resumed: false, required_records: { guard_armed: true } }",
+      "",
+    ].join("\n"), "utf8");
+    const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-shim-ws-"));
+    const evidence = await runAcceptance(root, { workspace, cliPath: "node" });
+    expect(evidence).toHaveLength(2);
+    const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+    const launches = spawnCalls.filter((call) => call.args[1] === "mission" && call.args[2] === "run");
+    expect(launches).toHaveLength(2);
+    const launchFor = (runRoot: string) => launches.find((call) => call.args.includes(runRoot));
+    const shimLaunch = launchFor(evidence[0].workspace);
+    const plainLaunch = launchFor(evidence[1].workspace);
+    expect(shimLaunch).toBeDefined();
+    expect(plainLaunch).toBeDefined();
+    expect(shimLaunch?.env?.[pathKey]).toBe(`${path.join(evidence[0].workspace, "acceptance", "support")}${path.delimiter}${process.env[pathKey] ?? ""}`);
+    expect(plainLaunch?.env?.[pathKey]).toBe(process.env[pathKey]);
+    expect(evidence[0].observed.shim_on_path).toBe(true);
+    expect(evidence[1].observed.shim_on_path).toBeUndefined();
+  });
+});
+
+describe("G1-cmdc runner registration", () => {
+  test("only the hook-broken entry declares the cmdc.cmd support shim", async () => {
+    const registry = await loadAcceptanceRegistry(process.cwd());
+    const declaring = Object.entries(registry.entries).filter(([, entry]) => entry.support_shim !== undefined).map(([id]) => id);
+    expect(declaring).toEqual(["G1-cmdc-hook-broken"]);
+    expect(registry.entries["G1-cmdc-hook-broken"].support_shim).toBe("cmdc.cmd");
+  });
+
+  test("G1-cmdc-guard budget fits the model while expectations stay untouched", async () => {
+    const registry = await loadAcceptanceRegistry(process.cwd());
+    const entry = registry.entries["G1-cmdc-guard"];
+    expect(entry.expected).toEqual({
+      status: "passed",
+      required_files: ["out/cmdc-guard-report.txt"],
+      required_records: { denials: 3, tool_guard_lines: 3 },
+    });
+    expect(entry.notes).toContain("20260922T040135Z-6c706a");
+    expect(entry.notes).toContain("48");
+    expect(entry.notes).toMatch(/not changed/);
+    const mission = parse(await readFile(path.join(process.cwd(), "acceptance", entry.mission), "utf8")) as { runtime_config_overrides?: { max_turns?: number; limits?: { max_turns?: number } } };
+    expect(mission.runtime_config_overrides?.max_turns).toBe(40);
+    expect(mission.runtime_config_overrides?.limits?.max_turns).toBe(40);
   });
 });
