@@ -22,6 +22,7 @@ import { dryRunHermesProxy, runHermesProxy } from "./adapters/hermes-proxy.js";
 import { dryRunOpenRouter, runOpenRouter } from "./adapters/openrouter.js";
 import { dryRunAnthropic, runAnthropic } from "./adapters/anthropic.js";
 import { dryRunPi, runPi } from "./adapters/pi.js";
+import { dryRunAcp, runAcp } from "./adapters/acp.js";
 import { runtimeRegistry } from "./harness/registry.js";
 import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
@@ -138,6 +139,7 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
   anthropic: { dryRun: (root, missionPath, opts) => dryRunAnthropic(root, missionPath, opts), run: (root, missionPath, opts) => runAnthropic(root, missionPath, opts), surfaceBlocked: true },
   pi: { dryRun: (root, missionPath, opts) => dryRunPi(root, missionPath, opts), run: (root, missionPath, opts) => runPi(root, missionPath, opts), surfaceBlocked: true },
   "claude-code": { dryRun: (root, missionPath, opts) => dryRunClaudeCode(root, missionPath, opts), run: (root, missionPath, opts) => runClaudeCode(root, missionPath, opts), surfaceBlocked: true },
+  acp: { dryRun: (root, missionPath, opts) => dryRunAcp(root, missionPath, opts), run: (root, missionPath, opts) => runAcp(root, missionPath, opts), surfaceBlocked: true },
 };
 
 
