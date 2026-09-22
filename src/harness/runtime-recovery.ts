@@ -11,6 +11,22 @@ import { assertValidRunId, generateRunId } from "./run-id.js";
 import { getMissionArtifactContext, assertWritableArtifact, writeArtifactFile, type MissionArtifactContext } from "../adapters/_artifact-context.js";
 import { reconcileRuntimeSettlement } from "./runtime-settlement.js";
 
+/** Who authorized a resume: an operator command, or the mission's automatic policy. */
+export type ResumeOrigin = "operator" | "policy";
+
+/**
+ * Whether a resume consumes the policy's automatic `max_resumes` budget.
+ * Operator-initiated resumes are authorized outside the loop and never do.
+ */
+export function resumeConsumesBudget(origin: ResumeOrigin): boolean {
+  return origin !== "operator";
+}
+
+/** Automatic resume budget left after prior resumes, counting only budget-consuming ones. */
+export function remainingResumeBudget(maxResumes: number, origins: readonly ResumeOrigin[]): number {
+  return Math.max(0, maxResumes - origins.filter(resumeConsumesBudget).length);
+}
+
 export interface RuntimeResume {
   sourceRunId: string;
   sessionId: string;
@@ -18,10 +34,12 @@ export interface RuntimeResume {
   sourceStopCode?: RuntimeControl["stop_code"];
   sourceStopReason?: string;
   grace?: boolean;
+  /** Who authorized this resume; operator resumes never spend the automatic budget. */
+  origin?: ResumeOrigin;
 }
 
 /** A preserved transcript is not permission to overlap or replay an unsettled attempt. */
-export async function prepareRuntimeResume(root: string, missionId: string, runId: string, runtime: string, notes: string): Promise<RuntimeResume> {
+export async function prepareRuntimeResume(root: string, missionId: string, runId: string, runtime: string, notes: string, origin: ResumeOrigin = "policy"): Promise<RuntimeResume> {
   assertSafeMissionId(missionId);
   assertValidRunId(runId);
   const suppliedNotes = notes.trim();
@@ -48,7 +66,7 @@ export async function prepareRuntimeResume(root: string, missionId: string, runI
   const combinedNotes = grace
     ? `${notes}\nYour time budget is exhausted. Write your deliverable now with everything you have found so far. Mark it clearly as INCOMPLETE at the top, and end it with a section titled "Missing for the next step" listing what you did not get to and where you stopped. Do not start new investigation. Then stop.`
     : `${notes}\nYou were stopped: ${sourceStopReason}. Do not repeat that action. Inspect existing outputs before continuing.`;
-  return { sourceRunId: runId, sessionId: control.session_id, notes: combinedNotes, sourceStopCode: control.stop_code, sourceStopReason, grace };
+  return { sourceRunId: runId, sessionId: control.session_id, notes: combinedNotes, sourceStopCode: control.stop_code, sourceStopReason, grace, origin };
 }
 
 export function recoveryPrompt(resume: RuntimeResume): string {
@@ -76,6 +94,11 @@ export async function runWithRuntimeRecovery<T extends RecoverableRuntimeResult>
   extraRuntimeConfigOverrides?: Record<string, unknown>;
   cancellationSignal?: AbortSignal;
   onAttempt?: (runId: string) => Promise<void>;
+  /**
+   * Resumes that already produced the attempt this loop starts from. Operator
+   * resumes are free: they never reduce the automatic `max_resumes` budget.
+   */
+  priorResumeOrigins?: readonly ResumeOrigin[];
   run: (options: RecoveryRunOptions) => Promise<T>;
 }): Promise<T> {
   const policy = input.recovery === undefined ? undefined : RuntimeRecoveryPolicySchema.parse(input.recovery);
@@ -83,7 +106,8 @@ export async function runWithRuntimeRecovery<T extends RecoverableRuntimeResult>
   let runId = input.runId;
   let overrides = input.extraRuntimeConfigOverrides;
   let graceAttempted = false;
-  for (let resumed = 0; ; resumed++) {
+  // Prior resumes already spent part of the budget; operator resumes spent none.
+  for (let resumed = (input.priorResumeOrigins ?? []).filter(resumeConsumesBudget).length; ; resumed++) {
     await input.onAttempt?.(runId);
     const result = await input.run({ runId, extraRuntimeConfigOverrides: overrides });
     if (!policy || input.cancellationSignal?.aborted || result.result?.status === "passed") return result;
