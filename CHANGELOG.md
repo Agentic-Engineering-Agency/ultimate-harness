@@ -20,6 +20,11 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - OpenTelemetry export: `uh observatory export <mission> --otlp` writes one run as OTLP/JSON following the GenAI semantic conventions (`invoke_agent`, `chat`, `execute_tool`) with deterministic ids. Tool arguments, results, message text and prompts are never exported; tool targets are opt-in.
 - `uh observatory runs [--mission] [--group-by] [--json]`.
 - Terminal contract for `uh mission run`: `--quiet`, a final single-line `UH_RESULT {json}` without absolute paths, and exit codes 0 passed, 1 failed, 2 blocked, 130 cancelled.
+- Native event stream loop-probe: `src/harness/loop-probe.ts` projects Command Code (`toolCallId` sequence from `tool_queued` to `tool_completed`) and oh-my-pi events accurately, calculating real repeat and alternating signatures without false positives.
+- OTLP Trace Push client: `src/harness/otlp-push.ts` sends exported GenAI traces to an OTLP HTTP endpoint with bounded retries, capped `retry-after` backoff, and strict secret protection.
+- Run arm comparison and A/B template evaluation: `src/harness/run-comparison.ts` compares run sets using Wilson score intervals and cost-per-success without misrepresenting unpriced runs.
+- Team run salvage: `src/harness/team-run.ts` preserves verified work from workers stopped by limits or deadlines when their declared outputs and checks pass, recording eligible branches in the integration report.
+- Consistent dry-run overrides: `uh mission dry-run` mirrors `uh mission run` override precedence for all runtime adapters.
 
 ### Changed
 
