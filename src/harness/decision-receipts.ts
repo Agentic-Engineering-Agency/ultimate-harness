@@ -18,13 +18,16 @@ type OutcomeMapping = {
 function mapOutcome(outcome: ThreeVerdictOutcome): OutcomeMapping {
   switch (outcome.kind) {
     case "ok": {
-      const uncertain = outcome.confidence === 0;
+      // No discriminating signal means zero confidence over the judged criteria
+      // AND no deterministic fact to ground the outcome. A deterministic failure
+      // or tamper is never "uncertain": it is a grounded, non-vacuous judgment.
+      const uncertain = outcome.confidence === 0 && !outcome.deterministic_failure && !outcome.tamper;
       return {
         result: outcome,
         provider_status: uncertain ? "uncertain" : "available",
         uncertain,
         reason: uncertain
-          ? "Provider answered every asked question without a discriminating signal; no recommendation applied."
+          ? "Provider answered without a discriminating signal over any judged criterion; no recommendation applied."
           : "Advisory judgment consumed; deterministic failures and human authority remain unchanged.",
       };
     }
@@ -44,9 +47,12 @@ function mapOutcome(outcome: ThreeVerdictOutcome): OutcomeMapping {
  * Persist the provider outcome and the consumer's actual transition, never its raw inputs.
  *
  * Provider result kinds map onto the existing receipt statuses: `disabled` and
- * `unavailable` are recorded as `unavailable`, `malformed` as `malformed`, and an
- * answer set with no discriminating signal (every asked Noul at the midpoint,
- * confidence 0) as `uncertain`. Nothing is applied for any of those, so a
+ * `unavailable` are recorded as `unavailable`, `malformed` as `malformed`, and
+ * an answer set with no discriminating signal as `uncertain`. Confidence is
+ * zero when no criterion was judged or when every judged Noul sat at the
+ * midpoint; a candidate is only actually uncertain when no deterministic
+ * failure and no tamper grounds the outcome, so a verdict over no criterion is
+ * never silently applied. Nothing is applied for `uncertain`, so a
  * deterministic failure and human authority always remain unchanged.
  */
 export async function recordAcceptanceDecision(options: {
