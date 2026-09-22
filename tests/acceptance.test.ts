@@ -1,9 +1,10 @@
-import { describe, expect, test, vi } from "vitest";
-import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { access, lstat, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
-import type { ChildProcess } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
+import type { EventEmitter as NodeEventEmitter } from "node:events";
 import { AcceptanceEvidenceSchema, AcceptanceRegistrySchema } from "../src/schema/acceptance.js";
 import { validateMission } from "../src/schema/mission.js";
 import { applyTeamMissionOverrides, classifyAcceptance, collectFacts, compareAcceptanceFacts, loadAcceptanceRegistry, renderAcceptanceReport, runAcceptance, wrapperMechanismUnavailable } from "../src/harness/acceptance.js";
@@ -101,7 +102,7 @@ describe("acceptance evidence", () => {
     const facts = await collectFacts(root, "fixture", expected);
     expect(facts.observed.tool_guard_lines).toBe(3);
     expect(facts.fact_sources.tool_guard_lines).toBe("first");
-    expect(compareAcceptanceFacts(expected, facts.observed)).toEqual([]);
+    expect(compareAcceptanceFacts(expected, facts.observed)).toEqual([{ field: "status", expected: "failed", observed: undefined }]);
   });
 
   test("prefers the guard log of the latest run that has one", async () => {
@@ -140,9 +141,22 @@ describe("acceptance evidence", () => {
   });
 
   test("committed acceptance report is generated from current registry", async () => {
-    const report = await renderAcceptanceReport(process.cwd());
+    const emptyEvidence = await mkdtemp(path.join(tmpdir(), "acceptance-empty-evidence-"));
+    const report = await renderAcceptanceReport(process.cwd(), new Date(), { evidenceRoot: emptyEvidence });
     const committed = await readFile(path.join(process.cwd(), "docs", "acceptance", "README.md"), "utf8");
     expect(committed.replace(/\r\n/g, "\n")).toBe(report.replace(/\r\n/g, "\n"));
+  });
+  test("the drift check ignores local evidence while the generator keeps rendering it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-drift-"));
+    await mkdir(path.join(root, "acceptance", "evidence", "C1"), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), "schema_version: uh.acceptance-registry.v0\nentries:\n  C1:\n    title: Per-worker contracts\n    capability: C1\n    mission: missions/C1/mission.yaml\n    shape: single\n    runtime: oh-my-pi\n    expected: { status: passed }\n");
+    await writeFile(path.join(root, "acceptance", "evidence", "C1", "latest.json"), JSON.stringify({
+      schema_version: "uh.acceptance-evidence.v0", capability: "C1", outcome: "passed", checked_at: "2026-09-15T00:00:00.000Z", harness_commit: "unknown", runtime: "oh-my-pi", provider: "unknown", model: "unknown", cost_usd: "unknown", workspace: "T:/tmp/run", run_ids: [], mission_id: "c1", expected: { status: "passed" }, observed: { status: "passed" }, fact_sources: {}, mismatches: [], artifact_root: "T:/tmp/run/.harness",
+    }) + "\n");
+    const now = new Date("2026-09-15T00:00:00.000Z");
+    expect(await renderAcceptanceReport(root, now)).toContain("| C1 | C1 | Per-worker contracts | proven |");
+    const emptyEvidence = await mkdtemp(path.join(tmpdir(), "acceptance-drift-empty-"));
+    expect(await renderAcceptanceReport(root, now, { evidenceRoot: emptyEvidence })).toContain("| C1 | C1 | Per-worker contracts | unproven |");
   });
   test("refuses acceptance run without workspace", async () => {
     await expect(runAcceptance(process.cwd())).rejects.toThrow(/--workspace/);
@@ -266,25 +280,60 @@ describe("acceptance runtime override honesty", () => {
     expect(evidence[0].observed.reason).toBe("wrapper_unavailable");
     expect(evidence[0].mismatches.map((mismatch) => mismatch.observed)).toContain("wrapper_unavailable");
     expect(evidence[0].run_ids).toEqual([]);
-    const persisted = JSON.parse(await readFile(path.join(root, "acceptance", "evidence", "G2", "latest.json"), "utf8")) as { observed: { reason?: string }; outcome: string };
+    expect(evidence[0].cli).toEqual({ exit_code: null, stderr_tail: "", stdout_tail: "" });
+    const persisted = JSON.parse(await readFile(path.join(root, "acceptance", "evidence", "G2", "latest.json"), "utf8")) as { observed: { reason?: string }; outcome: string; cli?: { exit_code?: number | null } };
     expect(persisted.outcome).toBe("failed");
     expect(persisted.observed.reason).toBe("wrapper_unavailable");
+    expect(persisted.cli?.exit_code).toBeNull();
   });
 });
 
-const spawnCalls = vi.hoisted(() => [] as { args: string[]; env: NodeJS.ProcessEnv | undefined }[]);
+const spawnState = vi.hoisted(() => ({
+  calls: [] as { args: string[]; env: NodeJS.ProcessEnv | undefined }[],
+  missionScripts: [] as { code: number; stdout?: string; stderr?: string; resultFile?: string }[],
+  blockedNodeModules: new Set<string>(),
+}));
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   const { EventEmitter } = await import("node:events");
+  const { writeFileSync } = await import("node:fs");
+  const nodePath = await import("node:path");
   const spawn = (...spawnArgs: unknown[]) => {
     const [, args, options] = spawnArgs as [string, string[], { env?: NodeJS.ProcessEnv } | undefined];
-    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() }) as unknown as ChildProcess;
-    spawnCalls.push({ args: [...args], env: options?.env ? { ...options.env } : undefined });
-    queueMicrotask(() => child.emit("close", 0, null));
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    }) as unknown as ChildProcess & { stdout: NodeEventEmitter; stderr: NodeEventEmitter };
+    spawnState.calls.push({ args: [...args], env: options?.env ? { ...options.env } : undefined });
+    const script = args[1] === "mission" ? spawnState.missionScripts.shift() : undefined;
+    queueMicrotask(() => {
+      if (script?.resultFile && args[2] === "run" && typeof args[3] === "string" && args[3].endsWith("mission.yaml")) {
+        writeFileSync(nodePath.join(nodePath.dirname(args[3]), "runtime-result.yaml"), script.resultFile, "utf8");
+      }
+      if (script?.stdout !== undefined) child.stdout.emit("data", script.stdout);
+      if (script?.stderr !== undefined) child.stderr.emit("data", script.stderr);
+      child.emit("close", script ? script.code : 0, null);
+    });
     return child;
   };
   return { ...actual, spawn };
+});
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const stat = actual.stat;
+  const mockedStat = ((value: unknown, options?: unknown) =>
+    typeof value === "string" && spawnState.blockedNodeModules.has(value)
+      ? Promise.reject(Object.assign(new Error(`ENOENT: no such file or directory, stat ${value}`), { code: "ENOENT" }))
+      : stat(value as Parameters<typeof stat>[0], options as never)) as typeof stat;
+  return { ...actual, stat: mockedStat };
+});
+
+beforeEach(() => {
+  spawnState.calls.length = 0;
+  spawnState.missionScripts.length = 0;
+  spawnState.blockedNodeModules.clear();
 });
 
 describe("acceptance support shim PATH", () => {
@@ -322,7 +371,7 @@ describe("acceptance support shim PATH", () => {
     const evidence = await runAcceptance(root, { workspace, cliPath: "node" });
     expect(evidence).toHaveLength(2);
     const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
-    const launches = spawnCalls.filter((call) => call.args[1] === "mission" && call.args[2] === "run");
+    const launches = spawnState.calls.filter((call) => call.args[1] === "mission" && call.args[2] === "run");
     expect(launches).toHaveLength(2);
     const launchFor = (runRoot: string) => launches.find((call) => call.args.includes(runRoot));
     const shimLaunch = launchFor(evidence[0].workspace);
@@ -358,5 +407,151 @@ describe("G1-cmdc runner registration", () => {
     const mission = parse(await readFile(path.join(process.cwd(), "acceptance", entry.mission), "utf8")) as { runtime_config_overrides?: { max_turns?: number; limits?: { max_turns?: number } } };
     expect(mission.runtime_config_overrides?.max_turns).toBe(40);
     expect(mission.runtime_config_overrides?.limits?.max_turns).toBe(40);
+  });
+});
+
+describe("acceptance campaign runtime", () => {
+  const fixtureMission = ["schema_version: uh.mission.v0", "id: fixture-acceptance", "title: Fixture", "workflow_profile: bugfix-contained", "objective: Create out/report.txt.", ""].join("\n");
+
+  async function writeSingleFixture(root: string, capability: string, runtime: string): Promise<void> {
+    await mkdir(path.join(root, "acceptance", "missions", capability), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "missions", capability, "mission.yaml"), fixtureMission, "utf8");
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), [
+      "schema_version: uh.acceptance-registry.v0",
+      "entries:",
+      `  ${capability}:`,
+      "    title: Fixture",
+      `    capability: ${capability}`,
+      `    mission: missions/${capability}/mission.yaml`,
+      "    shape: single",
+      `    runtime: ${runtime}`,
+      "    expected: { status: passed }",
+      "",
+    ].join("\n"), "utf8");
+  }
+
+  test("records the mission CLI outcome and surfaces stderr on FAIL when no status is observed", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-cli-"));
+    await mkdir(path.join(root, "acceptance", "missions", "C2"), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "missions", "C2", "mission.yaml"), fixtureMission, "utf8");
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), [
+      "schema_version: uh.acceptance-registry.v0",
+      "entries:",
+      "  C1:",
+      "    title: First",
+      "    capability: C1",
+      "    mission: missions/C1/mission.yaml",
+      "    shape: single",
+      "    runtime: command-code",
+      "    expected: { status: passed }",
+      "  C2:",
+      "    title: Second",
+      "    capability: C2",
+      "    mission: missions/C2/mission.yaml",
+      "    shape: single",
+      "    runtime: command-code",
+      "    expected: { status: passed }",
+      "",
+    ].join("\n"), "utf8");
+    await mkdir(path.join(root, "acceptance", "missions", "C1"), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "missions", "C1", "mission.yaml"), fixtureMission, "utf8");
+    const stderr = `Error: Cannot find package 'commander'\n${"x".repeat(2100)}\n`;
+    spawnState.missionScripts.push({ code: 1, stderr }, { code: 1, stderr, resultFile: "status: passed\n" });
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((line?: unknown) => { logs.push(String(line)); });
+    let evidence: Awaited<ReturnType<typeof runAcceptance>>;
+    try {
+      const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-cli-ws-"));
+      evidence = await runAcceptance(root, { workspace, cliPath: "node" });
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(evidence).toHaveLength(2);
+    expect(evidence[0].observed.status).toBeUndefined();
+    expect(evidence[0].cli).toEqual({ exit_code: 1, stderr_tail: stderr.slice(-2048), stdout_tail: "" });
+    expect(evidence[0].cli?.stderr_tail).toHaveLength(2048);
+    expect(evidence[1].observed.status).toBe("failed");
+    const failLines = logs.filter((line) => line.startsWith("FAIL "));
+    expect(failLines).toHaveLength(2);
+    expect(failLines[0].endsWith("Error: Cannot find package 'commander'")).toBe(true);
+    expect(failLines[1].endsWith("Error: Cannot find package 'commander'")).toBe(false);
+    const persisted = JSON.parse(await readFile(path.join(root, "acceptance", "evidence", "C1", "latest.json"), "utf8")) as { cli?: { exit_code?: number; stderr_tail?: string } };
+    expect(persisted.cli?.exit_code).toBe(1);
+    expect(persisted.cli?.stderr_tail).toBe(stderr.slice(-2048));
+  });
+
+  test("recreates a dangling campaign node_modules junction instead of reusing it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-junction-"));
+    await mkdir(path.join(root, "dist"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, "node_modules"), { recursive: true });
+    await writeFile(path.join(root, "dist", "cli.js"), "process.exit(0);\n", "utf8");
+    await writeFile(path.join(root, "src", "index.js"), "export {};\n", "utf8");
+    await writeFile(path.join(root, "node_modules", ".marker"), "source\n", "utf8");
+    await writeSingleFixture(root, "C1", "command-code");
+    const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-junction-ws-"));
+    await runAcceptance(root, { workspace });
+    const junction = path.join(workspace, ".acceptance-runtime", "node_modules");
+    expect((await lstat(junction)).isSymbolicLink()).toBe(true);
+    await expect(readFile(path.join(junction, ".marker"), "utf8")).resolves.toBe("source\n");
+    await rm(junction, { recursive: true, force: true });
+    await symlink(path.join(root, "node_modules-missing"), junction, "junction");
+    await expect(stat(junction)).rejects.toMatchObject({ code: "ENOENT" });
+    await runAcceptance(root, { workspace });
+    await expect(readFile(path.join(junction, ".marker"), "utf8")).resolves.toBe("source\n");
+  });
+
+  test("refuses loudly with exit 2 when no node_modules exists above the source root", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-nonodes-"));
+    await writeSingleFixture(root, "C1", "command-code");
+    let current = path.resolve(root);
+    for (;;) {
+      spawnState.blockedNodeModules.add(path.join(current, "node_modules"));
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null | undefined): never => {
+      throw new Error(`process.exit(${code})`);
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-nonodes-ws-"));
+      await expect(runAcceptance(root, { workspace })).rejects.toThrow("process.exit(2)");
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(path.resolve(root)));
+    } finally {
+      exitSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  test("sets git core.longpaths at workspace init on Windows only", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-longpaths-"));
+    await writeSingleFixture(root, "C1", "command-code");
+    const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-longpaths-ws-"));
+    await runAcceptance(root, { workspace, cliPath: "node" });
+    const longpathsCalls = spawnState.calls.filter((call) => call.args.includes("core.longpaths"));
+    if (process.platform === "win32") {
+      expect(longpathsCalls.map((call) => call.args)).toContainEqual(["config", "core.longpaths", "true"]);
+    } else {
+      expect(longpathsCalls).toHaveLength(0);
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")("costless-wrapper-cmdc spawns a .cmd shim through its node entry point", async () => {
+    const shimDir = await mkdtemp(path.join(tmpdir(), "acceptance-cmdc-"));
+    await writeFile(path.join(shimDir, "stub-cmdc.mjs"), [
+      "process.stdout.write(JSON.stringify({ usage: { command: 'stub' }, args: process.argv.slice(2) }) + '\\n');",
+      "process.exit(3);",
+      "",
+    ].join("\n"), "utf8");
+    await writeFile(path.join(shimDir, "cmdc.cmd"), '@ECHO off\r\n"%dp0%\\stub-cmdc.mjs" %*\r\n', "utf8");
+    const wrapper = path.join(process.cwd(), "acceptance", "support", "costless-wrapper-cmdc.mjs");
+    const result = spawnSync(process.execPath, [wrapper, "--root", shimDir], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}` },
+    });
+    expect(result.status).toBe(3);
+    expect(result.stdout?.trim()).toBe(JSON.stringify({ args: ["--root", shimDir] }));
   });
 });
