@@ -180,8 +180,14 @@ export interface GitOps {
   diffFiles: (root: string, baseRef: string, branch: string) => Promise<string[]>;
   /** Delete a local branch (`git branch -D`). Best-effort. */
   deleteBranch: (root: string, branch: string) => Promise<void>;
-  /** Stage + commit any uncommitted changes in `cwd`. No-op when worktree is clean. */
-  commitAll: (cwd: string, message: string) => Promise<void>;
+  /**
+   * Stage + commit uncommitted changes in `cwd`, no-op when the staged index is
+   * empty. `stagePaths` restricts staging to exactly those paths — an empty
+   * array stages nothing — so a worker whose only changes fall outside its
+   * write roots produces no commit. When omitted, the whole worktree is staged
+   * minus the protected roots (the salvage / legacy callers).
+   */
+  commitAll: (cwd: string, message: string, stagePaths?: readonly string[]) => Promise<void>;
   /**
    * List the paths with uncommitted changes (staged, unstaged, untracked) in a
    * worktree, relative to the worktree root. Used to decide whether a stopped
@@ -246,6 +252,12 @@ export interface WorkerOutcome {
   salvage?: WorkerSalvage;
   /** Why a settled worker's non-zero exit did not fail it (rendered as a report warning). */
   postRunWarning?: string;
+  /**
+   * Changed paths the worker left outside its write roots and declared outputs
+   * (protected paths excluded), so they were never staged into the worker
+   * commit. Mirrors `CanonicalTeamWorker["out_of_roots"]`.
+   */
+  outOfRoots?: NonNullable<CanonicalTeamWorker["out_of_roots"]>;
 }
 
 /** A worker's salvage record (see `CanonicalWorkerSalvageSchema`). */
@@ -266,6 +278,94 @@ function isProtectedPath(candidate: string, protectedRoots: readonly string[]): 
     const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
     return normalized === normalizedRoot || normalized.startsWith(`${normalizedRoot}/`);
   });
+}
+
+/** Normalize a repo-relative path for containment checks (POSIX separators, no leading "./"). */
+function normalizeRelativePath(candidate: string): string {
+  return candidate.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * True when `candidate` equals or lives under the repo-relative `root`. Unlike
+ * `isProtectedPath`, a root of `.` matches the whole worktree — the default
+ * write root must not be treated as a literal path segment.
+ */
+function isWithinRelativeRoot(candidate: string, root: string): boolean {
+  const normalizedRoot = normalizeRelativePath(root);
+  if (normalizedRoot.length === 0 || normalizedRoot === ".") return true;
+  const normalized = normalizeRelativePath(candidate);
+  return normalized === normalizedRoot || normalized.startsWith(`${normalizedRoot}/`);
+}
+
+/** Extract non-empty `write_roots` from a raw guard block, if any. */
+function guardWriteRoots(guard: unknown): string[] | undefined {
+  const record = objectRecord(guard);
+  const roots = record.write_roots;
+  if (!Array.isArray(roots)) return undefined;
+  const cleaned = roots.filter((root): root is string => typeof root === "string" && root.trim().length > 0);
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+/**
+ * The worker's resolved write roots — the same roots the tool guard enforces.
+ * A per-worker `guard.write_roots` wins, then the worker's mission packet guard
+ * (what the runtime actually used), then the permissive default (".").
+ */
+function resolveWorkerWriteRoots(spec: TeamWorkerSpec | undefined, basePacket: Record<string, unknown>): string[] {
+  return guardWriteRoots(spec?.guard) ?? guardWriteRoots(basePacket.guard) ?? ["."];
+}
+
+/** Cap on the out-of-roots paths carried in the canonical state and the report. */
+const OUT_OF_ROOTS_LIST_CAP = 20;
+
+interface WorkerCommitScope {
+  /**
+   * Exact changed paths to stage. `undefined` when the gitOps cannot enumerate
+   * the worktree (a stub without `dirtyPaths`); the commit then falls back to
+   * the write roots as pathspecs.
+   */
+  stagePaths?: string[];
+  /** Changed paths outside the write roots and declared outputs, protected paths excluded. */
+  outOfRoots?: NonNullable<CanonicalTeamWorker["out_of_roots"]>;
+}
+
+/**
+ * Partition a worker's changed paths into the ones inside its write roots or
+ * declared outputs — staged into the worker commit — and the rest, which stay
+ * unstaged and are reported as `out_of_roots`. Protected roots keep their
+ * existing exclusion behaviour and are never listed as out-of-roots. A child
+ * process (a build) can write outside the roots without the tool guard seeing
+ * it, which is exactly what this classification catches.
+ */
+async function resolveWorkerCommitScope(args: {
+  gitOps: GitOps;
+  worktreePath: string;
+  writeRoots: readonly string[];
+  expectedOutputs: readonly string[];
+}): Promise<WorkerCommitScope> {
+  const allowedRoots = [...args.writeRoots, ...args.expectedOutputs];
+  // Without a way to enumerate the worktree we cannot classify paths, so fall
+  // back to the legacy unrestricted commit (a stub gitOps without `dirtyPaths`).
+  if (!args.gitOps.dirtyPaths) return {};
+  let changed: string[];
+  try {
+    changed = await args.gitOps.dirtyPaths(args.worktreePath);
+  } catch {
+    return {};
+  }
+  const stagePaths: string[] = [];
+  const outside: string[] = [];
+  for (const candidate of changed) {
+    if (isProtectedPath(candidate, DEFAULT_PROTECTED_PATHS)) continue;
+    if (allowedRoots.some((root) => isWithinRelativeRoot(candidate, root))) stagePaths.push(candidate);
+    else outside.push(candidate);
+  }
+  outside.sort();
+  const scope: WorkerCommitScope = { stagePaths };
+  if (outside.length > 0) {
+    scope.outOfRoots = { paths: outside.slice(0, OUT_OF_ROOTS_LIST_CAP), total: outside.length };
+  }
+  return scope;
 }
 
 /** Read the stop code off a worker run's persisted runtime control receipt. */
@@ -502,14 +602,25 @@ export const defaultGitOps: GitOps = {
       await execFileP("git", ["branch", "-D", branch], { cwd: root });
     } catch { /* best-effort */ }
   },
-  async commitAll(cwd, message) {
-    // Stage only the worker's own work. The protected roots are excluded by
-    // pathspec, so a tracked or untracked harness-owned file is never staged
-    // and a worker that produced nothing else stages nothing.
-    await execFileP("git", ["add", "-A", "--", ".", ...COMMIT_PROTECTED_EXCLUDES], { cwd });
-    // Any residual protected-root changes stay in the worktree unstaged (the
-    // worktree is discarded or retained as evidence), so gate the commit on the
-    // INDEX being non-empty rather than on the worktree being clean.
+  async commitAll(cwd, message, stagePaths) {
+    // An explicit empty list means "nothing is inside the worker's roots":
+    // stage nothing and create no commit, mirroring the protected-path case.
+    if (stagePaths !== undefined && stagePaths.length === 0) return;
+    // Stage only the worker's own work. When `stagePaths` is given it lists the
+    // exact changed paths inside the worker's write roots (plus its declared
+    // outputs) — the caller already filtered the protected roots out, so it is
+    // staged as-is. `:(literal)` keeps a path with glob metacharacters (e.g. a
+    // Next.js `[slug].js`) from matching unintended files, and no exclude
+    // pathspecs are mixed in: a file include combined with excludes can
+    // mis-stage on some git builds. Otherwise the whole worktree is staged
+    // minus the protected roots, so a harness-owned file is never staged.
+    const pathspecs = stagePaths === undefined
+      ? [".", ...COMMIT_PROTECTED_EXCLUDES]
+      : stagePaths.map((entry) => `:(literal)${entry}`);
+    await execFileP("git", ["add", "-A", "--", ...pathspecs], { cwd });
+    // Any residual out-of-root or protected change stays in the worktree
+    // unstaged (the worktree is discarded or retained as evidence), so gate the
+    // commit on the INDEX being non-empty rather than on the worktree being clean.
     const { stdout } = await execFileP("git", ["diff", "--cached", "--name-only"], { cwd });
     if (stdout.trim().length === 0) return;
     await execFileP("git", [
@@ -1053,11 +1164,31 @@ export async function runTeamMission(
         salvageRecord = evaluated.record;
         if (salvageRecord) canonicalWorker.salvage = salvageRecord;
       }
+      // Classify the worktree's changed paths before committing: only paths
+      // inside the worker's resolved write roots (or its declared outputs) are
+      // staged. A child process — a build — can write outside those roots with
+      // the tool guard none the wiser, so those paths stay unstaged and are
+      // recorded as out_of_roots.
+      let outOfRoots: WorkerOutcome["outOfRoots"];
+      let stagePaths: string[] | undefined;
+      if (status === "succeeded") {
+        const workerSpec = slot.plan.spec ?? { role: slot.plan.role, adapter: slot.plan.adapter as TeamWorker["adapter"] };
+        const basePacket = workerMissionPackets.get(slot.plan.id)?.packet ?? canonicalPacket;
+        const scope = await resolveWorkerCommitScope({
+          gitOps,
+          worktreePath: slot.plan.worktreePath,
+          writeRoots: resolveWorkerWriteRoots(workerSpec, basePacket),
+          expectedOutputs: expectedOutputs?.files ?? [],
+        });
+        stagePaths = scope.stagePaths;
+        outOfRoots = scope.outOfRoots;
+        if (outOfRoots) canonicalWorker.out_of_roots = outOfRoots;
+      }
       await persistState();
       let commitErr: string | null = null;
       if (status === "succeeded") {
         try {
-          await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`);
+          await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths);
         } catch (err) {
           commitErr = err instanceof Error ? err.message : String(err);
         }
@@ -1077,6 +1208,7 @@ export async function runTeamMission(
         ...(postRunWarning !== undefined ? { postRunWarning } : {}),
         ...(salvageStopCode !== undefined ? { stopCode: salvageStopCode } : {}),
         ...(salvageRecord ? { salvage: salvageRecord } : {}),
+        ...(outOfRoots ? { outOfRoots } : {}),
       };
     } catch (err) {
       canonicalWorker.status = "error";
@@ -1501,6 +1633,13 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
     lines.push(`- Files touched: ${outcome.filesTouched.length}`);
     if (outcome.filesTouched.length > 0) {
       for (const p of outcome.filesTouched) lines.push(`  - \`${p}\``);
+    }
+    // Changed paths the worker left outside its write roots are never staged;
+    // surface them (capped, with the true count) so the integration report
+    // shows exactly what stayed behind.
+    if (outcome.outOfRoots && outcome.outOfRoots.total > 0) {
+      lines.push(`- Not committed (outside write roots): ${outcome.outOfRoots.total} path(s)`);
+      for (const p of outcome.outOfRoots.paths) lines.push(`  - \`${p}\``);
     }
     // A worker that did not succeed always renders why — the worker's own
     // error message first, the runtime result's errors as the fallback — so
