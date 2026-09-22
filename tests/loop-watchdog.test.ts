@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   DEFAULT_EVERY_CALLS,
@@ -10,7 +11,7 @@ import {
   resolveLoopWatchdogMode,
   type LoopWatchdogProvider,
 } from "../src/harness/loop-watchdog.js";
-import { MIN_PROBE_CALLS } from "../src/harness/loop-probe.js";
+import { MIN_PROBE_CALLS, deterministicLoopSignals, projectActivity } from "../src/harness/loop-probe.js";
 import { DecisionReceiptSchema } from "../src/schema/decisions.js";
 import type { EvaluateSystemOneOptions, SystemOneResult } from "../src/harness/typesafe.js";
 import { runRuntimeProcess, type RuntimeProcessOutput } from "../src/harness/runtime-process.js";
@@ -399,4 +400,76 @@ describe("runtime supervision wiring", () => {
     const receipt = await readReceipt(shadow.missionDir);
     expect(receipt).toMatchObject({ kind: "retry-stop", status: "advisory", authorizer: "shadow", applied: false });
   }, 30_000);
+});
+
+describe("recorded Command Code event streams", () => {
+  const FIXTURE_DIR = fileURLToPath(new URL("./fixtures/runtime-events", import.meta.url));
+
+  /** Parse a recorded native event excerpt: one JSON event per line. */
+  async function fixture(name: string): Promise<unknown[]> {
+    const raw = await readFile(path.join(FIXTURE_DIR, name), "utf8");
+    return raw.split("\n").map(line => line.trim()).filter(Boolean).map(line => JSON.parse(line) as unknown);
+  }
+
+  test("command-code-repeated-shell-failure: observed identical_repeats=2, alternating_pairs=0, completed_calls=3 — below thresholds 3/2 and minCalls 4, so it produces no receipt", async () => {
+    const events = await fixture("command-code-repeated-shell-failure.ndjson");
+    const window = projectActivity(events, { workingDirectory: WORKING_DIRECTORY });
+    const signals = deterministicLoopSignals(window);
+
+    // Observed on the recorded stream: three identical failing shell_command calls.
+    expect(window.calls).toHaveLength(3);
+    expect(signals).toEqual({ identical_repeats: 2, alternating_pairs: 0, distinct_targets: 1 });
+    // It misses every gate by one, so the watchdog never consults the provider on this real loop shape.
+    expect(signals.identical_repeats).toBeLessThan(IDENTICAL_REPEAT_THRESHOLD);
+    expect(signals.alternating_pairs).toBeLessThan(ALTERNATING_PAIR_THRESHOLD);
+    expect(window.calls.length).toBeLessThan(MIN_PROBE_CALLS);
+
+    const dir = await missionDir();
+    const { provider, calls } = disabledProvider();
+    const watchdog = createLoopWatchdog({ source: "command-code", workingDirectory: WORKING_DIRECTORY,
+      provider, missionDir: dir, missionId: "one" });
+    await watchdog.observe(events);
+
+    expect(calls).toHaveLength(0);
+    expect(watchdog.evaluations).toBe(0);
+    expect(await receiptFiles(dir)).toEqual([]);
+  });
+
+  test("command-code-denied-retries: observed alternating_pairs=4 crosses ALTERNATING_PAIR_THRESHOLD and writes an advisory receipt", async () => {
+    const events = await fixture("command-code-denied-retries.ndjson");
+    const signals = deterministicLoopSignals(projectActivity(events, { workingDirectory: WORKING_DIRECTORY }));
+    expect(signals.alternating_pairs).toBeGreaterThanOrEqual(ALTERNATING_PAIR_THRESHOLD);
+    expect(signals.alternating_pairs).toBe(4);
+
+    const dir = await missionDir();
+    const { provider, calls } = okProvider();
+    const watchdog = createLoopWatchdog({ source: "command-code", workingDirectory: WORKING_DIRECTORY,
+      provider, missionDir: dir, missionId: "one" });
+    await watchdog.observe(events);
+
+    expect(calls).toHaveLength(1);
+    expect(watchdog.evaluations).toBe(1);
+    const receipt = await readReceipt(dir);
+    expect(receipt).toMatchObject({ kind: "retry-stop", status: "advisory", authorizer: "shadow", applied: false });
+    expect(receipt.loop_signals).toMatchObject({ alternating_pairs: 4 });
+    expect(() => DecisionReceiptSchema.parse(receipt)).not.toThrow();
+  });
+
+  test("command-code-healthy: observed identical_repeats=2, alternating_pairs=0 makes no provider call", async () => {
+    const events = await fixture("command-code-healthy.ndjson");
+    const window = projectActivity(events, { workingDirectory: WORKING_DIRECTORY });
+    const signals = deterministicLoopSignals(window);
+    expect(window.calls.length).toBeGreaterThanOrEqual(MIN_PROBE_CALLS);
+    expect(signals).toEqual({ identical_repeats: 2, alternating_pairs: 0, distinct_targets: 5 });
+
+    const dir = await missionDir();
+    const { provider, calls } = okProvider();
+    const watchdog = createLoopWatchdog({ source: "command-code", workingDirectory: WORKING_DIRECTORY,
+      provider, missionDir: dir, missionId: "one" });
+    await watchdog.observe(events);
+
+    expect(calls).toHaveLength(0);
+    expect(watchdog.evaluations).toBe(0);
+    expect(await receiptFiles(dir)).toEqual([]);
+  });
 });
