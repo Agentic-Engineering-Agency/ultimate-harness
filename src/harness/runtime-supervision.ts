@@ -316,19 +316,40 @@ function guardTamperEvent(event: Event): boolean {
   return guardTamperRecord(event);
 }
 
-function guardLogEntries(logPath: string): { lines: number; tamper: boolean } {
-  if (!existsSync(logPath)) return { lines: 0, tamper: false };
+type GuardEvidenceEntry = { tool?: string; target?: string };
+
+function guardLogEntries(logPath: string): { lines: number; tamper: boolean; entries: GuardEvidenceEntry[] } {
+  if (!existsSync(logPath)) return { lines: 0, tamper: false, entries: [] };
   try {
-    const entries = readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean);
-    return {
-      lines: entries.length,
-      tamper: entries.some(line => {
-        try { return guardTamperRecord(JSON.parse(line), 0); } catch { return false; }
-      }),
-    };
+    const lines = readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean);
+    const entries: GuardEvidenceEntry[] = [];
+    let tamper = false;
+    for (const line of lines) {
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (guardTamperRecord(parsed, 0)) tamper = true;
+        const item = record(parsed);
+        entries.push({
+          tool: typeof item?.tool === "string" && item.tool ? item.tool : undefined,
+          target: typeof item?.target === "string" && item.target ? item.target : undefined,
+        });
+      } catch { entries.push({}); }
+    }
+    return { lines: lines.length, tamper, entries };
   } catch {
-    return { lines: 0, tamper: false };
+    return { lines: 0, tamper: false, entries: [] };
   }
+}
+
+/**
+ * Whether a guard-log target can be evidence for the target the supervisor
+ * observed for a call. The supervisor truncates shell targets and the hooks
+ * sometimes log a resolved sub-target of a command, so a containment in either
+ * direction counts. A target unknown on either side matches by tool name alone.
+ */
+function guardTargetMatches(logged: string | undefined, observed: string | undefined): boolean {
+  if (logged === undefined || observed === undefined) return true;
+  return logged === observed || logged.includes(observed) || observed.includes(logged);
 }
 
 
@@ -387,6 +408,8 @@ export class RuntimeSupervision {
   guardArmed?: boolean;
   turns = 0;
   denials = 0;
+  /** Calls the runtime denied natively without invoking the guard hook; also counted in `denials`. */
+  nativeRefusals = 0;
   readyAt?: number;
   sessionId?: string;
   terminal = false;
@@ -509,14 +532,19 @@ export class RuntimeSupervision {
     return this.failure;
   }
 
-  private countDenial(id: string, reason: string | undefined, now: number): void {
+  private countDenial(id: string, reason: string | undefined, now: number, native = false): void {
     if (id && this.countedDenials.has(id)) return;
     if (id) this.countedDenials.add(id);
     this.denials++;
+    if (native) this.nativeRefusals++;
     if (id && reason) this.hookBlocks.set(id, reason);
     this.markProgress(now);
     if (this.limits.max_denials && this.denials >= this.limits.max_denials) {
       const name = id ? this.toolNames.get(id) : undefined;
+      if (native) {
+        this.stop(`${this.denials} denied calls; last: ${reason ?? `native refusal of ${name ?? "unknown tool"}`}`, "denial_budget");
+        return;
+      }
       const target = id ? this.toolTargets.get(id) : undefined;
       const block = id ? this.hookBlocks.get(id) : undefined;
       const details = [name, target].filter(Boolean).join(" ");
@@ -528,17 +556,25 @@ export class RuntimeSupervision {
   private verifyGuardInvocation(id: string): void {
     if (this.permissionMode !== "guard" || !id || this.guardCompletedCalls.has(id)) return;
     this.guardCompletedCalls.add(id);
-    const evidence = this.guardLogPath ? guardLogEntries(this.guardLogPath) : { lines: 0, tamper: false };
+    const evidence = this.guardLogPath ? guardLogEntries(this.guardLogPath) : { lines: 0, tamper: false, entries: [] as GuardEvidenceEntry[] };
     if (evidence.tamper) {
       this.stop("Guard tamper attempted", "policy");
       return;
     }
-    if (evidence.lines < this.guardCompletedCalls.size) {
+    const name = this.toolNames.get(id);
+    const target = this.toolTargets.get(id);
+    // When every guard-log line records a tool name, evidence matches the call
+    // itself; otherwise the comparison falls back to counting totals.
+    const matchable = name !== undefined && evidence.entries.length > 0 &&
+      evidence.entries.every(entry => entry.tool !== undefined);
+    const hasCallEvidence = !matchable ||
+      evidence.entries.some(entry => entry.tool === name && guardTargetMatches(entry.target, target));
+    if (evidence.lines >= this.guardCompletedCalls.size && hasCallEvidence) {
+      this.guardArmed = true;
+    } else {
       this.guardArmed = false;
       const reason = this.hookCalls.has(id) ? "Guard hook ran but could not log" : "Guard hook did not run";
       this.stop(`${reason}; refusing to continue with permissions enabled`, "policy");
-    } else {
-      this.guardArmed = true;
     }
   }
   private stop(reason: string, code: RuntimeStopCode): string {
@@ -671,8 +707,18 @@ export class RuntimeSupervision {
     } else if (type === "tool_hook_blocked" || type === "tool_call_blocked" || type === "tool_denied") {
       this.inflight.delete(id);
       this.commands.delete(id);
-      this.verifyGuardInvocation(id);
-      this.countDenial(id, id ? this.hookBlocks.get(id) : undefined, now);
+      const name = toolName(event);
+      if (id && name) this.toolNames.set(id, name);
+      if (type === "tool_hook_blocked" || (id !== "" && this.hookCalls.has(id))) {
+        this.verifyGuardInvocation(id);
+        this.countDenial(id, id ? this.hookBlocks.get(id) : undefined, now);
+      } else {
+        // A native refusal: the runtime denied the call itself (for example a
+        // tool name it does not have) without ever invoking the guard hook, so
+        // no guard-log line is expected and the guard stays as it is. It still
+        // consumes the denial budget.
+        this.countDenial(id, name ? `native refusal of ${name}` : undefined, now, true);
+      }
     } else if (type === "turn_start") {
       this.markProgress(now);
       const deadline = this.deadlineReason(now);

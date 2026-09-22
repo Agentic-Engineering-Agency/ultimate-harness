@@ -386,6 +386,60 @@ describe("runtime supervision", () => {
     expect(run.stopCode).toBeUndefined();
     expect(run.guardArmed).toBeUndefined();
   });
+
+  test("a native tool refusal keeps the guard armed and counts separately", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "uh-native-refusal-"));
+    const logPath = path.join(directory, "tool-guard.log");
+    writeFileSync(logPath, `${JSON.stringify({
+      ts: "2026-01-01T00:00:09.000Z", call_id: "call-1", tool: "shell_command", class: "allow", target: "bunx x",
+    })}\n`);
+    try {
+      const run = new RuntimeSupervision({ max_denials: 5 }, 0, undefined, "C:\\worker", "guard", logPath);
+      let stopped: string | undefined;
+      for (const [index, value] of fixture("command-code-native-unknown-tool.ndjson").entries()) {
+        stopped = run.observe(value, index + 1);
+      }
+      expect(stopped).toBeUndefined();
+      expect(run.stopCode).toBeUndefined();
+      expect(run.guardArmed).toBe(true);
+      expect(run.nativeRefusals).toBe(1);
+      expect(run.denials).toBe(1);
+      expect(run.terminal).toBe(true);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("repeated native refusals exhaust the denial budget naming the tool without disarming the guard", () => {
+    const run = new RuntimeSupervision({ max_denials: 2 }, 0, undefined, "C:\\worker", "guard", "T:/missing-tool-guard.log");
+    run.observe({ type: "tool_queued", toolCallId: "one", toolName: "shell", input: { command: "echo x" } }, 1);
+    expect(run.observe({ type: "tool_denied", toolCallId: "one", toolName: "shell" }, 2)).toBeUndefined();
+    run.observe({ type: "tool_queued", toolCallId: "two", toolName: "shell", input: { command: "echo x" } }, 3);
+    expect(run.observe({ type: "tool_denied", toolCallId: "two", toolName: "shell" }, 4))
+      .toBe("2 denied calls; last: native refusal of shell");
+    expect(run.stopCode).toBe("denial_budget");
+    expect(run.nativeRefusals).toBe(2);
+    expect(run.denials).toBe(2);
+    expect(run.guardArmed).toBeUndefined();
+  });
+
+  test("guard evidence must belong to the completed call, not only match totals", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "uh-guard-evidence-"));
+    const logPath = path.join(directory, "tool-guard.log");
+    writeFileSync(logPath, `${JSON.stringify({
+      ts: "2026-01-01T00:00:01.000Z", call_id: "other", tool: "read_file", class: "allow", target: "src/x.ts",
+    })}\n`);
+    try {
+      const run = new RuntimeSupervision({}, 0, undefined, "C:\\worker", "guard", logPath);
+      run.observe({ type: "tool_queued", toolCallId: "call", toolName: "shell_command", input: { command: "bun run test" } }, 1);
+      run.observe({ type: "tool_completed", toolCallId: "call", toolName: "shell_command", result: [] }, 2);
+      expect(run.stopCode).toBe("policy");
+      expect(run.failure).toBe("Guard hook did not run; refusing to continue with permissions enabled");
+      expect(run.guardArmed).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   test("deadline wall-time stops at grace boundary with remaining budget", () => {
     const run = new RuntimeSupervision({ timeout_ms: 10_000 }, 1_000, undefined, undefined, undefined, undefined,
       { grace_turns: 2, grace_timeout_ms: 3_000 });

@@ -195,6 +195,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       stop_code: stopCode ?? supervisor.stopCode ?? (cancelled ? "cancelled" : supervisor.terminalFailure ? "runtime_error" : undefined),
       ready_at: supervisor.readyAt === undefined ? undefined : new Date(supervisor.readyAt).toISOString(),
       session_id: supervisor.sessionId, turns: supervisor.turns, denials: supervisor.denials,
+      native_refusals: supervisor.nativeRefusals,
       expected_route: expectedRoute,
       review_request_sha256: input.reviewRequestSha256,
       guardian: guardianInfo,

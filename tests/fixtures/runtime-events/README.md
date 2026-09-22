@@ -14,6 +14,7 @@ timestamps are rebased. Streaming delta events are dropped.
 | `command-code-shell-exit-code-in-stdout.ndjson` | Command Code | A succeeding `shell_command` whose stdout mentions `Exit code` in a later line, which must not read as a failure. |
 | `command-code-usage.ndjson` | Command Code | A run whose every model call reports usage on `model_request_end` and the same usage object again on its matching `turn_end` (sums must not double count). Three calls, one turn each; the final `result` event carries no price, so the run's cost is only knowable from an operator price table. |
 | `command-code-native-turn-cap.ndjson` | Command Code | The model emits a final assistant message, then the runtime's own turn cap ends the run: the terminal `result` carries `stopReason: "max_turns"` (and the matching `subtype: "error_max_turns"`) with `num_turns: 2`. |
+| `command-code-native-unknown-tool.ndjson` | Command Code | A completed `shell_command` followed by a `shell` call the runtime denies natively (`tool_denied` without any `tool_hooks` event), so the guard hook never ran for it. |
 | `oh-my-pi-healthy.ndjson` | oh-my-pi | A run using `tool_execution_start` / `tool_execution_end` with arguments under `args`. |
 
 The literal `Exit code: <n>` lines of Command Code shell results are kept

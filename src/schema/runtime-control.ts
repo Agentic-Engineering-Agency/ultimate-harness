@@ -128,6 +128,8 @@ export const RuntimeControlSchema = z.object({
   guard_armed: z.boolean().optional(),
   turns: z.number().int().nonnegative(),
   denials: z.number().int().nonnegative(),
+  /** Calls the runtime denied natively without invoking the guard hook; also counted in `denials`. */
+  native_refusals: z.number().int().nonnegative().optional(),
   inflight_tools: z.number().int().nonnegative(),
   usage: RuntimeUsageSchema.optional(),
   settlement_confirmed: z.boolean().optional(),
