@@ -62,7 +62,10 @@ const report = {schema_version:'uh.independent-review-report.v0', request_sha256
   const passed = observed === '42';
   return {mission_id:source.mission_id, claims_checked:[{claim:'Answer equals 42',source:output.snapshot_path,observed,verdict:passed?'supported':'contradicted'}],
    acceptance:source.acceptance.map(item=>({id:item.id,status:passed?'passed':'failed',evidence:observed})),
-   checks:source.checks.map(item=>({id:item.id,status:passed?'passed':'failed',evidence:observed})), findings:[], verdict:passed?'pass':'needs-remediation',reason:'Compared captured answer to 42'};
+   checks:source.checks.map(item=>({id:item.id,status:passed?'passed':'failed',evidence:observed})), findings:[],
+   observations:[{title:'Captured output inspected in full',evidence:observed,relates_to:(source.acceptance[0]||source.checks[0]||{}).id,severity:'info'},
+    {title:'No claims outside the listed ids were verified',evidence:'Review covered only the listed ids',severity:'warn'}],
+   verdict:passed?'pass':'needs-remediation',reason:'Compared captured answer to 42'};
  })};
 fs.mkdirSync(path.dirname(reportPath), {recursive:true});
 fs.writeFileSync(reportPath, JSON.stringify(report));
@@ -84,8 +87,7 @@ async function executeFixture(root: string) {
   await prepareIndependentReview(root, { id: "review", sources: [{ missionId: "source" }], runtime: "command-code", model: "offline-review-fixture" });
   const reviewMissionPath = path.join(root, ".harness", "missions", "review", "mission.yaml");
   const reviewMission = parse(await readFile(reviewMissionPath, "utf8")) as Record<string, unknown>;
-  reviewMission.guard = { write_roots: ["out"] };
-  await writeFile(reviewMissionPath, stringify(reviewMission));
+  expect(reviewMission.guard).toEqual({ write_roots: ["out"], deny_git_mutations: true, deny_package_installs: true, deny_network_clients: true });
   const workspace = await createSandbox(root, { id: "review-workspace", missionId: "review", backend: "directory" });
   workspace.path = path.resolve(root, workspace.path);
   const workspaceAdapterPath = path.join(workspace.path, ".harness", "adapters", "command-code.yaml");
@@ -107,6 +109,10 @@ test("a separate native review produces an advisory assessment, never owner appr
     const { workspace, missionPath } = await executeFixture(root);
     const assessment = await collectIndependentReview(root, "review");
     expect(assessment).toMatchObject({ recommendation: "pass", human_acceptance_required: true });
+    expect(assessment.observations).toEqual([
+      { source: "source", title: "Captured output inspected in full", evidence: "42", relates_to: "ac-1", severity: "info" },
+      { source: "source", title: "No claims outside the listed ids were verified", evidence: "Review covered only the listed ids", severity: "warn" },
+    ]);
     expect((await verifyMission(root, "review")).status).toBe("passed");
     expect(await readFile(path.join(root, "answer.txt"), "utf8")).toBe("42");
     await expect(readFile(path.join(root, ".harness", "missions", "source", "promotion.yaml"))).rejects.toThrow();
@@ -150,6 +156,43 @@ test("a review cannot pass omitted criteria or missing and empty required output
     const originalPacket = await readFile(prepared.requestPath, "utf8");
     await expect(prepareIndependentReview(root, { id: "review", sources: [{ missionId: "source" }], runtime: "command-code", model: "offline-review-fixture" })).rejects.toThrow();
     expect(await readFile(prepared.requestPath, "utf8")).toBe(originalPacket);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a review packet pins exact ids for a source with no acceptance criteria", async () => {
+  const root = await fixture();
+  try {
+    await proposeMission(root, { id: "bare", title: "Bare", objective: "Produce answer 42", workflow: "research-docs",
+      expectedOutputs: ["answer.txt"], requiredChecks: [{ name: "answer-exists" }, { name: "answer-matches-42" }] });
+    const prepared = await prepareIndependentReview(root, { id: "review-bare", sources: [{ missionId: "bare" }], runtime: "command-code", model: "offline-review-fixture" });
+    const missionDir = path.join(root, ".harness", "missions", "review-bare");
+    const mission = parse(await readFile(path.join(missionDir, "mission.yaml"), "utf8")) as Record<string, unknown>;
+    expect(mission.objective).toContain("- bare: acceptance: [] exactly; add nothing; checks: check-1, check-2.");
+    expect(mission.objective).toContain("goes into observations, never into acceptance or checks");
+    expect(mission.guard).toEqual({ write_roots: ["out"], deny_git_mutations: true, deny_package_installs: true, deny_network_clients: true });
+    const schema = JSON.parse(await readFile(path.join(missionDir, "review-report.schema.json"), "utf8"));
+    const sourceProperties = schema.properties.sources.items.properties;
+    expect(sourceProperties.acceptance.maxItems).toBe(0);
+    expect(sourceProperties.acceptance.items.properties.id.enum).toEqual([]);
+    expect(sourceProperties.checks.maxItems).toBe(2);
+    expect(sourceProperties.checks.items.properties.id.enum).toEqual(["check-1", "check-2"]);
+    const request = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(prepared.requestPath, "utf8")));
+    expect(request.sources[0].acceptance).toEqual([]);
+    expect(request.sources[0].checks.map(item => item.id)).toEqual(["check-1", "check-2"]);
+    const report = { schema_version: "uh.independent-review-report.v0", request_sha256: prepared.requestSha256,
+      sources: [{ mission_id: "bare", claims_checked: [{ claim: "Produce answer 42", source: "answer.txt", observed: "42", verdict: "supported" }],
+        acceptance: [] as Array<{ id: string; status: "passed"; evidence: string }>,
+        checks: [{ id: "check-1", status: "passed", evidence: "answer.txt exists" }, { id: "check-2", status: "passed", evidence: "answer.txt reads 42" }],
+        findings: [], verdict: "pass", reason: "Both required checks hold against the captured output" }] };
+    const invented = IndependentReviewReportSchema.parse({ ...report,
+      sources: [{ ...report.sources[0], acceptance: [{ id: "ac-1", status: "passed", evidence: "invented criterion" }] }] });
+    expect(() => validateIndependentReviewReport(request, invented)).toThrow("Review must cover each acceptance criterion exactly once");
+    const withObservations = IndependentReviewReportSchema.parse({ ...report,
+      sources: [{ ...report.sources[0], observations: [
+        { title: "Snapshot matches the contract claim", evidence: "answer.txt", relates_to: "check-2", severity: "info" },
+        { title: "No claims outside the listed ids were verified", evidence: "Review covered only the listed ids" }] }] });
+    expect(validateIndependentReviewReport(request, withObservations)).toBe("pass");
+    expect(validateIndependentReviewReport(request, IndependentReviewReportSchema.parse(report))).toBe("pass");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
