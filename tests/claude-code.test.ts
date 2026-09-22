@@ -103,6 +103,61 @@ test("worker plan embeds guard settings, exact model route, and stream flags", a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("plans -p without a prompt argument and frames the packet as a stream-json user message on stdin", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const plan = await planClaudeCodeRun(root, missionPath);
+    expect(plan.promptSource).toBe("stdin");
+    expect(plan.args).toContain("-p");
+    // `-p` carries no query: the token after it is a flag, never the prompt.
+    expect(plan.args[plan.args.indexOf("-p") + 1]).not.toBe(plan.prompt);
+    expect(plan.args).not.toContain(plan.prompt);
+    expect(plan.args.join("\0")).not.toContain(plan.prompt);
+    // The documented print-mode input format that makes stdin the user's task.
+    expect(flag(plan.args, "--input-format")).toBe("stream-json");
+    expect(plan.stdin.endsWith("\n")).toBe(true);
+    expect(JSON.parse(plan.stdin)).toEqual({
+      type: "user", message: { role: "user", content: plan.prompt },
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("the runner receives the prompt as stdin and argv and the recorded session stay prompt-free", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    let seenArgs: string[] | undefined;
+    let seenStdin: string | undefined;
+    await runClaudeCode(root, missionPath, {
+      runId: "prompt-stdin",
+      runner: async input => { seenArgs = input.args; seenStdin = input.stdin; return okRunner(); },
+      collectDiff: noopDiff,
+    });
+    expect(seenArgs).toContain("-p");
+    expect(seenArgs).not.toContain(seenStdin);
+    expect(seenStdin).toBeDefined();
+    const message = JSON.parse(seenStdin!) as { type: string; message: { role: string; content: string } };
+    expect(message.type).toBe("user");
+    expect(message.message.role).toBe("user");
+    expect(message.message.content).toContain("Preserve outputs");
+    expect(seenArgs).not.toContain(message.message.content);
+    const session = parse(await readFile(path.join(path.dirname(missionPath), "runs", "prompt-stdin", "runtime-session.yaml"), "utf8")) as { args: string[] };
+    expect(session.args).not.toContain(message.message.content);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a prompt beyond the Windows command-line limit plans without error", async () => {
+  const longObjective = "x".repeat(50_000);
+  const { root, missionPath } = await fixture({}, mission => { mission.objective = longObjective; });
+  try {
+    const plan = await planClaudeCodeRun(root, missionPath);
+    expect(plan.prompt.length).toBeGreaterThanOrEqual(50_000);
+    expect(plan.args).not.toContain(plan.prompt);
+    // No single argv token approaches the 32,767-character Windows limit.
+    for (const arg of plan.args) expect(arg.length).toBeLessThan(32_767);
+    expect((JSON.parse(plan.stdin) as { message: { content: string } }).message.content).toBe(plan.prompt);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("worker runs refuse guard-less missions, non-default permission modes, and reserved flags", async () => {
   const { root, missionPath } = await fixture({ permission_mode: "dontAsk" });
   try {

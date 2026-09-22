@@ -51,7 +51,7 @@ import {
 const exec = promisify(execFile);
 export const DEFAULT_CLAUDE_CODE_MODEL = "claude-fable-5-1[1m]";
 const RESERVED_CLAUDE_FLAGS = new Set([
-  "-p", "--print", "--model", "--output-format", "--verbose", "--include-partial-messages",
+  "-p", "--print", "--model", "--output-format", "--input-format", "--verbose", "--include-partial-messages",
   "--permission-mode", "--settings", "--resume", "-r", "--continue", "-c", "--bare",
   "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--allowedtools", "--allowed-tools",
 ]);
@@ -216,10 +216,26 @@ function controllerGuard(guard: ToolGuardPolicy | undefined): ToolGuardPolicy & 
   return { ...(guard ?? resolveToolGuardPolicy(undefined)), controller_commands: true };
 }
 
+/**
+ * Claude Code frames print-mode stdin as the user's message only under
+ * `--input-format stream-json`, where stdin is newline-delimited JSON with one
+ * message object per line (`{"type":"user","message":{"role":"user","content":"..."}}`,
+ * documented in the CLI reference and calibrated against v2.1.x by the Agent SDK
+ * streaming protocol). A bare `-p` with plain-text stdin is read as piped context
+ * the model may question as a system reminder, so the prompt travels as a single
+ * `user` message and the trailing newline terminates the NDJSON line. Sending the
+ * prompt here rather than in argv keeps it off the Windows command-line limit.
+ */
+function claudeStdinPayload(prompt: string): string {
+  return `${JSON.stringify({ type: "user", message: { role: "user", content: prompt } })}\n`;
+}
+
 export interface ClaudeCodeRunPlan {
   command: string;
   args: string[];
   prompt: string;
+  stdin: string;
+  promptSource: "stdin";
   mission: MissionDocument;
   config: ClaudeCodeRuntimeConfig;
   resume?: RuntimeResume;
@@ -263,10 +279,10 @@ export async function planClaudeCodeRun(root: string, missionPath: string, optio
   const orchestratorGuard = config.role === "orchestrator" ? controllerGuard(mission.guard) : undefined;
   const guard = orchestratorGuard ?? mission.guard;
   const writeRules = orchestratorGuard ? orchestratorWriteRules(orchestratorGuard.write_roots) : [];
-  const args = [...config.cli_args, "-p", prompt];
+  const args = [...config.cli_args, "-p"];
   const resumeSession = resume?.sessionId ?? config.resume_session;
   if (resumeSession) args.push("--resume", resumeSession);
-  args.push("--model", config.model, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", config.permission_mode);
+  args.push("--model", config.model, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--input-format", "stream-json", "--permission-mode", config.permission_mode);
   if (config.role === "orchestrator") {
     args.push("--tools", "Bash,Read,Write,Edit", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
   }
@@ -279,6 +295,8 @@ export async function planClaudeCodeRun(root: string, missionPath: string, optio
     command: adapter.config?.cli_command || "claude",
     args,
     prompt,
+    stdin: claudeStdinPayload(prompt),
+    promptSource: "stdin" as const,
     mission,
     config,
     resume,
@@ -398,6 +416,7 @@ export async function runClaudeCode(root: string, missionPath: string, options: 
     output = await (options.runner ?? runRuntimeProcess)({
       command: plan.command,
       args: plan.args,
+      stdin: plan.stdin,
       cwd: root,
       env: guardEnv,
       permissionMode: plan.permission_mode,
