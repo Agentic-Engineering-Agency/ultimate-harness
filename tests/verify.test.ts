@@ -228,10 +228,13 @@ describe("uh verify", () => {
     const startedAt = Date.now();
     const { stdout, stderr } = await runUhFailure(["verify", "timeout-cli", "--root", TEST_ROOT, "--timeout-ms", "25"]);
     const elapsedMs = Date.now() - startedAt;
-    // Generous bound: CLI startup on slow CI runners can be >1s; the
-    // assertion that matters is "we return well before the inner 500ms
-    // setTimeout could naturally complete + propagate", not micro-latency.
-    expect(elapsedMs).toBeLessThan(3000);
+    // The mechanism this asserts: the child hangs for 60s, so returning under
+    // 30s proves the 25ms CLI timeout fired and stopped it — the child can
+    // never finish first. The ceiling is deliberately generous (rather than
+    // tight to the 25ms timeout) because the CLI subprocess pays a full tsx
+    // cold start, which measured >3s under parallel load; the exact timeout
+    // window is asserted on the verification record below, not on wall time.
+    expect(elapsedMs).toBeLessThan(30_000);
     expect(`${stdout}${stderr}`).toContain("[FAIL] timeout-cli");
     const verification = await readVerification("timeout-cli");
     expect(verification.status).toBe("failed");
