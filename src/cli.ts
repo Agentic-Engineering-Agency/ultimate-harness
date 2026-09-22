@@ -575,6 +575,45 @@ async function runOperatorResumedAttempt(request: OperatorResumeRequest): Promis
   });
 }
 
+// uh wait — block until matched runs settle, so orchestrators do not poll `uh ps`.
+program
+  .command("wait")
+  .description("Block until a run (or a mission's or team's runs) settles or is orphaned (exit 0/1/3/4; 2 when nothing matches)")
+  .argument("[run-id]", "Run id, or a unique prefix of one")
+  .option("--mission <id>", "Every live run of this mission, including its team workers")
+  .option("--team <id>", "Every live run of this team")
+  .option("--timeout-ms <ms>", "Give up after this many milliseconds (default: 1800000)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the wait report as JSON")
+  .action(async (runId: string | undefined, opts: {
+    mission?: string; team?: string; timeoutMs?: string; root?: string; json?: boolean;
+  }) => {
+    const root = resolveRoot(opts.root);
+    const timeoutMs = opts.timeoutMs === undefined ? undefined : Number.parseInt(opts.timeoutMs, 10);
+    if (opts.timeoutMs !== undefined && (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+      console.error(`[FAIL] --timeout-ms must be a non-negative integer of milliseconds, got: ${opts.timeoutMs}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const { waitForRuns, formatWaitReport } = await import("./harness/wait.js");
+      const report = await waitForRuns(root, {
+        ...(runId !== undefined ? { runId } : {}),
+        ...(opts.mission !== undefined ? { missionId: opts.mission } : {}),
+        ...(opts.team !== undefined ? { teamId: opts.team } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      });
+      if (opts.json) console.log(JSON.stringify(report, null, 2));
+      else console.log(formatWaitReport(report));
+      process.exit(report.exit_code);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      console.error(`[FAIL] wait error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(code === "no_target" || code === "unknown_target" || code === "ambiguous_target" ? 2 : 1);
+    }
+  });
+
 // uh resume — continue a settled run's native session as a new run.
 program
   .command("resume")
