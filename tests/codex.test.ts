@@ -1,5 +1,7 @@
-import { test, expect, describe, beforeAll } from "vitest";
+import { test, expect, describe, beforeAll, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
@@ -17,7 +19,7 @@ import {
   type DiffCollector,
 } from "../src/adapters/codex.js";
 
-const TEST_ROOT = resolve("/tmp/uh-test-codex-adapter");
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-codex-adapter-"));
 
 async function cleanup() {
   try { await rm(TEST_ROOT, { recursive: true, force: true }); } catch {}
@@ -80,6 +82,7 @@ test.beforeEach(async () => {
   await writeCodexManifest();
 });
 test.afterEach(cleanup);
+test.afterAll(cleanup);
 
 describe("uh adapter check codex", () => {
   test("returns valid check result when codex is installed", async () => {
