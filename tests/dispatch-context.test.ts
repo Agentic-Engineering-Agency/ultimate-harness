@@ -98,6 +98,9 @@ describe("UH-80 dispatch context contract", () => {
   test("renderPrompt produces a stable canonical prompt", () => {
     const ctx = buildDispatchContext(FIXTURE_MISSION, FIXTURE_WORKFLOW, {
       finalMessageInstruction: FINAL_INSTRUCTION,
+      // An explicit empty brief keeps this snapshot independent of the
+      // repository's real .harness/project-brief.md.
+      projectBrief: "",
     });
     const prompt = renderPrompt(ctx);
     expect(prompt).toMatchInlineSnapshot(`
@@ -265,7 +268,11 @@ describe("UH-80 dispatch context contract", () => {
       workflow_profile: "spec-first-feature",
       objective: "Just the basics.",
     });
-    const ctx = buildDispatchContext(sparse, undefined, { finalMessageInstruction: "::F::" });
+    const ctx = buildDispatchContext(sparse, undefined, {
+      finalMessageInstruction: "::F::",
+      // Explicit empty brief: no dependence on the repository's real brief.
+      projectBrief: "",
+    });
     const prompt = renderPrompt(ctx);
     expect(ctx.constraints).toEqual([]);
     expect(ctx.acceptanceCriteria).toEqual([]);
@@ -326,32 +333,25 @@ describe("project facts and template worker rules", () => {
     expect(prompt.split("## Project facts").length - 1).toBe(1);
   });
 
-  test("omits the Project facts section when there is no brief", async () => {
+  test("renders a brief from the given root and nothing when the root has none", async () => {
     // An explicit root keeps this independent of the working directory.
-    const dir = await mkdtemp(path.join(tmpdir(), "uh-nobrief-"));
-    try {
-      const ctx = buildDispatchContext(FIXTURE_MISSION, undefined, {
-        root: dir,
-        finalMessageInstruction: FINAL_INSTRUCTION,
-      });
-      expect(ctx.projectFacts).toBeUndefined();
-      expect(renderPrompt(ctx)).not.toContain("## Project facts");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("reads .harness/project-brief.md from the given root", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "uh-brief-"));
     try {
-      await mkdir(path.join(dir, ".harness"), { recursive: true });
-      await writeFile(path.join(dir, ".harness", "project-brief.md"), "Repo facts from disk.\n", "utf-8");
-      const ctx = buildDispatchContext(FIXTURE_MISSION, undefined, {
+      const withoutBrief = buildDispatchContext(FIXTURE_MISSION, undefined, {
         root: dir,
         finalMessageInstruction: FINAL_INSTRUCTION,
       });
-      expect(ctx.projectFacts).toBe("Repo facts from disk.");
-      expect(renderPrompt(ctx)).toContain("## Project facts\nRepo facts from disk.");
+      expect(withoutBrief.projectFacts).toBeUndefined();
+      expect(renderPrompt(withoutBrief)).not.toContain("## Project facts");
+
+      await mkdir(path.join(dir, ".harness"), { recursive: true });
+      await writeFile(path.join(dir, ".harness", "project-brief.md"), "Repo facts from disk.\n", "utf-8");
+      const withBrief = buildDispatchContext(FIXTURE_MISSION, undefined, {
+        root: dir,
+        finalMessageInstruction: FINAL_INSTRUCTION,
+      });
+      expect(withBrief.projectFacts).toBe("Repo facts from disk.");
+      expect(renderPrompt(withBrief)).toContain("## Project facts\nRepo facts from disk.");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

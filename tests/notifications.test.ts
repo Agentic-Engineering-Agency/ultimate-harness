@@ -12,6 +12,7 @@ import {
   describeSink,
   detectPresets,
   dispatchEvent,
+  drainNotifications,
   elapsedMs,
   expandPreset,
   loadNotificationConfig,
@@ -87,6 +88,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Fire-and-forget settlements append to the ledger asynchronously; wait for
+  // them before removing the temporary project so cleanup never races a write.
+  await drainNotifications();
   if (WORK) await rm(WORK, { recursive: true, force: true });
 });
 

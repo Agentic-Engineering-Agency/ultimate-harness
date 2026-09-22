@@ -650,6 +650,34 @@ export async function dispatchEvent(root: string, event: NotificationEvent, opti
 /** The run digest artifact name; read only to source the files-written count. */
 export const RUN_DIGEST_FILE = "run-digest.json";
 
+/**
+ * Promises of the settlement announcements that are still in flight. Tracked so
+ * a host (tests, or a process about to exit) can wait for the delivery and
+ * ledger writes to finish without making settlement itself block on them.
+ */
+const inFlightDeliveries = new Set<Promise<unknown>>();
+
+function trackDelivery(promise: Promise<unknown>): void {
+  let entry: Promise<unknown>;
+  entry = promise.catch(() => undefined).finally(() => {
+    inFlightDeliveries.delete(entry);
+  });
+  inFlightDeliveries.add(entry);
+}
+
+/**
+ * Await every fire-and-forget delivery started by {@link notifyRunSettled},
+ * {@link notifyRunOrphaned}, or {@link notifyTeamSettled} that has not settled
+ * yet. Tests call this before removing a temporary project directory so an
+ * in-flight ledger append cannot race the cleanup; a host can call it before
+ * exit. Settlement never awaits this — delivery stays non-blocking.
+ */
+export async function drainNotifications(): Promise<void> {
+  while (inFlightDeliveries.size > 0) {
+    await Promise.all([...inFlightDeliveries]);
+  }
+}
+
 async function filesWrittenIn(runDir: string): Promise<number | undefined> {
   try {
     const parsed = JSON.parse(await readFile(path.join(runDir, RUN_DIGEST_FILE), "utf8")) as { files_written?: { total?: unknown } };
@@ -675,17 +703,17 @@ async function announceRun(root: string, input: RunSettlementInput, orphaned: bo
 
 /** Announce a run settlement (and a supervision alert when the stop code warrants one). */
 export function notifyRunSettled(root: string, input: RunSettlementInput): void {
-  void announceRun(root, input, false).catch(() => undefined);
+  trackDelivery(announceRun(root, input, false));
 }
 
 /** Announce a discovered orphaned run (and a supervision alert when the stop code warrants one). */
 export function notifyRunOrphaned(root: string, input: RunSettlementInput): void {
-  void announceRun(root, input, true).catch(() => undefined);
+  trackDelivery(announceRun(root, input, true));
 }
 
 /** Announce a finished team run. */
 export function notifyTeamSettled(root: string, input: TeamSettlementInput): void {
-  void dispatchEvent(root, buildTeamSettledEvent(input)).catch(() => undefined);
+  trackDelivery(dispatchEvent(root, buildTeamSettledEvent(input)));
 }
 
 /* -------------------------------------------------------------------------- */
