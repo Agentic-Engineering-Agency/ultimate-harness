@@ -296,7 +296,9 @@ else, then continue.
    `.harness/missions/<team>/team/artifacts/...` and holds no adapters of its
    own, so the manifest is never looked up there.
 4. The runtime has a native resume path (Command Code, oh-my-pi, Claude Code).
-
+5. No attempt in the same session lineage is live. Steering or resuming an old
+   run id while its successor is live is refused, naming the live run id so the
+   operator can target it instead of launching duplicate concurrent attempts.
 A refusal is a clear message and no side effect: no stop is signalled and no
 steer request is written.
 
@@ -315,12 +317,19 @@ recovery loop (`runWithRuntimeRecovery`) then:
 - records the steer in the attempt lineage (`runtime-recovery.json` on the new
   run carries `source_stop_code: steered` and the message as its notes).
 
+If the attempt finishes successfully (`status: passed`) while the steer's stop
+is in flight, the controller does not resume; it consumes the steer request only
+when acting on it. When the attempt completed before the steer took effect, the
+controller keeps an explicit record in `steer-record.json` next to
+`runtime-control.json` (`status: "not_applied"`, `reason: "attempt completed before the steer took effect"`,
+and the message digest). `uh steer` observes this and reports that the steer
+was not applied rather than misleading the operator into expecting a resume.
+
 A steered attempt does **not** count against the mission's
 `recovery.max_resumes` budget — an operator message is authorized outside the
 automatic loop. Because the resume happens inside the controller, a team
 worker keeps running inside its team controller and is integrated normally
 instead of being treated as a finished worker.
-
 ### When no live controller owns the run
 
 If the controller is gone (`uh ps` reports `orphaned`), steer falls back to the
@@ -344,10 +353,9 @@ acts on the message.
 uh resume <run-id> [--notes "<text>"] [--json]
 ```
 
-It refuses a run that is still live — steer that one instead — and refuses a
-runtime with no session resume path:
-
-```
+It refuses a run that is still live — steer that one instead — refuses any run
+when another attempt in the same session lineage is still live (naming the live
+run id so you can target it), and refuses a runtime with no session resume path:
 unsupported: <runtime> has no session resume
 ```
 

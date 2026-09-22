@@ -1,9 +1,11 @@
 import { validateMission } from "../schema/mission.js";
 import { runtimeRegistry } from "./registry.js";
 import { mergeRuntimeConfigOverrides } from "./runtime-config-overrides.js";
-import { lstat, readFile, rm } from "node:fs/promises";
+import { lstat, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { parse } from "yaml";
+import { z } from "zod";
 import { RuntimeControlSchema, RuntimeRecoveryPolicySchema, RuntimeRecoveryRecordSchema, RuntimeSteerRequestSchema, type RuntimeControl, type RuntimeSteerRequest } from "../schema/runtime-control.js";
 import { RuntimeSessionSchema, RuntimeResultSchema } from "../schema/artifacts.js";
 import { assertSafeMissionId } from "./mission.js";
@@ -92,11 +94,23 @@ export async function prepareRuntimeResume(root: string, missionId: string, runI
   return { sourceRunId: runId, sessionId: control.session_id, notes: combinedNotes, sourceStopCode: control.stop_code, sourceStopReason, grace, origin };
 }
 
-/**
- * The `uh steer` request written next to a run's `runtime-control.json`, if one
- * is pending, deleted once read so a controller can never replay it.
- */
-export async function consumeSteerRequest(root: string, missionId: string, runId: string): Promise<RuntimeSteerRequest | undefined> {
+/** Explicit record of a steer request outcome. */
+export const SteerRecordSchema = z
+  .object({
+    schema_version: z.literal("uh.steer-record.v0").default("uh.steer-record.v0"),
+    mission_id: z.string().min(1),
+    run_id: z.string().min(1),
+    status: z.literal("not_applied"),
+    reason: z.string().min(1),
+    message_digest: z.string().min(1),
+    digest: z.string().min(1).optional(),
+    recorded_at: z.string(),
+  })
+  .strict();
+export type SteerRecord = z.infer<typeof SteerRecordSchema>;
+
+/** Read a pending steer request next to runtime-control.json without consuming it. */
+export async function readSteerRequest(root: string, missionId: string, runId: string): Promise<RuntimeSteerRequest | undefined> {
   assertSafeMissionId(missionId);
   assertValidRunId(runId);
   const requestPath = path.join(root, ".harness", "missions", missionId, "runs", runId, "steer-request.json");
@@ -109,6 +123,60 @@ export async function consumeSteerRequest(root: string, missionId: string, runId
   }
   const request = RuntimeSteerRequestSchema.parse(JSON.parse(raw));
   if (request.mission_id !== missionId || request.run_id !== runId) throw new Error("Steer request identity mismatch");
+  return request;
+}
+
+/**
+ * Record that a steer request could not be applied because the attempt already
+ * completed successfully before the steer took effect.
+ */
+export async function recordSteerNotApplied(root: string, missionId: string, runId: string, message: string): Promise<SteerRecord> {
+  assertSafeMissionId(missionId);
+  assertValidRunId(runId);
+  const digest = createHash("sha256").update(message).digest("hex");
+  const record: SteerRecord = SteerRecordSchema.parse({
+    schema_version: "uh.steer-record.v0",
+    mission_id: missionId,
+    run_id: runId,
+    status: "not_applied",
+    reason: "attempt completed before the steer took effect",
+    message_digest: digest,
+    digest,
+    recorded_at: new Date().toISOString(),
+  });
+  const recordPath = path.join(root, ".harness", "missions", missionId, "runs", runId, "steer-record.json");
+  const artifacts = await getMissionArtifactContext(root, path.join(root, ".harness", "missions", missionId, "mission.yaml"), runId);
+  if (artifacts) {
+    await writeArtifactFile(artifacts.missionDir, recordPath, JSON.stringify(record, null, 2));
+  } else {
+    await writeFile(recordPath, JSON.stringify(record, null, 2), "utf8");
+  }
+  return record;
+}
+
+/** Read an explicit steer record if one exists next to runtime-control.json. */
+export async function readSteerRecord(root: string, missionId: string, runId: string): Promise<SteerRecord | undefined> {
+  assertSafeMissionId(missionId);
+  assertValidRunId(runId);
+  const recordPath = path.join(root, ".harness", "missions", missionId, "runs", runId, "steer-record.json");
+  let raw: string;
+  try {
+    raw = await readFile(recordPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  return SteerRecordSchema.parse(JSON.parse(raw));
+}
+
+/**
+ * The `uh steer` request written next to a run's `runtime-control.json`, if one
+ * is pending, deleted once read so a controller can never replay it.
+ */
+export async function consumeSteerRequest(root: string, missionId: string, runId: string): Promise<RuntimeSteerRequest | undefined> {
+  const request = await readSteerRequest(root, missionId, runId);
+  if (!request) return undefined;
+  const requestPath = path.join(root, ".harness", "missions", missionId, "runs", runId, "steer-request.json");
   await rm(requestPath, { force: true });
   return request;
 }
@@ -183,8 +251,21 @@ export async function runWithRuntimeRecovery<T extends RecoverableRuntimeResult>
     // automatic `max_resumes` budget and works without a recovery policy.
     for (;;) {
       if (input.cancellationSignal?.aborted) return result;
-      const steer = await consumeSteerRequest(input.root, input.missionId, runId);
-      if (!steer || result.result?.status === "passed") break;
+      const steer = await readSteerRequest(input.root, input.missionId, runId);
+      if (!steer) break;
+      let isPassed = result.result?.status === "passed";
+      if (!isPassed) {
+        try {
+          const control = RuntimeControlSchema.parse(JSON.parse(await readFile(path.join(input.root, ".harness", "missions", input.missionId, "runs", runId, "runtime-control.json"), "utf8")));
+          if (control.status === "passed") isPassed = true;
+        } catch {}
+      }
+      if (isPassed) {
+        await recordSteerNotApplied(input.root, input.missionId, runId, steer.message);
+        const requestPath = path.join(input.root, ".harness", "missions", input.missionId, "runs", runId, "steer-request.json");
+        await rm(requestPath, { force: true });
+        break;
+      }
       const notes = steerNotes(steer.message, steer.report);
       try {
         await prepareRuntimeResume(input.root, input.missionId, runId, input.runtime, notes, "operator");
@@ -193,6 +274,9 @@ export async function runWithRuntimeRecovery<T extends RecoverableRuntimeResult>
         // it is left settled rather than relabelled or restarted from scratch.
         break;
       }
+      // Consume the steer request only when acting on it.
+      const requestPath = path.join(input.root, ".harness", "missions", input.missionId, "runs", runId, "steer-request.json");
+      await rm(requestPath, { force: true });
       await markAttemptSteered(input.root, input.missionId, runId, steer.message);
       overrides = { ...input.extraRuntimeConfigOverrides, resume_session: undefined, resume_from_run: runId, recovery_notes: notes };
       runId = generateRunId();

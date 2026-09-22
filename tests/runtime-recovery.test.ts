@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -266,5 +267,38 @@ test("a steered attempt does not consume max_resumes", async () => {
     expect(attempts).toBe(2);
     expect(result.runId).not.toBe("steer-budget");
     expect(result.result?.status).toBe("passed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test("the completed-before-steer race records not_applied and does not resume", async () => {
+  const root = await steerFixture();
+  try {
+    const firstRun = "steer-race-source";
+    const steerMessage = "Nudge that arrives right before completion.";
+    const result = await runWithRuntimeRecovery({
+      root, missionId: "one", runtime: "command-code", runId: firstRun,
+      recovery: { max_resumes: 1, notes: "Automatic policy notes." },
+      run: async (options) => {
+        // The live attempt is running, steer request is written, but before
+        // the stop takes effect the attempt finishes passed.
+        const runDir = await writeAttempt(root, options.runId, { status: "running", sessionId: "saved-session" });
+        await writeSteerRequest(runDir, options.runId, steerMessage);
+        await writeAttempt(root, options.runId, { status: "passed", sessionId: "saved-session" });
+        return { runId: options.runId, result: { status: "passed" } };
+      },
+    });
+    // The attempt completed passed and was not resumed.
+    expect(result.result?.status).toBe("passed");
+    expect(result.runId).toBe(firstRun);
+    // The steer request file was consumed / cleaned up.
+    await expect(readFile(path.join(root, ".harness", "missions", "one", "runs", firstRun, "steer-request.json"), "utf8")).rejects.toThrow();
+    // An explicit not_applied record was written next to runtime-control.
+    const record = JSON.parse(await readFile(path.join(root, ".harness", "missions", "one", "runs", firstRun, "steer-record.json"), "utf8"));
+    const expectedDigest = createHash("sha256").update(steerMessage).digest("hex");
+    expect(record).toMatchObject({
+      status: "not_applied",
+      reason: "attempt completed before the steer took effect",
+      message_digest: expectedDigest,
+    });
   } finally { await rm(root, { recursive: true, force: true }); }
 }, 15000);

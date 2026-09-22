@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parse, stringify } from "yaml";
@@ -368,6 +369,163 @@ test("prepareRuntimeResume tags the operator origin and leaves policy resumes as
     expect(operator).toMatchObject({ origin: "operator", sessionId: "saved-session", sourceRunId: "origin-run" });
     const policy = await prepareRuntimeResume(root, "one", "origin-run", "command-code", "Note");
     expect(policy.origin).toBe("policy");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the completed-before-steer race records not_applied and uh steer reports it", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runId = "race-run";
+    const runDir = await seedRun(root, "one", runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    const message = "Switch to auth path.";
+    const digest = createHash("sha256").update(message).digest("hex");
+    let ran = false;
+    const result = await steerRun(root, runId, message, {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: async () => {
+        // Simulate controller observing the attempt finished passed while steer was in flight
+        await writeFile(path.join(runDir, "steer-record.json"), JSON.stringify({
+          schema_version: "uh.steer-record.v0",
+          mission_id: "one",
+          run_id: runId,
+          status: "not_applied",
+          reason: "attempt completed before the steer took effect",
+          message_digest: digest,
+          recorded_at: new Date().toISOString(),
+        }));
+        await rm(path.join(runDir, "steer-request.json"), { force: true });
+        return { ok: true, status: "passed" };
+      },
+      processes: alive(4242),
+    });
+    expect(ran).toBe(false);
+    expect(result).toMatchObject({
+      ok: false,
+      mode: "controller",
+      sourceRunId: runId,
+      status: "not_applied",
+      reason: "attempt completed before the steer took effect",
+      message_digest: digest,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("steering an old run id while its successor is live is refused with the live id named", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const oldRunId = "20260922T100000Z-oldrun";
+    const liveRunId = "20260922T100500Z-liverun";
+    await seedRun(root, "one", oldRunId, { status: "passed", sessionId: "shared-session" });
+    await seedRun(root, "one", liveRunId, { status: "running", sessionId: "shared-session", controllerPid: 5555 });
+    const runsDir = path.join(root, ".harness", "missions", "one", "runs");
+    await writeFile(path.join(runsDir, oldRunId, "resume-link.json"), JSON.stringify({
+      schema_version: "uh.resume-link.v0", mission_id: "one", run_id: oldRunId, runtime: "command-code",
+      resume_origin: "operator", resumed_by: liveRunId, report: false, created_at: new Date().toISOString(),
+    }));
+    await writeFile(path.join(runsDir, liveRunId, "resume-link.json"), JSON.stringify({
+      schema_version: "uh.resume-link.v0", mission_id: "one", run_id: liveRunId, runtime: "command-code",
+      resume_origin: "operator", resumed_from: oldRunId, report: false, created_at: new Date().toISOString(),
+    }));
+
+    let ran = false;
+    let errMessage = "";
+    await steerRun(root, oldRunId, "Nudge old run.", {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: unusedCancel,
+      processes: alive(5555),
+    }).catch((err: Error) => { errMessage = err.message; });
+
+    expect(ran).toBe(false);
+    expect(errMessage).toContain(liveRunId);
+    expect(errMessage).toMatch(/lineage/i);
+    expect(errMessage).toMatch(/live/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("resuming an old run id while its successor is live is refused with the live id named", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const oldRunId = "20260922T100000Z-oldrun";
+    const liveRunId = "20260922T100500Z-liverun";
+    await seedRun(root, "one", oldRunId, { status: "passed", sessionId: "shared-session" });
+    await seedRun(root, "one", liveRunId, { status: "running", sessionId: "shared-session", controllerPid: 5555 });
+    const runsDir = path.join(root, ".harness", "missions", "one", "runs");
+    await writeFile(path.join(runsDir, oldRunId, "resume-link.json"), JSON.stringify({
+      schema_version: "uh.resume-link.v0", mission_id: "one", run_id: oldRunId, runtime: "command-code",
+      resume_origin: "operator", resumed_by: liveRunId, report: false, created_at: new Date().toISOString(),
+    }));
+    await writeFile(path.join(runsDir, liveRunId, "resume-link.json"), JSON.stringify({
+      schema_version: "uh.resume-link.v0", mission_id: "one", run_id: liveRunId, runtime: "command-code",
+      resume_origin: "operator", resumed_from: oldRunId, report: false, created_at: new Date().toISOString(),
+    }));
+
+    let ran = false;
+    let errMessage = "";
+    await resumeRun(root, oldRunId, {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: unusedCancel,
+      processes: alive(5555),
+    }).catch((err: Error) => { errMessage = err.message; });
+
+    expect(ran).toBe(false);
+    expect(errMessage).toContain(liveRunId);
+    expect(errMessage).toMatch(/lineage/i);
+    expect(errMessage).toMatch(/live/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("normal steer of a live run continues to succeed when old runs exist in the lineage", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const oldRunId = "20260922T100000Z-oldrun";
+    const liveRunId = "20260922T100500Z-liverun";
+    await seedRun(root, "one", oldRunId, { status: "passed", sessionId: "shared-session" });
+    const liveRunDir = await seedRun(root, "one", liveRunId, { status: "running", sessionId: "shared-session", controllerPid: 5555 });
+    const runsDir = path.join(root, ".harness", "missions", "one", "runs");
+    await writeFile(path.join(runsDir, oldRunId, "resume-link.json"), JSON.stringify({
+      schema_version: "uh.resume-link.v0", mission_id: "one", run_id: oldRunId, runtime: "command-code",
+      resume_origin: "operator", resumed_by: liveRunId, report: false, created_at: new Date().toISOString(),
+    }));
+    await writeFile(path.join(runsDir, liveRunId, "resume-link.json"), JSON.stringify({
+      schema_version: "uh.resume-link.v0", mission_id: "one", run_id: liveRunId, runtime: "command-code",
+      resume_origin: "operator", resumed_from: oldRunId, report: false, created_at: new Date().toISOString(),
+    }));
+
+    const calls: string[] = [];
+    let ran = false;
+    const result = await steerRun(root, liveRunId, "Steer the active run.", {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: async (cancelRoot, missionId, runId) => { calls.push(`cancel:${missionId}:${runId}`); return { ok: true, status: "cancelled" }; },
+      processes: alive(5555),
+    });
+
+    expect(ran).toBe(false);
+    expect(calls).toEqual([`cancel:one:${liveRunId}`]);
+    expect(result).toMatchObject({
+      ok: true,
+      mode: "controller",
+      sourceRunId: liveRunId,
+      missionId: "one",
+      runtime: "command-code",
+    });
+    const request = JSON.parse(await readFile(path.join(liveRunDir, "steer-request.json"), "utf8"));
+    expect(request).toMatchObject({
+      mission_id: "one",
+      run_id: liveRunId,
+      message: "Steer the active run.",
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

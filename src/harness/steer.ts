@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -6,6 +6,7 @@ import {
   discoverRuns,
   findProjectRoot,
   liveness,
+  type LiveRunRecord,
   type LivenessVerdict,
   type NativeProcess,
 } from "./live-runs.js";
@@ -13,16 +14,16 @@ import { runRootForRecord } from "./mission-cancel.js";
 import { getMissionArtifactContext, writeArtifactFile } from "../adapters/_artifact-context.js";
 import { assertValidRunId, generateRunId } from "./run-id.js";
 import { runtimeRegistry } from "./registry.js";
-import { RuntimeSteerRequestSchema } from "../schema/runtime-control.js";
+import { RuntimeControlSchema, RuntimeSteerRequestSchema } from "../schema/runtime-control.js";
 import {
   DEFAULT_OPERATOR_RESUME_NOTE,
   REPORT_REQUEST,
+  readSteerRecord,
   steerNotes,
   type ResumeOrigin,
 } from "./runtime-recovery.js";
 
 export { DEFAULT_OPERATOR_RESUME_NOTE, REPORT_REQUEST, steerNotes };
-
 /**
  * UH steer / resume — message a running worker across a stop and a restart.
  *
@@ -144,8 +145,10 @@ export interface SteerResult {
   report: boolean;
   /** The operator-started new run; present only for the fallback path. */
   runId?: string;
+  status?: "applied" | "not_applied";
+  reason?: string;
+  message_digest?: string;
 }
-
 export interface ResolveRunDeps {
   processes?: NativeProcess[];
   now?: number;
@@ -256,6 +259,104 @@ function assertSettledForResume(target: ResumableRun): void {
   }
   throw new Error(`run ${target.runId} is ${target.liveness}; settle it before resuming (uh kill ${target.runId})`);
 }
+async function resolveLineageRuns(
+  target: ResumableRun,
+  discoveredRuns: LiveRunRecord[],
+): Promise<string[]> {
+  const lineage = new Set<string>([target.runId]);
+  const sessionIds = new Set<string>();
+  if (target.sessionId) sessionIds.add(target.sessionId);
+
+  for (const r of discoveredRuns) {
+    if (r.session_id && sessionIds.has(r.session_id)) {
+      lineage.add(r.run_id);
+    }
+  }
+
+  const runsDir = path.join(target.artifactRoot, ".harness", "missions", target.missionId, "runs");
+  try {
+    const entries = await readdir(runsDir, { withFileTypes: true });
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const runId = entry.name;
+        try {
+          const linkRaw = await readFile(path.join(runsDir, runId, "resume-link.json"), "utf8");
+          const link = JSON.parse(linkRaw);
+          const from = link.resumed_from;
+          const by = link.resumed_by;
+          if (lineage.has(runId) || (from && lineage.has(from)) || (by && lineage.has(by))) {
+            if (!lineage.has(runId)) { lineage.add(runId); changed = true; }
+            if (from && !lineage.has(from)) { lineage.add(from); changed = true; }
+            if (by && !lineage.has(by)) { lineage.add(by); changed = true; }
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  for (const r of discoveredRuns) {
+    if (lineage.has(r.run_id) && r.session_id) {
+      sessionIds.add(r.session_id);
+    }
+  }
+  for (const r of discoveredRuns) {
+    if (r.session_id && sessionIds.has(r.session_id)) {
+      lineage.add(r.run_id);
+    }
+  }
+
+  return [...lineage];
+}
+
+async function assertNoLiveInLineage(
+  root: string,
+  target: ResumableRun,
+  action: "steer" | "resume",
+  deps: ResolveRunDeps,
+): Promise<void> {
+  const projectRoot = (await findProjectRoot(root)) ?? path.resolve(root);
+  const runs = await discoverRuns(projectRoot, { includeSettled: true, persist: false });
+  const lineageRunIds = await resolveLineageRuns(target, runs);
+  const processes = deps.processes ?? (await defaultProcessLister());
+  const now = deps.now ?? Date.now();
+
+  for (const runId of lineageRunIds) {
+    if (runId === target.runId) continue;
+    let record = runs.find((r) => r.run_id === runId);
+    if (!record) {
+      const controlPath = path.join(target.artifactRoot, ".harness", "missions", target.missionId, "runs", runId, "runtime-control.json");
+      try {
+        const raw = await readFile(controlPath, "utf8");
+        const control = RuntimeControlSchema.parse(JSON.parse(raw));
+        record = {
+          source: "scan",
+          run_id: runId,
+          mission_id: control.mission_id,
+          runtime: control.runtime,
+          artifact_root: target.artifactRoot,
+          control_path: controlPath,
+          controller_pid: control.controller_pid,
+          started_at: control.started_at,
+          status: control.status,
+          stop_code: control.stop_code,
+          heartbeat_at: control.heartbeat_at,
+          session_id: control.session_id,
+        };
+      } catch {}
+    }
+    if (record) {
+      const state = liveness(record, processes, { now });
+      if (state === "live") {
+        throw new Error(
+          `cannot ${action} ${target.runId}: run ${runId} in the same session lineage is live; target ${runId} instead`,
+        );
+      }
+    }
+  }
+}
 
 /** Write the steer request next to the run's control file for its controller to consume. */
 async function writeSteerRequest(target: ResumableRun, message: string, report: boolean): Promise<void> {
@@ -358,6 +459,7 @@ export async function resumeRun(
   const target = await resolveResumableRun(root, runRef, resolveDeps(deps));
   assertResumableRuntime(target.runtime);
   assertSettledForResume(target);
+  await assertNoLiveInLineage(root, target, "resume", resolveDeps(deps));
   const notes = (options.notes ?? "").trim() || DEFAULT_OPERATOR_RESUME_NOTE;
   return performResume(target, { notes, report: false, cancelled: false }, deps);
 }
@@ -382,12 +484,27 @@ export async function steerRun(
 ): Promise<SteerResult> {
   const target = await resolveResumableRun(root, runRef, resolveDeps(deps));
   await assertSteerable(target, message);
+  await assertNoLiveInLineage(root, target, "steer", resolveDeps(deps));
   const report = options.report === true;
   if (target.liveness === "live") {
     await writeSteerRequest(target, message.trim(), report);
     // Signal the attempt to stop; the owning controller consumes the request
     // and resumes the session, so no new run is started here.
     await deps.cancel(root, target.missionId, target.runId);
+    const record = await readSteerRecord(target.artifactRoot, target.missionId, target.runId);
+    if (record?.status === "not_applied") {
+      return {
+        ok: false,
+        mode: "controller",
+        sourceRunId: target.runId,
+        missionId: target.missionId,
+        runtime: target.runtime,
+        report,
+        status: "not_applied",
+        reason: record.reason,
+        message_digest: record.message_digest,
+      };
+    }
     return { ok: true, mode: "controller", sourceRunId: target.runId, missionId: target.missionId, runtime: target.runtime, report };
   }
   const cancelled = target.liveness !== "settled";
