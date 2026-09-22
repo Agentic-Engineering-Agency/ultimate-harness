@@ -54,6 +54,7 @@ import { loadMissionFile } from "./capabilities.js";
 import { aggregateRuntimeUsage, type RuntimeUsage } from "./usage.js";
 import { readRuntimeAccounting } from "./runtime-accounting.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists } from "./mission.js";
+import { registerLiveRun } from "./live-runs.js";
 const execFileP = promisify(execFile);
 
 /* -------------------------------------------------------------------------- */
@@ -951,6 +952,24 @@ export async function runTeamMission(
       context.onAttempt = async (runId) => {
         context.runId = runId;
         canonicalWorker.run_id = runId;
+        // Register the worker at the PROJECT root so `uh ps` finds it from
+        // outside the team tree. Team identity comes straight from the plan,
+        // not from path parsing, so it is exact.
+        const overrides = canonicalWorker.contract?.runtime_config_overrides;
+        const model = overrides !== undefined && typeof overrides.model === "string" ? overrides.model : undefined;
+        try {
+          await registerLiveRun({
+            projectRoot: root,
+            artifactRoot: context.artifactRoot,
+            runId,
+            missionId: workerMissionId,
+            runtime: slot.plan.adapter,
+            ...(model !== undefined ? { model } : {}),
+            team: { mission_id: mission.id, role: slot.plan.role },
+          });
+        } catch {
+          // The registry is best-effort; a worker must not fail because of it.
+        }
         await persistState();
       };
       launchedWorkers.add(slot.plan.id);
