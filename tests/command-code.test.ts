@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { stringify, parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
-import { runCommandCode, planCommandCodeRun, checkCommandCode, buildCommandCodeProbeArgs, parseCommandCodeVersion, CommandCodeRuntimeConfigSchema } from "../src/adapters/command-code.js";
+import { runCommandCode, planCommandCodeRun, dryRunCommandCode, checkCommandCode, buildCommandCodeProbeArgs, parseCommandCodeVersion, CommandCodeRuntimeConfigSchema } from "../src/adapters/command-code.js";
 import { validateAdapter, type AdapterDocument } from "../src/schema/adapter.js";
 
 async function fixture() {
@@ -174,6 +174,37 @@ test("max-turns native failure cannot become success from exit zero and complete
       stderr: "", exitCode: 0, timedOut: false }), collectDiff: async () => ({ patch: "" }) });
     expect(result.result.status).toBe("failed");
     expect(result.exitCode).not.toBe(0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("limits.max_turns plans --max-turns and an explicit top-level max_turns wins", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+    const overrides = mission.runtime_config_overrides as Record<string, unknown>;
+    overrides.limits = { max_turns: 200 };
+    await writeFile(missionPath, stringify(mission));
+    const planned = await planCommandCodeRun(root, missionPath);
+    expect(planned.args.indexOf("--max-turns")).toBeGreaterThan(-1);
+    expect(planned.args[planned.args.indexOf("--max-turns") + 1]).toBe("200");
+    expect(planned.native_default_turn_cap).toBeUndefined();
+
+    overrides.max_turns = 150;
+    await writeFile(missionPath, stringify(mission));
+    const explicit = await planCommandCodeRun(root, missionPath);
+    expect(explicit.args[explicit.args.indexOf("--max-turns") + 1]).toBe("150");
+    expect(explicit.native_default_turn_cap).toBeUndefined();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a mission without a turn cap passes no flag and records the native default in the plan", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const plan = await planCommandCodeRun(root, missionPath);
+    expect(plan.args).not.toContain("--max-turns");
+    expect(plan.native_default_turn_cap).toBe(100);
+    const planned = await dryRunCommandCode(root, missionPath);
+    expect(planned.native_default_turn_cap).toBe(100);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 test("guard policy artifacts and Command Code hook preserve existing settings", async () => {

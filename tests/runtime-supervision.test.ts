@@ -92,6 +92,32 @@ describe("runtime supervision", () => {
     expect(run.observe({ type: "agent_end", messages: [] }, 3)).toBeUndefined();
     expect(run.observe({ type: "turn_start" }, 4)).toMatch(/Turn limit/);
   });
+  test("a native max_turns terminal stop settles as turn_limit naming the cap and the turn count", () => {
+    const run = new RuntimeSupervision({ max_turns: 200 }, 0);
+    run.observe({ type: "model_request_start", model: "assigned" }, 1);
+    expect(run.observe({ type: "result", subtype: "error_max_turns", stopReason: "max_turns", num_turns: 100 }, 2))
+      .toBe("Native turn cap (max_turns) reached after 100 turns");
+    expect(run.stopCode).toBe("turn_limit");
+  });
+  test("a native turn cap is recognized without a num_turns counter by counting turn_end events", () => {
+    const run = new RuntimeSupervision({}, 0);
+    run.observe({ type: "turn_end" }, 1);
+    run.observe({ type: "turn_end" }, 2);
+    expect(run.observe({ type: "result", stopReason: "max_turns" }, 3))
+      .toBe("Native turn cap (max_turns) reached after 2 turns");
+    expect(run.stopCode).toBe("turn_limit");
+  });
+  test("an unrecognized native terminal stop settles as runtime_error with the reason copied", () => {
+    const run = new RuntimeSupervision({}, 0);
+    expect(run.observe({ type: "result", finalText: "partial", stopReason: "aborted", num_turns: 4 }, 1))
+      .toBe("Runtime reported failure (aborted)");
+    expect(run.stopCode).toBe("runtime_error");
+  });
+  test("a native time cap settles as timeout", () => {
+    const run = new RuntimeSupervision({}, 0);
+    run.observe({ type: "result", stopReason: "max_time" }, 1);
+    expect(run.stopCode).toBe("timeout");
+  });
   test("repeated failure accounting follows tool identity and structured outcome", () => {
     const run = new RuntimeSupervision({ max_repeated_failures: 2 }, 0);
     for (const id of ["one", "two"]) {

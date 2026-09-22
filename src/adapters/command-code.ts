@@ -138,12 +138,16 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   if (resumeSession) args.push("--resume", resumeSession);
   args.push("-m", config.model, "--verbose", "--skip-onboarding", "--no-auto-update", "--no-skills", "--output-format", "json");
   if (permissionMode === "guard" || permissionMode === "yolo") args.push("--yolo");
-  const effectiveMaxTurns = grace && deadline ? deadline.grace_turns + 1 : config.max_turns;
+  // Turn-cap precedence: explicit top-level max_turns wins, else limits.max_turns,
+  // else the native default applies and the plan records it.
+  const missionMaxTurns = config.max_turns ?? config.limits?.max_turns;
+  const effectiveMaxTurns = grace && deadline ? deadline.grace_turns + 1 : missionMaxTurns;
   if (effectiveMaxTurns) args.push("--max-turns", String(effectiveMaxTurns));
   return { command: cliCommand, args, prompt, mission, config, resume,
     grace, deadline,
     permission_mode: permissionMode,
     ...(guard ? { guard } : {}),
+    ...(effectiveMaxTurns ? {} : { native_default_turn_cap: 100 as const }),
     expectedRoute: { model: config.model }, reviewRequestSha256, worktree: false, session_id_passthrough: false, errors: [] as string[] };
 }
 
