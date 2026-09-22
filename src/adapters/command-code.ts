@@ -21,7 +21,8 @@ import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides
 import { generateRunId, appendRunsIndexEntry, writeLatestPointer, mirrorRuntimeResultToLatest } from "../harness/run-id.js";
 import { runRuntimeProcess, type RuntimeProcessInput, type RuntimeProcessOutput } from "../harness/runtime-process.js";
 import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
-import { nativeRuntimeCompleted, nativeRuntimeEvent, nativeRuntimeRoute, runtimeRouteMismatch, runtimeTerminalFailure } from "../harness/runtime-supervision.js";
+import { nativeRuntimeCompleted, nativeRuntimeEvent, nativeRuntimeRoute, nativeTerminalBudgetCap, nativeTerminalStopReason, runtimeRouteMismatch, runtimeTerminalFailure } from "../harness/runtime-supervision.js";
+import { settleNativeCap, reconcileNativeCapSettlement } from "../harness/runtime-settlement.js";
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { captureDiffWithUntracked, diffCaptureFailureRecord } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
@@ -143,8 +144,14 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   const missionMaxTurns = config.max_turns ?? config.limits?.max_turns;
   const effectiveMaxTurns = grace && deadline ? deadline.grace_turns + 1 : missionMaxTurns;
   if (effectiveMaxTurns) args.push("--max-turns", String(effectiveMaxTurns));
+  // The grace attempt runs under a native cap of `grace_turns + 1`, so its cap
+  // is the attempt's expected end. Supervision is told this with the grace
+  // marker; a plain attempt keeps the ordinary deadline window.
+  const onDeadline = deadline === undefined ? undefined
+    : grace ? { ...deadline, grace: true as const }
+      : deadline;
   return { command: cliCommand, args, prompt, mission, config, resume,
-    grace, deadline,
+    grace, deadline, onDeadline,
     permission_mode: permissionMode,
     ...(guard ? { guard } : {}),
     ...(effectiveMaxTurns ? {} : { native_default_turn_cap: 100 as const }),
@@ -246,7 +253,7 @@ export async function runCommandCode(root: string, missionPath: string, options:
       permissionMode: plan.permission_mode,
       guardLogPath: plan.guard && artifacts ? path.join(artifacts.runDir, "tool-guard.log") : undefined,
       timeoutMs: options.timeoutMs,
-      onDeadline: plan.grace ? undefined : plan.deadline,
+      onDeadline: plan.onDeadline,
       cancellationSignal: options.cancellationSignal,
       expectedRoute: plan.expectedRoute,
       reviewRequestSha256: plan.reviewRequestSha256,
@@ -262,6 +269,18 @@ export async function runCommandCode(root: string, missionPath: string, options:
   const nativeResult = terminal?.result && typeof terminal.result === "object" ? terminal.result as Record<string, unknown> : terminal;
   const text = typeof nativeResult?.finalText === "string" ? nativeResult.finalText : "";
   const finalMessage = extractRuntimeFinalMessageSentinel(text) ?? text;
+  // A native turn/time cap ends the attempt; the grace attempt's cap is its
+  // expected end and is settled by the deliverable it produced, never as a
+  // turn_limit failure. The cap can be named by any terminal event, not only
+  // the last one.
+  const terminalEvents = events.filter(e => e.type === "result" || e.type === "run_end");
+  const capEvent = terminalEvents.find(e => nativeTerminalBudgetCap(e) !== undefined);
+  const nativeCap = capEvent ? nativeTerminalBudgetCap(capEvent) : undefined;
+  const capTurns = typeof capEvent?.num_turns === "number" ? capEvent.num_turns : undefined;
+  const graceCapSettlement = plan.grace && nativeCap && capEvent
+    ? settleNativeCap({ cap: nativeCap, reason: nativeTerminalStopReason(capEvent) ?? (nativeCap === "turn" ? "max_turns" : "max_time"),
+      grace: true, deliverable: finalMessage.length > 0, turns: capTurns })
+    : undefined;
   const observedModels = new Set<string>();
   for (const event of events) {
     const model = nativeRuntimeRoute(event)?.model;
@@ -305,7 +324,11 @@ export async function runCommandCode(root: string, missionPath: string, options:
     ...(plan.config.pricing ? { pricing: plan.config.pricing } : {}),
     ...(usage.cost_usd !== undefined ? { cost_usd: usage.cost_usd, cost_basis: usage.cost_basis } : {}),
   };
-  const errors = [output.spawnError, ...events.filter(e => e.type === "result" || e.type === "run_end").map(runtimeTerminalFailure)].filter((e): e is string => Boolean(e));
+  // A native cap is the grace attempt's expected end, so its recorded failure
+  // is not an error; every other terminal failure still is.
+  const errors = [output.spawnError, ...terminalEvents
+    .map(event => graceCapSettlement && nativeTerminalBudgetCap(event) ? undefined : runtimeTerminalFailure(event))]
+    .filter((e): e is string => Boolean(e));
   if (events.some(event => runtimeRouteMismatch(nativeRuntimeRoute(event), plan.expectedRoute))) errors.push("Runtime reported a route outside the configured assignment");
   if (!reportedModel) errors.push("Runtime did not attest the configured route");
   if (!terminal) errors.push("Command Code did not emit a terminal result");
@@ -333,8 +356,12 @@ export async function runCommandCode(root: string, missionPath: string, options:
   } else {
     errors.push(...diff.errors);
   }
-  const status = output.cancelled ? "cancelled" : nativeCompleted ? "passed"
-    : output.exitCode !== 0 || output.timedOut || errors.length ? "failed" : finalMessage ? "passed" : "blocked";
+  // Completion requires a natural end: any supervision stop (except the grace
+  // attempt's expected cap) settles failed even with a final message.
+  const supervisionStopped = output.supervisionStopCode !== undefined && graceCapSettlement === undefined;
+  const status = output.cancelled ? "cancelled" : graceCapSettlement ? graceCapSettlement.status : nativeCompleted ? "passed"
+    : output.exitCode !== 0 || output.timedOut || errors.length || supervisionStopped ? "failed"
+    : finalMessage ? "passed" : "blocked";
   const incomplete = plan.grace || output.supervisionStopCode === "deadline";
   const incompleteReason = incomplete
     ? (output.supervisionStopCode === "deadline" ? "Deadline grace budget exhausted" : "Original runtime budget exhausted; deliverable captured during grace")
@@ -353,6 +380,10 @@ export async function runCommandCode(root: string, missionPath: string, options:
   await writeArtifactFile(artifacts.missionDir, artifacts.diffPath, diff.patch);
   await writeArtifactFile(artifacts.missionDir, artifacts.finalMessagePath, finalMessage);
   await writeArtifactFile(artifacts.missionDir, artifacts.runtimeResultPath, stringify(result));
+  // The grace attempt ended on its expected native cap, so its control receipt
+  // settles by the deliverable with stop code `deadline` rather than the
+  // launcher exit code.
+  if (graceCapSettlement) await reconcileNativeCapSettlement(canonical, plan.mission.id, runId, graceCapSettlement).catch(() => undefined);
   await writeArtifactFile(artifacts.missionDir, artifacts.runtimeSessionPath, stringify({ schema_version: "uh.runtime-session.v0",
     mission_id: plan.mission.id, runtime: "command-code", status: status === "passed" ? "succeeded" : "failed",
     command: plan.command, args: plan.args, started_at: startedAt, finished_at: finishedAt, exit_code: result.exit_code, ...facts }));

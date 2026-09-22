@@ -130,6 +130,43 @@ describe("runtime supervision", () => {
     run.observe({ type: "result", stopReason: "max_time" }, 1);
     expect(run.stopCode).toBe("timeout");
   });
+  test("a native turn cap settles turn_limit after a final assistant message and the sentinel", () => {
+    // A final message is not a natural end: the runtime's own cap still ends
+    // the attempt, so the run can never settle as completed.
+    for (const limits of [{ max_turns: 2 }, {}]) {
+      const run = new RuntimeSupervision(limits, 0);
+      let stopped: string | undefined;
+      for (const [index, value] of fixture("command-code-native-turn-cap.ndjson").entries()) {
+        stopped = run.observe(value, index + 1);
+      }
+      expect(stopped).toBe("Native turn cap (max_turns) reached after 2 turns");
+      expect(run.stopCode).toBe("turn_limit");
+      expect(run.terminal).toBe(true);
+      expect(nativeRuntimeCompleted({
+        nativeTerminal: run.terminal, nativeTerminalFailure: run.terminalFailure,
+        supervisionStopCode: run.stopCode, finalMessage: "completed just before the cap", errors: [],
+      })).toBe(false);
+    }
+  });
+  test("a native turn cap named only by an error subtype still settles turn_limit", () => {
+    const run = new RuntimeSupervision({}, 0);
+    expect(run.observe({ type: "result", subtype: "error_max_turns", num_turns: 3 }, 1))
+      .toBe("Native turn cap (max_turns) reached after 3 turns");
+    expect(run.stopCode).toBe("turn_limit");
+  });
+  test("a deadline grace attempt settles its expected native cap as deadline, never turn_limit", () => {
+    const run = new RuntimeSupervision({ max_turns: 3 }, 0, undefined, undefined, undefined, undefined,
+      { grace_turns: 2, grace_timeout_ms: 300_000, grace: true });
+    let stopped: string | undefined;
+    for (const [index, value] of fixture("command-code-native-turn-cap.ndjson").entries()) {
+      stopped = run.observe(value, index + 1);
+    }
+    expect(stopped).toBeUndefined();
+    expect(run.failure).toBeUndefined();
+    expect(run.stopCode).toBe("deadline");
+    expect(run.terminal).toBe(true);
+    expect(run.terminalFailure).toBeUndefined();
+  });
   test("repeated failure accounting follows tool identity and structured outcome", () => {
     const run = new RuntimeSupervision({ max_repeated_failures: 2 }, 0);
     for (const id of ["one", "two"]) {
