@@ -237,7 +237,8 @@ export async function planClaudeCodeRun(root: string, missionPath: string, optio
     args.push("--tools", "Bash,Read,Write", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
   }
   if (config.effort) args.push("--effort", config.effort);
-  const effectiveMaxTurns = grace && deadline ? deadline.grace_turns + 1 : config.max_turns;
+  // Turn-cap precedence mirrors command-code: top-level max_turns wins, else limits.max_turns.
+  const effectiveMaxTurns = grace && deadline ? deadline.grace_turns + 1 : (config.max_turns ?? config.limits?.max_turns);
   if (effectiveMaxTurns) args.push("--max-turns", String(effectiveMaxTurns));
   if (guard) args.push("--settings", claudeSettings(config.role, await snapshotGuardHook("extensions/tool-guard/claude-code-hook.js")));
   return {
