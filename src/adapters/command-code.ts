@@ -23,7 +23,7 @@ import { runRuntimeProcess, type RuntimeProcessInput, type RuntimeProcessOutput 
 import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
 import { nativeRuntimeCompleted, nativeRuntimeEvent, nativeRuntimeRoute, runtimeRouteMismatch, runtimeTerminalFailure } from "../harness/runtime-supervision.js";
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
-import { captureDiffWithUntracked } from "../harness/diff-capture.js";
+import { captureDiffWithUntracked, diffCaptureFailureRecord } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
 import { getMissionArtifactContext, persistPromptAndSession, appendMissionEvent, writeArtifactFile } from "./_artifact-context.js";
 
@@ -310,7 +310,10 @@ export async function runCommandCode(root: string, missionPath: string, options:
     const captured = await (options.collectDiff ?? captureDiffWithUntracked)(root);
     diff = { patch: captured.patch, errors: captured.errors ?? [] };
   } catch (error) { diff.errors.push(`Diff capture failed: ${(error as Error).message}`); }
-  errors.push(...diff.errors);
+  // Diff capture runs after the runtime settled, so its failure says nothing
+  // about the run itself: on a confirmed settlement it is recorded as
+  // `diff_capture` bookkeeping and must not change status or exit_code. Only
+  // a run that never settled may fail because of diff capture.
   const nativeCompleted = nativeRuntimeCompleted({
     nativeTerminal: output.nativeTerminal === true,
     nativeTerminalFailure: terminal ? runtimeTerminalFailure(terminal) : "Command Code did not emit a terminal result",
@@ -321,6 +324,11 @@ export async function runCommandCode(root: string, missionPath: string, options:
     spawnError: output.spawnError,
     errors,
   });
+  if (nativeCompleted) {
+    if (diff.errors.length > 0) errors.push(diffCaptureFailureRecord(diff.errors));
+  } else {
+    errors.push(...diff.errors);
+  }
   const status = output.cancelled ? "cancelled" : nativeCompleted ? "passed"
     : output.exitCode !== 0 || output.timedOut || errors.length ? "failed" : finalMessage ? "passed" : "blocked";
   const incomplete = plan.grace || output.supervisionStopCode === "deadline";

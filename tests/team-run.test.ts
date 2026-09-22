@@ -11,7 +11,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { promisify } from "node:util";
 import {
   planTeamRun,
@@ -939,6 +939,85 @@ describe("runTeamMission — fake gitOps", () => {
     expect(blocked.outputs).toEqual([{ path: "out/missing.txt", status: "failed", notes: expect.any(String) }]);
     expect(succeeded.status).toBe("succeeded");
     expect(succeeded.outputs).toEqual([{ path: "out/backend.txt", status: "passed" }]);
+  });
+
+  test("a failed worker's runtime result errors render as the failure reason next to Files touched", async () => {
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async () => { /* no-op */ } };
+    const diffError = "Diff capture failed: Command failed: git rev-parse --verify HEAD";
+    const result = await runTeamMission(
+      mission("team-mission", { workers: [{ role: "backend", adapter: "hermes" }] }),
+      ROOT,
+      {
+        runnerFor: _adapter => async (_runtime, _workerRoot, _missionPath, context): Promise<TeamRuntimeRunResult> => {
+          const missionId = context.missionId ?? "team-mission";
+          const runDir = join(context.artifactRoot, ".harness", "missions", missionId, "runs", context.runId);
+          await mkdir(runDir, { recursive: true });
+          await writeFile(join(runDir, "runtime-result.yaml"), stringifyYaml({
+            schema_version: "uh.runtime-result.v0",
+            mission_id: missionId,
+            runtime: "hermes",
+            status: "failed",
+            started_at: "2026-01-01T00:00:00.000Z",
+            finished_at: "2026-01-01T00:00:01.000Z",
+            exit_code: 1,
+            prompt_path: "prompt.md",
+            stdout_path: "runtime.stdout.log",
+            stderr_path: "runtime.stderr.log",
+            errors: [diffError],
+          }), "utf-8");
+          return { exitCode: 1, stdout: "", stderr: "", result: { status: "failed", errors: [diffError] } };
+        },
+        gitOps: fakeGitOps(repo, fs),
+        retainOnSuccess: true,
+      },
+    );
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("failed");
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain("- Files touched: 0");
+    expect(report).toContain(`- Failure reason: ${diffError}`);
+  });
+
+  test("a worker that settled passed with a non-zero exit is succeeded with a warning, not failed", async () => {
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async () => { /* no-op */ } };
+    const runner = makeRunner({
+      writes: {
+        backend: { files: { "src/a.ts": "a\n" }, sentinel: "ok", exitCode: 1 },
+      },
+    }, repo);
+    const verifier = async (): Promise<VerifyMissionLike> => ({
+      status: "passed",
+      path: "/fake/verification.yaml",
+      checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+      acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+    });
+
+    const result = await runTeamMission(
+      mission("team-mission", { workers: [{ role: "backend", adapter: "hermes" }] }),
+      ROOT,
+      { runnerFor: runner, gitOps: fakeGitOps(repo, fs), verifier, retainOnSuccess: true },
+    );
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("succeeded");
+    expect(backend.postRunWarning).toMatch(/exited with code 1/);
+    expect(backend.integrated).toBe(true);
+    expect(backend.filesTouched).toEqual(["src/a.ts"]);
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain("- Warning: Runtime exited with code 1 after a settled pass; treated as succeeded");
+    expect(report).toMatch(/Leader merge: clean/);
+    expect(result.status).toBe("passed");
   });
 });
 
