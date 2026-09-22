@@ -91,11 +91,6 @@ function readLockOwnerPid(contents: string): number | null {
   }
 }
 
-/**
- * Break a lock only when it is older than the stale threshold AND its recorded
- * owner is gone (or the lock carries no usable owner). Returns true when the
- * lock was removed so the caller can retry the exclusive create immediately.
- */
 async function readLockOwnerToken(contents: string): Promise<{ pid: number; nonce: string } | null> {
   try {
     const parsed = JSON.parse(contents) as { pid?: unknown; nonce?: unknown };
@@ -107,10 +102,11 @@ async function readLockOwnerToken(contents: string): Promise<{ pid: number; nonc
   }
 }
 
-function makeOwnerToken(): string {
-  return `${process.pid}:${randomUUID()}`;
-}
-
+/**
+ * Break a lock only when it is older than the stale threshold AND its recorded
+ * owner is gone (or the lock carries no usable owner). Returns true when the
+ * lock was removed so the caller can retry the exclusive create immediately.
+ */
 async function breakStaleIndexLock(lockPath: string): Promise<boolean> {
   let ageMs: number;
   try {
@@ -120,11 +116,12 @@ async function breakStaleIndexLock(lockPath: string): Promise<boolean> {
   }
   if (ageMs < INDEX_LOCK_STALE_MS) return false;
 
-  let ownerPid: number | null = null;
+  let ownerPid: number | null;
   try {
-    const token = await readLockOwnerToken(await readFile(lockPath, "utf-8"));
-    ownerPid = token?.pid ?? null;
-    if (token && isProcessAlive(token.pid)) return false;
+    const contents = await readFile(lockPath, "utf-8");
+    // A lock written by an older build carries no nonce; fall back to its pid so
+    // a still-live owner is honored instead of being broken out from under.
+    ownerPid = (await readLockOwnerToken(contents))?.pid ?? readLockOwnerPid(contents);
   } catch {
     return false; // unreadable but not provably abandoned; keep waiting
   }

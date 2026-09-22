@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { join, normalize } from "node:path";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { parse, stringify } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { getSandboxBackend, listSandboxBackends, runOpenSandboxCommand } from "../src/harness/sandbox-backends.js";
@@ -562,56 +563,89 @@ describe("sandbox index concurrency and repair", () => {
     expect((await readFile(indexPath())).equals(before)).toBe(true);
   });
 
-  test("release after a takeover leaves the new owner's lock in place", async () => {
+  test("a mutation that loses its lock to a takeover does not release the new owner's lock", async () => {
     const lockPath = `${indexPath()}.lock`;
-    // Simulate Process A acquiring the lock.
-    await writeFile(
-      lockPath,
-      JSON.stringify({ pid: process.pid, nonce: "nonce-a", acquired_at: new Date().toISOString() }),
-      "utf-8",
-    );
-    // Simulate a takeover: Process B writes its own lock (same pid, different nonce, fresh mtime).
-    await writeFile(
-      lockPath,
-      JSON.stringify({ pid: process.pid, nonce: "nonce-b", acquired_at: new Date().toISOString() }),
-      "utf-8",
-    );
-    await utimes(lockPath, new Date(), new Date());
-
-    // Now release as if we were Process A (nonce-a). The lock should NOT be removed.
-    const releaseA = async () => {
-      const contents = await readFile(lockPath, "utf-8");
-      const parsed = JSON.parse(contents) as { pid?: unknown; nonce?: unknown };
-      if (parsed.pid === process.pid && parsed.nonce === "nonce-a") {
-        await rm(lockPath, { force: true });
-      }
+    // While the mutation holds the lock, a second process takes over by
+    // replacing the lock file with its own token (foreign pid and nonce).
+    const foreign = {
+      pid: process.pid + 1,
+      nonce: "foreign-nonce",
+      acquired_at: new Date().toISOString(),
     };
-    await releaseA();
 
-    // Process B's lock is still there.
+    const result = await withSandboxesIndexMutation(TEST_ROOT, async (index) => {
+      const held = JSON.parse(await readFile(lockPath, "utf-8")) as { pid: number; nonce: string };
+      expect(held.pid).toBe(process.pid);
+
+      await writeFile(lockPath, JSON.stringify(foreign), "utf-8");
+      await utimes(lockPath, new Date(), new Date());
+
+      index.sandboxes.push({
+        id: "kept",
+        mission_id: "demo",
+        backend: "git-worktree",
+        status: "created",
+      });
+      return "mutation-completed";
+    });
+
+    // The mutation still completed and its write landed...
+    expect(result).toBe("mutation-completed");
+    expect((await listSandboxes(TEST_ROOT)).map((entry) => entry.id)).toContain("kept");
+
+    // ...and the release saw a foreign owner, so the lock survived untouched.
     const after = parse(await readFile(lockPath, "utf-8")) as { pid: number; nonce: string };
-    expect(after.pid).toBe(process.pid);
-    expect(after.nonce).toBe("nonce-b");
+    expect(after).toMatchObject(foreign);
   });
 
-  test("normal release removes the lock", async () => {
+  test("a normal mutation releases its own lock", async () => {
     const lockPath = `${indexPath()}.lock`;
-    const nonce = "nonce-normal";
-    await writeFile(
-      lockPath,
-      JSON.stringify({ pid: process.pid, nonce, acquired_at: new Date().toISOString() }),
-      "utf-8",
-    );
 
-    const release = async () => {
-      const contents = await readFile(lockPath, "utf-8");
-      const parsed = JSON.parse(contents) as { pid?: unknown; nonce?: unknown };
-      if (parsed.pid === process.pid && parsed.nonce === nonce) {
-        await rm(lockPath, { force: true });
-      }
-    };
-    await release();
+    const result = await withSandboxesIndexMutation(TEST_ROOT, () => "done");
+    expect(result).toBe("done");
 
+    await expect(stat(lockPath)).rejects.toThrow();
+  });
+
+  test("a stale lock written without a nonce is not broken while its pid is alive", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    // An older build's lock carries only a pid. It is stale by age, but that pid
+    // (ours, hence alive) must be honored rather than broken out from under it.
+    await writeFile(lockPath, JSON.stringify({ pid: process.pid }), "utf-8");
+    const ancient = new Date(Date.now() - 120_000);
+    await utimes(lockPath, ancient, ancient);
+
+    const before = listSandboxIndexLockBreaks().length;
+    const mutation = withSandboxesIndexMutation(TEST_ROOT, () => "ok");
+    const raced = await Promise.race([
+      mutation.then(() => "completed" as const),
+      delay(750).then(() => "waited" as const),
+    ]);
+    expect(raced).toBe("waited");
+
+    // Honored: still present, still ours, and no break was recorded.
+    expect(JSON.parse(await readFile(lockPath, "utf-8"))).toMatchObject({ pid: process.pid });
+    expect(listSandboxIndexLockBreaks().length).toBe(before);
+
+    // Release the lock ourselves so the pending mutation can finish.
+    await rm(lockPath, { force: true });
+    await expect(mutation).resolves.toBe("ok");
+  });
+
+  test("a stale lock written without a nonce whose owner is gone is broken and records the pid", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    const deadPid = 2147483647; // an unallocatable pid: the OS probe returns ESRCH
+    await writeFile(lockPath, JSON.stringify({ pid: deadPid }), "utf-8");
+    const ancient = new Date(Date.now() - 120_000);
+    await utimes(lockPath, ancient, ancient);
+
+    const before = listSandboxIndexLockBreaks().length;
+    const record = await createSandbox(TEST_ROOT, { id: "after-nonce-less-stale", missionId: "demo" });
+    expect(record.id).toBe("after-nonce-less-stale");
+
+    const breaks = listSandboxIndexLockBreaks();
+    expect(breaks.length).toBeGreaterThan(before);
+    expect(breaks[breaks.length - 1]).toMatchObject({ lock_file: lockPath, owner_pid: deadPid });
     await expect(stat(lockPath)).rejects.toThrow();
   });
 });
