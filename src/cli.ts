@@ -54,7 +54,7 @@ import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js"
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 import { installTelemetryHooks } from "./harness/telemetry.js";
 import { projectDeliveryObservatory } from "./harness/delivery-observatory/project.js";
-import { acceptanceStatus, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
+import { acceptanceStatus, rebindAcceptanceEvidence, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
 
 import {
   createSandbox,
@@ -688,9 +688,30 @@ acceptanceCmd
     try {
       const summary = await acceptanceStatus(resolveRoot(opts.root));
       if (opts.json) console.log(JSON.stringify(summary, null, 2));
-      else console.log(`Acceptance evidence: proven ${summary.counts.proven}, stale ${summary.counts.stale}, failed ${summary.counts.failed}, unproven ${summary.counts.unproven}, fixture_only ${summary.counts.fixture_only}`);
+      else {
+        console.log(`Acceptance evidence: proven ${summary.counts.proven}, stale ${summary.counts.stale}, failed ${summary.counts.failed}, unproven ${summary.counts.unproven}, fixture_only ${summary.counts.fixture_only}`);
+        for (const [capability, reasons] of Object.entries(summary.reasons)) {
+          console.log(`  stale ${capability}: ${reasons.join(", ")}`);
+        }
+      }
     } catch (error) {
       console.error(`[FAIL] acceptance status: ${(error as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+acceptanceCmd
+  .command("rebind")
+  .description("Revalidate legacy evidence without rerunning models by stamping an input digest at its commit")
+  .option("--root <path>", "Harness repository root (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    try {
+      const outcomes = await rebindAcceptanceEvidence(resolveRoot(opts.root));
+      const summary = { rebound: 0, changed: 0, skipped: 0 } as Record<"rebound" | "changed" | "skipped", number>;
+      for (const outcome of outcomes) summary[outcome.outcome] += 1;
+      console.log(`Acceptance rebind: ${summary.rebound} rebound, ${summary.changed} changed, ${summary.skipped} skipped`);
+    } catch (error) {
+      console.error(`[FAIL] acceptance rebind: ${(error as Error).message}`);
       process.exit(1);
     }
   });

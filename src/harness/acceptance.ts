@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cp, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -116,17 +117,210 @@ export function compareAcceptanceFacts(expected: AcceptanceExpected, observed: A
 }
 
 
-export function classifyAcceptance(
-  evidence: Pick<AcceptanceEvidence, "outcome" | "checked_at"> & Partial<Pick<AcceptanceEvidence, "harness_commit">> | null,
+export type AcceptanceInputIdentity = { runtime: string; model: string; runtimeVersion?: string };
+export type AcceptanceInputDigest = { digest: string; resolved: number; files: string[] };
+export type AcceptanceClassification = { state: AcceptanceState; reasons: string[] };
+export type AcceptanceClassifyContext = {
+  /** Repository root whose tracked files are the evidence's inputs. */
+  root?: string;
+  /** Glob patterns naming the files the probe asserts (see `acceptanceInputs`). */
+  inputs?: string[];
+  /** Runtime version to fold into the digest when it is known. */
+  runtimeVersion?: string;
+};
+
+const DEFAULT_INPUT_PATTERNS: readonly string[] = ["acceptance/support/**", "src/**"];
+
+/**
+ * The files whose behaviour an entry's probe asserts. `inputs` when declared,
+ * else a conservative default: the entry's own mission directory, the shared
+ * acceptance support files, and every harness source file.
+ */
+export function defaultAcceptanceInputs(entry: { mission: string }): string[] {
+  const missionDirectory = entry.mission.split("/").slice(0, -1).join("/");
+  return [`acceptance/${missionDirectory}/**`, ...DEFAULT_INPUT_PATTERNS];
+}
+
+export function acceptanceInputs(entry: { mission: string; inputs?: string[] }): string[] {
+  return entry.inputs && entry.inputs.length > 0 ? entry.inputs : defaultAcceptanceInputs(entry);
+}
+
+function inputPatternToRegExp(pattern: string): RegExp {
+  let regex = "";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "*") {
+      if (pattern[index + 1] === "*") {
+        index += 1;
+        if (pattern[index + 1] === "/") {
+          index += 1;
+          regex += "(?:.*/)?";
+        } else {
+          regex += ".*";
+        }
+      } else {
+        regex += "[^/]*";
+      }
+    } else if (char === "?") {
+      regex += "[^/]";
+    } else {
+      regex += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${regex}$`);
+}
+
+function matchesAcceptanceInput(relativePath: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => inputPatternToRegExp(pattern).test(relativePath));
+}
+
+function sha256Hex(content: Buffer | string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * Input hashing normalizes CRLF to LF so a commit blob (stored LF) and a
+ * checked-out working-tree file hash identically when their content is
+ * semantically unchanged — otherwise every Windows checkout would look stale.
+ */
+function normalizeInputContent(content: Buffer): string {
+  return content.toString("utf8").replace(/\r\n/g, "\n");
+}
+
+async function listAcceptanceInputFiles(root: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("git", ["ls-files", "-z"], { cwd: root, maxBuffer: 32 * 1024 * 1024 });
+    return stdout.split("\0").filter((entry) => entry !== "").map((entry) => entry.split(path.sep).join("/"));
+  } catch {
+    return listWalkedInputFiles(root);
+  }
+}
+
+async function listWalkedInputFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (!directory) continue;
+    let children;
+    try {
+      children = await readdir(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const child of children) {
+      if (child.name === ".git" || child.name === "node_modules") continue;
+      const childPath = path.join(directory, child.name);
+      if (child.isDirectory()) pending.push(childPath);
+      else if (child.isFile()) files.push(path.relative(root, childPath).split(path.sep).join("/"));
+    }
+  }
+  return files;
+}
+
+async function listInputFilesAtCommit(root: string, commit: string): Promise<string[]> {
+  const { stdout } = await execFileAsync("git", ["ls-tree", "-r", "--name-only", "-z", commit], { cwd: root, maxBuffer: 32 * 1024 * 1024 });
+  return stdout.split("\0").filter((entry) => entry !== "").map((entry) => entry.split(path.sep).join("/"));
+}
+
+async function readInputContent(root: string, relativePath: string, commit?: string): Promise<Buffer | undefined> {
+  try {
+    if (commit) {
+      const result = await execFileAsync("git", ["show", `${commit}:${relativePath}`], { cwd: root, maxBuffer: 32 * 1024 * 1024, encoding: "buffer" });
+      return result.stdout as unknown as Buffer;
+    }
+    return await readFile(path.join(root, relativePath));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * sha256 over the sorted (relative path, content sha256) list of every tracked
+ * file matching `inputs`, plus the runtime id, runtime version when known, and
+ * the model. `commit` reads file contents from that git revision (via
+ * `git show`); otherwise the working tree is read.
+ */
+export async function computeAcceptanceInputDigest(
+  root: string,
+  inputs: string[],
+  identity: AcceptanceInputIdentity,
+  options: { commit?: string } = {},
+): Promise<AcceptanceInputDigest> {
+  const allFiles = options.commit
+    ? await listInputFilesAtCommit(root, options.commit)
+    : await listAcceptanceInputFiles(root);
+  const matched = allFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)).sort();
+  const lines = [`runtime=${identity.runtime}`, `runtime_version=${identity.runtimeVersion ?? UNKNOWN}`, `model=${identity.model}`];
+  const files: string[] = [];
+  for (const relativePath of matched) {
+    const content = await readInputContent(root, relativePath, options.commit);
+    if (content === undefined) continue;
+    lines.push(`${relativePath}\t${sha256Hex(normalizeInputContent(content))}`);
+    files.push(relativePath);
+  }
+  return { digest: sha256Hex(lines.join("\n")), resolved: files.length, files };
+}
+
+/**
+ * Input files whose content differs between a base commit and the current
+ * working tree, restricted to those matching the entry's inputs. Returns an
+ * empty list when the base commit cannot be resolved.
+ */
+export async function changedAcceptanceInputs(root: string, inputs: string[], baseCommit?: string): Promise<string[]> {
+  if (!baseCommit || baseCommit === UNKNOWN) return [];
+  let baseFiles: string[];
+  try {
+    baseFiles = await listInputFilesAtCommit(root, baseCommit);
+  } catch {
+    return [];
+  }
+  const currentFiles = await listAcceptanceInputFiles(root);
+  const relevant = new Set([
+    ...baseFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)),
+    ...currentFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)),
+  ]);
+  const changed: string[] = [];
+  for (const relativePath of [...relevant].sort()) {
+    const before = await readInputContent(root, relativePath, baseCommit);
+    const after = await readInputContent(root, relativePath);
+    const beforeHash = before === undefined ? null : sha256Hex(normalizeInputContent(before));
+    const afterHash = after === undefined ? null : sha256Hex(normalizeInputContent(after));
+    if (beforeHash !== afterHash) changed.push(relativePath);
+  }
+  return changed;
+}
+
+export async function classifyAcceptance(
+  evidence: Pick<AcceptanceEvidence, "outcome" | "checked_at"> & Partial<Pick<AcceptanceEvidence, "harness_commit" | "input_digest" | "runtime" | "model">> | null,
   freshnessDays: number,
   now = new Date(),
   currentCommit?: string,
-): AcceptanceState {
-  if (!evidence) return "unproven";
-  if (evidence.outcome === "failed") return "failed";
-  if (currentCommit && evidence.harness_commit && evidence.harness_commit !== currentCommit) return "stale";
+  context: AcceptanceClassifyContext = {},
+): Promise<AcceptanceClassification> {
+  if (!evidence) return { state: "unproven", reasons: [] };
+  if (evidence.outcome === "failed") return { state: "failed", reasons: [] };
   const age = now.getTime() - Date.parse(evidence.checked_at);
-  return Number.isFinite(age) && age <= freshnessDays * 86_400_000 ? "proven" : "stale";
+  const fresh = Number.isFinite(age) && age <= freshnessDays * 86_400_000;
+  if (evidence.input_digest) {
+    if (context.root !== undefined) {
+      const identity: AcceptanceInputIdentity = {
+        runtime: evidence.runtime ?? UNKNOWN,
+        model: evidence.model ?? UNKNOWN,
+        ...(context.runtimeVersion ? { runtimeVersion: context.runtimeVersion } : {}),
+      };
+      const current = await computeAcceptanceInputDigest(context.root, context.inputs ?? [], identity);
+      if (current.digest === evidence.input_digest) {
+        return fresh ? { state: "proven", reasons: [] } : { state: "stale", reasons: ["freshness window exceeded"] };
+      }
+      const changed = await changedAcceptanceInputs(context.root, context.inputs ?? [], evidence.harness_commit);
+      return { state: "stale", reasons: changed.length > 0 ? changed.slice(0, 5) : ["input digest changed"] };
+    }
+  }
+  if (currentCommit && evidence.harness_commit && evidence.harness_commit !== currentCommit) {
+    return { state: "stale", reasons: [`harness commit ${evidence.harness_commit} != ${currentCommit}`] };
+  }
+  return fresh ? { state: "proven", reasons: [] } : { state: "stale", reasons: ["freshness window exceeded"] };
 }
 
 async function latestEvidence(evidenceRoot: string, capability: string): Promise<AcceptanceEvidenceRecord | null> {
@@ -138,7 +332,7 @@ async function latestEvidence(evidenceRoot: string, capability: string): Promise
   }
 }
 
-export async function acceptanceStatus(root: string, now = new Date()): Promise<{ counts: Record<AcceptanceState, number>; failed: string[]; unproven: string[]; states: Record<string, AcceptanceState> }> {
+export async function acceptanceStatus(root: string, now = new Date()): Promise<{ counts: Record<AcceptanceState, number>; failed: string[]; unproven: string[]; states: Record<string, AcceptanceState>; reasons: Record<string, string[]> }> {
   const registry = await loadAcceptanceRegistry(root);
   const currentCommit = await gitCommit(root);
   const evidenceRoot = path.join(root, "acceptance", "evidence");
@@ -146,15 +340,19 @@ export async function acceptanceStatus(root: string, now = new Date()): Promise<
   const failed: string[] = [];
   const unproven: string[] = [];
   const states: Record<string, AcceptanceState> = {};
+  const reasons: Record<string, string[]> = {};
   for (const [capability, entry] of Object.entries(registry.entries)) {
     const evidence = await latestEvidence(evidenceRoot, capability);
-    const state = entry.real_mission === "not_applicable" && !evidence ? "fixture_only" : classifyAcceptance(evidence, entry.freshness_days, now, currentCommit);
-    states[capability] = state;
-    counts[state] += 1;
-    if (state === "failed") failed.push(capability);
-    if (state === "unproven") unproven.push(capability);
+    const classified = entry.real_mission === "not_applicable" && !evidence
+      ? { state: "fixture_only" as AcceptanceState, reasons: [] as string[] }
+      : await classifyAcceptance(evidence, entry.freshness_days, now, currentCommit, { root, inputs: acceptanceInputs(entry) });
+    states[capability] = classified.state;
+    counts[classified.state] += 1;
+    if (classified.reasons.length > 0) reasons[capability] = classified.reasons;
+    if (classified.state === "failed") failed.push(capability);
+    if (classified.state === "unproven") unproven.push(capability);
   }
-  return { counts, failed, unproven, states };
+  return { counts, failed, unproven, states, reasons };
 }
 
 export async function renderAcceptanceReport(root: string, now = new Date(), options: { evidenceRoot?: string } = {}): Promise<string> {
@@ -165,7 +363,9 @@ export async function renderAcceptanceReport(root: string, now = new Date(), opt
   const rows = ["<!-- Generated by `uh acceptance report`; do not edit by hand. -->", "# Acceptance evidence", "", "| Capability | Inventory ID | Title | State | Last checked | Runtime | Model | Cost (USD) | Evidence |", "|---|---|---|---|---|---|---|---:|---|"];
   for (const [capability, entry] of Object.entries(registry.entries)) {
     const evidence = await latestEvidence(evidenceRoot, capability);
-    const state = entry.real_mission === "not_applicable" && !evidence ? "fixture_only" : classifyAcceptance(evidence, entry.freshness_days, now, currentCommit);
+    const state = entry.real_mission === "not_applicable" && !evidence
+      ? "fixture_only"
+      : (await classifyAcceptance(evidence, entry.freshness_days, now, currentCommit, { root, inputs: acceptanceInputs(entry) })).state;
     const evidencePath = path.relative(reportDirectory, path.join(evidenceRoot, capability, "latest.json")).split(path.sep).join("/");
     const evidenceCell = evidence ? `[latest](${evidencePath})` : "—";
     rows.push(`| ${capability} | ${entry.capability ?? capability} | ${entry.title} | ${state} | ${evidence?.checked_at ?? "—"} | ${evidence?.runtime ?? entry.runtime} | ${evidence?.model ?? entry.model ?? "—"} | ${evidence?.cost_usd ?? "—"} | ${evidenceCell} |`);
@@ -485,6 +685,8 @@ async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: 
   const workspace = path.resolve(options.workspace ?? sourceRoot);
   const runRoot = path.join(workspace, capability, timestamp);
   const missionId = acceptanceMissionId(capability);
+  const model = entry.model ?? options.model ?? UNKNOWN;
+  const inputDigest = await computeAcceptanceInputDigest(sourceRoot, acceptanceInputs(entry), { runtime, model });
   const evidence: AcceptanceEvidenceRecord = {
     schema_version: "uh.acceptance-evidence.v0",
     capability,
@@ -493,7 +695,7 @@ async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: 
     harness_commit: await gitCommit(sourceRoot),
     runtime,
     provider: UNKNOWN,
-    model: entry.model ?? options.model ?? UNKNOWN,
+    model,
     cost_usd: "unknown",
     workspace: runRoot,
     run_ids: [],
@@ -504,6 +706,8 @@ async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: 
     mismatches: [{ field: "wrapper", expected: `${capability} mechanism for runtime ${runtime}`, observed: "wrapper_unavailable" }],
     artifact_root: path.join(runRoot, ".harness", "missions", missionId),
     cli: { exit_code: null, stderr_tail: "", stdout_tail: "" },
+    input_digest: inputDigest.digest,
+    inputs_resolved: inputDigest.resolved,
   };
   const checked = AcceptanceEvidenceRecordSchema.parse(evidence);
   const evidenceDir = path.join(sourceRoot, "acceptance", "evidence", capability);
@@ -617,6 +821,7 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   if (entry.support_shim) facts.observed.shim_on_path = true;
   if (result.code !== 0 && facts.observed.status === "passed") facts.observed.status = "failed";
   const mismatches = compareAcceptanceFacts(entry.expected, facts.observed);
+  const inputDigest = await computeAcceptanceInputDigest(sourceRoot, acceptanceInputs(entry), { runtime, model: facts.model });
   const evidence: AcceptanceEvidenceRecord = {
     schema_version: "uh.acceptance-evidence.v0",
     capability,
@@ -636,6 +841,8 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
     mismatches,
     artifact_root: path.join(runRoot, ".harness", "missions", missionId),
     cli: { exit_code: result.code, stderr_tail: result.stderr.slice(-2048), stdout_tail: result.stdout.slice(-2048) },
+    input_digest: inputDigest.digest,
+    inputs_resolved: inputDigest.resolved,
   };
   const checked = AcceptanceEvidenceRecordSchema.parse(evidence);
   const evidenceDir = path.join(sourceRoot, "acceptance", "evidence", capability);
@@ -699,4 +906,91 @@ export async function writeAcceptanceReport(root: string): Promise<string> {
   const report = await renderAcceptanceReport(root);
   await writeFile(output, report, "utf8");
   return output;
+}
+
+export type AcceptanceRebindOutcome = {
+  capability: string;
+  evidence_path: string;
+  outcome: "rebound" | "changed" | "skipped";
+  changed?: string[];
+  reason?: string;
+};
+
+async function listEvidenceFiles(directory: string): Promise<string[]> {
+  try {
+    return (await readdir(directory)).filter((file) => file.endsWith(".json")).sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Revalidate legacy evidence (records written before `input_digest` existed)
+ * without rerunning any model: when the entry's inputs hash identically at the
+ * record's `harness_commit` and at HEAD, stamp the record with the input digest
+ * and the commit it was rebound from. Records whose inputs changed are reported
+ * as `changed`; unresolvable records are `skipped`.
+ */
+export async function rebindAcceptanceEvidence(root: string): Promise<AcceptanceRebindOutcome[]> {
+  const registry = await loadAcceptanceRegistry(root);
+  const evidenceRoot = path.join(root, "acceptance", "evidence");
+  const outcomes: AcceptanceRebindOutcome[] = [];
+  for (const [capability, entry] of Object.entries(registry.entries)) {
+    const directory = path.join(evidenceRoot, capability);
+    for (const file of await listEvidenceFiles(directory)) {
+      const evidencePath = path.join(directory, file);
+      let record: AcceptanceEvidenceRecord;
+      try {
+        record = AcceptanceEvidenceRecordSchema.parse(JSON.parse(await readFile(evidencePath, "utf8")));
+      } catch (error) {
+        const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "skipped", reason: `unreadable evidence (${(error as Error).message})` };
+        outcomes.push(outcome);
+        console.log(`skipped ${capability} ${file} — ${outcome.reason}`);
+        continue;
+      }
+      if (record.input_digest) continue;
+      const baseCommit = record.harness_commit;
+      if (!baseCommit || baseCommit === UNKNOWN) {
+        const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "skipped", reason: "harness_commit is unknown" };
+        outcomes.push(outcome);
+        console.log(`skipped ${capability} ${file} — ${outcome.reason}`);
+        continue;
+      }
+      const inputs = acceptanceInputs(entry);
+      const identity: AcceptanceInputIdentity = { runtime: record.runtime, model: record.model };
+      let atCommit: AcceptanceInputDigest;
+      let atHead: AcceptanceInputDigest;
+      try {
+        atCommit = await computeAcceptanceInputDigest(root, inputs, identity, { commit: baseCommit });
+        atHead = await computeAcceptanceInputDigest(root, inputs, identity, { commit: "HEAD" });
+      } catch (error) {
+        const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "skipped", reason: `cannot resolve commit ${baseCommit} (${(error as Error).message})` };
+        outcomes.push(outcome);
+        console.log(`skipped ${capability} ${file} — ${outcome.reason}`);
+        continue;
+      }
+      if (atCommit.digest !== atHead.digest) {
+        const changed = await changedAcceptanceInputs(root, inputs, baseCommit);
+        const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "changed", changed };
+        outcomes.push(outcome);
+        console.log(`changed ${capability} ${file} — ${changed.length > 0 ? changed.join(", ") : "input files differ"}`);
+        continue;
+      }
+      const rebound = AcceptanceEvidenceRecordSchema.parse({
+        ...record,
+        input_digest: atHead.digest,
+        inputs_resolved: atHead.resolved,
+        rebound_from_commit: baseCommit,
+      });
+      await writeFile(evidencePath, JSON.stringify(rebound, null, 2) + "\n", "utf8");
+      const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "rebound", reason: baseCommit };
+      outcomes.push(outcome);
+      console.log(`rebound ${capability} ${file} — ${atHead.resolved} input(s) unchanged since ${commitLabel(baseCommit)}`);
+    }
+  }
+  return outcomes;
+}
+
+function commitLabel(commit: string): string {
+  return commit.length > 12 ? commit.slice(0, 12) : commit;
 }
