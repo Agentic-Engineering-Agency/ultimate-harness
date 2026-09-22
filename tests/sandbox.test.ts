@@ -24,6 +24,7 @@ import {
   listSandboxes,
   listSandboxIndexLockBreaks,
   repairSandboxes,
+  withSandboxesIndexMutation,
 } from "../src/harness/sandbox.js";
 
 let TEST_ROOT: string;
@@ -480,7 +481,7 @@ describe("sandbox index concurrency and repair", () => {
     // A pid the OS will not hand out (probe returns ESRCH), so it is provably gone.
     await writeFile(
       lockPath,
-      JSON.stringify({ pid: 2147483647, acquired_at: new Date(0).toISOString() }),
+      JSON.stringify({ pid: 2147483647, nonce: "stale-nonce", acquired_at: new Date(0).toISOString() }),
       "utf-8",
     );
     const ancient = new Date(Date.now() - 120_000);
@@ -559,6 +560,59 @@ describe("sandbox index concurrency and repair", () => {
 
     await expect(repairSandboxes(TEST_ROOT)).rejects.toThrow(/Sandboxes index is invalid/);
     expect((await readFile(indexPath())).equals(before)).toBe(true);
+  });
+
+  test("release after a takeover leaves the new owner's lock in place", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    // Simulate Process A acquiring the lock.
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: process.pid, nonce: "nonce-a", acquired_at: new Date().toISOString() }),
+      "utf-8",
+    );
+    // Simulate a takeover: Process B writes its own lock (same pid, different nonce, fresh mtime).
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: process.pid, nonce: "nonce-b", acquired_at: new Date().toISOString() }),
+      "utf-8",
+    );
+    await utimes(lockPath, new Date(), new Date());
+
+    // Now release as if we were Process A (nonce-a). The lock should NOT be removed.
+    const releaseA = async () => {
+      const contents = await readFile(lockPath, "utf-8");
+      const parsed = JSON.parse(contents) as { pid?: unknown; nonce?: unknown };
+      if (parsed.pid === process.pid && parsed.nonce === "nonce-a") {
+        await rm(lockPath, { force: true });
+      }
+    };
+    await releaseA();
+
+    // Process B's lock is still there.
+    const after = parse(await readFile(lockPath, "utf-8")) as { pid: number; nonce: string };
+    expect(after.pid).toBe(process.pid);
+    expect(after.nonce).toBe("nonce-b");
+  });
+
+  test("normal release removes the lock", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    const nonce = "nonce-normal";
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: process.pid, nonce, acquired_at: new Date().toISOString() }),
+      "utf-8",
+    );
+
+    const release = async () => {
+      const contents = await readFile(lockPath, "utf-8");
+      const parsed = JSON.parse(contents) as { pid?: unknown; nonce?: unknown };
+      if (parsed.pid === process.pid && parsed.nonce === nonce) {
+        await rm(lockPath, { force: true });
+      }
+    };
+    await release();
+
+    await expect(stat(lockPath)).rejects.toThrow();
   });
 });
 
