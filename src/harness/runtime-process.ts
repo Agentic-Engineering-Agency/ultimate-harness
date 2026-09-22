@@ -101,6 +101,19 @@ async function prepareWindowsGuardian(jobDirectory: string, limits: RuntimeLimit
   }
 }
 
+/**
+ * Injectable clock and poll scheduler so tests can advance supervision time
+ * deterministically instead of waiting on wall time for stall, startup or
+ * timeout budgets to fire. Defaults are the real clock and interval.
+ */
+export interface RuntimeProcessClock {
+  /** Supervision clock: budget origin, progress stamps and deadline checks. */
+  now?: () => number;
+  /** Schedules the 100ms supervision poll; inject to fire checks manually. */
+  setInterval?: (callback: () => void, intervalMs: number) => unknown;
+  clearInterval?: (handle: unknown) => void;
+}
+
 export interface RuntimeProcessInput {
   command: string;
   args: string[];
@@ -118,6 +131,7 @@ export interface RuntimeProcessInput {
   cancellationSignal?: AbortSignal;
   artifacts?: { directory: string; missionId: string; runId: string; runtime: string };
   persistArtifact?: (file: string, content: string) => Promise<void>;
+  clock?: RuntimeProcessClock;
 }
 export interface RuntimeProcessOutput {
   stdout: string;
@@ -148,7 +162,10 @@ function terminate(child: ChildProcess): void {
 export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<RuntimeProcessOutput> {
   const limits = RuntimeLimitsSchema.parse({ ...input.limits,
     ...(input.timeoutMs === undefined ? {} : { timeout_ms: input.timeoutMs }) });
-  const started = Date.now();
+  const now = input.clock?.now ?? Date.now;
+  const schedulePoll = input.clock?.setInterval ?? ((callback: () => void, intervalMs: number) => setInterval(callback, intervalMs));
+  const clearPoll = input.clock?.clearInterval ?? ((handle: unknown) => clearInterval(handle as NodeJS.Timeout));
+  const started = now();
   const expectedRoute = input.expectedRoute === undefined ? undefined : RuntimeRouteSchema.parse(input.expectedRoute);
   const supervisor = new RuntimeSupervision(limits, started, expectedRoute, input.cwd, input.permissionMode, input.guardLogPath, input.onDeadline);
   const scope = input.artifacts;
@@ -172,7 +189,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
     await (input.persistArtifact ?? writeAtomicArtifact)(controlPath, JSON.stringify(RuntimeControlSchema.parse({
       schema_version: "uh.runtime-control.v0", mission_id: scope.missionId, run_id: scope.runId,
       runtime: scope.runtime, controller_pid: process.pid, started_at: new Date(started).toISOString(),
-      heartbeat_at: new Date().toISOString(), status, permission_mode: input.permissionMode,
+      heartbeat_at: new Date(now()).toISOString(), status, permission_mode: input.permissionMode,
       guard_armed: supervisor.guardArmed, stop_reason: stopReason,
       stop_code: stopCode ?? supervisor.stopCode ?? (cancelled ? "cancelled" : supervisor.terminalFailure ? "runtime_error" : undefined),
       ready_at: supervisor.readyAt === undefined ? undefined : new Date(supervisor.readyAt).toISOString(),
@@ -221,7 +238,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       guardianInfo = prepared.info;
       await persist("running");
     } catch (error) {
-      stopReason = supervisor.check(Date.now()) ?? `Windows guardian compilation failed: ${String(error)}`;
+      stopReason = supervisor.check(now()) ?? `Windows guardian compilation failed: ${String(error)}`;
       stopCode = supervisor.stopCode ?? "controller_error";
       timedOut = stopCode === "startup" || stopCode === "timeout";
       await persist("failed");
@@ -282,7 +299,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
     };
     const observe = (line: string): void => {
       try {
-        const reason = supervisor.observe(JSON.parse(line), Date.now());
+        const reason = supervisor.observe(JSON.parse(line), now());
         if (reason) stop(reason, supervisor.stopCode);
       } catch { /* Preserve malformed and partial bytes; the adapter classifies them. */ }
     };
@@ -315,11 +332,11 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         if (scope) await appendFile(path.join(scope.directory, "runtime.stderr.log"), chunk);
       }).finally(() => child.stderr?.resume());
     });
-    const timer = setInterval(() => {
+    const timer = schedulePoll(() => {
       if (finished || polling) return;
       polling = true;
       activePoll = (async () => {
-        const reason = supervisor.check(Date.now());
+        const reason = supervisor.check(now());
         if (reason) stop(reason, supervisor.stopCode);
         if (scope) {
           try {
@@ -329,8 +346,8 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") stop("Malformed or unreadable cancellation request");
           }
         }
-        if (!finished && Date.now() - lastHeartbeat >= 1000) {
-          lastHeartbeat = Date.now();
+        if (!finished && now() - lastHeartbeat >= 1000) {
+          lastHeartbeat = now();
           enqueue(persistHeartbeat);
         }
       })().catch(() => stop("Runtime supervision failed")).finally(() => { polling = false; });
@@ -339,7 +356,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
     child.on("error", (error: Error) => { spawnError = error.message; });
     child.on("close", (code: number | null) => {
       finished = true;
-      clearInterval(timer);
+      clearPoll(timer);
       input.cancellationSignal?.removeEventListener("abort", cancel);
       if (partial.trim()) observe(partial);
       void (async () => {

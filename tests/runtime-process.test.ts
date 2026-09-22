@@ -16,6 +16,24 @@ async function waitForFile(file: string, predicate: (text: string) => boolean) {
   throw new Error(`Expected persisted state at ${file}`);
 }
 
+/**
+ * Supervision deadlines are fired by advancing this clock, never by waiting
+ * out wall time, so the tests stay deterministic under machine load.
+ */
+function manualClock() {
+  let current = Date.now();
+  const polls: Array<() => void> = [];
+  return {
+    now: () => current,
+    setInterval: (callback: () => void) => { polls.push(callback); return polls.length; },
+    clearInterval: () => {},
+    advance: (milliseconds: number) => { current += milliseconds; for (const poll of [...polls]) poll(); },
+  };
+}
+
+/** Yield to the event loop without sleeping on wall time. */
+const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve));
+
 test("local cancellation settles only the selected real child and preserves live transcript", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "uh-local-cancel-"));
   const directory = path.join(root, ".harness", "missions", "one", "runs", "attempt-one");
@@ -56,29 +74,69 @@ test("local cancellation settles only the selected real child and preserves live
 });
 test("a failed periodic heartbeat does not stop an otherwise successful run", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "uh-heartbeat-retry-"));
-  const startedAt = Date.now();
+  const clock = manualClock();
+  const startedAt = clock.now();
+  let heartbeatFailures = 0;
+  // Serializes the "running" persists and exposes their completion, so the
+  // test advances virtual time only after the initial and stdout-driven
+  // persists have drained; the next running-persist is then a heartbeat.
+  let runningPersistsDrained: Promise<void> = Promise.resolve();
   try {
-    const result = await runRuntimeProcess({
+    const run = runRuntimeProcess({
       command: process.execPath,
-      args: ["-e", "process.stdout.write(JSON.stringify({type:'session',id:'heartbeat'})+'\\n'+JSON.stringify({type:'run_end'})+'\\n'); setTimeout(()=>process.exit(0),1300)"],
+      // The child stays alive until the test confirms the heartbeat mechanism
+      // ran, then exits on signal; the 10s backstop only bounds failure paths.
+      args: ["-e", "const fs=require('node:fs'); process.stdout.write(JSON.stringify({type:'session',id:'heartbeat'})+'\\n'+JSON.stringify({type:'run_end'})+'\\n'); setInterval(()=>{ if (fs.existsSync('heartbeat-exercised')) process.exit(0); },20); setTimeout(()=>process.exit(0),10000)"],
       cwd: root,
       timeoutMs: 5000,
+      clock,
       artifacts: { directory: path.join(root, "run"), missionId: "one", runId: "one", runtime: "fixture" },
       persistArtifact: async (_file, content) => {
-        if (JSON.parse(content).status === "running" && Date.now() - startedAt > 500) throw new Error("simulated heartbeat failure");
+        if (JSON.parse(content).status !== "running") return;
+        const previous = runningPersistsDrained;
+        let release!: () => void;
+        runningPersistsDrained = new Promise<void>(resolve => { release = resolve; });
+        try {
+          await previous;
+          if (clock.now() - startedAt > 500) { heartbeatFailures++; throw new Error("simulated heartbeat failure"); }
+        } finally { release(); }
       },
     });
+    let settled = false;
+    void run.then(() => { settled = true; });
+    await waitForFile(path.join(root, "run", "runtime.stdout.log"), text => text.includes("run_end"));
+    await runningPersistsDrained;
+    // Advance across the 1s heartbeat interval so a poll fires a heartbeat
+    // persist, which fails; a real tick never has to elapse for this.
+    while (heartbeatFailures === 0 && !settled) {
+      clock.advance(1500);
+      await yieldToEventLoop();
+    }
+    await writeFile(path.join(root, "heartbeat-exercised"), "", "utf8");
+    const result = await run;
+    expect(heartbeatFailures).toBe(1);
     expect(result.exitCode).toBe(0);
     expect(result.supervisionStopCode).toBeUndefined();
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await writeFile(path.join(root, "heartbeat-exercised"), "", "utf8").catch(() => {});
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 }, 10_000);
 
 test("real process with no progress is stopped without a provider call", async () => {
-  const result = await runRuntimeProcess({ command: process.execPath,
-    args: ["-e", "setInterval(()=>{},1000)"], cwd: process.cwd(), limits: { startup_timeout_ms: 100 },
+  const clock = manualClock();
+  const run = runRuntimeProcess({ command: process.execPath,
+    args: ["-e", "setInterval(()=>{},1000)"], cwd: process.cwd(), limits: { startup_timeout_ms: 100 }, clock,
   });
+  let settled = false;
+  void run.then(() => { settled = true; });
+  // Advance virtual time past the startup budget so the readiness deadline
+  // fires on the next poll, exactly when intended, independent of load.
+  while (!settled) {
+    clock.advance(200);
+    await yieldToEventLoop();
+  }
+  const result = await run;
   expect(result.exitCode).not.toBe(0);
   expect(result.timedOut).toBe(true);
 });
