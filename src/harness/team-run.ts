@@ -55,6 +55,7 @@ import { aggregateRuntimeUsage, type RuntimeUsage } from "./usage.js";
 import { readRuntimeAccounting } from "./runtime-accounting.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists } from "./mission.js";
 import { registerLiveRun } from "./live-runs.js";
+import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 const execFileP = promisify(execFile);
 
 /* -------------------------------------------------------------------------- */
@@ -243,6 +244,8 @@ export interface WorkerOutcome {
   stopCode?: string;
   /** Salvage record for a failed worker whose stop code permits salvage. */
   salvage?: WorkerSalvage;
+  /** Why a settled worker's non-zero exit did not fail it (rendered as a report warning). */
+  postRunWarning?: string;
 }
 
 /** A worker's salvage record (see `CanonicalWorkerSalvageSchema`). */
@@ -979,12 +982,27 @@ export async function runTeamMission(
       } finally {
         await writeFile(workerMissionPath, workerMissionPackets.get(slot.plan.id)?.bytes ?? canonicalBytes, "utf-8");
       }
-      const runtimeResult = await readCanonicalRuntimeResult(context.artifactRoot, workerMissionId, context.runId);
+      const runtimeResult = await (async () => {
+        // End-of-run consistency: the runtime-control receipt is the
+        // confirmed settlement. A runtime result that contradicts it gets a
+        // `settlement_conflict` record and the confirmed settlement is
+        // preferred before the status decision reads it. Best-effort: a
+        // reconciliation failure must not fail the worker.
+        await reconcileRuntimeResultControl(context.artifactRoot, workerMissionId, context.runId).catch(() => undefined);
+        return readCanonicalRuntimeResult(context.artifactRoot, workerMissionId, context.runId);
+      })();
       const finalSentinel = (await readCanonicalSentinel(context.artifactRoot, workerMissionId, context.runId))
         || await readSentinel(slot.plan.worktreePath, workerMissionId);
       await stripWorkerSessionArtifacts(slot.plan.worktreePath, workerMissionId);
       canonicalWorker.completion = runtimeResult?.completion ?? res.result?.completion ?? "complete";
-      let status = classifyRuntimeStatus(res);
+      // The reconciled, on-disk runtime result is the authoritative verdict
+      // when one was written; the adapter's in-memory copy is the fallback.
+      let status = classifyRuntimeStatus({ ...res, result: runtimeResult ?? res.result });
+      // A settled worker whose runtime exited non-zero after the settlement
+      // did its work; the exit is a post-run artifact, not a worker failure.
+      const postRunWarning = status === "succeeded" && res.exitCode !== 0
+        ? `Runtime exited with code ${res.exitCode} after a settled pass; treated as succeeded`
+        : undefined;
       const expectedOutputs = canonicalWorker.contract?.expected_outputs ?? slot.plan.spec?.expected_outputs;
       if (status === "succeeded" && expectedOutputs) {
         const outputs = await Promise.all(expectedOutputs.files.map(async (outputPath) => {
@@ -1055,6 +1073,7 @@ export async function runTeamMission(
         runId: context.runId,
         artifactScope: canonicalWorker.artifact_scope,
         runtimeResult,
+        ...(postRunWarning !== undefined ? { postRunWarning } : {}),
         ...(salvageStopCode !== undefined ? { stopCode: salvageStopCode } : {}),
         ...(salvageRecord ? { salvage: salvageRecord } : {}),
       };
@@ -1255,6 +1274,10 @@ async function safeAddWorktree(gitOps: GitOps, root: string, leader: LeaderPlan,
 function classifyRuntimeStatus(res: TeamRuntimeRunResult): WorkerOutcome["status"] {
   if (res.result?.status === "blocked") return "blocked";
   if (res.exitCode === 0) return "succeeded";
+  // A worker whose runtime-result block settled as `passed` did its work: a
+  // non-zero exit observed after that settlement is a post-run artifact (a
+  // diff capture failure, launcher teardown), never a worker failure.
+  if (res.result?.status === "passed") return "succeeded";
   return "failed";
 }
 
@@ -1464,10 +1487,19 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
     lines.push("");
     lines.push(`- Branch: \`${outcome.plan.branch}\``);
     lines.push(`- Status: ${outcome.status}${outcome.errorMessage ? ` (${outcome.errorMessage})` : ""}`);
+    if (outcome.postRunWarning) lines.push(`- Warning: ${outcome.postRunWarning}`);
     if (outcome.runId) lines.push(`- Canonical run: \`${outcome.runId}\` (${outcome.artifactScope ?? "worker scope"})`);
     lines.push(`- Files touched: ${outcome.filesTouched.length}`);
     if (outcome.filesTouched.length > 0) {
       for (const p of outcome.filesTouched) lines.push(`  - \`${p}\``);
+    }
+    // A worker that did not succeed always renders why — the worker's own
+    // error message first, the runtime result's errors as the fallback — so
+    // a "failed with no reason" report cannot happen.
+    if (outcome.status !== "succeeded") {
+      const reason = outcome.errorMessage
+        ?? (outcome.runtimeResult?.errors ?? []).map((entry) => entry.trim()).filter(Boolean).join("; ");
+      lines.push(`- Failure reason: ${reason.length > 0 ? reason : "no reason recorded"}`);
     }
     if (outcome.merge) {
       // Codex P2: the report verdict must distinguish three states —

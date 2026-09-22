@@ -36,7 +36,7 @@ import {
   runtimeRouteMismatch,
   runtimeTerminalFailure,
 } from "../harness/runtime-supervision.js";
-import { captureDiffWithUntracked } from "../harness/diff-capture.js";
+import { captureDiffWithUntracked, diffCaptureFailureRecord } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
 import { relativeArtifactPath } from "../harness/artifact-paths.js";
 import { appendRunsIndexEntry, generateRunId, mirrorRuntimeResultToLatest, writeLatestPointer } from "../harness/run-id.js";
@@ -394,7 +394,10 @@ export async function runClaudeCode(root: string, missionPath: string, options: 
     const captured = await (options.collectDiff ?? captureDiffWithUntracked)(root);
     diff = { patch: captured.patch, errors: captured.errors ?? [] };
   } catch (error) { diff.errors.push(`Diff capture failed: ${error instanceof Error ? error.message : String(error)}`); }
-  errors.push(...diff.errors);
+  // Diff capture runs after the runtime settled, so its failure says nothing
+  // about the run itself: on a confirmed settlement it is recorded as
+  // `diff_capture` bookkeeping and must not change status or exit_code. Only
+  // a run that never settled may fail because of diff capture.
   const nativeCompleted = nativeRuntimeCompleted({
     nativeTerminal: output.nativeTerminal === true,
     nativeTerminalFailure: terminal ? runtimeTerminalFailure(terminal) : "Claude Code did not emit a terminal result",
@@ -405,6 +408,11 @@ export async function runClaudeCode(root: string, missionPath: string, options: 
     spawnError: output.spawnError,
     errors,
   });
+  if (nativeCompleted) {
+    if (diff.errors.length > 0) errors.push(diffCaptureFailureRecord(diff.errors));
+  } else {
+    errors.push(...diff.errors);
+  }
   const status = output.cancelled ? "cancelled" : nativeCompleted ? "passed"
     : output.exitCode !== 0 || output.timedOut || errors.length ? "failed" : finalMessage ? "passed" : "blocked";
   const incomplete = plan.grace || output.supervisionStopCode === "deadline";
