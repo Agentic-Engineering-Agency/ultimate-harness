@@ -35,7 +35,10 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and seven wir
 | `hermes-proxy` | active | HTTP client targeting a local `hermes proxy` instance (Hermes Agent ≥ 0.14.0). Officially sanctioned OAuth-backed subscription routing — replaces the OMP stealth path. See [`docs/architecture/adapter-hermes-proxy.md`](./docs/architecture/adapter-hermes-proxy.md) and [`docs/runbooks/hermes-proxy-setup.md`](./docs/runbooks/hermes-proxy-setup.md). |
 | `openrouter` | active | OpenAI-compat HTTP client for [openrouter.ai](https://openrouter.ai) — the cheapest pay-per-token routing target. API key via `OPENROUTER_API_KEY` (never the manifest); a missing key makes `uh adapter check openrouter` degrade gracefully. See [`docs/runbooks/openrouter-setup.md`](./docs/runbooks/openrouter-setup.md). |
 | `pi` | active | Drives the vanilla `pi` agent CLI (`pi --print --mode json --no-session`) — the base CLI that oh-my-pi extends. `config.cli_command` overridable. See [`docs/runbooks/pi-setup.md`](./docs/runbooks/pi-setup.md). |
-| `anthropic` | experimental | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY` (env-only, never the manifest); a missing key makes `uh adapter check anthropic` degrade gracefully. Shipped v0.9.0 (#214); graduation to `active` pending live-smoke. |
+| `anthropic` | active | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY`. |
+| `command-code` | active | Command Code native execution with persistent sessions, process trees, and Tool Guard supervision. |
+| `claude-code` | active | Claude Code adapter with structured event capture and saved-session recovery. |
+| `acp` | active | Agent-Client Protocol (ACP) v1 runner for headless agent orchestration via standard JSON-RPC 2.0 over stdio. See [`docs/runbooks/acp-setup.md`](./docs/runbooks/acp-setup.md). |
 
 Unreleased development (v0.11.0) includes native `command-code` and `claude-code`
 adapters, runtime supervision and recovery improvements, platform neutrality fixes,

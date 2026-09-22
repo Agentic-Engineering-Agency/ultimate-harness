@@ -7,6 +7,10 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 ## [Unreleased]
 
 ### Added
+- Native ACP (Agent-Client Protocol) v1 adapter: `acp` runtime supporting headless agent orchestration via standard JSON-RPC 2.0 over stdio with run-id integrity, strict `uh.runtime-result.v0` validation, wire-conformance error mapping, bidirectional permission request handling (`session/request_permission`), timeout and cancellation signal threading, and 17 regression tests.
+- Progressive semantic routing: `chooseSemanticRoute` in `src/harness/auto-route.ts` combining Level 0 deterministic eligibility (runtime_requirements, capabilities, fleet, and `decision_policy.allowed_runtimes`) with Level 1 TypeSafe System One (JEV) classification. Evaluates task cognitive complexity and selects the optimal adapter and model from candidate options with calibrated confidence, writing `uh.decision-receipt.v0` receipts.
+- Mission `decision_policy` schema: `DecisionPolicySchema` in `src/schema/mission.ts` allowing missions to specify `enabled`, `min_confidence`, `allowed_runtimes`, `allowed_models`, `require_provider_for_route`, `require_provider_for_retry`, `escalation_model`, and `fallback_model`.
+- ACP session template: `.harness/templates/acp-worker.yaml` and runbook `docs/runbooks/acp-setup.md`.
 
 - `guard.allow_native_subagents` (default `false`). Native sub-agent tools (`task`, `agent`, `subagent`, `spawn_agent`, `dispatch_agent`, `delegate`) are denied by tool name for every role; a denied worker is told to end with `ESCALATE: <what its orchestrator should delegate>`.
 - Delegated-agent route attestation. Supervision reads the structured `details.progress[]` / `details.jobs[]` metadata of native tool events and stops the run with `route_mismatch`, naming the route, when a sub-agent runs on a provider or model outside the assignment. Tool arguments and tool text are never read.

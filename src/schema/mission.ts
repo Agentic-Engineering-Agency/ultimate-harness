@@ -59,7 +59,7 @@ const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/
  * adapter modules. Keep in sync with `RUNTIME_WIRINGS` in `src/cli.ts` and the
  * adapter manifests under `.harness/adapters/`.
  */
-export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi", "command-code", "claude-code"] as const;
+export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi", "command-code", "claude-code", "acp"] as const;
 const AdapterIdSchema = z.enum(TEAM_ADAPTER_IDS);
 
 export const TeamWorkerSchema = z.object({
@@ -115,6 +115,23 @@ export const RuntimeRequirementsSchema = z.object({
   max_cost_class: CostClassSchema.default("premium"),
 }).strict();
 
+/**
+ * Optional governed-decision policy. Additive and strict: a legacy mission that
+ * omits it keeps its purely deterministic behavior. `allowed_runtimes` narrows
+ * deterministic adapter eligibility; `allowed_models` is the only model set a
+ * JEV (TypeSafe System One) recommendation may be applied from.
+ */
+export const DecisionPolicySchema = z.object({
+  enabled: z.boolean().default(false),
+  min_confidence: z.number().min(0).max(1).default(0.7),
+  allowed_runtimes: z.array(AdapterIdSchema).optional().default([]),
+  allowed_models: z.array(z.string().min(1)).optional().default([]),
+  require_provider_for_route: z.boolean().default(false),
+  require_provider_for_retry: z.boolean().default(false),
+  escalation_model: z.string().min(1).optional(),
+  fallback_model: z.string().min(1).optional(),
+}).strict();
+
 const MissionInputSchema = z.object({
   schema_version: z.literal("uh.mission.v0"),
   id: z.string().min(1),
@@ -143,6 +160,7 @@ const MissionInputSchema = z.object({
   tdd: TddOptionsSchema.optional(),
   capabilities: z.array(CapabilitySchema).optional().default([]),
   runtime_requirements: RuntimeRequirementsSchema.optional(),
+  decision_policy: DecisionPolicySchema.optional(),
   guard: ToolGuardFieldsSchema.optional(),
   // Backward-compatible fields.
   name: z.string().min(1).optional(),
@@ -281,6 +299,7 @@ export type MissionDocument = z.infer<typeof MissionSchema>;
 export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>;
 export type TddOptions = z.infer<typeof TddOptionsSchema>;
 export type RuntimeRequirements = z.infer<typeof RuntimeRequirementsSchema>;
+export type DecisionPolicy = z.infer<typeof DecisionPolicySchema>;
 export type ResolvedToolGuardPolicy = ToolGuardPolicy;
 export const TDD_DEFAULT_TEST_PATHS = DEFAULT_TEST_PATHS;
 export const TDD_DEFAULT_SOURCE_PATHS = DEFAULT_SOURCE_PATHS;

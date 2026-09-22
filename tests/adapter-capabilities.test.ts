@@ -41,7 +41,7 @@ describe("AdapterCapabilitiesSchema", () => {
   });
 
   test("registry exposes every team adapter id", () => {
-    expect(listAdapterIds()).toEqual(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi", "command-code", "claude-code"]);
+    expect(listAdapterIds()).toEqual(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi", "command-code", "claude-code", "acp"]);
     for (const id of listAdapterIds()) {
       expect(getCapabilities(id).id).toBe(id);
       expect(CAPABILITIES[id]).toEqual(getCapabilities(id));

@@ -1,0 +1,14 @@
+schema_version: uh.session-template.v0
+id: acp-worker
+name: ACP Worker
+description: Session template for headless ACP v1 agent worker
+runtime: acp
+tier: balanced
+runtime_config:
+  server_command: acp-agent
+  protocol_version: 1
+  timeout_ms: 600000
+limits:
+  timeout_ms: 1800000
+  stall_timeout_ms: 600000
+  max_turns: 60
