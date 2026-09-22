@@ -197,6 +197,68 @@ test("limits.max_turns plans --max-turns and an explicit top-level max_turns win
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a deadline grace plan marks the attempt as grace for supervision", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+    const overrides = mission.runtime_config_overrides as Record<string, unknown>;
+    overrides.recovery_grace = true;
+    overrides.recovery = { max_resumes: 0, notes: "Preserve the findings already gathered.", on_deadline: { grace_turns: 2, grace_timeout_ms: 300000 } };
+    await writeFile(missionPath, stringify(mission));
+    const runOnce = async (runId: string): Promise<Record<string, unknown> | undefined> => {
+      let seen: Record<string, unknown> | undefined;
+      await runCommandCode(root, missionPath, { runId,
+        runner: async input => { seen = input.onDeadline as Record<string, unknown> | undefined; return { stdout: "", stderr: "", exitCode: 1, timedOut: false }; },
+        collectDiff: async () => ({ patch: "" }) });
+      return seen;
+    };
+    expect(await runOnce("grace-marker")).toMatchObject({ grace: true, grace_turns: 2, grace_timeout_ms: 300000 });
+
+    delete overrides.recovery_grace;
+    await writeFile(missionPath, stringify(mission));
+    expect(await runOnce("plain-marker")).not.toHaveProperty("grace");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a grace attempt whose expected native cap ends it settles by its deliverable", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+    const overrides = mission.runtime_config_overrides as Record<string, unknown>;
+    overrides.model = "deepseek/deepseek-v4.1-flash";
+    overrides.recovery_grace = true;
+    overrides.recovery = { max_resumes: 0, notes: "Preserve the findings already gathered.", on_deadline: { grace_turns: 2, grace_timeout_ms: 300000 } };
+    await writeFile(missionPath, stringify(mission));
+    const stdout = await readFile(fileURLToPath(new URL("./fixtures/runtime-events/command-code-native-turn-cap.ndjson", import.meta.url)), "utf8");
+    const result = await runCommandCode(root, missionPath, { runId: "grace-cap",
+      runner: async () => ({ stdout, stderr: "", exitCode: 8, timedOut: false }),
+      collectDiff: async () => ({ patch: "" }) });
+    expect(result.result).toMatchObject({
+      status: "passed",
+      completion: "incomplete",
+      exit_code: 8,
+      exit_code_ignored_reason: "runtime exited non-zero after completed native terminal event",
+    });
+    expect(result.result.errors).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a native cap supervision stopped cannot settle passed on a clean terminal and exit zero", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const stdout = [
+      { type: "event", event: { type: "model_request_start", model: "qwen/qwen3.8-flash" } },
+      { type: "result", subtype: "max_turns", num_turns: 2, finalText: "completed just before the cap" },
+    ].map(value => JSON.stringify(value)).join("\n");
+    const result = await runCommandCode(root, missionPath, { runId: "supervision-cap",
+      runner: async () => ({ stdout, stderr: "", exitCode: 0, timedOut: false, nativeTerminal: true,
+        supervisionStopCode: "turn_limit", nativeTerminalFailure: "Runtime reported failure (max_turns)" }),
+      collectDiff: async () => ({ patch: "" }) });
+    expect(result.result.status).toBe("failed");
+    expect(result.exitCode).not.toBe(0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a mission without a turn cap passes no flag and records the native default in the plan", async () => {
   const { root, missionPath } = await fixture();
   try {

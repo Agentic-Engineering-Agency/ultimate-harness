@@ -5,7 +5,7 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 import { cancelLocalMissionRun } from "../src/harness/mission-cancel.js";
 import { prepareRuntimeResume } from "../src/harness/runtime-recovery.js";
-import { reconcileRuntimeResultControl, reconcileRuntimeSettlement } from "../src/harness/runtime-settlement.js";
+import { reconcileNativeCapSettlement, reconcileRuntimeResultControl, reconcileRuntimeSettlement, settleNativeCap } from "../src/harness/runtime-settlement.js";
 
 async function fixture(confirmed: boolean) {
   const root = await mkdtemp(path.join(tmpdir(), "uh-reconcile-"));
@@ -160,4 +160,51 @@ test("missing control or result evidence needs no reconciliation", async () => {
     await rm(path.join(missingControl.directory, "runtime-control.json"));
     expect(await reconcileRuntimeResultControl(missingControl.root, "one", "lost")).toBe(false);
   } finally { await rm(missingControl.root, { recursive: true, force: true }); }
+});
+
+/* ------------------------------- native budget caps ------------------------------- */
+
+test("a native turn cap settles failed/turn_limit even when a final message was emitted", () => {
+  expect(settleNativeCap({ cap: "turn", reason: "max_turns", grace: false, deliverable: true, turns: 2 }))
+    .toEqual({ status: "failed", stopCode: "turn_limit", reason: "Native turn cap (max_turns) reached after 2 turns", graceExpectedEnd: false });
+  expect(settleNativeCap({ cap: "turn", reason: "max_turns", grace: false, deliverable: false }))
+    .toEqual({ status: "failed", stopCode: "turn_limit", reason: "Native turn cap (max_turns) reached", graceExpectedEnd: false });
+});
+
+test("a native time cap settles failed/timeout", () => {
+  expect(settleNativeCap({ cap: "time", reason: "max_time", grace: false, deliverable: true }))
+    .toEqual({ status: "failed", stopCode: "timeout", reason: "Native time cap (max_time) reached", graceExpectedEnd: false });
+  expect(settleNativeCap({ cap: "time", reason: "timeout", grace: false, deliverable: false }).stopCode).toBe("timeout");
+});
+
+test("a deadline grace attempt settles by its deliverable with stop code deadline", () => {
+  expect(settleNativeCap({ cap: "turn", reason: "max_turns", grace: true, deliverable: true, turns: 3 }))
+    .toEqual({ status: "passed", stopCode: "deadline", reason: "Native turn cap (max_turns) reached after 3 turns", graceExpectedEnd: true });
+  expect(settleNativeCap({ cap: "turn", reason: "max_turns", grace: true, deliverable: false, turns: 3 }))
+    .toMatchObject({ status: "failed", stopCode: "deadline", graceExpectedEnd: true });
+});
+
+test("a native-cap settlement rewrites the run control receipt with the settled status and stop code", async () => {
+  const { root, directory } = await resultControlFixture(
+    confirmedControl("failed", { stop_code: "turn_limit", stop_reason: "Native turn cap (max_turns) reached after 3 turns" }),
+    resultDocument("passed", 0, []),
+  );
+  try {
+    const settlement = settleNativeCap({ cap: "turn", reason: "max_turns", grace: true, deliverable: true, turns: 3 });
+    expect(await reconcileNativeCapSettlement(root, "one", "lost", settlement)).toBe(true);
+    const control = JSON.parse(await readFile(path.join(directory, "runtime-control.json"), "utf8")) as Record<string, unknown>;
+    expect(control).toMatchObject({ status: "passed", stop_code: "deadline", stop_reason: "Native turn cap (max_turns) reached after 3 turns" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a missing control receipt is left untouched by native-cap settlement", async () => {
+  const { root, directory } = await resultControlFixture(
+    confirmedControl("failed", { stop_code: "turn_limit" }),
+    resultDocument("failed", 1, []),
+  );
+  try {
+    await rm(path.join(directory, "runtime-control.json"));
+    expect(await reconcileNativeCapSettlement(root, "one", "lost",
+      settleNativeCap({ cap: "turn", reason: "max_turns", grace: true, deliverable: true }))).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
