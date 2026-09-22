@@ -1,7 +1,19 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { RuntimeSupervision, nativeRuntimeCompleted, runtimeRouteMismatch, runtimeTerminalFailure, sameRouteIdentifier } from "../src/harness/runtime-supervision.js";
+
+const FIXTURE_DIR = fileURLToPath(new URL("./fixtures/runtime-events", import.meta.url));
+
+/** Parse a native event excerpt: one JSON event per line. */
+function fixture(name: string): unknown[] {
+  return readFileSync(path.join(FIXTURE_DIR, name), "utf-8")
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => JSON.parse(line) as unknown);
+}
 
 describe("runtime supervision", () => {
   test("a blocked tool leaves in-flight state so subsequent stalls remain detectable", () => {
@@ -255,6 +267,38 @@ describe("runtime supervision", () => {
     expect(turns.turns).toBe(1);
 
     expect(turns.failure).toBe(turnReason);
+  });
+  test("Command Code shell failures parsed from result text trip the repeated-failure guard", () => {
+    const run = new RuntimeSupervision({ max_repeated_failures: 3 }, 0);
+    let completions = 0;
+    let stoppedOn: number | undefined;
+    for (const [index, value] of fixture("command-code-repeated-shell-failure.ndjson").entries()) {
+      if ((value as { type?: unknown }).type === "tool_completed") completions += 1;
+      const stopped = run.observe(value, index + 1);
+      if (stopped && stoppedOn === undefined) stoppedOn = completions;
+    }
+    expect(stoppedOn).toBe(3);
+    expect(run.stopCode).toBe("repeated_failure");
+    expect(run.failure).toBe('The same command failed 3 times (exit 1): node -e "process.exit(1)"');
+    expect(run.failures.get('node -e "process.exit(1)"')).toBe(3);
+    expect(run.inflight.size).toBe(0);
+  });
+  test("Command Code stdout that merely mentions an exit code never counts as a failure", () => {
+    const run = new RuntimeSupervision({ max_repeated_failures: 1 }, 0);
+    for (const [index, value] of fixture("command-code-shell-exit-code-in-stdout.ndjson").entries()) {
+      run.observe(value, index + 1);
+    }
+    expect(run.failure).toBeUndefined();
+    expect(run.failures.size).toBe(0);
+  });
+  test("oh-my-pi error outcomes still count through their structured fields", () => {
+    const run = new RuntimeSupervision({ max_repeated_failures: 3 }, 0);
+    for (const [index, value] of fixture("oh-my-pi-healthy.ndjson").entries()) {
+      run.observe(value, index + 1);
+    }
+    expect(run.failure).toBeUndefined();
+    expect(run.failures.get("gitnexus_impact x")).toBe(1);
+    expect(run.failures.get("bunx x")).toBe(1);
   });
   test("guard tamper in the guard log is a non-resumable policy stop", () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "uh-guard-tamper-"));

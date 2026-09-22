@@ -10,7 +10,13 @@ timestamps are rebased. Streaming delta events are dropped.
 |---|---|---|
 | `command-code-healthy.ndjson` | Command Code | A run that reads, edits, runs tests and finishes. Tool events are keyed by `toolCallId`; arguments are under `input` (`paths`, `file_path`, `pattern`, `command`). |
 | `command-code-denied-retries.ndjson` | Command Code | A run whose writes are denied by the guard hook (`tool_hooks`, `tool_hook_blocked`) and retried by other routes. |
+| `command-code-repeated-shell-failure.ndjson` | Command Code | Three identical failing `shell_command` calls. The `tool_completed` result text opens with the literal `Exit code: 1` line Command Code emits instead of an error field. |
+| `command-code-shell-exit-code-in-stdout.ndjson` | Command Code | A succeeding `shell_command` whose stdout mentions `Exit code` in a later line, which must not read as a failure. |
 | `oh-my-pi-healthy.ndjson` | oh-my-pi | A run using `tool_execution_start` / `tool_execution_end` with arguments under `args`. |
+
+The literal `Exit code: <n>` lines of Command Code shell results are kept
+verbatim in the fixtures that exist to exercise them; all other text stays
+sanitized as described above.
 
 Use these instead of hand-written event shapes when testing anything that reads
 native events.
