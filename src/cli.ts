@@ -1089,6 +1089,203 @@ observatoryCmd
     }
   });
 
+// uh experiment plan|run|report — matched-budget experiments over a seeded
+// search/held-out task split. `runExperiment` takes the runner by injection;
+// `run` wires a real per-runtime runner, while `plan` and `report` read and
+// summarize artifacts and never start a runtime.
+const experimentCmd = program
+  .command("experiment")
+  .description("Plan, run, and report matched-budget experiments with a held-out split");
+
+experimentCmd
+  .command("plan")
+  .description("Print the seeded search/held-out split and the arm-interleaved run plan")
+  .argument("<id>", "Experiment id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { root?: string }) => {
+    try {
+      const root = resolveRoot(opts.root);
+      const { loadExperiment, splitTasks, planExperiment } = await import("./harness/experiment.js");
+      const spec = await loadExperiment(root, id);
+      const split = splitTasks(spec);
+      const plan = planExperiment(spec);
+      console.log(`Experiment: ${spec.id} — ${spec.title}`);
+      console.log(`Seed: ${split.seed === undefined ? "explicit held-out split" : split.seed}`);
+      console.log(`Split sizes: search ${split.search.length}, held_out ${split.held_out.length}`);
+      console.log(`Plan: ${plan.length} run(s)`);
+      console.log("");
+      renderAlignedTable(
+        ["TASK", "ARM", "ATTEMPT", "SPLIT"],
+        plan.map((entry) => [entry.task, entry.arm, String(entry.attempt), entry.split]),
+      );
+    } catch (err) {
+      console.error(`[FAIL] experiment plan error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+experimentCmd
+  .command("run")
+  .description("Run a planned experiment under a matched budget")
+  .argument("<id>", "Experiment id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the per-run records as JSON")
+  .action(async (id: string, opts: { root?: string; json?: boolean }) => {
+    try {
+      const root = resolveRoot(opts.root);
+      const { loadExperiment, runExperiment } = await import("./harness/experiment.js");
+      const spec = await loadExperiment(root, id);
+      const outcome = await runExperiment(root, spec, { runner: experimentRuntimeRunner(root) });
+      if (opts.json) {
+        console.log(JSON.stringify(outcome.runs, null, 2));
+        return;
+      }
+      console.log(`Experiment: ${outcome.experiment_id}`);
+      console.log(`Seed: ${outcome.seed === undefined ? "explicit held-out split" : outcome.seed}`);
+      console.log(`Split sizes: search ${outcome.split.search.length}, held_out ${outcome.split.held_out.length}`);
+      console.log(`Runs: ${outcome.executed} executed, ${outcome.skipped} skipped${outcome.stop_reason ? ` (budget: ${outcome.stop_reason})` : ""}`);
+      console.log(`Plan: ${outcome.plan_path}`);
+      console.log(`Runs: ${outcome.runs_path}`);
+      console.log(`Report: ${outcome.report_path}`);
+    } catch (err) {
+      console.error(`[FAIL] experiment run error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+experimentCmd
+  .command("report")
+  .description("Summarize an experiment against the plain-repeat baseline")
+  .argument("<id>", "Experiment id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the report as JSON")
+  .action(async (id: string, opts: { root?: string; json?: boolean }) => {
+    try {
+      const root = resolveRoot(opts.root);
+      const { loadExperiment, loadExperimentRuns, summarizeExperiment, experimentVerdictLine, experimentRepeatsLine } =
+        await import("./harness/experiment.js");
+      const spec = await loadExperiment(root, id);
+      const runs = await loadExperimentRuns(root, id);
+      const report = summarizeExperiment(runs, spec);
+      if (opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+        return;
+      }
+      console.log(`Experiment: ${report.experiment_id} — ${report.title}`);
+      console.log(`Seed: ${report.seed === undefined ? "explicit held-out split" : report.seed}`);
+      console.log(`Split sizes: search ${report.split_sizes.search}, held_out ${report.split_sizes.held_out}`);
+      console.log(`Baseline arm: ${report.baseline}`);
+      for (const split of report.splits) {
+        console.log("");
+        console.log(`[${split.split}] ${split.task_count} task(s)`);
+        renderAlignedTable(
+          ["ARM", "RUNS", "PASSED", "SUCCESS_RATE", "WILSON_95", "MEAN_DENIALS", "GUARD_TAMPER", "CONTAINMENT_ESCAPE", "MEAN_COST"],
+          split.arms.map((arm) => [
+            arm.arm,
+            String(arm.runs),
+            String(arm.passed),
+            rateText(arm.success_rate),
+            `${rateText(arm.interval.low)} - ${rateText(arm.interval.high)}`,
+            arm.mean_denials === undefined ? "unknown" : arm.mean_denials.toFixed(2),
+            String(arm.guard_tamper_stops),
+            String(arm.containment_escape_stops),
+            arm.mean_cost_usd === undefined ? "unknown" : `$${arm.mean_cost_usd.toFixed(4)}`,
+          ]),
+        );
+        for (const comparison of split.comparisons) {
+          console.log(`Verdict (${comparison.a} vs ${comparison.b}): ${experimentVerdictLine(comparison.comparison, comparison.a, comparison.b)}`);
+        }
+        for (const repeat of split.baseline_repeats) {
+          console.log(`Plain repeats (${repeat.baseline_arm} vs ${repeat.arm}): ${experimentRepeatsLine(repeat)}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[FAIL] experiment report error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * The real per-runtime runner for `uh experiment run`. It resolves the arm's
+ * session template, executes the task mission through the same runtime wiring
+ * `mission run` uses, and reads the settled stop_code, denials, guard classes,
+ * and cost back out of the run directory.
+ */
+function experimentRuntimeRunner(root: string): import("./harness/experiment.js").ExperimentRunner {
+  return async (request) => {
+    const missionPath = path.join(root, ".harness", "missions", request.task, "mission.yaml");
+    let runtime = "hermes";
+    let overrides: Record<string, unknown> = {};
+    if (request.arm.template !== undefined) {
+      const adoption = await adoptSessionTemplate({ root, missionPath, templateId: request.arm.template });
+      runtime = adoption.runtime;
+      overrides = { ...adoption.runtimeConfigOverrides };
+    }
+    overrides = { ...overrides, ...(request.arm.runtime_config_overrides ?? {}) };
+    const wiring = RUNTIME_WIRINGS[runtime];
+    if (!wiring) throw new Error(`Unknown runtime for arm "${request.arm.id}": ${runtime}`);
+    const runId = generateRunId();
+    const result = await wiring.run(root, missionPath, {
+      runId,
+      ...(Object.keys(overrides).length > 0 ? { extraRuntimeConfigOverrides: overrides } : {}),
+    });
+    const finalRunId = result.runId ?? runId;
+    const runDir = path.join(root, ".harness", "missions", request.task, "runs", finalRunId);
+    const settled = await readExperimentSettlement(runDir);
+    return { run_id: finalRunId, mission_id: request.task, runtime, ...settled };
+  };
+}
+
+async function readExperimentSettlement(runDir: string): Promise<{
+  status?: string;
+  stop_code?: string;
+  denials?: number;
+  denial_classes?: string[];
+  cost_usd?: number;
+  duration_ms?: number;
+}> {
+  let status: string | undefined;
+  let stopCode: string | undefined;
+  let denials: number | undefined;
+  let costUsd: number | undefined;
+  let durationMs: number | undefined;
+  try {
+    const parsed = parseYaml(await readFileAsync(path.join(runDir, "runtime-result.yaml"), "utf8")) as Record<string, unknown>;
+    if (typeof parsed.status === "string") status = parsed.status;
+    if (typeof parsed.cost_usd === "number") costUsd = parsed.cost_usd;
+  } catch { /* artifact may be absent */ }
+  try {
+    const parsed = JSON.parse(await readFileAsync(path.join(runDir, "runtime-control.json"), "utf8")) as Record<string, unknown>;
+    if (typeof parsed.status === "string") status = parsed.status;
+    if (typeof parsed.stop_code === "string") stopCode = parsed.stop_code;
+    if (typeof parsed.denials === "number") denials = parsed.denials;
+    if (typeof parsed.started_at === "string" && typeof parsed.heartbeat_at === "string") {
+      const elapsed = Date.parse(parsed.heartbeat_at) - Date.parse(parsed.started_at);
+      if (Number.isFinite(elapsed) && elapsed >= 0) durationMs = elapsed;
+    }
+  } catch { /* artifact may be absent */ }
+  const denialClasses: string[] = [];
+  try {
+    const log = await readFileAsync(path.join(runDir, "tool-guard.log"), "utf8");
+    for (const line of log.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed === "") continue;
+      try {
+        const entry = JSON.parse(trimmed) as { class?: unknown };
+        if (typeof entry.class === "string" && entry.class !== "allow") denialClasses.push(entry.class);
+      } catch { /* a truncated guard line is not a denial we can classify */ }
+    }
+  } catch { /* no guard log */ }
+  return {
+    ...(status !== undefined ? { status } : {}),
+    ...(stopCode !== undefined ? { stop_code: stopCode } : {}),
+    ...(denials !== undefined ? { denials } : {}),
+    ...(denialClasses.length > 0 ? { denial_classes: denialClasses } : {}),
+    ...(costUsd !== undefined ? { cost_usd: costUsd } : {}),
+    ...(durationMs !== undefined ? { duration_ms: durationMs } : {}),
+  };
+}
+
 // uh verify
 program
   .command("verify")
