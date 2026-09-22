@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -11,7 +12,16 @@ import {
 import { runRootForRecord } from "./mission-cancel.js";
 import { getMissionArtifactContext, writeArtifactFile } from "../adapters/_artifact-context.js";
 import { assertValidRunId, generateRunId } from "./run-id.js";
-import type { ResumeOrigin } from "./runtime-recovery.js";
+import { runtimeRegistry } from "./registry.js";
+import { RuntimeSteerRequestSchema } from "../schema/runtime-control.js";
+import {
+  DEFAULT_OPERATOR_RESUME_NOTE,
+  REPORT_REQUEST,
+  steerNotes,
+  type ResumeOrigin,
+} from "./runtime-recovery.js";
+
+export { DEFAULT_OPERATOR_RESUME_NOTE, REPORT_REQUEST, steerNotes };
 
 /**
  * UH steer / resume — message a running worker across a stop and a restart.
@@ -19,12 +29,21 @@ import type { ResumeOrigin } from "./runtime-recovery.js";
  * A worker can be stopped but, until now, could not be nudged: its only mid-run
  * control was `uh kill`. Command Code (and oh-my-pi and Claude Code) accept
  * `--resume <session-id>`, and the adapters already implement `resume_from_run`
- * with recovery notes. Steering is therefore: stop the run cleanly, then resume
- * its native session with the operator's message injected as the first
- * instruction of the resumed turn.
+ * with recovery notes. Steering is therefore: stop the run, then resume its
+ * native session with the operator's message injected as the first instruction
+ * of the resumed turn.
  *
- * `uh steer` costs a stop and a restart of the native session — it is not a
- * live channel — but the transcript and the prior work are preserved through
+ * A live run is steered by the controller that owns it: `uh steer` validates
+ * everything first, writes a steer request next to the run's
+ * `runtime-control.json`, and signals the attempt to stop. The controller's
+ * recovery loop (`runWithRuntimeRecovery`) consumes that request, labels the
+ * attempt `steered`, and resumes the same native session with the message — so
+ * a team worker keeps running inside its team controller and is integrated
+ * normally. Only when no live controller owns the run does steer fall back to
+ * cancelling and resuming the session itself.
+ *
+ * `uh steer` still costs a stop and a restart of the native session — it is not
+ * a live channel — but the transcript and the prior work are preserved through
  * the native resume.
  *
  * This module is deliberately free of CLI and adapter wiring: it resolves a run
@@ -47,29 +66,6 @@ export class UnsupportedResumeError extends Error {
     this.name = "UnsupportedResumeError";
     this.runtime = runtime;
   }
-}
-
-/**
- * The fixed status-report request `uh steer --report` injects before the
- * operator's message, so a nudge always yields the same shape of answer.
- */
-export const REPORT_REQUEST = `Before anything else, write a status report for the operator in exactly this shape:
-1. Done so far
-2. In progress
-3. Blocked on
-4. Next three actions
-5. Files touched
-Write the report first, then continue your work.`;
-
-/** Default instruction for an operator resume that supplied no `--notes`. */
-export const DEFAULT_OPERATOR_RESUME_NOTE =
-  "Resume the saved session and continue the mission from where the previous attempt stopped.";
-
-/** Compose the note injected into a resumed turn; `--report` prepends the fixed request. */
-export function steerNotes(message: string, report: boolean): string {
-  const trimmed = message.trim();
-  if (!report) return trimmed;
-  return trimmed.length === 0 ? REPORT_REQUEST : `${REPORT_REQUEST}\n\n${trimmed}`;
 }
 
 /**
@@ -98,6 +94,13 @@ export interface ResumableRun {
   runtime: string;
   /** Absolute artifact root that owns the source run; the new run lands here. */
   artifactRoot: string;
+  /**
+   * The project root that owns `.harness/adapters`: the nearest ancestor of the
+   * run's artifact scope holding an `.harness/adapters` directory. A team
+   * worker's scope is nested far below it, so the adapter manifest is resolved
+   * here, never from the scope.
+   */
+  adapterRoot: string;
   missionPath: string;
   sessionId?: string;
   stopCode?: string;
@@ -108,6 +111,8 @@ export interface ResumableRun {
 /** What the injected runner is asked to execute for one resumed attempt. */
 export interface ResumeRequest {
   artifactRoot: string;
+  /** Project root that owns `.harness/adapters` (and workflows). */
+  adapterRoot: string;
   missionId: string;
   missionPath: string;
   runtime: string;
@@ -129,6 +134,18 @@ export interface ResumeResult {
   origin: ResumeOrigin;
 }
 
+/** Outcome of `uh steer`: the controller owns a live run, or the operator resumed it. */
+export interface SteerResult {
+  ok: boolean;
+  mode: "controller" | "fallback";
+  sourceRunId: string;
+  missionId: string;
+  runtime: string;
+  report: boolean;
+  /** The operator-started new run; present only for the fallback path. */
+  runId?: string;
+}
+
 export interface ResolveRunDeps {
   processes?: NativeProcess[];
   now?: number;
@@ -140,6 +157,30 @@ export interface SteerDeps {
   processes?: NativeProcess[];
   now?: number;
   newRunId?: () => string;
+}
+
+/**
+ * The nearest ancestor of `scope` that holds an `.harness/adapters` directory —
+ * the project root that owns the adapter manifest. Team worker artifact scopes
+ * live under `.harness/missions/<team>/team/artifacts/...`, so resolving from
+ * the scope itself is how the manifest went missing.
+ */
+export async function resolveAdapterRoot(scope: string): Promise<string> {
+  const start = path.resolve(scope);
+  for (let dir = start; ; ) {
+    try {
+      const stat = await lstat(path.join(dir, ".harness", "adapters"));
+      if (stat.isDirectory()) return dir;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(
+    `no .harness/adapters directory found above ${start}; the adapter manifest cannot be resolved from the project root`,
+  );
 }
 
 /**
@@ -163,6 +204,7 @@ export async function resolveResumableRun(
   }
   const record = matches[0]!;
   const artifactRoot = runRootForRecord(projectRoot, record);
+  const adapterRoot = await resolveAdapterRoot(artifactRoot);
   const processes = deps.processes ?? (await defaultProcessLister());
   const now = deps.now ?? Date.now();
   return {
@@ -170,6 +212,7 @@ export async function resolveResumableRun(
     missionId: record.mission_id,
     runtime: record.runtime,
     artifactRoot,
+    adapterRoot,
     missionPath: path.join(artifactRoot, ".harness", "missions", record.mission_id, "mission.yaml"),
     ...(record.session_id !== undefined ? { sessionId: record.session_id } : {}),
     ...(record.stop_code !== undefined ? { stopCode: record.stop_code } : {}),
@@ -182,6 +225,27 @@ export function assertResumableRuntime(runtime: string): void {
   if (!runtimeSupportsResume(runtime)) throw new UnsupportedResumeError(runtime);
 }
 
+/**
+ * Validate everything a steer needs before anything is written: a non-empty
+ * message, a runtime with a native resume path, a recorded native session id,
+ * and an adapter manifest that resolves from the project root. Any failure
+ * refuses and leaves the run untouched.
+ */
+export async function assertSteerable(target: ResumableRun, message: string): Promise<void> {
+  if (message.trim().length === 0) throw new Error("steer requires a non-empty message");
+  assertResumableRuntime(target.runtime);
+  if (!target.sessionId) {
+    throw new Error(`run ${target.runId} has no recorded native session id and cannot be steered; it would restart from scratch`);
+  }
+  try {
+    await runtimeRegistry.load(target.adapterRoot, target.runtime);
+  } catch (error) {
+    throw new Error(
+      `the ${target.runtime} adapter manifest does not resolve from the project root ${target.adapterRoot}: ${(error as Error).message}`,
+    );
+  }
+}
+
 /** A resume only ever overlays a settled attempt. A live one is steered instead. */
 function assertSettledForResume(target: ResumableRun): void {
   if (target.liveness === "settled") return;
@@ -191,6 +255,23 @@ function assertSettledForResume(target: ResumableRun): void {
     );
   }
   throw new Error(`run ${target.runId} is ${target.liveness}; settle it before resuming (uh kill ${target.runId})`);
+}
+
+/** Write the steer request next to the run's control file for its controller to consume. */
+async function writeSteerRequest(target: ResumableRun, message: string, report: boolean): Promise<void> {
+  const artifacts = await getMissionArtifactContext(target.artifactRoot, target.missionPath, target.runId);
+  if (!artifacts) {
+    throw new Error(`mission ${target.missionId} is not a canonical UH artifact directory; cannot write a steer request`);
+  }
+  const request = RuntimeSteerRequestSchema.parse({
+    schema_version: "uh.runtime-steer-request.v0",
+    mission_id: target.missionId,
+    run_id: target.runId,
+    message,
+    report,
+    requested_at: new Date().toISOString(),
+  });
+  await writeArtifactFile(artifacts.missionDir, path.join(artifacts.runDir, "steer-request.json"), JSON.stringify(request, null, 2));
 }
 
 /**
@@ -206,6 +287,7 @@ async function performResume(
   assertValidRunId(runId);
   const outcome = await deps.run({
     artifactRoot: target.artifactRoot,
+    adapterRoot: target.adapterRoot,
     missionId: target.missionId,
     missionPath: target.missionPath,
     runtime: target.runtime,
@@ -285,9 +367,11 @@ export interface SteerOptions {
 }
 
 /**
- * `uh steer` — cancel a run through the standard cancel path, then resume its
- * native session with `message` as the recovery notes. Costs a stop and a
- * restart of the native session.
+ * `uh steer` — message a run. A live run is steered by its owning controller:
+ * the request is written for the controller's recovery loop, which stops the
+ * attempt (`steered`) and resumes the same native session. A run with no live
+ * controller falls back to cancelling it here and resuming the session
+ * directly. Everything is validated before the run is touched.
  */
 export async function steerRun(
   root: string,
@@ -295,17 +379,29 @@ export async function steerRun(
   message: string,
   options: SteerOptions,
   deps: SteerDeps,
-): Promise<ResumeResult> {
+): Promise<SteerResult> {
   const target = await resolveResumableRun(root, runRef, resolveDeps(deps));
-  assertResumableRuntime(target.runtime);
-  if (message.trim().length === 0) throw new Error("steer requires a non-empty message");
+  await assertSteerable(target, message);
   const report = options.report === true;
-  let cancelled = false;
-  if (target.liveness !== "settled") {
+  if (target.liveness === "live") {
+    await writeSteerRequest(target, message.trim(), report);
+    // Signal the attempt to stop; the owning controller consumes the request
+    // and resumes the session, so no new run is started here.
     await deps.cancel(root, target.missionId, target.runId);
-    cancelled = true;
+    return { ok: true, mode: "controller", sourceRunId: target.runId, missionId: target.missionId, runtime: target.runtime, report };
   }
-  return performResume(target, { notes: steerNotes(message, report), report, cancelled }, deps);
+  const cancelled = target.liveness !== "settled";
+  if (cancelled) await deps.cancel(root, target.missionId, target.runId);
+  const resume = await performResume(target, { notes: steerNotes(message, report), report, cancelled }, deps);
+  return {
+    ok: true,
+    mode: "fallback",
+    sourceRunId: resume.sourceRunId,
+    missionId: resume.missionId,
+    runtime: resume.runtime,
+    report,
+    runId: resume.runId,
+  };
 }
 
 function resolveDeps(deps: SteerDeps): ResolveRunDeps {

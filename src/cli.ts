@@ -537,6 +537,8 @@ program
 /** One resumed attempt for `uh resume` / `uh steer`, wired to the live CLI. */
 interface OperatorResumeRequest {
   artifactRoot: string;
+  /** Project root that owns `.harness/adapters`; a team worker's scope has none. */
+  adapterRoot: string;
   missionId: string;
   missionPath: string;
   runtime: string;
@@ -549,7 +551,9 @@ interface OperatorResumeRequest {
 async function runOperatorResumedAttempt(request: OperatorResumeRequest): Promise<{ runId?: string; result?: { status?: string } }> {
   const wiring = RUNTIME_WIRINGS[request.runtime];
   if (!wiring) throw new Error(`Unknown runtime: ${request.runtime}`);
-  const routing = await resolveSandboxMissionRoot(request.artifactRoot, request.missionPath, true);
+  // The adapter manifest, workflow and sandbox binding all live at the project
+  // root; a team worker's artifact scope is nested below it and holds neither.
+  const routing = await resolveSandboxMissionRoot(request.adapterRoot, request.missionPath, true);
   if (routing.error) throw new Error(routing.error);
   const recovery = await resolveRuntimeRecoveryPolicy(routing.effectiveRoot, routing.missionPath, request.runtime, {});
   return runWithRuntimeRecovery({
@@ -591,10 +595,10 @@ program
     }
   });
 
-// uh steer — cancel a live or settled run and resume it with a message.
+// uh steer — message a run; its owning controller stops and resumes it.
 program
   .command("steer")
-  .description("Cancel a run, then resume its native session with a message")
+  .description("Message a run: its controller stops the attempt (steered) and resumes the session")
   .argument("<run-id>", "Run id, or a unique prefix of one")
   .argument("<message>", "Message injected as the first instruction of the resumed turn")
   .option("--report", "Ask the worker to write a status report before continuing")
@@ -607,6 +611,7 @@ program
       const result = await steerRun(root, runId, message, { report: opts.report === true },
         { run: runOperatorResumedAttempt, cancel: (cancelRoot, missionId, id) => cancelLocalMissionRun(cancelRoot, missionId, id) });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else if (result.mode === "controller") console.log(`Steered ${result.sourceRunId}; its controller will resume the session`);
       else console.log(`Steered ${result.sourceRunId} into ${result.runId}`);
     } catch (err) {
       console.error(`[FAIL] steer error:`);

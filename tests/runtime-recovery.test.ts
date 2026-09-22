@@ -8,7 +8,8 @@ import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
 import { runCommandCode } from "../src/adapters/command-code.js";
 import { runRuntimeProcess, type RuntimeProcessInput } from "../src/harness/runtime-process.js";
-import { prepareRuntimeResume, runWithRuntimeRecovery } from "../src/harness/runtime-recovery.js";
+import { persistRuntimeRecovery, prepareRuntimeResume, runWithRuntimeRecovery } from "../src/harness/runtime-recovery.js";
+import { getMissionArtifactContext } from "../src/adapters/_artifact-context.js";
 
 /**
  * Real children and filesystem visibility cannot be driven by a fake clock, so
@@ -148,5 +149,122 @@ test("a denial budget resumes with a source stop and combined recovery note", as
       notes: expect.stringContaining("You were stopped: 3 hook-denied calls; last: write_file out/c.txt"),
     });
     expect(recovery.notes.match(/You were stopped:/g)).toHaveLength(1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+/* -------------------------------------------------------------------------- */
+/* Steer: the controller owns the steer, and it never spends max_resumes       */
+/* -------------------------------------------------------------------------- */
+
+async function steerFixture(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-steer-recovery-"));
+  const missionPath = path.join(root, ".harness", "missions", "one", "mission.yaml");
+  await mkdir(path.dirname(missionPath), { recursive: true });
+  await writeFile(missionPath, stringify({ schema_version: "uh.mission.v0", id: "one", title: "Steer recovery", workflow_profile: "research-docs" }));
+  return root;
+}
+
+/** Persist an attempt's control/session/result exactly as an adapter would. */
+async function writeAttempt(
+  root: string,
+  runId: string,
+  attempt: { status: "running" | "passed" | "failed"; stopCode?: string; sessionId?: string },
+): Promise<string> {
+  const runDir = path.join(root, ".harness", "missions", "one", "runs", runId);
+  await mkdir(runDir, { recursive: true });
+  const now = new Date().toISOString();
+  await writeFile(path.join(runDir, "runtime-control.json"), JSON.stringify({
+    schema_version: "uh.runtime-control.v0", mission_id: "one", run_id: runId, runtime: "command-code",
+    controller_pid: process.pid, started_at: now, heartbeat_at: now, status: attempt.status,
+    turns: 1, denials: 0, inflight_tools: 0,
+    ...(attempt.sessionId !== undefined ? { session_id: attempt.sessionId } : {}),
+    ...(attempt.stopCode !== undefined ? { stop_code: attempt.stopCode } : {}),
+  }));
+  await writeFile(path.join(runDir, "runtime-session.yaml"), stringify({
+    schema_version: "uh.runtime-session.v0", mission_id: "one", runtime: "command-code",
+    status: attempt.status === "passed" ? "succeeded" : attempt.status === "running" ? "running" : "failed",
+  }));
+  await writeFile(path.join(runDir, "runtime-result.yaml"), stringify({
+    schema_version: "uh.runtime-result.v0", mission_id: "one", runtime: "command-code",
+    status: attempt.status === "passed" ? "passed" : "failed", started_at: now, finished_at: now,
+    prompt_path: "prompt.md", stdout_path: "runtime.stdout.log", stderr_path: "runtime.stderr.log",
+  }));
+  return runDir;
+}
+
+async function writeSteerRequest(runDir: string, runId: string, message: string, report = false): Promise<void> {
+  await writeFile(path.join(runDir, "steer-request.json"), JSON.stringify({
+    schema_version: "uh.runtime-steer-request.v0", mission_id: "one", run_id: runId,
+    message, report, requested_at: new Date().toISOString(),
+  }));
+}
+
+test("a steer request stops the attempt with steered and the next attempt resumes the same session with the message", async () => {
+  const root = await steerFixture();
+  try {
+    const firstRun = "steer-source";
+    const seen: Array<{ runId: string; overrides?: Record<string, unknown> }> = [];
+    const result = await runWithRuntimeRecovery({
+      root, missionId: "one", runtime: "command-code", runId: firstRun,
+      // A steer must work with no automatic resume budget left at all.
+      recovery: { max_resumes: 0, notes: "Automatic policy notes." },
+      run: async (options) => {
+        seen.push({ runId: options.runId, ...(options.extraRuntimeConfigOverrides !== undefined ? { overrides: options.extraRuntimeConfigOverrides } : {}) });
+        const resumeFrom = options.extraRuntimeConfigOverrides?.resume_from_run;
+        if (typeof resumeFrom === "string") {
+          // Mirror the adapter: record the resume lineage for the new attempt.
+          const resume = await prepareRuntimeResume(root, "one", resumeFrom, "command-code", String(options.extraRuntimeConfigOverrides?.recovery_notes ?? ""), "operator");
+          const artifacts = await getMissionArtifactContext(root, path.join(root, ".harness", "missions", "one", "mission.yaml"), options.runId);
+          if (artifacts) await persistRuntimeRecovery(artifacts, resume);
+          await writeAttempt(root, options.runId, { status: "passed", sessionId: "saved-session" });
+          return { runId: options.runId, result: { status: "passed" } };
+        }
+        // The live attempt is stopped by the operator's steer: request written,
+        // then the runtime settles the cancelled attempt.
+        const runDir = await writeAttempt(root, firstRun, { status: "running", sessionId: "saved-session" });
+        await writeSteerRequest(runDir, firstRun, "Switch to the auth path.");
+        await writeAttempt(root, firstRun, { status: "failed", stopCode: "cancelled", sessionId: "saved-session" });
+        return { runId: firstRun, result: { status: "failed" } };
+      },
+    });
+    expect(result.result?.status).toBe("passed");
+    expect(result.runId).not.toBe(firstRun);
+    expect(seen).toHaveLength(2);
+    // The next attempt resumes the same native session with the steer message.
+    expect(seen[1]!.overrides).toMatchObject({ resume_from_run: firstRun });
+    expect(String(seen[1]!.overrides?.recovery_notes)).toContain("Switch to the auth path.");
+    // The stopped attempt is labelled `steered`, not left as a bare cancel.
+    const control = JSON.parse(await readFile(path.join(root, ".harness", "missions", "one", "runs", firstRun, "runtime-control.json"), "utf8"));
+    expect(control.stop_code).toBe("steered");
+    // The request is consumed exactly once.
+    await expect(readFile(path.join(root, ".harness", "missions", "one", "runs", firstRun, "steer-request.json"), "utf8")).rejects.toThrow();
+    // The steer is recorded in the attempt lineage.
+    const lineage = JSON.parse(await readFile(path.join(root, ".harness", "missions", "one", "runs", result.runId!, "runtime-recovery.json"), "utf8"));
+    expect(lineage).toMatchObject({ source_run_id: firstRun, source_stop_code: "steered", session_id: "saved-session", notes: expect.stringContaining("Switch to the auth path.") });
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test("a steered attempt does not consume max_resumes", async () => {
+  const root = await steerFixture();
+  try {
+    let attempts = 0;
+    const result = await runWithRuntimeRecovery({
+      root, missionId: "one", runtime: "command-code", runId: "steer-budget",
+      // No automatic resumes are authorized, yet the steer still resumes once.
+      recovery: { max_resumes: 0, notes: "Automatic policy notes." },
+      run: async (options) => {
+        attempts += 1;
+        if (attempts === 1) {
+          const runDir = await writeAttempt(root, options.runId, { status: "failed", stopCode: "cancelled", sessionId: "saved-session" });
+          await writeSteerRequest(runDir, options.runId, "Go on.");
+          return { runId: options.runId, result: { status: "failed" } };
+        }
+        await writeAttempt(root, options.runId, { status: "passed", sessionId: "saved-session" });
+        return { runId: options.runId, result: { status: "passed" } };
+      },
+    });
+    expect(attempts).toBe(2);
+    expect(result.runId).not.toBe("steer-budget");
+    expect(result.result?.status).toBe("passed");
   } finally { await rm(root, { recursive: true, force: true }); }
 }, 15000);

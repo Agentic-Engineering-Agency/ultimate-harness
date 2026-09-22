@@ -13,7 +13,8 @@ import {
   runWithRuntimeRecovery,
 } from "../src/harness/runtime-recovery.js";
 import { generateRunId } from "../src/harness/run-id.js";
-import { REPORT_REQUEST, resumeRun, steerRun } from "../src/harness/steer.js";
+import { registerLiveRun } from "../src/harness/live-runs.js";
+import { REPORT_REQUEST, resolveResumableRun, resumeRun, steerRun } from "../src/harness/steer.js";
 
 /** A project root with the harness and a Command Code adapter. */
 async function project(): Promise<string> {
@@ -76,6 +77,7 @@ function alive(pid: number) {
 }
 
 const unusedCancel = async () => ({ ok: true, status: "cancelled" });
+const unusedRun = async () => ({ runId: undefined });
 
 test("resume refuses a run that is still live and points at steer", async () => {
   const root = await project();
@@ -99,6 +101,75 @@ test("resume refuses a run that is still live and points at steer", async () => 
   }
 });
 
+test("steer of a live run writes a request for its controller and starts no new run", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runDir = await seedRun(root, "one", "active-run", { status: "running", sessionId: "s1", controllerPid: 4242 });
+    const calls: string[] = [];
+    let ran = false;
+    const result = await steerRun(root, "active-run", "Switch to the auth path.", { report: true }, {
+      run: async () => { ran = true; return {}; },
+      cancel: async (cancelRoot, missionId, runId) => { calls.push(`cancel:${cancelRoot === root}:${missionId}:${runId}`); return { ok: true, status: "cancelled" }; },
+      processes: alive(4242),
+    });
+    expect(result).toMatchObject({ ok: true, mode: "controller", sourceRunId: "active-run", missionId: "one", runtime: "command-code", report: true });
+    expect(result.runId).toBeUndefined();
+    expect(ran).toBe(false);
+    expect(calls).toEqual(["cancel:true:one:active-run"]);
+    const request = JSON.parse(await readFile(path.join(runDir, "steer-request.json"), "utf8"));
+    expect(request).toMatchObject({ schema_version: "uh.runtime-steer-request.v0", mission_id: "one", run_id: "active-run", message: "Switch to the auth path.", report: true });
+    expect(await readdir(path.join(root, ".harness", "missions", "one", "runs"))).toEqual(["active-run"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("steer of a run with no live controller falls back to cancel-then-resume", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    await seedRun(root, "one", "active-run", { status: "running", sessionId: "s1", controllerPid: 4242 });
+    const calls: string[] = [];
+    let notes = "";
+    const newRunId = "20260922T101600Z-bbbbbb";
+    const result = await steerRun(root, "active-run", "Switch to the auth path.", {}, {
+      run: async (request) => { calls.push("resume"); notes = request.recoveryNotes; return { runId: request.runId }; },
+      cancel: async (cancelRoot, missionId, runId) => { calls.push(`cancel:${cancelRoot === root}:${missionId}:${runId}`); return { ok: true, status: "cancelled" }; },
+      // The recorded controller pid is gone, so the run is orphaned, not live.
+      processes: [],
+      newRunId: () => newRunId,
+    });
+    expect(calls).toEqual([`cancel:true:one:active-run`, "resume"]);
+    expect(result).toMatchObject({ ok: true, mode: "fallback", runId: newRunId, sourceRunId: "active-run" });
+    expect(notes).toContain("Switch to the auth path.");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("steer --report injects the fixed report request before the message", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    await seedRun(root, "one", "settled-run", { status: "passed", sessionId: "s1" });
+    let notes = "";
+    await steerRun(root, "settled-run", "Keep going.", { report: true }, {
+      run: async (request) => { notes = request.recoveryNotes; return { runId: request.runId }; },
+      cancel: unusedCancel,
+      processes: [],
+      newRunId: () => "20260922T101700Z-cccccc",
+    });
+    expect(notes.startsWith(REPORT_REQUEST)).toBe(true);
+    for (const heading of ["Done so far", "In progress", "Blocked on", "Next three actions", "Files touched"]) {
+      expect(notes).toContain(heading);
+    }
+    expect(notes).toContain("Keep going.");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("resume of a settled Command Code run plans --resume <session_id> with the notes and records both links", async () => {
   const root = await project();
   try {
@@ -109,7 +180,8 @@ test("resume of a settled Command Code run plans --resume <session_id> with the 
     let plannedPrompt = "";
     const result = await resumeRun(root, "source-run", { notes: "Focus on the parser next." }, {
       run: async (request) => {
-        const plan = await planCommandCodeRun(request.artifactRoot, request.missionPath, {
+        const plan = await planCommandCodeRun(request.adapterRoot, request.missionPath, {
+          artifactRoot: request.artifactRoot,
           extraRuntimeConfigOverrides: { resume_from_run: request.sourceRunId, recovery_notes: request.recoveryNotes },
         });
         plannedArgs = plan.args;
@@ -136,50 +208,6 @@ test("resume of a settled Command Code run plans --resume <session_id> with the 
   }
 });
 
-test("steer cancels through the cancel path and then resumes with the message", async () => {
-  const root = await project();
-  try {
-    await missionPacket(root, "one");
-    await seedRun(root, "one", "active-run", { status: "running", sessionId: "s1", controllerPid: 4242 });
-    const calls: string[] = [];
-    let notes = "";
-    const newRunId = "20260922T101600Z-bbbbbb";
-    const result = await steerRun(root, "active-run", "Switch to the auth path.", {}, {
-      run: async (request) => { calls.push("resume"); notes = request.recoveryNotes; return { runId: request.runId }; },
-      cancel: async (cancelRoot, missionId, runId) => { calls.push(`cancel:${cancelRoot === root}:${missionId}:${runId}`); return { ok: true, status: "cancelled" }; },
-      processes: alive(4242),
-      newRunId: () => newRunId,
-    });
-    expect(calls).toEqual([`cancel:true:one:active-run`, "resume"]);
-    expect(result).toMatchObject({ runId: newRunId, sourceRunId: "active-run", cancelled: true, origin: "operator" });
-    expect(notes).toContain("Switch to the auth path.");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("steer --report injects the fixed report request before the message", async () => {
-  const root = await project();
-  try {
-    await missionPacket(root, "one");
-    await seedRun(root, "one", "active-run", { status: "running", sessionId: "s1", controllerPid: 4242 });
-    let notes = "";
-    await steerRun(root, "active-run", "Keep going.", { report: true }, {
-      run: async (request) => { notes = request.recoveryNotes; return { runId: request.runId }; },
-      cancel: unusedCancel,
-      processes: alive(4242),
-      newRunId: () => "20260922T101700Z-cccccc",
-    });
-    expect(notes.startsWith(REPORT_REQUEST)).toBe(true);
-    for (const heading of ["Done so far", "In progress", "Blocked on", "Next three actions", "Files touched"]) {
-      expect(notes).toContain(heading);
-    }
-    expect(notes).toContain("Keep going.");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("a runtime with no session resume is refused and nothing changes", async () => {
   const root = await project();
   try {
@@ -194,6 +222,102 @@ test("a runtime with no session resume is refused and nothing changes", async ()
     expect(ran).toBe(false);
     const runs = await readdir(path.join(root, ".harness", "missions", "one", "runs"));
     expect(runs).toEqual(["hermes-run"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Team worker: the manifest resolves from the project root (defect A)         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A project root with one team worker whose control file sits deep in the team
+ * tree, under the worker's own artifact scope. Only the project root holds
+ * `.harness/adapters`.
+ */
+async function teamWorker(): Promise<{ projectRoot: string; workerRoot: string; team: string; runId: string }> {
+  const projectRoot = await project();
+  const team = "wave-audit-0";
+  const runId = "20260922T100100Z-eeeeee";
+  const workerRoot = path.join(projectRoot, ".harness", "missions", team, "team", "artifacts", "20260922T100000Z-parent", "workers", "runbook");
+  await mkdir(path.join(workerRoot, ".harness", "missions", team), { recursive: true });
+  await writeFile(path.join(workerRoot, ".harness", "missions", team, "mission.yaml"), stringify({
+    schema_version: "uh.mission.v0", id: team, title: "Team worker fixture", workflow_profile: "research-docs",
+  }));
+  await seedRun(workerRoot, team, runId, { status: "running", sessionId: "worker-session", controllerPid: 4242 });
+  await registerLiveRun({
+    projectRoot, artifactRoot: workerRoot, runId, missionId: team,
+    runtime: "command-code", controllerPid: 4242, team: { mission_id: team, role: "runbook" },
+  });
+  return { projectRoot, workerRoot, team, runId };
+}
+
+test("a team worker path resolves the adapter manifest from the project root", async () => {
+  const { projectRoot, workerRoot, team, runId } = await teamWorker();
+  try {
+    const target = await resolveResumableRun(projectRoot, runId, { processes: alive(4242) });
+    expect(target.artifactRoot).toBe(path.resolve(workerRoot));
+    expect(target.adapterRoot).toBe(path.resolve(projectRoot));
+    expect(target.liveness).toBe("live");
+
+    let ran = false;
+    const result = await steerRun(projectRoot, runId, "Skip the retry loop.", {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: unusedCancel,
+      processes: alive(4242),
+    });
+    expect(result).toMatchObject({ mode: "controller", sourceRunId: runId, missionId: team });
+    expect(ran).toBe(false);
+    const request = JSON.parse(await readFile(path.join(workerRoot, ".harness", "missions", team, "runs", runId, "steer-request.json"), "utf8"));
+    expect(request).toMatchObject({ mission_id: team, run_id: runId, message: "Skip the retry loop." });
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("a failing preflight refuses and leaves the run untouched", async () => {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), "uh-steer-preflight-"));
+  const missionId = "one";
+  const runId = "20260922T100200Z-ffffff";
+  try {
+    // The project root holds a harness and an EMPTY adapters directory, so the
+    // manifest cannot resolve from the project root.
+    await mkdir(path.join(projectRoot, ".harness", "adapters"), { recursive: true });
+    await writeFile(path.join(projectRoot, ".harness", "project.yaml"), "schema_version: uh.project.v0\nname: preflight fixture\n");
+    await missionPacket(projectRoot, missionId);
+    await seedRun(projectRoot, missionId, runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    let cancelled = false;
+    let ran = false;
+    await expect(steerRun(projectRoot, runId, "Nudge.", {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: async () => { cancelled = true; return { ok: true, status: "cancelled" }; },
+      processes: alive(4242),
+      newRunId: () => generateRunId(),
+    })).rejects.toThrow(/manifest/);
+    expect(cancelled).toBe(false);
+    expect(ran).toBe(false);
+    const runsDir = path.join(projectRoot, ".harness", "missions", missionId, "runs");
+    expect(await readdir(runsDir)).toEqual([runId]);
+    await expect(readFile(path.join(runsDir, runId, "steer-request.json"), "utf8")).rejects.toThrow();
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("steer refuses a run with no recorded native session id and touches nothing", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    await seedRun(root, "one", "no-session-run", { status: "running", controllerPid: 4242 });
+    let cancelled = false;
+    await expect(steerRun(root, "no-session-run", "Nudge.", {}, {
+      run: unusedRun,
+      cancel: async () => { cancelled = true; return { ok: true, status: "cancelled" }; },
+      processes: alive(4242),
+    })).rejects.toThrow(/native session id/);
+    expect(cancelled).toBe(false);
+    await expect(readFile(path.join(root, ".harness", "missions", "one", "runs", "no-session-run", "steer-request.json"), "utf8")).rejects.toThrow();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

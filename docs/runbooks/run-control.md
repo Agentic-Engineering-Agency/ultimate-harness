@@ -246,11 +246,12 @@ under. Use `--team` (or `--all`) for that.
 ## Steering a worker
 
 A worker can be nudged mid-run only by stopping it and resuming its native
-session with a message. `uh steer` does both in one command:
+session with a message. `uh steer` validates the request, then has the run's
+owning controller perform the steer:
 
 ```bash
-# Stop the run, then resume its saved session with the message injected as the
-# first instruction of the resumed turn. The new run id is printed.
+# Message the run: its controller stops the attempt (stop code `steered`) and
+# resumes the same native session with the message as the first instruction.
 uh steer 20260922T101500Z-a1b2c3 "Skip the retry loop; the endpoint already returns 429."
 
 # Ask for a status report before the worker continues.
@@ -264,11 +265,54 @@ uh steer <run-id> "<message>" --json
 in progress / blocked on / next three actions / files touched" before anything
 else, then continue.
 
-Steering resolves the run exactly like `uh ps` does — by id or a unique prefix,
-from the project root, including team workers under their own artifact roots. It
-cancels through the normal cancel path and waits for settlement, then starts a
-new run for the same mission, in the same artifact root and sandbox, bound to
-`resume_from_run = <run-id>`. The operator's message becomes the recovery notes.
+### Preflight — everything is validated before the run is touched
+
+`uh steer` refuses, and changes nothing, unless all of the following hold:
+
+1. The run exists (by id or a unique prefix), resolved exactly like `uh ps`
+   does — from the project root, including team workers under their own
+   artifact roots.
+2. A native session id is recorded for the attempt.
+3. The adapter manifest resolves from the **project root** that owns
+   `.harness/adapters` (the nearest ancestor of the run's artifact scope). A
+   team worker's scope lives under
+   `.harness/missions/<team>/team/artifacts/...` and holds no adapters of its
+   own, so the manifest is never looked up there.
+4. The runtime has a native resume path (Command Code, oh-my-pi, Claude Code).
+
+A refusal is a clear message and no side effect: no stop is signalled and no
+steer request is written.
+
+### The owning controller resumes it
+
+When a live controller owns the attempt (`uh ps` says `live`), steer writes a
+`steer-request.json` (message, `report` flag, `requested_at`) next to the run's
+`runtime-control.json` and signals the attempt to stop. The controller's
+recovery loop (`runWithRuntimeRecovery`) then:
+
+- consumes the request (it is deleted, so it can never be replayed),
+- records the stopped attempt as `stop_code: steered` — a resumable, non-terminal
+  stop, never a bare `cancelled`,
+- starts the next attempt with `resume_from_run = <run-id>` and the operator's
+  message as the first instruction, and
+- records the steer in the attempt lineage (`runtime-recovery.json` on the new
+  run carries `source_stop_code: steered` and the message as its notes).
+
+A steered attempt does **not** count against the mission's
+`recovery.max_resumes` budget — an operator message is authorized outside the
+automatic loop. Because the resume happens inside the controller, a team
+worker keeps running inside its team controller and is integrated normally
+instead of being treated as a finished worker.
+
+### When no live controller owns the run
+
+If the controller is gone (`uh ps` reports `orphaned`), steer falls back to the
+older path — but only after the same preflight succeeded. It asks the settled
+run's remaining owner to stop, then starts a new run for the same mission, in
+the same artifact root and sandbox, bound to `resume_from_run = <run-id>`, and
+records the operator lineage both ways: `resumed_from` on the new run and
+`resumed_by` on the old one, with `resume_origin: "operator"` in
+`runs/<run-id>/resume-link.json` on each.
 
 **The honest caveat**: steering is not a live channel. It costs a stop and a
 restart of the native session. The transcript and prior work survive because the
@@ -303,6 +347,6 @@ outside the automatic recovery loop, so they never spend the mission's
 - `uh status` / `uh status --json` include live-run counts.
 - `uh mission cancel` — cancel an owned local run.
 - `uh kill` — stop runs by id, role, mission, team, `--all` or `--orphans`.
-- `uh steer` — cancel a run and resume its session with a message.
+- `uh steer` — message a run; its controller stops the attempt (`steered`) and resumes the session.
 - `uh resume` — continue a settled run's session as a new run.
 - Team fan-out and worker artifact layout: `docs/runbooks/resource-wave-smoke.md`.

@@ -1,10 +1,10 @@
 import { validateMission } from "../schema/mission.js";
 import { runtimeRegistry } from "./registry.js";
 import { mergeRuntimeConfigOverrides } from "./runtime-config-overrides.js";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
-import { RuntimeControlSchema, RuntimeRecoveryPolicySchema, RuntimeRecoveryRecordSchema, type RuntimeControl } from "../schema/runtime-control.js";
+import { RuntimeControlSchema, RuntimeRecoveryPolicySchema, RuntimeRecoveryRecordSchema, RuntimeSteerRequestSchema, type RuntimeControl, type RuntimeSteerRequest } from "../schema/runtime-control.js";
 import { RuntimeSessionSchema, RuntimeResultSchema } from "../schema/artifacts.js";
 import { assertSafeMissionId } from "./mission.js";
 import { assertValidRunId, generateRunId } from "./run-id.js";
@@ -25,6 +25,29 @@ export function resumeConsumesBudget(origin: ResumeOrigin): boolean {
 /** Automatic resume budget left after prior resumes, counting only budget-consuming ones. */
 export function remainingResumeBudget(maxResumes: number, origins: readonly ResumeOrigin[]): number {
   return Math.max(0, maxResumes - origins.filter(resumeConsumesBudget).length);
+}
+
+/**
+ * The fixed status-report request `uh steer --report` injects before the
+ * operator's message, so a nudge always yields the same shape of answer.
+ */
+export const REPORT_REQUEST = `Before anything else, write a status report for the operator in exactly this shape:
+1. Done so far
+2. In progress
+3. Blocked on
+4. Next three actions
+5. Files touched
+Write the report first, then continue your work.`;
+
+/** Default instruction for an operator resume that supplied no `--notes`. */
+export const DEFAULT_OPERATOR_RESUME_NOTE =
+  "Resume the saved session and continue the mission from where the previous attempt stopped.";
+
+/** Compose the note injected into a resumed turn; `--report` prepends the fixed request. */
+export function steerNotes(message: string, report: boolean): string {
+  const trimmed = message.trim();
+  if (!report) return trimmed;
+  return trimmed.length === 0 ? REPORT_REQUEST : `${REPORT_REQUEST}\n\n${trimmed}`;
 }
 
 export interface RuntimeResume {
@@ -69,6 +92,50 @@ export async function prepareRuntimeResume(root: string, missionId: string, runI
   return { sourceRunId: runId, sessionId: control.session_id, notes: combinedNotes, sourceStopCode: control.stop_code, sourceStopReason, grace, origin };
 }
 
+/**
+ * The `uh steer` request written next to a run's `runtime-control.json`, if one
+ * is pending, deleted once read so a controller can never replay it.
+ */
+export async function consumeSteerRequest(root: string, missionId: string, runId: string): Promise<RuntimeSteerRequest | undefined> {
+  assertSafeMissionId(missionId);
+  assertValidRunId(runId);
+  const requestPath = path.join(root, ".harness", "missions", missionId, "runs", runId, "steer-request.json");
+  let raw: string;
+  try {
+    raw = await readFile(requestPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  const request = RuntimeSteerRequestSchema.parse(JSON.parse(raw));
+  if (request.mission_id !== missionId || request.run_id !== runId) throw new Error("Steer request identity mismatch");
+  await rm(requestPath, { force: true });
+  return request;
+}
+
+/**
+ * Label a stopped attempt `steered`: its control receipt records the operator
+ * identity rather than the transient stop that ended it. Idempotent and
+ * best-effort — a missing or unreadable receipt is left untouched.
+ */
+export async function markAttemptSteered(root: string, missionId: string, runId: string, message: string): Promise<void> {
+  assertSafeMissionId(missionId);
+  assertValidRunId(runId);
+  const artifacts = await getMissionArtifactContext(root, path.join(root, ".harness", "missions", missionId, "mission.yaml"), runId);
+  if (!artifacts) return;
+  const controlPath = path.join(artifacts.runDir, "runtime-control.json");
+  let control: RuntimeControl;
+  try {
+    control = RuntimeControlSchema.parse(JSON.parse(await readFile(controlPath, "utf8")));
+  } catch {
+    return;
+  }
+  if (control.mission_id !== missionId || control.run_id !== runId) return;
+  const firstLine = message.trim().split(/\r?\n/, 1)[0]?.slice(0, 200) ?? "";
+  const rewritten: RuntimeControl = { ...control, stop_code: "steered", stop_reason: `Steered by the controller: ${firstLine}` };
+  await writeArtifactFile(artifacts.missionDir, controlPath, JSON.stringify(rewritten));
+}
+
 export function recoveryPrompt(resume: RuntimeResume): string {
   return resume.grace
     ? `\n\n## Recovery of prior attempt ${resume.sourceRunId}\n${resume.notes}\n`
@@ -109,7 +176,29 @@ export async function runWithRuntimeRecovery<T extends RecoverableRuntimeResult>
   // Prior resumes already spent part of the budget; operator resumes spent none.
   for (let resumed = (input.priorResumeOrigins ?? []).filter(resumeConsumesBudget).length; ; resumed++) {
     await input.onAttempt?.(runId);
-    const result = await input.run({ runId, extraRuntimeConfigOverrides: overrides });
+    let result = await input.run({ runId, extraRuntimeConfigOverrides: overrides });
+    // A `uh steer` request is an operator message to a live attempt. The
+    // controller stops the steered attempt and resumes its native session with
+    // the message as the first instruction. It is free: it never spends the
+    // automatic `max_resumes` budget and works without a recovery policy.
+    for (;;) {
+      if (input.cancellationSignal?.aborted) return result;
+      const steer = await consumeSteerRequest(input.root, input.missionId, runId);
+      if (!steer || result.result?.status === "passed") break;
+      const notes = steerNotes(steer.message, steer.report);
+      try {
+        await prepareRuntimeResume(input.root, input.missionId, runId, input.runtime, notes, "operator");
+      } catch {
+        // The attempt cannot be resumed (for example a concurrent policy stop);
+        // it is left settled rather than relabelled or restarted from scratch.
+        break;
+      }
+      await markAttemptSteered(input.root, input.missionId, runId, steer.message);
+      overrides = { ...input.extraRuntimeConfigOverrides, resume_session: undefined, resume_from_run: runId, recovery_notes: notes };
+      runId = generateRunId();
+      await input.onAttempt?.(runId);
+      result = await input.run({ runId, extraRuntimeConfigOverrides: overrides });
+    }
     if (!policy || input.cancellationSignal?.aborted || result.result?.status === "passed") return result;
     const control = RuntimeControlSchema.parse(JSON.parse(await readFile(path.join(input.root, ".harness", "missions", input.missionId, "runs", runId, "runtime-control.json"), "utf8")));
     if (graceAttempted) return result;
