@@ -448,6 +448,38 @@ program
       console.log(`Promoted missions: ${s.promoted_missions_count}`);
       console.log(`Recent audit events: ${s.recent_audit_events}`);
       console.log(`Acceptance evidence: proven ${s.acceptance.proven}, stale ${s.acceptance.stale}, failed ${s.acceptance.failed}, unproven ${s.acceptance.unproven}`);
+      const { liveRunCounts } = await import("./harness/live-runs.js");
+      const live = await liveRunCounts(root);
+      console.log(`Live runs: ${live.total} (orphaned: ${live.orphaned})`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// uh ps — every live run discoverable from the project root.
+program
+  .command("ps")
+  .description("List live runs found from the project root (exit 3 when a run is orphaned)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit discovered runs as JSON")
+  .option("--all", "Include recent settled runs (kept for 24h)")
+  .action(async (opts: { root?: string; json?: boolean; all?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { listLiveRuns, formatLiveRuns, liveRunsExitCode } = await import("./harness/live-runs.js");
+      const { records, orphaned } = await listLiveRuns(root, { includeSettled: opts.all === true });
+      if (opts.json) {
+        console.log(JSON.stringify({
+          schema_version: "uh.ps.v0",
+          generated_at: new Date().toISOString(),
+          orphaned,
+          runs: records,
+        }, null, 2));
+      } else {
+        console.log(formatLiveRuns(records));
+      }
+      process.exit(liveRunsExitCode(records));
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
