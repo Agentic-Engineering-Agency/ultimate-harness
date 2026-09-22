@@ -36,8 +36,10 @@ export function renderPrompt(ctx: DispatchContext): string {
     for (const p of ctx.readFirst) {
       prompt += `- ${p}\n`;
     }
-    prompt += "\n";
+  } else {
+    prompt += "## Read First\n- none, add nothing\n";
   }
+  prompt += "\n";
 
   if (ctx.expectedArtifacts.length > 0) {
     prompt += "## Expected Artifacts\n";
@@ -47,24 +49,30 @@ export function renderPrompt(ctx: DispatchContext): string {
       if (a.completion_marker !== undefined) prompt += `; final nonblank line must be ${JSON.stringify(a.completion_marker)}`;
       prompt += "\n";
     }
-    prompt += "\n";
+  } else {
+    prompt += "## Expected Artifacts\n- none, add nothing\n";
   }
+  prompt += "\n";
 
   if (ctx.verificationChecks.length > 0) {
     prompt += "## Verification Checks\n";
     for (const c of ctx.verificationChecks) {
       prompt += `- ${c}\n`;
     }
-    prompt += "\n";
+  } else {
+    prompt += "## Verification Checks\n- none, add nothing\n";
   }
+  prompt += "\n";
 
   if (ctx.constraints.length > 0) {
     prompt += "## Constraints\n";
     for (const constraint of ctx.constraints) {
       prompt += `- ${constraint}\n`;
     }
-    prompt += "\n";
+  } else {
+    prompt += "## Constraints\n- none, add nothing\n";
   }
+  prompt += "\n";
 
   if (ctx.acceptanceCriteria.length > 0) {
     prompt += "## Acceptance Criteria\n";
@@ -74,8 +82,10 @@ export function renderPrompt(ctx: DispatchContext): string {
         prompt += `  - check_command: ${criterion.check_command}\n`;
       }
     }
-    prompt += "\n";
+  } else {
+    prompt += "## Acceptance Criteria\n- none, add nothing\n";
   }
+  prompt += "\n";
   prompt += "Execute this mission and produce the expected artifacts.\n";
   prompt += ctx.finalMessageInstruction;
 
