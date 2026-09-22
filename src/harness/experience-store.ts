@@ -11,7 +11,8 @@ import {
 } from "../schema/artifacts.js";
 import { RuntimeControlSchema, RuntimeRecoveryRecordSchema, type RuntimeControl } from "../schema/runtime-control.js";
 import { CanonicalTeamStateSchema, type CanonicalTeamState } from "../schema/team.js";
-import { readNativeCostFacts, resolveRunCost } from "./runtime-accounting.js";
+import { readNativeCostFacts, resolveRunCost, tokenTotalsFromUsage, type RunTokenTotals } from "./runtime-accounting.js";
+import { loadOperatorPriceTable, type OperatorPriceTable } from "./cost-table.js";
 
 export type RunRecord = {
   mission_id: string;
@@ -36,6 +37,8 @@ export type RunRecord = {
   output_tokens?: number;
   cache_read_tokens?: number;
   cache_write_tokens?: number;
+  /** Token totals summed from the run's native event stream, or its recorded usage. */
+  token_totals?: RunTokenTotals;
   cost_usd?: number;
   cost_basis?: string;
   resumed_from?: string;
@@ -104,6 +107,7 @@ async function indexRun(
   missionId: string,
   missionRoot: string,
   runId: string,
+  priceTable: OperatorPriceTable | undefined,
   team?: { mission_id: string; role: string },
 ): Promise<RunRecord | undefined> {
   const runRoot = path.join(missionRoot, "runs", runId);
@@ -132,16 +136,18 @@ async function indexRun(
   const runtime = result?.runtime ?? control?.runtime;
   const cost = optionalNumber(result?.cost_usd ?? usage?.cost_usd);
   const costBasis = result?.cost_basis ?? usage?.cost_basis;
-  // Only a run that records no cost consults its native stream, and only to
-  // explain the gap: a run whose stream is deliberately costless stays unknown.
-  const native = cost === undefined && runtime === "command-code" ? await readNativeCostFacts(runRoot) : undefined;
-  const resolvedCost = resolveRunCost({ runtime, resultCostUsd: cost, resultCostBasis: costBasis, native });
+  // A Command Code run consults its native stream even when its result already
+  // carries a price: the stream is where token totals and the model come from,
+  // and where an unpriced run's cost gap gets explained (never guessed).
+  const native = runtime === "command-code" ? await readNativeCostFacts(runRoot) : undefined;
+  const resolvedCost = resolveRunCost({ runtime, resultCostUsd: cost, resultCostBasis: costBasis, native, priceTable });
+  const tokenTotals = tokenTotalsFromUsage(native?.usage) ?? tokenTotalsFromUsage(usage);
   return {
     mission_id: result?.mission_id ?? control?.mission_id ?? missionId,
     run_id: runId,
     runtime,
     provider: result?.provider ?? usage?.provider ?? control?.usage?.provider,
-    model: result?.model ?? usage?.model ?? control?.usage?.model,
+    model: result?.model ?? usage?.model ?? control?.usage?.model ?? native?.model,
     workflow_profile: workflowProfile,
     template_id: optionalString(templateRecord?.template_id),
     tier: optionalString(templateRecord?.tier),
@@ -157,6 +163,7 @@ async function indexRun(
     output_tokens: optionalNumber(usage?.output_tokens),
     cache_read_tokens: optionalNumber(usage?.cache_read_tokens),
     cache_write_tokens: optionalNumber(usage?.cache_write_tokens),
+    ...(tokenTotals !== undefined ? { token_totals: tokenTotals } : {}),
     cost_usd: resolvedCost.cost_usd,
     cost_basis: costBasis,
     ...(resolvedCost.cost_source !== undefined ? { cost_source: resolvedCost.cost_source } : {}),
@@ -180,7 +187,7 @@ async function readTeamState(filePath: string): Promise<CanonicalTeamState | und
  * `team-state.json`; each worker's own canonical run lives one `.harness` tree
  * deeper than the mission that owns the team.
  */
-async function indexTeamRuns(missionId: string, missionRoot: string): Promise<RunRecord[]> {
+async function indexTeamRuns(missionId: string, missionRoot: string, priceTable: OperatorPriceTable | undefined): Promise<RunRecord[]> {
   const teamRoot = path.join(missionRoot, "team");
   let parents: Dirent[] = [];
   try { parents = await readdir(path.join(teamRoot, "artifacts"), { withFileTypes: true }); } catch { return []; }
@@ -197,6 +204,7 @@ async function indexTeamRuns(missionId: string, missionRoot: string): Promise<Ru
         workerMissionId,
         path.join(workerRoot, ".harness", "missions", workerMissionId),
         worker.run_id,
+        priceTable,
         { mission_id: missionId, role: worker.role },
       );
       if (record) records.push(record);
@@ -210,6 +218,9 @@ export async function indexRuns(root: string, options: { missionId?: string } = 
   let missions;
   try { missions = await readdir(missionsRoot, { withFileTypes: true }); } catch { return []; }
   const selected = missions.filter(entry => entry.isDirectory() && (options.missionId === undefined || entry.name === options.missionId));
+  // The operator price table is loaded once per index pass; a missing or
+  // malformed table prices nothing.
+  const priceTable = await loadOperatorPriceTable(root);
   // A run is identified by (mission, run id). A team worker run is also
   // reachable through the parent's team-state pointer, so it must not be
   // counted twice: the team-recorded view (which carries the role) wins.
@@ -220,14 +231,14 @@ export async function indexRuns(root: string, options: { missionId?: string } = 
     let runs: Dirent[] = [];
     try { runs = await readdir(path.join(missionRoot, "runs"), { withFileTypes: true }); } catch { runs = []; }
     for (const run of runs.filter(entry => entry.isDirectory())) {
-      const record = await indexRun(mission.name, missionRoot, run.name);
+      const record = await indexRun(mission.name, missionRoot, run.name, priceTable);
       if (record) records.set(keyOf(record), record);
     }
   }
   // Second pass so the team-recorded view of a shared run always wins,
   // independent of the order missions are read.
   for (const mission of selected) {
-    for (const record of await indexTeamRuns(mission.name, path.join(missionsRoot, mission.name))) {
+    for (const record of await indexTeamRuns(mission.name, path.join(missionsRoot, mission.name), priceTable)) {
       records.set(keyOf(record), record);
     }
   }

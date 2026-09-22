@@ -251,7 +251,9 @@ describe("uh observatory runs", () => {
       status?: string;
       stop_code?: string;
       cost_usd?: number;
+      cost_source?: string;
       duration_ms?: number;
+      token_totals?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
     }>;
 
     expect(Array.isArray(records)).toBe(true);
@@ -266,6 +268,8 @@ describe("uh observatory runs", () => {
       status: "passed",
       duration_ms: 2000,
       cost_usd: 1.25,
+      cost_source: "estimated",
+      token_totals: { input: 100, output: 20 },
     });
 
     const run2 = records.find((r) => r.run_id === "run-fail-2");
@@ -287,7 +291,7 @@ describe("uh observatory runs", () => {
     const { stdout } = await runUh(["observatory", "runs", "--root", TEST_ROOT]);
 
     // Check table headers
-    expect(stdout).toMatch(/MISSION_ID\s+RUN_ID\s+RUNTIME\s+MODEL\s+WORKFLOW_PROFILE\s+STATUS\s+STOP_CODE\s+DURATION\s+COST/);
+    expect(stdout).toMatch(/MISSION_ID\s+RUN_ID\s+RUNTIME\s+MODEL\s+WORKFLOW_PROFILE\s+STATUS\s+STOP_CODE\s+DURATION\s+TOKENS\s+COST\s+COST_SOURCE/);
 
     // Run 1 has known values
     expect(stdout).toContain("run-pass-1");
@@ -378,6 +382,76 @@ describe("uh observatory runs", () => {
 
     const res = await runUhFailure(["observatory", "runs", "--root", TEST_ROOT, "--group-by", "invalid_dim"]);
     expect(`${res.stdout}${res.stderr}`).toMatch(/must be one of runtime, model, workflow_profile, stop_code/i);
+  });
+
+  test("shows native token totals and operator-priced provenance for a command-code run", async () => {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "mission-cmdc");
+    const runDir = join(missionDir, "runs", "run-cmdc-usage");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(
+      join(missionDir, "mission.yaml"),
+      stringify({
+        schema_version: "uh.mission.v0",
+        id: "mission-cmdc",
+        title: "Command Code Usage",
+        workflow_profile: "spec-first-feature",
+        objective: "Test native token totals",
+      }),
+      "utf-8",
+    );
+    await writeFile(
+      join(runDir, "runtime-result.yaml"),
+      stringify({
+        schema_version: "uh.runtime-result.v0",
+        mission_id: "mission-cmdc",
+        runtime: "command-code",
+        status: "passed",
+        started_at: "2026-09-22T00:00:00.000Z",
+        finished_at: "2026-09-22T00:01:00.000Z",
+        prompt_path: "prompt.md",
+        stdout_path: "stdout.log",
+        stderr_path: "stderr.log",
+      }),
+      "utf-8",
+    );
+    await writeFile(
+      join(runDir, "events.ndjson"),
+      await readFile(join(process.cwd(), "tests", "fixtures", "runtime-events", "command-code-usage.ndjson"), "utf-8"),
+      "utf-8",
+    );
+    await writeFile(
+      join(TEST_ROOT, ".harness", "prices.yaml"),
+      [
+        "schema_version: uh.prices.v0",
+        "models:",
+        "  qwen/qwen3.8-flash:",
+        "    input_usd_per_million: 2",
+        "    output_usd_per_million: 8",
+        "    cache_read_usd_per_million: 0.4",
+        "    cache_write_usd_per_million: 1",
+        '    source: "test placeholder, not a real price"',
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const { stdout } = await runUh(["observatory", "runs", "--root", TEST_ROOT]);
+    const line = stdout.split("\n").find((l) => l.includes("run-cmdc-usage"));
+    expect(line).toBeDefined();
+    // 39076 input + 580 output + 18432 cache-read + 0 cache-write.
+    expect(line).toContain("58088");
+    expect(line).toContain("$0.0902");
+    expect(line).toContain("estimated");
+
+    const { stdout: json } = await runUh(["observatory", "runs", "--root", TEST_ROOT, "--json"]);
+    const record = (JSON.parse(json) as Array<{
+      run_id: string;
+      cost_usd?: number;
+      cost_source?: string;
+      token_totals?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
+    }>).find((r) => r.run_id === "run-cmdc-usage");
+    expect(record?.token_totals).toEqual({ input: 39076, output: 580, cache_read: 18432, cache_write: 0 });
+    expect(record?.cost_usd).toBeCloseTo(0.0901648, 12);
+    expect(record?.cost_source).toBe("estimated");
   });
 });
 
