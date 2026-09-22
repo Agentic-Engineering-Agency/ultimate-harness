@@ -1,6 +1,7 @@
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { DEFAULT_PROTECTED_PATHS, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode } from "../schema/runtime-control.js";
+import { nativeToolFailure } from "./native-tool-result.js";
 import { SHELL_TOOLS, WRITE_TOOLS } from "./tool-guard.js";
 type Event = Record<string, unknown>;
 const record = (value: unknown): Event | undefined =>
@@ -359,6 +360,7 @@ export class RuntimeSupervision {
   readonly inflight = new Set<string>();
   readonly commands = new Map<string, string>();
   readonly failures = new Map<string, number>();
+  private readonly failureExitCodes = new Map<string, number>();
   private readonly toolNames = new Map<string, string>();
   private readonly toolTargets = new Map<string, string>();
   private readonly hookBlocks = new Map<string, string>();
@@ -619,18 +621,17 @@ export class RuntimeSupervision {
       this.inflight.delete(id);
       const command = this.commands.get(id);
       this.commands.delete(id);
-      const result = record(event.result);
-      const failed = event.isError === true || result?.isError === true || result?.is_error === true ||
-        (typeof result?.exitCode === "number" && result.exitCode !== 0) ||
-        (typeof result?.exit_code === "number" && result.exit_code !== 0);
+      const outcome = nativeToolFailure(event);
       this.verifyGuardInvocation(id);
       const denial = guardDenialReason(event);
       if (denial) this.countDenial(id, denial, now);
-      if (command && failed && !denial) {
+      if (command && outcome.failed && !denial) {
         const count = (this.failures.get(command) ?? 0) + 1;
         this.failures.set(command, count);
+        if (outcome.exit_code !== undefined) this.failureExitCodes.set(command, outcome.exit_code);
         if (this.limits.max_repeated_failures && count >= this.limits.max_repeated_failures) {
-          this.stop(`The same command failed ${count} times: ${command.slice(0, 120)}`, "repeated_failure");
+          const exit = this.failureExitCodes.get(command);
+          this.stop(`The same command failed ${count} times${exit === undefined ? "" : ` (exit ${exit})`}: ${command.slice(0, 120)}`, "repeated_failure");
         }
       }
       this.markProgress(now);
