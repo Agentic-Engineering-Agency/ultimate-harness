@@ -8,7 +8,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -342,6 +342,58 @@ describe("runTeamMission — fake gitOps", () => {
     // Summary line extracted from runtime-final.txt's first non-empty line.
     expect(report).toMatch(/Summary: wrote src\/a\.ts/);
     expect(report).toMatch(/Summary: wrote src\/b\.ts/);
+  });
+
+  test("team worker registers a live run at the project root with its team and role", async () => {
+    const repo: FakeRepo = {
+      branches: new Set(["HEAD"]),
+      contents: new Map([["HEAD", new Map()]]),
+      conflictsWith: new Map(),
+    };
+    const fs = { write: async () => { /* no-op */ } };
+    const baseRunner = makeRunner({
+      writes: { backend: { files: { "src/a.ts": "a\n" }, sentinel: "ok" } },
+    }, repo);
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [
+        { role: "backend", adapter: "hermes", runtime_config_overrides: { model: "provider/backend" } },
+      ],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath, context) => {
+        // The adapter claims its attempt before running; the team runner wires
+        // this hook so the worker is discoverable from the project root.
+        await context.onAttempt?.(context.runId);
+        return baseRunner(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, fs),
+      verifier: async () => ({
+        status: "passed", path: "/fake/verification.yaml", checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+        acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+      }),
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    const liveRunsDir = join(ROOT, ".harness", "live-runs");
+    const files = await readdir(liveRunsDir);
+    const entries = await Promise.all(files.map(async (file) => JSON.parse(
+      await readFile(join(liveRunsDir, file), "utf-8"),
+    ) as {
+      run_id: string;
+      mission_id: string;
+      runtime: string;
+      model?: string;
+      team?: { mission_id: string; role: string };
+      artifact_root: string;
+    }));
+    const backend = entries.find((entry) => entry.team?.role === "backend");
+    expect(backend).toBeTruthy();
+    expect(backend!.team).toEqual({ mission_id: "team-mission", role: "backend" });
+    expect(backend!.runtime).toBe("hermes");
+    expect(backend!.model).toBe("provider/backend");
+    expect(backend!.artifact_root).toMatch(
+      /^\.harness\/missions\/team-mission\/team\/artifacts\/.+\/workers\/backend$/,
+    );
   });
 
   test("conflict path: leader marks conflict and overall status is blocked (no verifier wired)", async () => {

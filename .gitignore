@@ -27,6 +27,7 @@ __pycache__/
 /.local-only/
 /out/
 /.harness/audit/
+/.harness/live-runs/
 /acceptance/evidence/
 /docs/architecture/evidence/
 # Missions are local execution state by default. Existing tracked templates stay
