@@ -1,5 +1,7 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile, appendFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseEventLine,
@@ -8,7 +10,7 @@ import {
   type RunEvent,
 } from "../src/tui/run-events.js";
 
-const ROOT = "/tmp/uh-test-run-events";
+const ROOT = mkdtempSync(join(tmpdir(), "uh-test-run-events-"));
 const FILE = join(ROOT, "events.ndjson");
 
 async function reset() {
@@ -18,6 +20,7 @@ async function reset() {
 
 beforeEach(reset);
 afterEach(async () => { try { await rm(ROOT, { recursive: true, force: true }); } catch {} });
+afterAll(async () => { try { await rm(ROOT, { recursive: true, force: true }); } catch {} });
 
 describe("tui/run-events parseEventLine", () => {
   test("returns null for empty / whitespace input", () => {

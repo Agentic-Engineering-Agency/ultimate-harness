@@ -1,5 +1,7 @@
-import { describe, expect, test, beforeAll, beforeEach, afterEach } from "vitest";
+import { describe, expect, test, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initializeHarness } from "../src/harness/init.js";
 import { planHermesRun } from "../src/adapters/hermes.js";
@@ -9,7 +11,7 @@ import {
   parseRuntimeConfigOverridesJson,
 } from "../src/harness/runtime-config-overrides.js";
 
-const TEST_ROOT = "/tmp/uh-test-runtime-config-overrides";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-runtime-config-overrides-"));
 
 describe("parseRuntimeConfigOverridesJson", () => {
   test("returns the parsed object for a valid JSON object", () => {
@@ -108,6 +110,7 @@ describe("planHermesRun threads extra overrides through the merge (UH-81)", () =
   }
 
   beforeAll(cleanup);
+  afterAll(cleanup);
   beforeEach(async () => {
     await cleanup();
     await mkdir(TEST_ROOT, { recursive: true });

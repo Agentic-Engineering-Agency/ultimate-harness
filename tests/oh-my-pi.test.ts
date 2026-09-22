@@ -1,5 +1,7 @@
-import { test, expect, describe, beforeAll } from "vitest";
+import { test, expect, describe, beforeAll, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { cp, mkdir, rm, writeFile, readFile, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
@@ -18,7 +20,7 @@ import {
 import { recoveryPrompt } from "../src/harness/runtime-recovery.js";
 import { waitForTerminated } from "./process-state.js";
 
-const TEST_ROOT = "/tmp/uh-test-oh-my-pi-adapter";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-oh-my-pi-adapter-"));
 const SNAPSHOT_ROOT = join(TEST_ROOT, "snapshot");
 const SNAPSHOT_DIST = join(SNAPSHOT_ROOT, "dist");
 let previousDist: string | undefined;
@@ -104,6 +106,7 @@ test.afterEach(async () => {
   restoreSnapshotEnv();
   await cleanup();
 });
+test.afterAll(cleanup);
 
 describe("uh adapter check oh-my-pi", () => {
   test("returns valid check result when omp is installed", async () => {
