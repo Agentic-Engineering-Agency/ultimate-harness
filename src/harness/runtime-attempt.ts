@@ -1,6 +1,7 @@
 import { lstat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertWritableArtifact, type MissionArtifactContext } from "../adapters/_artifact-context.js";
+import { claimLiveRun } from "./live-runs.js";
 
 /** Run ids are immutable attempt identities, including failed and interrupted attempts. */
 export async function claimRuntimeAttempt(artifacts: MissionArtifactContext): Promise<void> {
@@ -17,4 +18,11 @@ export async function claimRuntimeAttempt(artifacts: MissionArtifactContext): Pr
   await assertWritableArtifact(artifacts.missionDir, claim);
   // Never remove this marker: even initialization failure consumes the attempt identity.
   await writeFile(claim, "", { flag: "wx" });
+  // Make the attempt discoverable from the project root. A registry write
+  // failure must never abort a run, so it is best-effort.
+  try {
+    await claimLiveRun(artifacts);
+  } catch {
+    // ignored: the run is still valid, it just will not appear in `uh ps`.
+  }
 }

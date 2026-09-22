@@ -8,6 +8,7 @@ import { assertWritableArtifact, getMissionArtifactContext } from "../adapters/_
 import { assertSafeMissionId } from "./mission.js";
 import { appendRunsIndexEntry, assertValidRunId, mirrorRuntimeResultToLatest, writeLatestPointer } from "./run-id.js";
 import { withArtifactTransaction, writeAtomicArtifact } from "./artifact-transaction.js";
+import { settleLiveRun } from "./live-runs.js";
 
 /** Reconcile a guardian's confirmed owner-loss receipt; never infer termination from a stale heartbeat. */
 export async function reconcileRuntimeSettlement(root: string, missionId: string, runId: string): Promise<boolean> {
@@ -22,7 +23,7 @@ export async function reconcileRuntimeSettlement(root: string, missionId: string
   const control = RuntimeControlSchema.parse(JSON.parse(await readFile(controlPath, "utf8")));
   if (control.mission_id !== missionId || control.run_id !== runId) throw new Error("Settlement receipt identity mismatch");
   if (control.status !== "failed" || control.stop_code !== "controller_lost" || control.settlement_confirmed !== true) return false;
-  return withArtifactTransaction(path.join(artifacts.runDir, "runtime-settlement"), async () => {
+  const settled = await withArtifactTransaction(path.join(artifacts.runDir, "runtime-settlement"), async () => {
     for (const file of [artifacts.runtimeSessionPath, artifacts.runtimeResultPath]) await assertWritableArtifact(artifacts.missionDir, file);
     let session;
     try { session = RuntimeSessionSchema.parse(parse(await readFile(artifacts.runtimeSessionPath, "utf8"))); }
@@ -53,4 +54,13 @@ export async function reconcileRuntimeSettlement(root: string, missionId: string
     await mirrorRuntimeResultToLatest(root, missionId, runId);
     return true;
   });
+  if (settled) {
+    // Keep the project-root live-run registry in step with the canonical settlement.
+    await settleLiveRun(root, runId, {
+      status: "failed",
+      stop_code: "controller_lost",
+      settled_at: new Date().toISOString(),
+    }).catch(() => undefined);
+  }
+  return settled;
 }
