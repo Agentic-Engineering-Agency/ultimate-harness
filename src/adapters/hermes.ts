@@ -307,9 +307,9 @@ export async function checkHermes(root?: string): Promise<CheckResult> {
   return runHermesCliCheck("hermes");
 }
 
-export async function dryRunHermes(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunHermes(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planHermesRun(root, missionPath);
+    const plan = await planHermesRun(root, missionPath, options);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {

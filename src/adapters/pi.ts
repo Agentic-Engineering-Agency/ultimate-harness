@@ -260,9 +260,9 @@ export async function checkPi(root?: string): Promise<CheckResult> {
   return runPiCliCheck("pi");
 }
 
-export async function dryRunPi(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunPi(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planPiRun(root, missionPath);
+    const plan = await planPiRun(root, missionPath, options);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
