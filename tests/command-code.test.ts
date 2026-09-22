@@ -1,5 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -286,8 +287,13 @@ test("guard policy artifacts and Command Code hook preserve existing settings", 
       collectDiff: async () => ({ patch: "" }),
     });
     const runDir = path.join(path.dirname(missionPath), "runs", "guarded-run");
-    expect(parse(await readFile(path.join(runDir, "tool-guard.json"), "utf8"))).toMatchObject({ schema_version: "uh.tool-guard.v0", write_roots: ["out"] });
+    const guardArtifact = parse(await readFile(path.join(runDir, "tool-guard.json"), "utf8")) as { written_files?: Record<string, string> };
+    expect(guardArtifact).toMatchObject({ schema_version: "uh.tool-guard.v0", write_roots: ["out"] });
     expect(seenEnv?.UH_TOOL_GUARD_POLICY).toContain("tool-guard.json");
+    // The baseline the protected-paths invariant judges against: the sha256 of
+    // each policy file exactly as written.
+    expect(guardArtifact.written_files?.[".commandcode/settings.json"]).toBe(createHash("sha256").update(await readFile(settingsPath)).digest("hex"));
+    expect(guardArtifact.written_files?.[".commandcode/.gitignore"]).toBe(createHash("sha256").update("*\n").digest("hex"));
     expect(parse(await readFile(settingsPath, "utf8"))).toMatchObject({ permissions: { defaultMode: "default" }, custom: { keep: true }, hooks: { PreToolUse: [{ hooks: [{ type: "command" }] }] } });
     const persistedSettings = parse(await readFile(settingsPath, "utf8")) as { hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> } };
     const hookCommand = persistedSettings.hooks.PreToolUse.at(-1)?.hooks[0]?.command ?? "";

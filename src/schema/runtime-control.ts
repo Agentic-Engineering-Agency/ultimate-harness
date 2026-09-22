@@ -44,6 +44,13 @@ export const ToolGuardArtifactSchema = ToolGuardPolicySchema.extend({
   protected_paths: z.array(z.string().min(1)),
   /** Only the explicit Claude Code orchestrator role may set this marker. */
   controller_commands: z.boolean().default(false),
+  /**
+   * sha256 of each harness-written policy file, keyed by the path relative to
+   * `worker_root`. The acceptance `protected_paths_untouched` invariant treats
+   * this as the baseline: later copies must match it, so a policy file
+   * rewritten identically everywhere is still caught.
+   */
+  written_files: z.record(z.string().min(1), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
 }).strict();
 export type ToolGuardArtifact = z.infer<typeof ToolGuardArtifactSchema>;
 

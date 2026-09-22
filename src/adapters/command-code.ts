@@ -2,6 +2,7 @@ import { assertIndependentReviewExecution } from "../harness/independent-review-
 import { prepareRuntimeResume, recoveryPrompt, persistRuntimeRecovery } from "../harness/runtime-recovery.js";
 import { claimRuntimeAttempt } from "../harness/runtime-attempt.js";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -45,6 +46,10 @@ export const CommandCodeRuntimeConfigSchema = z.object({
 }).strict();
 registerRuntimeConfigSchema("command-code", CommandCodeRuntimeConfigSchema);
 const exec = promisify(execFile);
+
+function sha256Hex(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
 
 function controllerGuard(guard: ToolGuardPolicy | undefined): ToolGuardPolicy & { controller_commands: boolean } {
   return { ...(guard ?? resolveToolGuardPolicy(undefined)), controller_commands: true };
@@ -200,16 +205,8 @@ export async function runCommandCode(root: string, missionPath: string, options:
   if (plan.guard) {
     const effectiveLimits = { ...plan.config.limits, ...options.limits };
     const protectedPaths = effectiveLimits.protected_paths ?? DEFAULT_PROTECTED_PATHS;
-    const artifact = ToolGuardArtifactSchema.parse({
-      schema_version: "uh.tool-guard.v0",
-      ...plan.guard,
-      worker_root: root,
-      protected_paths: protectedPaths,
-      controller_commands: plan.config.role === "orchestrator",
-    });
     const policyPath = path.join(artifacts.runDir, "tool-guard.json");
     const logPath = path.join(artifacts.runDir, "tool-guard.log");
-    await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     const settingsPath = path.join(root, ".commandcode", "settings.json");
     await mkdir(path.dirname(settingsPath), { recursive: true });
     let settings: Record<string, unknown> = {};
@@ -228,8 +225,26 @@ export async function runCommandCode(root: string, missionPath: string, options:
     });
     hooks.PreToolUse = [...retainedHooks, { hooks: [{ type: "command", command: `${process.execPath} \"${hookPath}\"`, timeout: 10 }] }];
     settings.hooks = hooks;
-    await writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
-    await writeFile(path.join(root, ".commandcode", ".gitignore"), "*\n", "utf8");
+    const settingsContent = JSON.stringify(settings, null, 2);
+    const gitignorePath = path.join(root, ".commandcode", ".gitignore");
+    const gitignoreContent = "*\n";
+    await writeFile(settingsPath, settingsContent, "utf8");
+    await writeFile(gitignorePath, gitignoreContent, "utf8");
+    // The baseline the acceptance invariant judges against: the sha256 of each
+    // policy file exactly as written, keyed relative to `worker_root`. Comparing
+    // copies with each other cannot catch a file rewritten identically everywhere.
+    const artifact = ToolGuardArtifactSchema.parse({
+      schema_version: "uh.tool-guard.v0",
+      ...plan.guard,
+      worker_root: root,
+      protected_paths: protectedPaths,
+      controller_commands: plan.config.role === "orchestrator",
+      written_files: {
+        ".commandcode/settings.json": sha256Hex(settingsContent),
+        ".commandcode/.gitignore": sha256Hex(gitignoreContent),
+      },
+    });
+    await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
   }
   let partial = "";

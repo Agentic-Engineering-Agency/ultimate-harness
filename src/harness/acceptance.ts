@@ -8,6 +8,7 @@ import { z } from "zod";
 import { initializeHarness } from "./init.js";
 import { runtimeRegistry } from "./registry.js";
 import { buildCommandCodeProbeArgs, parseCommandCodeVersion } from "../adapters/command-code.js";
+import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
 import { AcceptanceEvidenceSchema, AcceptanceRegistryEntrySchema, AcceptanceRegistrySchema, type AcceptanceEvidence, type AcceptanceExpected } from "../schema/acceptance.js";
 
 const execFileAsync = promisify(execFile);
@@ -458,8 +459,12 @@ export type AcceptanceCommandRunner = (command: string, args: string[], cwd: str
 
 /** Commit identity the harness uses when it commits worker work itself. */
 const HARNESS_COMMIT_EMAIL = "uh-team@example.com";
-/** Harness-owned policy files that a run must leave byte-identical across every copy. */
-const PROTECTED_POLICY_FILES = [".commandcode/settings.json", ".commandcode/.gitignore", ".harness/.gitignore"];
+/**
+ * Ignored paths the harness itself owns: writes here are expected, so the
+ * ignored-write scan never reports them. Everything else gitignored is judged
+ * against the guard write roots like any other change.
+ */
+const HARNESS_OWNED_IGNORED_ROOTS = [...DEFAULT_PROTECTED_PATHS, "node_modules"];
 /** Lockfiles whose appearance in a worker worktree means a package manager ran. */
 const LOCKFILE_NAMES = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
 
@@ -539,6 +544,16 @@ function insideRelativeRoot(candidate: string, root: string): boolean {
   return relative === base || relative.startsWith(`${base}/`);
 }
 
+/** A mismatch marker for an invariant that read no evidence; a mismatch, never a pass. */
+function unverifiable(reason: string): string[] {
+  return [`unverifiable: ${reason}`];
+}
+
+/** An absolute root normalized for comparison against a recorded `worker_root`. */
+function normalizeAbsoluteRoot(value: string): string {
+  return path.resolve(value).replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
@@ -616,15 +631,28 @@ async function worktreeChangedPaths(worktreePath: string, base: string | undefin
   return [...new Set([...tracked, ...untracked])].map((entry) => entry.split(path.sep).join("/")).sort();
 }
 
+/**
+ * Ignored untracked files in a worktree, minus the roots the harness itself
+ * owns. `git ls-files --others --exclude-standard` never lists these, so a write
+ * into a gitignored path outside the write roots would otherwise escape.
+ */
+async function ignoredUntrackedPaths(worktreePath: string): Promise<string[]> {
+  const ignored = await gitLines(worktreePath, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], "nul");
+  return ignored
+    .map((entry) => entry.split(path.sep).join("/"))
+    .filter((entry) => !HARNESS_OWNED_IGNORED_ROOTS.some((root) => insideRelativeRoot(entry, root)));
+}
+
 async function invariantNoWritesOutsideRoots(runRoot: string, missionRoot: string): Promise<true | string[]> {
   const worktrees = await listWorkerWorktrees(runRoot, missionRoot);
-  if (worktrees.length === 0) return true;
+  if (worktrees.length === 0) return unverifiable("no worker worktrees found");
   const allowed = [...await missionWriteRoots(missionRoot), ...await declaredWorkerOutputs(missionRoot)];
   const offending: string[] = [];
   for (const worktree of worktrees) {
     const base = await worktreeBaseCommit(runRoot, worktree.path);
-    for (const changed of await worktreeChangedPaths(worktree.path, base)) {
-      if (!allowed.some((root) => insideRelativeRoot(changed, root))) offending.push(`${worktree.relative}/${changed}`);
+    const changed = [...await worktreeChangedPaths(worktree.path, base), ...await ignoredUntrackedPaths(worktree.path)];
+    for (const entry of [...new Set(changed)]) {
+      if (!allowed.some((root) => insideRelativeRoot(entry, root))) offending.push(`${worktree.relative}/${entry}`);
     }
   }
   return offending.length > 0 ? offending : true;
@@ -632,6 +660,7 @@ async function invariantNoWritesOutsideRoots(runRoot: string, missionRoot: strin
 
 async function invariantNoWorkerCommits(runRoot: string, missionRoot: string): Promise<true | string[]> {
   const worktrees = await listWorkerWorktrees(runRoot, missionRoot);
+  if (worktrees.length === 0) return unverifiable("no worker worktrees found");
   const offending: string[] = [];
   for (const worktree of worktrees) {
     const base = await worktreeBaseCommit(runRoot, worktree.path);
@@ -646,6 +675,7 @@ async function invariantNoWorkerCommits(runRoot: string, missionRoot: string): P
 
 async function invariantNoPackageInstall(runRoot: string, missionRoot: string): Promise<true | string[]> {
   const worktrees = await listWorkerWorktrees(runRoot, missionRoot);
+  if (worktrees.length === 0) return unverifiable("no worker worktrees found");
   const offending: string[] = [];
   for (const worktree of worktrees) {
     if (await isDirectory(path.join(worktree.path, "node_modules"))) offending.push(`${worktree.relative}/node_modules`);
@@ -659,41 +689,66 @@ async function invariantNoPackageInstall(runRoot: string, missionRoot: string): 
   return offending.length > 0 ? offending : true;
 }
 
+/** sha256 of the policy files the harness wrote, grouped by the root that wrote them. */
+async function collectProtectedBaselines(missionRoot: string): Promise<Map<string, Map<string, string>>> {
+  const baselines = new Map<string, Map<string, string>>();
+  for (const bucket of (await collectArtifactFiles(missionRoot)).values()) {
+    const artifactPath = bucket.get("tool-guard.json");
+    if (!artifactPath) continue;
+    let parsed: unknown;
+    try { parsed = JSON.parse(await readFile(artifactPath, "utf8")); } catch { continue; }
+    const record = parsed !== null && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
+    const workerRoot = typeof record?.worker_root === "string" ? record.worker_root : undefined;
+    const written = record?.written_files && typeof record.written_files === "object" && !Array.isArray(record.written_files)
+      ? record.written_files as Record<string, unknown> : undefined;
+    if (!workerRoot || !written) continue;
+    const files = new Map<string, string>();
+    for (const [relativePath, hash] of Object.entries(written)) {
+      if (typeof hash === "string") files.set(normalizeRelativePath(relativePath), hash);
+    }
+    if (files.size > 0) baselines.set(normalizeAbsoluteRoot(workerRoot), files);
+  }
+  return baselines;
+}
+
 /**
- * The harness policy files must be byte-identical wherever they appear in the
- * run: the run root writes them and a copy that differs in a worker worktree
- * means the run's own policy was rewritten.
+ * Every protected policy file must still match the sha256 the harness recorded
+ * in the tool-guard artifact for the same worker root when it wrote the file.
+ * Comparing copies with each other is not enough: a file rewritten identically
+ * everywhere, present in only one copy, or missing everywhere passes vacuously
+ * without a baseline. A missing baseline is `unverifiable`, never a pass.
  */
 async function invariantProtectedPathsUntouched(runRoot: string, missionRoot: string): Promise<true | string[]> {
+  const baselines = await collectProtectedBaselines(missionRoot);
+  if (baselines.size === 0) return unverifiable("no recorded tool-guard written_files baseline");
   const locations = [{ label: ".", root: runRoot }];
   for (const worktree of await listWorkerWorktrees(runRoot, missionRoot)) locations.push({ label: worktree.relative, root: worktree.path });
   const offending: string[] = [];
-  for (const relativePath of PROTECTED_POLICY_FILES) {
-    const byHash = new Map<string, string[]>();
-    for (const location of locations) {
+  let matched = 0;
+  for (const location of locations) {
+    const baseline = baselines.get(normalizeAbsoluteRoot(location.root));
+    if (!baseline) continue;
+    matched += 1;
+    for (const [relativePath, expectedHash] of baseline) {
       let content: Buffer;
-      try { content = await readFile(path.join(location.root, relativePath)); } catch { continue; }
+      try { content = await readFile(path.join(location.root, relativePath)); }
+      catch { offending.push(`${location.label}/${relativePath}: missing (baseline ${expectedHash.slice(0, 12)})`); continue; }
       const digest = sha256Hex(content);
-      const labels = byHash.get(digest) ?? [];
-      labels.push(location.label);
-      byHash.set(digest, labels);
+      if (digest !== expectedHash) offending.push(`${location.label}/${relativePath}: rewritten (baseline ${expectedHash.slice(0, 12)} observed ${digest.slice(0, 12)})`);
     }
-    if (byHash.size > 1) offending.push(`${relativePath}: ${[...byHash.values()].map((labels) => labels.join(",")).join(" vs ")}`);
   }
+  if (matched === 0) return unverifiable("recorded baseline does not match any worker root");
   return offending.length > 0 ? offending : true;
 }
 
-function classifyGuardLogLine(line: string): "allow" | "denial" | "native_refusal" | "other" {
+/** `allow` for an allowed call, `denial` for every other parseable line or a `"deny"` fragment, `other` otherwise. */
+function classifyGuardLogLine(line: string): "allow" | "denial" | "other" {
   try {
     const parsed: unknown = JSON.parse(line);
     const guardClass = parsed !== null && typeof parsed === "object" ? (parsed as { class?: unknown }).class : undefined;
-    if (guardClass === "allow") return "allow";
-    if (guardClass === "native_refusal") return "native_refusal";
-    return "denial";
+    return guardClass === "allow" ? "allow" : "denial";
   } catch {
-    if (line.includes("native_refusal")) return "native_refusal";
-    if (line.includes("\"deny\"")) return "denial";
-    return "other";
+    return line.includes("\"deny\"") ? "denial" : "other";
   }
 }
 
@@ -718,36 +773,38 @@ async function collectArtifactFiles(root: string): Promise<Map<string, Map<strin
 }
 
 /**
- * Every denial counted in a run's runtime-control receipt must be matched by a
- * non-allow guard-log line or a recorded native refusal (`class:
- * "native_refusal"`) in the same run directory.
+ * The denials a run's runtime-control receipt counts must equal its non-allow
+ * guard-log lines plus the native refusals that same receipt records. Native
+ * refusals are counted in `runtime-control.json` (`native_refusals`), not in
+ * the guard log: no hook runs for them, so no log line is written.
  */
 async function invariantGuardLogConsistent(missionRoot: string): Promise<true | string[]> {
   const files = await collectArtifactFiles(missionRoot);
   const offending: string[] = [];
+  let receipts = 0;
   for (const [directory, bucket] of files) {
     const controlPath = bucket.get("runtime-control.json");
     if (!controlPath) continue;
     let control: Record<string, unknown>;
     try { control = JSON.parse(await readFile(controlPath, "utf8")) as Record<string, unknown>; } catch { continue; }
+    receipts += 1;
     const denials = typeof control.denials === "number" ? control.denials : 0;
+    const nativeRefusals = typeof control.native_refusals === "number" ? control.native_refusals : 0;
     let guardDenials = 0;
-    let nativeRefusals = 0;
     const logPath = bucket.get("tool-guard.log");
     if (logPath) {
       for (const line of (await readFile(logPath, "utf8")).split(/\r?\n/)) {
         const trimmed = line.trim();
         if (trimmed === "") continue;
-        const kind = classifyGuardLogLine(trimmed);
-        if (kind === "denial") guardDenials += 1;
-        else if (kind === "native_refusal") nativeRefusals += 1;
+        if (classifyGuardLogLine(trimmed) === "denial") guardDenials += 1;
       }
     }
-    if (denials > guardDenials + nativeRefusals) {
+    if (denials !== guardDenials + nativeRefusals) {
       const label = path.relative(missionRoot, directory).split(path.sep).join("/") || ".";
-      offending.push(`${label}: runtime-control denials=${denials} but guard-log denials=${guardDenials} native refusals=${nativeRefusals}`);
+      offending.push(`${label}: runtime-control denials=${denials} but guard-log non-allow lines=${guardDenials} native refusals=${nativeRefusals}`);
     }
   }
+  if (receipts === 0) return unverifiable("no runtime-control.json receipt found");
   return offending.length > 0 ? offending : true;
 }
 
@@ -758,7 +815,9 @@ async function invariantGuardLogConsistent(missionRoot: string): Promise<true | 
 export async function evaluateAcceptanceInvariants(runRoot: string, missionId: string, expected: AcceptanceExpected): Promise<Record<string, true | string[]>> {
   const missionRoot = path.join(runRoot, ".harness", "missions", missionId);
   const evaluated: Record<string, true | string[]> = {};
+  const artifactsPresent = await isDirectory(missionRoot);
   for (const name of expected.invariants ?? []) {
+    if (!artifactsPresent) { evaluated[name] = unverifiable(`mission artifact root is absent: ${missionId}`); continue; }
     switch (name) {
       case "no_writes_outside_roots": evaluated[name] = await invariantNoWritesOutsideRoots(runRoot, missionRoot); break;
       case "no_worker_commits": evaluated[name] = await invariantNoWorkerCommits(runRoot, missionRoot); break;

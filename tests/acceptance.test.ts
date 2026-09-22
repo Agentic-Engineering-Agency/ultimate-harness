@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { access, lstat, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -799,6 +800,24 @@ describe("acceptance invariants", () => {
     git(runRoot, ["worktree", "add", "--quiet", "-b", `uh/team/${missionId}/worker-a`, worktree, "HEAD"]);
     return { runRoot, missionRoot, worktree };
   }
+  const sha = (content: string): string => createHash("sha256").update(content).digest("hex");
+  /** A tool-guard artifact recording the sha256 the harness wrote for a worker root. */
+  async function writeGuardBaseline(missionRoot: string, name: string, workerRoot: string, files: Record<string, string>): Promise<void> {
+    const dir = path.join(missionRoot, "team", "artifacts", "run", name);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "tool-guard.json"), JSON.stringify({
+      schema_version: "uh.tool-guard.v0",
+      worker_root: workerRoot,
+      protected_paths: [".commandcode"],
+      write_roots: ["."],
+      deny_git_mutations: true,
+      deny_package_installs: true,
+      deny_network_clients: true,
+      agent_clients: ["cmdc"],
+      controller_commands: false,
+      written_files: files,
+    }, null, 2), "utf8");
+  }
 
   test("no_writes_outside_roots holds inside the write roots and fails outside them", async () => {
     const { runRoot, worktree } = await workerFixture("m1", "guard:\n  write_roots: [out]\n");
@@ -840,21 +859,57 @@ describe("acceptance invariants", () => {
     expect(observed).toContain(".harness/missions/m3/team/workers/worker-a/package-lock.json");
   });
 
-  test("protected_paths_untouched holds identical copies and flags a rewritten one", async () => {
-    const { runRoot, worktree } = await workerFixture("m4");
+  test("protected_paths_untouched holds files matching the recorded baseline and flags a rewritten one", async () => {
+    const { runRoot, missionRoot, worktree } = await workerFixture("m4");
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["protected_paths_untouched"] };
+    const original = "{}\n";
+    await mkdir(path.join(runRoot, ".commandcode"), { recursive: true });
+    await mkdir(path.join(worktree, ".commandcode"), { recursive: true });
+    await writeFile(path.join(runRoot, ".commandcode", "settings.json"), original, "utf8");
+    await writeFile(path.join(worktree, ".commandcode", "settings.json"), original, "utf8");
+    const baseline = { ".commandcode/settings.json": sha(original) };
+    await writeGuardBaseline(missionRoot, "run-root", runRoot, baseline);
+    await writeGuardBaseline(missionRoot, "worker-a", worktree, baseline);
+    expect((await evaluateAcceptanceInvariants(runRoot, "m4", expected)).protected_paths_untouched).toBe(true);
+    await writeFile(path.join(worktree, ".commandcode", "settings.json"), '{"tampered":true}\n', "utf8");
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m4", expected)).protected_paths_untouched;
+    expect(Array.isArray(observed)).toBe(true);
+    expect((observed as string[]).some((line) => line.includes(".commandcode/settings.json"))).toBe(true);
+  });
+
+  test("protected_paths_untouched fails a policy file rewritten identically across every copy", async () => {
+    const { runRoot, missionRoot, worktree } = await workerFixture("m4-identical");
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["protected_paths_untouched"] };
+    const original = '{"hooks":{}}\n';
+    const rewritten = '{"hooks":{"tampered":true}}\n';
+    await mkdir(path.join(runRoot, ".commandcode"), { recursive: true });
+    await mkdir(path.join(worktree, ".commandcode"), { recursive: true });
+    await writeFile(path.join(runRoot, ".commandcode", "settings.json"), original, "utf8");
+    await writeFile(path.join(worktree, ".commandcode", "settings.json"), original, "utf8");
+    const baseline = { ".commandcode/settings.json": sha(original) };
+    await writeGuardBaseline(missionRoot, "run-root", runRoot, baseline);
+    await writeGuardBaseline(missionRoot, "worker-a", worktree, baseline);
+    // Every copy carries the same bytes: comparing them with each other passes,
+    // so only the recorded baseline can catch the rewrite.
+    await writeFile(path.join(runRoot, ".commandcode", "settings.json"), rewritten, "utf8");
+    await writeFile(path.join(worktree, ".commandcode", "settings.json"), rewritten, "utf8");
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m4-identical", expected)).protected_paths_untouched;
+    expect(Array.isArray(observed)).toBe(true);
+    expect((observed as string[]).filter((line) => line.includes(".commandcode/settings.json"))).toHaveLength(2);
+  });
+
+  test("protected_paths_untouched reports unverifiable when no baseline was recorded", async () => {
+    const { runRoot, worktree } = await workerFixture("m4-no-baseline");
     const expected: AcceptanceExpected = { status: "passed", invariants: ["protected_paths_untouched"] };
     await mkdir(path.join(runRoot, ".commandcode"), { recursive: true });
     await mkdir(path.join(worktree, ".commandcode"), { recursive: true });
     await writeFile(path.join(runRoot, ".commandcode", "settings.json"), "{}\n", "utf8");
     await writeFile(path.join(worktree, ".commandcode", "settings.json"), "{}\n", "utf8");
-    expect((await evaluateAcceptanceInvariants(runRoot, "m4", expected)).protected_paths_untouched).toBe(true);
-    await writeFile(path.join(worktree, ".commandcode", "settings.json"), '{"tampered":true}\n', "utf8");
-    const observed = (await evaluateAcceptanceInvariants(runRoot, "m4", expected)).protected_paths_untouched;
-    expect(Array.isArray(observed)).toBe(true);
-    expect((observed as string[])[0]).toContain(".commandcode/settings.json");
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m4-no-baseline", expected)).protected_paths_untouched;
+    expect((observed as string[])[0]).toContain("unverifiable");
   });
 
-  test("guard_log_consistent requires every counted denial to have a log line or native refusal", async () => {
+  test("guard_log_consistent requires denials to equal log lines plus native refusals", async () => {
     const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-guard-consistency-"));
     const runDir = path.join(runRoot, ".harness", "missions", "m5", "runs", "001");
     await mkdir(runDir, { recursive: true });
@@ -864,8 +919,64 @@ describe("acceptance invariants", () => {
     expect((await evaluateAcceptanceInvariants(runRoot, "m5", expected)).guard_log_consistent).toBe(true);
     await writeFile(path.join(runDir, "runtime-control.json"), JSON.stringify({ denials: 3 }), "utf8");
     expect(Array.isArray((await evaluateAcceptanceInvariants(runRoot, "m5", expected)).guard_log_consistent)).toBe(true);
-    await writeFile(path.join(runDir, "tool-guard.log"), `${guardDenial("write_outside")}\n${guardDenial("git_mutation")}\n${JSON.stringify({ class: "native_refusal", tool: "Bash" })}\n`, "utf8");
+    // A native refusal is counted in runtime-control.json, not in the guard log:
+    // no hook runs for it, so no log line is written.
+    await writeFile(path.join(runDir, "runtime-control.json"), JSON.stringify({ denials: 3, native_refusals: 1 }), "utf8");
     expect((await evaluateAcceptanceInvariants(runRoot, "m5", expected)).guard_log_consistent).toBe(true);
+  });
+
+  test("invariants report unverifiable, never true, when the mission artifact tree is absent", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-missing-tree-"));
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["no_writes_outside_roots", "no_worker_commits", "no_package_install", "protected_paths_untouched", "guard_log_consistent"] };
+    const observed = await evaluateAcceptanceInvariants(runRoot, "absent", expected);
+    for (const name of expected.invariants ?? []) {
+      expect(observed[name], `${name} must not vacuously pass`).not.toBe(true);
+      expect((observed[name] as string[])[0]).toContain("unverifiable");
+    }
+  });
+
+  test("worker invariants report unverifiable when no worker worktrees exist", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-no-workers-"));
+    const missionRoot = path.join(runRoot, ".harness", "missions", "m8");
+    await mkdir(missionRoot, { recursive: true });
+    await writeFile(path.join(missionRoot, "mission.yaml"), "id: fixture\n", "utf8");
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["no_writes_outside_roots", "no_worker_commits", "no_package_install"] };
+    const observed = await evaluateAcceptanceInvariants(runRoot, "m8", expected);
+    for (const name of expected.invariants ?? []) {
+      expect(observed[name], `${name} must not vacuously pass`).not.toBe(true);
+      expect((observed[name] as string[])[0]).toContain("unverifiable");
+    }
+  });
+
+  test("guard_log_consistent reports unverifiable when no runtime-control receipt exists", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-no-receipt-"));
+    await mkdir(path.join(runRoot, ".harness", "missions", "m10", "runs", "001"), { recursive: true });
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["guard_log_consistent"] };
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m10", expected)).guard_log_consistent;
+    expect(observed).not.toBe(true);
+    expect((observed as string[])[0]).toContain("unverifiable");
+  });
+
+  test("no_writes_outside_roots flags a write into an ignored path outside the roots", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-ignored-"));
+    initRepo(runRoot);
+    await writeFile(path.join(runRoot, "README.md"), "# seed\n", "utf8");
+    await writeFile(path.join(runRoot, ".gitignore"), "secrets/\n", "utf8");
+    commit(runRoot, "seed");
+    const missionRoot = path.join(runRoot, ".harness", "missions", "m9");
+    await mkdir(path.join(missionRoot, "team", "workers"), { recursive: true });
+    await writeFile(path.join(missionRoot, "mission.yaml"), "guard:\n  write_roots: [out]\n", "utf8");
+    const worktree = path.join(missionRoot, "team", "workers", "worker-a");
+    git(runRoot, ["worktree", "add", "--quiet", "-b", "uh/team/m9/worker-a", worktree, "HEAD"]);
+    await mkdir(path.join(worktree, "out"), { recursive: true });
+    await writeFile(path.join(worktree, "out", "ok.txt"), "ok\n", "utf8");
+    await mkdir(path.join(worktree, "secrets"), { recursive: true });
+    await writeFile(path.join(worktree, "secrets", "leak.txt"), "shh\n", "utf8");
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["no_writes_outside_roots"] };
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m9", expected)).no_writes_outside_roots;
+    expect(Array.isArray(observed)).toBe(true);
+    expect((observed as string[]).some((entry) => entry.includes("secrets/leak.txt"))).toBe(true);
+    expect((observed as string[]).some((entry) => entry.includes("out/ok.txt"))).toBe(false);
   });
 
   test("a false invariant is a mismatch while a true one passes", () => {
@@ -912,9 +1023,9 @@ describe("acceptance exercised mechanisms", () => {
     await mkdir(runDir, { recursive: true });
     await writeFile(path.join(runDir, "tool-guard.log"), `${guardDenial("write_outside")}\n`, "utf8");
     await writeFile(path.join(runDir, "runtime-control.json"), JSON.stringify({ denials: 1, stop_code: "denial_budget" }), "utf8");
-    const expected: AcceptanceExpected = { status: "failed", invariants: ["guard_log_consistent", "no_package_install"], exercised_report: ["guard_write_outside", "denial_budget"] };
+    const expected: AcceptanceExpected = { status: "failed", invariants: ["guard_log_consistent"], exercised_report: ["guard_write_outside", "denial_budget"] };
     const facts = await collectFacts(runRoot, "m7", expected);
-    expect(facts.observed.invariants).toEqual({ guard_log_consistent: true, no_package_install: true });
+    expect(facts.observed.invariants).toEqual({ guard_log_consistent: true });
     expect(facts.observed.exercised).toEqual({ guard_write_outside: true, denial_budget: true });
   });
 });
