@@ -94,7 +94,10 @@ const READ_TOOLS = new Set(["read_file", "read", "view", "cat", "head", "tail", 
 const WRITE_TOOLS = new Set(["write_file", "edit_file", "write", "edit", "apply_patch", "patch", "create_file", "str_replace", "multi_edit", "notebook_edit", "search_replace"]);
 const SHELL_TOOLS = new Set(["bash", "shell", "shell_command", "run_command", "terminal", "execute", "powershell", "zsh", "cmd"]);
 
-const TOOL_START_TYPES: ReadonlySet<string> = new Set(["tool_queued", "tool_execution_start", "tool_running"]);
+/** Command Code registers a call at `tool_queued`; a later `tool_running` repeats it without arguments. */
+const COMMAND_CODE_START_TYPES: ReadonlySet<string> = new Set(["tool_queued", "tool_running"]);
+/** oh-my-pi registers a call once, at `tool_execution_start`, with `args`. */
+const OH_MY_PI_START_TYPES: ReadonlySet<string> = new Set(["tool_execution_start"]);
 const TOOL_END_TYPES: ReadonlySet<string> = new Set(["tool_execution_end", "tool_completed"]);
 const TOOL_BLOCK_TYPES: ReadonlySet<string> = new Set(["tool_hook_blocked", "tool_call_blocked", "tool_denied"]);
 const CONTRACT_PREFIX = "CONTRACT:";
@@ -103,8 +106,17 @@ const DENIAL_STATES = new Set(["denied", "blocked", "permission_denied"]);
 const IS_WINDOWS = process.platform === "win32";
 const OUTSIDE = "<outside>";
 const UNKNOWN_TARGET = "unknown";
+/** A pure search names no path, so the probe publishes a placeholder rather than the query. */
+const PATTERN_TARGET = "<pattern>";
 
 type Event = Record<string, unknown>;
+
+/** A call seen at its start event, awaiting its completion by the same call id. */
+type PendingStart = {
+  toolName: string;
+  args: Event | undefined;
+  source: ActivitySource;
+};
 
 function record(value: unknown): Event | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Event : undefined;
@@ -226,15 +238,31 @@ export function relativeDisplayPath(value: string, workingDirectory?: string): s
   return OUTSIDE;
 }
 
+/** Path-shaped arguments: `paths` is an array, the rest are strings. The first entry names the target. */
+const PATH_ARGUMENT_KEYS = ["path", "file_path", "filePath", "file", "target_file", "notebook_path", "abs_path"] as const;
+
+function firstPathValue(args: Event | undefined): string | undefined {
+  if (!args) return undefined;
+  const paths = args.paths;
+  if (Array.isArray(paths)) {
+    for (const value of paths) {
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return firstPathString(args, PATH_ARGUMENT_KEYS);
+}
+
 function projectTarget(args: Event | undefined, kind: ToolCallKind, workingDirectory?: string): string {
   if (kind === "shell") {
     const command = firstPathString(args, ["command", "cmd"]) ?? "";
     return executableName(shellExecutable(command));
   }
-  // Only path-shaped arguments may name a target; a `command` never does here.
-  const path = firstPathString(args, ["path", "file_path", "filePath", "file", "target_file", "notebook_path", "abs_path"]);
-  if (path === undefined) return UNKNOWN_TARGET;
-  return relativeDisplayPath(path, workingDirectory);
+  // A path names the target; a pure search has only a query, which is never published.
+  const path = firstPathValue(args);
+  if (path !== undefined) return relativeDisplayPath(path, workingDirectory);
+  const pattern = args?.pattern;
+  if (kind === "read" && typeof pattern === "string" && pattern.trim()) return PATTERN_TARGET;
+  return UNKNOWN_TARGET;
 }
 
 function containsDenialText(value: unknown, depth = 0): boolean {
@@ -277,7 +305,7 @@ export function projectActivity(events: readonly unknown[], options: ProjectActi
   const size = Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_ACTIVITY_WINDOW;
   const workingDirectory = options.workingDirectory;
 
-  const starts = new Map<string, Event & { source: ActivitySource }>();
+  const starts = new Map<string, PendingStart>();
   const calls: ProjectedToolCall[] = [];
   let commandCodeCalls = 0;
   let ohMyPiCalls = 0;
@@ -288,12 +316,25 @@ export function projectActivity(events: readonly unknown[], options: ProjectActi
     const type = String(event.type ?? "");
     const id = eventCallId(event);
     const name = eventToolName(event);
-    // Command Code keys its calls with a plain `id`; oh-my-pi names the field.
-    const fromCommandCode = event.id !== undefined && event.toolCallId === undefined && event.tool_call_id === undefined;
 
-    if (TOOL_START_TYPES.has(type)) {
-      if (!id || !name) continue;
-      starts.set(id, { toolName: name, args: eventArgs(event), source: fromCommandCode ? "command-code" : "oh-my-pi" });
+    if (COMMAND_CODE_START_TYPES.has(type) || OH_MY_PI_START_TYPES.has(type)) {
+      if (!id) continue;
+      const args = eventArgs(event);
+      const pending = starts.get(id);
+      if (pending) {
+        // Command Code emits `tool_running` between `tool_queued` (which carries
+        // `input`) and `tool_completed` (which does not). The later event must
+        // not erase the arguments the queue captured.
+        if (!pending.args && args) pending.args = args;
+        if (!pending.toolName && name) pending.toolName = name;
+        continue;
+      }
+      if (!name) continue;
+      starts.set(id, {
+        toolName: name,
+        args,
+        source: OH_MY_PI_START_TYPES.has(type) ? "oh-my-pi" : "command-code",
+      });
       continue;
     }
 
@@ -302,7 +343,7 @@ export function projectActivity(events: readonly unknown[], options: ProjectActi
     if (!start) continue;
     starts.delete(id);
 
-    const toolName = String(start.toolName ?? name);
+    const toolName = start.toolName || name;
     const kind = classifyKind(toolName);
     const status = TOOL_BLOCK_TYPES.has(type)
       ? { ok: false, error_class: "denied" as ErrorClass }
@@ -310,7 +351,7 @@ export function projectActivity(events: readonly unknown[], options: ProjectActi
     calls.push({
       tool: toolName || UNKNOWN_TARGET,
       kind,
-      target: projectTarget(record(start.args), kind, workingDirectory),
+      target: projectTarget(start.args, kind, workingDirectory),
       ok: status.ok,
       error_class: status.error_class,
     });
@@ -326,32 +367,46 @@ export function projectActivity(events: readonly unknown[], options: ProjectActi
   };
 }
 
+/** The repeatable identity of a call: tool, target and outcome, never its arguments. */
+function callSignature(call: ProjectedToolCall): string {
+  return `${call.tool}\u0000${call.target}\u0000${call.ok}\u0000${call.error_class}`;
+}
+
 /** Counts computed without a model: the probeable facts supervision can already see. */
 export function deterministicLoopSignals(window: ActivityWindow): DeterministicLoopSignals {
   const calls = window.calls;
-  const seen = new Set<string>();
+
+  // The longest run of consecutive identical calls, counted as the repeats after the first.
   let identicalRepeats = 0;
+  let run = 0;
+  let previous: string | undefined;
   for (const call of calls) {
-    const signature = `${call.tool}\u0000${call.kind}\u0000${call.target}\u0000${call.ok}\u0000${call.error_class}`;
-    if (seen.has(signature)) identicalRepeats += 1;
-    seen.add(signature);
+    const signature = callSignature(call);
+    run = signature === previous ? run + 1 : 1;
+    previous = signature;
+    if (run - 1 > identicalRepeats) identicalRepeats = run - 1;
   }
 
+  // Positions that step back to the state two calls earlier while differing from the one between.
   let alternatingPairs = 0;
   for (let index = 2; index < calls.length; index += 1) {
-    if (sameState(calls[index], calls[index - 2])) alternatingPairs += 1;
+    const current = callSignature(calls[index]);
+    if (current === callSignature(calls[index - 2]) && current !== callSignature(calls[index - 1])) {
+      alternatingPairs += 1;
+    }
+  }
+
+  // A search query or a path outside the workspace is a placeholder, not a target.
+  const targets = new Set<string>();
+  for (const call of calls) {
+    if (call.target !== PATTERN_TARGET && call.target !== OUTSIDE) targets.add(call.target);
   }
 
   return {
     identical_repeats: identicalRepeats,
     alternating_pairs: alternatingPairs,
-    distinct_targets: new Set(calls.map(call => call.target)).size,
+    distinct_targets: targets.size,
   };
-}
-
-function sameState(left: ProjectedToolCall | undefined, right: ProjectedToolCall | undefined): boolean {
-  if (!left || !right) return false;
-  return left.kind === right.kind && left.target === right.target && left.ok === right.ok && left.error_class === right.error_class;
 }
 
 function noul(question: string, satisfied: string, unsatisfied: string): NoulQuestion {
