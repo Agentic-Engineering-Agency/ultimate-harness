@@ -64,13 +64,22 @@ test("guard policy selects yolo and records guard permission mode", async () => 
     const plan = await planCommandCodeRun(root, missionPath);
     expect(plan.permission_mode).toBe("guard");
     expect(plan.args).toContain("--yolo");
+    // The prompt is transmitted on stdin, never in argv: `-p` carries no query.
+    expect(plan.args).toContain("-p");
+    expect(plan.args[plan.args.indexOf("-p") + 1]).not.toBe(plan.prompt);
+    expect(plan.args).not.toContain(plan.prompt);
+    expect(plan.promptSource).toBe("stdin");
     let seenMode: string | undefined;
+    let seenInput: { args: string[]; stdin?: string } | undefined;
     await runCommandCode(root, missionPath, {
       runId: "guard-mode",
-      runner: async input => { seenMode = input.permissionMode; return { stdout: "", stderr: "", exitCode: 1, timedOut: false }; },
+      runner: async input => { seenMode = input.permissionMode; seenInput = { args: input.args, stdin: input.stdin }; return { stdout: "", stderr: "", exitCode: 1, timedOut: false }; },
       collectDiff: async () => ({ patch: "" }),
     });
     expect(seenMode).toBe("guard");
+    expect(seenInput!.args).toContain("-p");
+    expect(seenInput!.stdin).toContain("Preserve outputs");
+    expect(seenInput!.args).not.toContain(seenInput!.stdin);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

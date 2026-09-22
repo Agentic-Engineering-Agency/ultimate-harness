@@ -7,7 +7,7 @@ import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, RuntimeRouteSchema, t
 import { delegatedRouteMismatch, nativeRuntimeCompleted, nativeRuntimeRoute, runtimeRouteMismatch } from "../harness/runtime-supervision.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, appendFile, mkdtemp, writeFile } from "node:fs/promises";
+import { readFile, appendFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
   type MissionArtifactContext,
@@ -69,6 +69,10 @@ export type DryRunResult = {
   command: string;
   args: string[];
   prompt: string;
+  /** Where the runtime reads the prompt from: a file for oh-my-pi, stdin for command-code. */
+  promptSource?: string;
+  /** Absolute path of the run's prompt.md handed to the runtime with the `@` prefix. */
+  promptPath?: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -79,6 +83,10 @@ export type OhMyPiRunPlan = {
   args: string[];
   /** Final prompt handed to the runtime (memory-enriched when honcho-memory is enabled). */
   prompt: string;
+  /** Where the runtime reads the prompt from: a file for oh-my-pi. */
+  promptSource?: string;
+  /** Absolute path of the run's prompt.md handed to the runtime with the `@` prefix. */
+  promptPath: string;
   /**
    * Pre-enrichment mission prompt — what `buildMissionPrompt` produced before
    * any extension touched it. Persisted to Honcho as the "user message" so
@@ -290,8 +298,9 @@ export async function checkOhMyPi(root?: string): Promise<CheckResult> {
 
 export async function dryRunOhMyPi(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planOhMyPiRun(root, missionPath, options);
-    const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
+    const runId = generateRunId();
+    const plan = await planOhMyPiRun(root, missionPath, { ...options, runId });
+    const artifacts = await getMissionArtifactContext(root, missionPath, runId);
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
         schema_version: "uh.runtime-session.v0",
@@ -306,6 +315,8 @@ export async function dryRunOhMyPi(root: string, missionPath: string, options: {
       command: plan.command,
       args: plan.args,
       prompt: plan.prompt,
+      promptSource: plan.promptSource,
+      promptPath: plan.promptPath,
       worktree: plan.worktree,
       session_id_passthrough: plan.session_id_passthrough,
       errors: plan.errors,
@@ -416,6 +427,11 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     : null;
   ctx.memoryBlock = memoryBlock ?? undefined;
   const prompt = renderPrompt(ctx) + (resume ? recoveryPrompt(resume) : "");
+  // The prompt leaves argv entirely: oh-my-pi reads `@<path>` from the run's
+  // prompt.md, which keeps a multi-KB packet off the Windows command line.
+  const runId = options.runId ?? generateRunId();
+  const artifactRoot = options.artifactRoot ?? root;
+  const promptPath = path.join(path.resolve(artifactRoot), ".harness", "missions", mission.id, "runs", runId, "prompt.md");
   const args = [
     "--print",
   ];
@@ -440,7 +456,7 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
   if (!allowSkills) {
     args.push("--no-skills");
   }
-  args.push("--no-title", prompt);
+  args.push("--no-title", `@${promptPath}`);
 
   const deadline = runtimeConfig.recovery?.on_deadline;
   const limits: RuntimeLimits = {
@@ -453,6 +469,8 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     command: cliCommand,
     args,
     prompt,
+    promptPath,
+    promptSource: "file",
     basePrompt,
     worktree: false,
     session_id_passthrough: false,
@@ -513,17 +531,22 @@ export async function runOhMyPi(
   missionPath: string,
   options: RunOhMyPiOptions = {},
 ): Promise<RunOhMyPiResult> {
-  const plan = await planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides, artifactRoot: options.artifactRoot });
+  const runId = options.runId ?? generateRunId();
+  const plan = await planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides, artifactRoot: options.artifactRoot, runId });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
 
-  const runId = options.runId ?? generateRunId();
   const startedAt = new Date().toISOString();
   const artifactRoot = options.artifactRoot ?? root;
   const artifactMissionPath = path.join(artifactRoot, ".harness", "missions", plan.mission.id, "mission.yaml");
   const artifacts = await getMissionArtifactContext(artifactRoot, artifactMissionPath, runId);
   if (artifacts) await claimRuntimeAttempt(artifacts);
+  else {
+    // A mission outside the harness tree still needs its prompt on disk for `@<path>`.
+    await mkdir(path.dirname(plan.promptPath), { recursive: true });
+    await writeFile(plan.promptPath, plan.prompt, "utf8");
+  }
   const overlayDir = artifacts?.runDir ?? await mkdtemp(path.join(tmpdir(), "uh-omp-overlay-"));
   const overlayPath = path.join(overlayDir, "omp-overlay.yml");
   if (artifacts) await writeArtifactFile(artifacts.missionDir, overlayPath, stringify(plan.runtimeOverlay));

@@ -55,8 +55,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const requestBase = '.harness/missions/review/';
 const reportPath = 'out/review-report.json';
+// The prompt now arrives on stdin; argv only carries the flags.
+let prompt = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { prompt += chunk; });
+process.stdin.on('end', () => {
 const request = JSON.parse(fs.readFileSync(requestBase + 'review-request.json', 'utf8'));
-const report = {schema_version:'uh.independent-review-report.v0', request_sha256: process.argv[process.argv.indexOf('-p')+1].match(/request_sha256 ([a-f0-9]{64})/)[1],
+const report = {schema_version:'uh.independent-review-report.v0', request_sha256: prompt.match(/request_sha256 ([a-f0-9]{64})/)[1],
  sources:request.sources.map(source => {
   const output = source.files.find(file => file.kind === 'output');
   const observed = fs.readFileSync(output.snapshot_path, 'utf8');
@@ -73,6 +78,7 @@ fs.mkdirSync(path.dirname(reportPath), {recursive:true});
 fs.writeFileSync(reportPath, JSON.stringify(report));
 console.log(JSON.stringify({type:'event',event:{type:'model_request_start',model:'offline-review-fixture'}}));
 console.log(JSON.stringify({type:'result',subtype:'success',finalText:'Review complete',stopReason:'end_turn'}));
+});
 `;
 
 async function executeFixture(root: string) {

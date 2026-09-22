@@ -140,6 +140,9 @@ describe("uh mission dry-run --runtime oh-my-pi", () => {
     const runDir = join(runsDir, runDirs[0]);
     expect(await readFile(join(runDir, "prompt.md"), "utf-8")).toBe(result.prompt);
     expect(result.command).toBe("omp");
+    // The prompt rides a file reference, so argv carries the path, never the text.
+    expect(result.promptSource).toBe("file");
+    expect(result.promptPath).toBe(join(runDir, "prompt.md"));
     expect(result.args).toEqual([
       "--print",
       "--mode",
@@ -147,8 +150,9 @@ describe("uh mission dry-run --runtime oh-my-pi", () => {
       "--no-extensions",
       "--no-skills",
       "--no-title",
-      result.prompt,
+      `@${result.promptPath}`,
     ]);
+    expect(result.args).not.toContain(result.prompt);
     const sessionPath = join(runDir, "runtime-session.yaml");
     const sessionValidation = await validateFile(sessionPath);
     expect(sessionValidation).toMatchObject({ valid: true, schema_version: "uh.runtime-session.v0" });

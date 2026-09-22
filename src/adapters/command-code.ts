@@ -139,7 +139,9 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   const prompt = renderPrompt(buildDispatchContext(mission, workflow)) + (resume ? recoveryPrompt(resume) : "")
     + (config.role === "orchestrator" ? `\n\n${ORCHESTRATOR_DELEGATION_INSTRUCTION}` : "");
   // Preserve native sessions; authorization remains with the configured CLI and sandbox.
-  const args = [...config.cli_args, "-p", prompt];
+  // The prompt rides stdin (`-p` without a query) so a multi-KB packet never has to
+  // fit the Windows command line.
+  const args = [...config.cli_args, "-p"];
   const resumeSession = resume?.sessionId ?? config.resume_session;
   if (resumeSession) args.push("--resume", resumeSession);
   args.push("-m", config.model, "--verbose", "--skip-onboarding", "--no-auto-update", "--no-skills", "--output-format", "json");
@@ -155,7 +157,7 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   const onDeadline = deadline === undefined ? undefined
     : grace ? { ...deadline, grace: true as const }
       : deadline;
-  return { command: cliCommand, args, prompt, mission, config, resume,
+  return { command: cliCommand, args, prompt, stdin: prompt, promptSource: "stdin" as const, mission, config, resume,
     grace, deadline, onDeadline,
     permission_mode: permissionMode,
     ...(guard ? { guard } : {}),
@@ -264,6 +266,7 @@ export async function runCommandCode(root: string, missionPath: string, options:
   let output: RuntimeProcessOutput;
   try {
     output = await (options.runner ?? runRuntimeProcess)({ command: plan.command, args: plan.args, cwd: root,
+      stdin: plan.prompt,
       env: guardEnv,
       permissionMode: plan.permission_mode,
       guardLogPath: plan.guard && artifacts ? path.join(artifacts.runDir, "tool-guard.log") : undefined,

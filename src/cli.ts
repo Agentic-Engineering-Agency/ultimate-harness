@@ -106,6 +106,9 @@ type RuntimeDryRunResult = {
   command: string;
   args: string[];
   prompt: string;
+  /** How the runtime receives the prompt: `stdin` for command-code, or the file path for oh-my-pi. */
+  promptSource?: string;
+  promptPath?: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -2175,6 +2178,7 @@ missionCmd
       process.exit(1);
     }
     console.log(`Command: ${result.command} ${result.args.join(" ")}`);
+    console.log(`Prompt source: ${result.promptPath ?? result.promptSource ?? "argv"}`);
     console.log(`Worktree mode: ${result.worktree}`);
     console.log(`Session ID passthrough: ${result.session_id_passthrough}`);
     console.log("");

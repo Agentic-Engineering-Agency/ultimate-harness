@@ -120,6 +120,8 @@ export interface RuntimeProcessInput {
   command: string;
   args: string[];
   cwd: string;
+  /** Payload fed once to the worker's standard input, then closed. */
+  stdin?: string;
   timeoutMs?: number;
   limits?: RuntimeLimits;
   onDeadline?: { grace_turns: number; grace_timeout_ms: number };
@@ -305,6 +307,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       resultPath: path.join(jobDirectory!, "windows-job-result.json"),
       stopPath: path.join(jobDirectory!, ".windows-job-stop"),
       controlPath: scope ? path.join(scope.directory, "runtime-control.json") : undefined,
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
     }),
   } : { ...executable, env: input.env };
   return new Promise<RuntimeProcessOutput>((resolve) => {
@@ -314,7 +317,9 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
     child.stdin?.on("error", () => { /* Spawn errors and early process exits are handled below. */ });
-    child.stdin?.end("specification" in launch ? launch.specification : undefined);
+    // On Windows the guardian carries the payload inside its spec and feeds the
+    // worker; elsewhere the payload is the child's stdin directly.
+    child.stdin?.end("specification" in launch ? launch.specification : input.stdin);
     const stop = (reason: string, code: RuntimeStopCode = "controller_error"): void => {
       if (!stopReason || code === "policy") { stopReason = reason; stopCode = code; }
       timedOut ||= code === "timeout" || code === "startup" || code === "stall";
@@ -434,16 +439,10 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         await persistDigest();
         if (process.platform === "win32") {
           try {
-            const receipt = JSON.parse((await readFile(path.join(jobDirectory!, "windows-job-result.json"), "utf8")).replace(/^\uFEFF/, "")) as Record<string, unknown>;
-            // The guardian records whether it attached a headless pseudoconsole;
-            // the settled contract itself is still validated field by field.
-            pseudoconsole = receipt.pseudoconsole === true;
-            const job = WindowsJobResultSchema.parse({
-              exit_code: receipt.exit_code, peak_memory_bytes: receipt.peak_memory_bytes,
-              controller_lost: receipt.controller_lost, settled: receipt.settled,
-            });
+            const job = WindowsJobResultSchema.parse(JSON.parse((await readFile(path.join(jobDirectory!, "windows-job-result.json"), "utf8")).replace(/^\uFEFF/, "")));
             peakMemoryBytes = job.peak_memory_bytes;
             settlementConfirmed = job.settled;
+            pseudoconsole = job.pseudoconsole === true;
           } catch { settlementConfirmed = false; }
           if (!settlementConfirmed) {
             stopReason = "Owned process-tree settlement was not confirmed";

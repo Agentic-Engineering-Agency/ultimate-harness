@@ -158,6 +158,8 @@ export const WindowsJobResultSchema = z.object({
   peak_memory_bytes: z.number().int().nonnegative(),
   controller_lost: z.boolean(),
   settled: z.boolean(),
+  /** Whether the guardian attached a headless pseudoconsole instead of the CREATE_NO_WINDOW fallback. */
+  pseudoconsole: z.boolean().optional(),
 }).strict();
 
 export const RuntimeCancelRequestSchema = z.object({

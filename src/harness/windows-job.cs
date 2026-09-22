@@ -34,6 +34,7 @@ public static class UHJob {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref SECURITY_ATTRIBUTES attributes, uint size);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool ReadFile(IntPtr file, byte[] buffer, uint toRead, out uint read, IntPtr overlapped);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool WriteFile(IntPtr file, byte[] buffer, uint toWrite, out uint written, IntPtr overlapped);
   static void Check(bool ok) { if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
   // Normalize separators before applying the verbatim prefix.
   static string ExtendedPath(string value) {
@@ -58,6 +59,24 @@ public static class UHJob {
   static void Drain(IntPtr handle) {
     byte[] buffer = new byte[8192]; uint read;
     try { while (ReadFile(handle, buffer, (uint)buffer.Length, out read, IntPtr.Zero) && read > 0) { } } catch { }
+  }
+  // Feeds a runtime prompt to the worker's stdin, then closes the write end so
+  // the worker observes EOF. Runs on its own thread because an anonymous pipe
+  // stalls once its buffer is full until the worker drains it, and the guardian
+  // must stay free to wait on the job.
+  static void WriteStdin(IntPtr handle, byte[] payload) {
+    try {
+      int offset = 0;
+      while (offset < payload.Length) {
+        int remaining = payload.Length - offset;
+        byte[] slice = new byte[remaining];
+        System.Buffer.BlockCopy(payload, offset, slice, 0, remaining);
+        uint written;
+        if (!WriteFile(handle, slice, (uint)remaining, out written, IntPtr.Zero) || written == 0) break;
+        offset += (int)written;
+      }
+    } catch { }
+    finally { CloseHandle(handle); }
   }
   /**
    * Attaches the worker to a windowless pseudoconsole instead of letting it (and
@@ -112,10 +131,11 @@ public static class UHJob {
   public static long PeakMemory;
   public static bool ParentLost;
   public static bool Pseudoconsole;
-  public static uint Run(string command, string[] args, string cwd, IntPtr parent, ulong memoryBytes, string stopPath) {
+  public static uint Run(string command, string[] args, string cwd, IntPtr parent, ulong memoryBytes, string stopPath, string stdinPayload) {
     stopPath = ExtendedPath(stopPath);
     IntPtr job = IntPtr.Zero; PROCESS child = new PROCESS();
     IntPtr pseudoconsole = IntPtr.Zero, attributeList = IntPtr.Zero, consoleInput = IntPtr.Zero, drainRead = IntPtr.Zero;
+    IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero;
     System.Threading.Thread drain = null;
     try {
       job = CreateJobObject(IntPtr.Zero, null); Check(job != IntPtr.Zero);
@@ -127,6 +147,16 @@ public static class UHJob {
       STARTUPEX startup = new STARTUPEX();
       startup.startup.flags = 0x100;
       startup.startup.stdin = GetStdHandle(-10); startup.startup.stdout = GetStdHandle(-11); startup.startup.stderr = GetStdHandle(-12);
+      // A prompt payload gets its own pipe so the worker reads it as stdin,
+      // independent of the guardian's own stdin (which carries the spec).
+      if (stdinPayload != null) {
+        SECURITY_ATTRIBUTES stdinAttributes = new SECURITY_ATTRIBUTES();
+        stdinAttributes.Length = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+        stdinAttributes.InheritHandle = true;
+        Check(CreatePipe(out stdinRead, out stdinWrite, ref stdinAttributes, 0));
+        SetHandleInformation(stdinWrite, 1, 0);
+        startup.startup.stdin = stdinRead;
+      }
       uint flags = 4;
       if (TryPseudoconsole(out pseudoconsole, out attributeList, out consoleInput, out drainRead, out drain)) {
         startup.attributeList = attributeList;
@@ -142,6 +172,13 @@ public static class UHJob {
       Check(CreateProcess(null, line, IntPtr.Zero, IntPtr.Zero, true, flags, IntPtr.Zero, cwd, ref startup, out child));
       Check(AssignProcessToJobObject(job, child.process));
       Check(ResumeThread(child.thread) != 0xffffffff);
+      if (stdinPayload != null) {
+        CloseIfSet(ref stdinRead);
+        IntPtr write = stdinWrite; stdinWrite = IntPtr.Zero;
+        byte[] payloadBytes = new UTF8Encoding(false).GetBytes(stdinPayload);
+        System.Threading.Thread writer = new System.Threading.Thread(() => WriteStdin(write, payloadBytes));
+        writer.IsBackground = true; writer.Start();
+      }
       uint waited;
       do { waited = WaitForMultipleObjects(2, new IntPtr[] { child.process, parent }, false, 100); }
       while (waited == 258 && !System.IO.File.Exists(stopPath));
@@ -169,6 +206,8 @@ public static class UHJob {
       if (drain != null) drain.Join(1000);
       CloseIfSet(ref consoleInput);
       CloseIfSet(ref drainRead);
+      CloseIfSet(ref stdinRead);
+      CloseIfSet(ref stdinWrite);
     }
   }
 
@@ -200,7 +239,9 @@ public static class UHJob {
         object controlPathObject;
         string controlPath = null;
         if (spec.TryGetValue("controlPath", out controlPathObject) && controlPathObject != null) controlPath = ExtendedPath((string)controlPathObject);
-        uint code = Run((string)spec["command"], args, (string)spec["cwd"], parent, Convert.ToUInt64(spec["memoryBytes"]), stopPath);
+        object stdinObject;
+        string stdinPayload = spec.TryGetValue("stdin", out stdinObject) && stdinObject != null ? (string)stdinObject : null;
+        uint code = Run((string)spec["command"], args, (string)spec["cwd"], parent, Convert.ToUInt64(spec["memoryBytes"]), stopPath, stdinPayload);
         WriteAtomicJson(resultPath, new { exit_code = code, peak_memory_bytes = PeakMemory, controller_lost = ParentLost, settled = true, pseudoconsole = Pseudoconsole }, json);
         if (ParentLost && controlPath != null && System.IO.File.Exists(controlPath)) {
           var control = (System.Collections.Generic.Dictionary<string, object>)json.DeserializeObject(System.IO.File.ReadAllText(controlPath));

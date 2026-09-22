@@ -461,3 +461,31 @@ test.skipIf(process.platform !== "win32")("Windows-only guardian runs the worker
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 }, 60000);
+
+test.skipIf(process.platform !== "win32")("Windows-only guardian feeds a 50,000-character stdin payload to the worker and still settles (non-Windows skips because the guardian requires PowerShell)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-guardian-stdin-"));
+  const directory = path.join(root, "run");
+  try {
+    const payload = "S".repeat(50_000);
+    // The worker reads its whole standard input, persists it verbatim, and
+    // reports the byte count; the guardian must deliver every byte even though
+    // it consumes its own stdin for the job specification.
+    const worker = "const fs=require('node:fs');let b='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>b+=c);process.stdin.on('end',()=>{fs.writeFileSync('received.txt',b);process.stdout.write('RECEIVED:'+b.length);});";
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", worker],
+      cwd: root,
+      stdin: payload,
+      limits: { timeout_ms: 20000 },
+      artifacts: { directory, missionId: "one", runId: "stdin", runtime: "fixture" },
+    });
+    expect(await readFile(path.join(root, "received.txt"), "utf8")).toBe(payload);
+    expect(result.stdout).toContain("RECEIVED:50000");
+    expect(result.exitCode).toBe(0);
+    expect(result.settlementConfirmed).toBe(true);
+    const receipt = JSON.parse(await readFile(path.join(directory, "windows-job-result.json"), "utf8"));
+    expect(receipt).toMatchObject({ settled: true, pseudoconsole: true });
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+}, 60000);
