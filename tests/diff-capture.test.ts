@@ -1,10 +1,10 @@
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureDiffWithUntracked } from "../src/harness/diff-capture.js";
+import { captureDiffWithUntracked, diffCaptureFailureRecord } from "../src/harness/diff-capture.js";
 
 const execFileP = promisify(execFile);
 
@@ -143,5 +143,44 @@ describe("captureDiffWithUntracked", () => {
     const result = await captureDiffWithUntracked(repo);
     expect(result.errors).toBeUndefined();
     expect(result.patch).toBe("");
+  });
+
+  test("retries a transient git failure once and still captures the diff", async () => {
+    // The first `git rev-parse --verify HEAD` fails while the checkout's git
+    // directory is briefly missing (the stand-in for a transient spawn
+    // failure during a host memory shortage); the single 500 ms retry lands
+    // after the directory is restored and the capture succeeds.
+    const transient = await mkdtemp(join(tmpdir(), "uh-diff-retry-"));
+    const gitDir = join(transient, ".git");
+    const hiddenDir = join(transient, ".git-transient-away");
+    await execFileP("git", ["init", "-q", "-b", "main"], { cwd: transient });
+    await execFileP("git", ["config", "user.email", "test@test"], { cwd: transient });
+    await execFileP("git", ["config", "user.name", "test"], { cwd: transient });
+    await writeFile(join(transient, "tracked.txt"), "original\n");
+    await execFileP("git", ["add", "tracked.txt"], { cwd: transient });
+    await execFileP("git", ["commit", "-q", "-m", "init"], { cwd: transient });
+    await writeFile(join(transient, "late.txt"), "written after the failure\n");
+    try {
+      await execFileP("git", ["-C", transient, "status", "--porcelain"], { cwd: transient });
+      await rename(gitDir, hiddenDir);
+      const restore = setTimeout(() => {
+        rename(hiddenDir, gitDir).catch(() => {});
+      }, 200);
+      try {
+        const result = await captureDiffWithUntracked(transient);
+        expect(result.errors).toBeUndefined();
+        expect(result.patch).toContain("diff --git a/late.txt b/late.txt");
+      } finally {
+        clearTimeout(restore);
+      }
+    } finally {
+      await rm(hiddenDir, { recursive: true, force: true });
+      await rm(transient, { recursive: true, force: true });
+    }
+  });
+
+  test("formats the post-settlement diff capture record", () => {
+    expect(diffCaptureFailureRecord(["Diff capture failed: Command failed: git rev-parse --verify HEAD"]))
+      .toBe(`diff_capture: ${JSON.stringify({ status: "failed", error: "Diff capture failed: Command failed: git rev-parse --verify HEAD" })}`);
   });
 });
