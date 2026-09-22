@@ -1,6 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, writeFile, chmod, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, chmod, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -296,6 +296,72 @@ test("worker evidence is integrity-checked and a worker run without a final mess
       reason: "the latest run 20260922T000000Z-aaaaaa wrote no runtime-final.txt",
     });
     expect(prepared.requestSha256).not.toBe(absent.requestSha256);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+/**
+ * Lay out a team run on disk: a worker worktree that holds no run records, plus
+ * the team's run pointer, `team-state.json`, and the worker artifact root (which
+ * does hold the worker's own `latest.json` and `runs/<run-id>/runtime-final.txt`).
+ */
+async function teamRunFixture(root: string, teamId: string, workerId: string, options: { includeWorker?: boolean } = {}) {
+  const teamRunId = "20260922T000000Z-team01";
+  const workerRunId = "20260922T000000Z-aaaaaa";
+  const teamMissionDir = path.join(root, ".harness", "missions", teamId);
+  const teamRoot = path.join(teamMissionDir, "team");
+  const workerWorktree = path.join(teamRoot, "workers", workerId);
+  const artifactScope = `artifacts/${teamRunId}/workers/${workerId}`;
+  const artifactMissionDir = path.join(teamRoot, artifactScope, ".harness", "missions", "source");
+  const artifactFinal = path.join(artifactMissionDir, "runs", workerRunId, "runtime-final.txt");
+  const finalMessage = "Team worker final message.\n";
+  await mkdir(workerWorktree, { recursive: true });
+  await mkdir(path.join(teamMissionDir, "runs", teamRunId), { recursive: true });
+  await writeFile(path.join(teamMissionDir, "latest.json"), JSON.stringify({
+    schema_version: "uh.latest-run.v0", run_id: teamRunId, started_at: "2026-09-22T00:00:00.000Z", status: "passed" }));
+  await writeFile(path.join(teamMissionDir, "runs", teamRunId, "team-state.json"), JSON.stringify({
+    schema_version: "uh.team-run.v0", mission_id: teamId, run_id: teamRunId, status: "passed",
+    started_at: "2026-09-22T00:00:00.000Z", finished_at: "2026-09-22T00:01:00.000Z",
+    integration_report_path: "team/integration-report.md", verification_status: null,
+    leader: { role: "integrator", adapter: "command-code", status: "succeeded" },
+    workers: options.includeWorker === false ? [] : [{
+      id: workerId, role: workerId, adapter: "command-code", run_id: workerRunId,
+      artifact_scope: artifactScope, runtime_result_path: null, status: "succeeded",
+      started_at: "2026-09-22T00:00:00.000Z", finished_at: "2026-09-22T00:01:00.000Z",
+    }],
+  }, null, 2));
+  await mkdir(path.join(artifactMissionDir, "runs", workerRunId), { recursive: true });
+  await writeFile(artifactFinal, finalMessage);
+  await writeFile(path.join(artifactMissionDir, "latest.json"), JSON.stringify({
+    schema_version: "uh.latest-run.v0", run_id: workerRunId, started_at: "2026-09-22T00:00:00.000Z", status: "passed" }));
+  return { workerWorktree, artifactFinal, finalMessage };
+}
+
+test("a team worker's final message is captured from the team's artifact root", async () => {
+  const root = await fixture();
+  try {
+    const { workerWorktree, artifactFinal, finalMessage } = await teamRunFixture(root, "wave-team", "worker-a");
+    const prepared = await prepareIndependentReview(root, { id: "review-team",
+      sources: [{ missionId: "source", workspaceRoot: workerWorktree }], runtime: "command-code", model: "offline-review-fixture" });
+    const request = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(prepared.requestPath, "utf8")));
+    const report = request.sources[0].files.find(file => file.kind === "report")!;
+    expect(report).toMatchObject({ kind: "report", state: "present",
+      original_path: path.relative(await realpath(root), await realpath(artifactFinal)).split(path.sep).join("/") });
+    expect(report.sha256).toBe(createHash("sha256").update(await readFile(artifactFinal)).digest("hex"));
+    expect(await readFile(path.join(root, report.snapshot_path!), "utf8")).toBe(finalMessage);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a team whose state names no worker keeps the absent record with the lookup that failed", async () => {
+  const root = await fixture();
+  try {
+    const { workerWorktree } = await teamRunFixture(root, "wave-team", "worker-a", { includeWorker: false });
+    const prepared = await prepareIndependentReview(root, { id: "review-team",
+      sources: [{ missionId: "source", workspaceRoot: workerWorktree }], runtime: "command-code", model: "offline-review-fixture" });
+    const request = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(prepared.requestPath, "utf8")));
+    expect(request.sources[0].files.find(file => file.kind === "report")).toEqual({
+      kind: "report", state: "absent", original_path: ".harness/missions/source/latest.json",
+      reason: "the team state names no worker worker-a, so the worker artifact root cannot be located",
+    });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

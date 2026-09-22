@@ -53,7 +53,7 @@ import {
 import { loadMissionFile } from "./capabilities.js";
 import { aggregateRuntimeUsage, type RuntimeUsage } from "./usage.js";
 import { readRuntimeAccounting } from "./runtime-accounting.js";
-import { assertSafeMissionId, assertWithinRoot, fileExists } from "./mission.js";
+import { assertSafeMissionId, assertWithinRoot, fileExists, isPathWithin } from "./mission.js";
 import { listLiveRuns, registerLiveRun } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 const execFileP = promisify(execFile);
@@ -762,6 +762,54 @@ function parentTeamStatePath(canonicalMissionDir: string, runId: string): string
 
 function workerArtifactRoot(teamRoot: string, workerId: string, parentRunId: string): string {
   return path.join(teamRoot, "artifacts", parentRunId, "workers", workerId);
+}
+
+/** Where a team worker's run records live, resolved from its worktree path. */
+export type TeamWorkerArtifactLookup = { artifactRoot: string } | { reason: string };
+
+/**
+ * A team worker writes its run records outside its own worktree — the worktree
+ * is `.harness/missions/<team>/team/workers/<worker-id>`, while its records
+ * live under the team's artifact root. Given that worktree path, resolve the
+ * artifact root the team recorded for the worker, through the team's run
+ * pointer and `team-state.json`; never by guessing the newest directory.
+ * Returns `null` when the path is not a team worker worktree, otherwise the
+ * resolved artifact root or the lookup that failed.
+ */
+export async function resolveTeamWorkerArtifactRoot(workerWorktree: string): Promise<TeamWorkerArtifactLookup | null> {
+  const workersRoot = path.dirname(workerWorktree);
+  const teamRoot = path.dirname(workersRoot);
+  const teamMissionDir = path.dirname(teamRoot);
+  const missionsRoot = path.dirname(teamMissionDir);
+  const harnessRoot = path.dirname(missionsRoot);
+  if (path.basename(workersRoot) !== "workers" || path.basename(teamRoot) !== "team"
+    || path.basename(missionsRoot) !== "missions" || path.basename(harnessRoot) !== ".harness") {
+    return null;
+  }
+  const workerId = path.basename(workerWorktree);
+  const teamMissionId = path.basename(teamMissionDir);
+  const teamLatest = await readLatestPointer(path.dirname(harnessRoot), teamMissionId);
+  if (!teamLatest) {
+    return { reason: `the team ${teamMissionId} has no latest.json run pointer, so the worker artifact root cannot be located` };
+  }
+  let state: CanonicalTeamState;
+  try {
+    state = CanonicalTeamStateSchema.parse(JSON.parse(await readFile(parentTeamStatePath(teamMissionDir, teamLatest.run_id), "utf-8")));
+  } catch (error) {
+    const detail = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? "has no team-state.json"
+      : "has an unreadable team-state.json";
+    return { reason: `the team ${teamMissionId} run ${teamLatest.run_id} ${detail}, so the worker artifact root cannot be located` };
+  }
+  const worker = state.workers.find((entry) => entry.id === workerId);
+  if (!worker) {
+    return { reason: `the team state names no worker ${workerId}, so the worker artifact root cannot be located` };
+  }
+  const artifactRoot = path.resolve(teamRoot, worker.artifact_scope);
+  if (!isPathWithin(artifactRoot, teamRoot)) {
+    return { reason: `the team state names an artifact root outside the team for worker ${workerId}` };
+  }
+  return { artifactRoot };
 }
 
 type WorkerContract = NonNullable<CanonicalTeamWorker["contract"]>;

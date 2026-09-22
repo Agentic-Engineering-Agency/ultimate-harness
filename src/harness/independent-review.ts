@@ -19,6 +19,7 @@ import { loadMissionFile } from "./capabilities.js";
 import { assertSafeMissionId, isPathWithin, requireInitializedProject, requireWorkflowProfile, rejectSymlinkIfExists } from "./mission.js";
 import { proposeMission } from "./propose.js";
 import { readLatestPointer } from "./run-id.js";
+import { resolveTeamWorkerArtifactRoot } from "./team-run.js";
 import { resolveSandboxMissionRoot } from "./sandbox.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
@@ -130,19 +131,28 @@ async function changedGitPaths(sourceRoot: string): Promise<string[]> {
   return output.split(/\r?\n/).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
 }
 
-async function snapshotFile(sourceRoot: string, original: string, destination: string): Promise<string | undefined> {
-  const candidate = path.resolve(sourceRoot, original);
-  if (!isPathWithin(candidate, sourceRoot)) throw new Error(`Review input escapes its source workspace: ${original}`);
+/**
+ * Copy an absolute file into the packet under `containmentRoot`, hashing it in
+ * the same pass. `undefined` when the file does not exist; containment is
+ * enforced on both the requested path and its realpath.
+ */
+async function snapshotWithin(containmentRoot: string, candidate: string, destination: string): Promise<string | undefined> {
+  const absolute = path.resolve(candidate);
+  if (!isPathWithin(absolute, containmentRoot)) throw new Error(`Review input escapes its source workspace: ${candidate}`);
   let resolved: string;
-  try { resolved = await realpath(candidate); }
+  try { resolved = await realpath(absolute); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-  if (!isPathWithin(resolved, sourceRoot)) throw new Error(`Review input resolves outside its source workspace: ${original}`);
-  if (!(await lstat(candidate)).isFile()) return undefined;
+  if (!isPathWithin(resolved, containmentRoot)) throw new Error(`Review input resolves outside its source workspace: ${candidate}`);
+  if (!(await lstat(absolute)).isFile()) return undefined;
   const hash = createHash("sha256");
   await pipeline(createReadStream(resolved), new Transform({
     transform(chunk, _encoding, callback) { hash.update(chunk); callback(null, chunk); },
   }), createWriteStream(destination, { flags: "wx" }));
   return hash.digest("hex");
+}
+
+async function snapshotFile(sourceRoot: string, original: string, destination: string): Promise<string | undefined> {
+  return snapshotWithin(sourceRoot, path.resolve(sourceRoot, original), destination);
 }
 
 /**
@@ -253,12 +263,38 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
         files.push({ kind: "verification", original_path: verificationOriginal, state: "absent", reason });
         evidence.push(`verification absent (${reason})`);
       }
-      const latestRun = await readLatestPointer(sourceRoot, source.missionId);
-      const finalOriginal = latestRun
-        ? path.posix.join(".harness", "missions", source.missionId, "runs", latestRun.run_id, "runtime-final.txt")
-        : path.posix.join(".harness", "missions", source.missionId, "latest.json");
       const finalSnapshot = path.join(inputDir, "runtime-final.txt");
-      const finalHash = latestRun ? await snapshotFile(sourceRoot, finalOriginal, finalSnapshot) : undefined;
+      const latestRun = await readLatestPointer(sourceRoot, source.missionId);
+      // A team worker writes its run records outside its own worktree, under
+      // the team's artifact root; resolve that root through the team's run
+      // pointer and team-state.json, never by guessing the newest directory. A
+      // standalone source keeps reading its own workspace.
+      const teamLookup = latestRun ? undefined : await resolveTeamWorkerArtifactRoot(sourceRoot);
+      let finalOriginal: string;
+      let finalHash: string | undefined;
+      let absentReason: string;
+      if (latestRun) {
+        finalOriginal = path.posix.join(".harness", "missions", source.missionId, "runs", latestRun.run_id, "runtime-final.txt");
+        finalHash = await snapshotFile(sourceRoot, finalOriginal, finalSnapshot);
+        absentReason = `the latest run ${latestRun.run_id} wrote no runtime-final.txt`;
+      } else if (teamLookup && "artifactRoot" in teamLookup) {
+        const artifactLatest = await readLatestPointer(teamLookup.artifactRoot, source.missionId);
+        const artifactFinal = artifactLatest
+          ? path.join(teamLookup.artifactRoot, ".harness", "missions", source.missionId, "runs", artifactLatest.run_id, "runtime-final.txt")
+          : path.join(teamLookup.artifactRoot, ".harness", "missions", source.missionId, "latest.json");
+        finalOriginal = relativeArtifactPath(root, artifactFinal);
+        if (artifactLatest) {
+          finalHash = await snapshotWithin(teamLookup.artifactRoot, artifactFinal, finalSnapshot);
+          absentReason = `the latest run ${artifactLatest.run_id} wrote no runtime-final.txt`;
+        } else {
+          absentReason = "the worker artifact root has no latest.json run pointer, so no run's final message can be located";
+        }
+      } else {
+        finalOriginal = path.posix.join(".harness", "missions", source.missionId, "latest.json");
+        absentReason = teamLookup
+          ? teamLookup.reason
+          : "the source workspace has no latest.json run pointer, so no run's final message can be located";
+      }
       if (finalHash) {
         const snapshotRelative = relativeArtifactPath(root, finalSnapshot);
         files.push({ kind: "report", original_path: finalOriginal, state: "present",
@@ -266,11 +302,8 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
         readFirst.push(snapshotRelative);
         evidence.push(`final message ${snapshotRelative}`);
       } else {
-        const reason = latestRun
-          ? `the latest run ${latestRun.run_id} wrote no runtime-final.txt`
-          : "the source workspace has no latest.json run pointer, so no run's final message can be located";
-        files.push({ kind: "report", original_path: finalOriginal, state: "absent", reason });
-        evidence.push(`final message absent (${reason})`);
+        files.push({ kind: "report", original_path: finalOriginal, state: "absent", reason: absentReason });
+        evidence.push(`final message absent (${absentReason})`);
       }
       workerEvidence.push(`- ${source.missionId}: ${evidence.join("; ")}.`);
       sources.push({ mission_id: source.missionId, source_root: sourceRoot, files,
