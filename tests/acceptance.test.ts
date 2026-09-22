@@ -93,16 +93,50 @@ describe("acceptance evidence", () => {
     expect(facts.fact_sources.stop_code).toBe("first");
   });
 
+  const guardAllow = (tool: string): string => JSON.stringify({ ts: "2026-09-22T00:00:00.000Z", tool, class: "allow", target: `src/${tool.toLowerCase()}.ts` });
+  const guardDenial = (guardClass: string): string => JSON.stringify({ ts: "2026-09-22T00:00:00.000Z", tool: "Bash", class: guardClass, target: "out/x.txt", reason: guardClass });
+
   test("reads tool_guard_lines from the run's guard log without a terminal result", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "acceptance-guardlog-"));
     const runDir = path.join(root, ".harness", "missions", "fixture", "runs", "001");
     await mkdir(runDir, { recursive: true });
-    await writeFile(path.join(runDir, "tool-guard.log"), ["blocked:a", "blocked:b", "blocked:c", ""].join("\n"));
+    await writeFile(path.join(runDir, "tool-guard.log"), [guardDenial("write_outside"), guardDenial("git_mutation"), guardDenial("package_install"), ""].join("\n"));
     const expected = { status: "failed", required_records: { tool_guard_lines: 3 } } as const;
     const facts = await collectFacts(root, "fixture", expected);
     expect(facts.observed.tool_guard_lines).toBe(3);
+    expect(facts.observed.tool_guard_allow_lines).toBe(0);
     expect(facts.fact_sources.tool_guard_lines).toBe("first");
     expect(compareAcceptanceFacts(expected, facts.observed)).toEqual([{ field: "status", expected: "failed", observed: undefined }]);
+  });
+
+  test("counts guard denials and allow lines separately", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-guardlog-"));
+    const runDir = path.join(root, ".harness", "missions", "fixture", "runs", "001");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "tool-guard.log"), [
+      guardAllow("Read"),
+      guardAllow("Glob"),
+      guardAllow("Read"),
+      guardDenial("git_mutation"),
+      guardDenial("package_install"),
+      guardDenial("write_outside"),
+      "",
+    ].join("\n"));
+    const facts = await collectFacts(root, "fixture");
+    expect(facts.observed.tool_guard_lines).toBe(3);
+    expect(facts.observed.tool_guard_allow_lines).toBe(3);
+    expect(facts.fact_sources.tool_guard_lines).toBe("first");
+    expect(facts.fact_sources.tool_guard_allow_lines).toBe("first");
+  });
+
+  test("counts an unparseable guard log line as a denial only when it says deny", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-guardlog-"));
+    const runDir = path.join(root, ".harness", "missions", "fixture", "runs", "001");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "tool-guard.log"), ["not json at all", '{"class":"deny"', ""].join("\n"));
+    const facts = await collectFacts(root, "fixture");
+    expect(facts.observed.tool_guard_lines).toBe(1);
+    expect(facts.observed.tool_guard_allow_lines).toBe(0);
   });
 
   test("prefers the guard log of the latest run that has one", async () => {
@@ -110,8 +144,8 @@ describe("acceptance evidence", () => {
     const runsRoot = path.join(root, ".harness", "missions", "fixture", "runs");
     await mkdir(path.join(runsRoot, "001"), { recursive: true });
     await mkdir(path.join(runsRoot, "002"), { recursive: true });
-    await writeFile(path.join(runsRoot, "001", "tool-guard.log"), ["blocked:a", "blocked:b", "blocked:c", ""].join("\n"));
-    await writeFile(path.join(runsRoot, "002", "tool-guard.log"), ["blocked:a", "blocked:b", "blocked:c", "blocked:d", "blocked:e"].join("\n"));
+    await writeFile(path.join(runsRoot, "001", "tool-guard.log"), [guardDenial("write_outside"), guardDenial("git_mutation"), guardDenial("package_install"), ""].join("\n"));
+    await writeFile(path.join(runsRoot, "002", "tool-guard.log"), [guardDenial("write_outside"), guardDenial("git_mutation"), guardDenial("package_install"), guardDenial("write_outside"), guardDenial("git_mutation")].join("\n"));
     const facts = await collectFacts(root, "fixture");
     expect(facts.runIds).toEqual(["001", "002"]);
     expect(facts.observed.tool_guard_lines).toBe(5);
@@ -123,9 +157,10 @@ describe("acceptance evidence", () => {
     const runsRoot = path.join(root, ".harness", "missions", "fixture", "runs");
     await mkdir(path.join(runsRoot, "001"), { recursive: true });
     await mkdir(path.join(runsRoot, "002"), { recursive: true });
-    await writeFile(path.join(runsRoot, "001", "tool-guard.log"), ["blocked:a", "blocked:b", "blocked:c", ""].join("\n"));
+    await writeFile(path.join(runsRoot, "001", "tool-guard.log"), [guardDenial("write_outside"), guardDenial("git_mutation"), guardDenial("package_install"), ""].join("\n"));
     const facts = await collectFacts(root, "fixture");
     expect(facts.observed.tool_guard_lines).toBe(3);
+    expect(facts.observed.tool_guard_allow_lines).toBe(0);
     expect(facts.fact_sources.tool_guard_lines).toBe("first");
   });
 
