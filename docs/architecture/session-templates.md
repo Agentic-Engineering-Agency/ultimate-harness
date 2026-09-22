@@ -135,6 +135,37 @@ The `overridden_by_mission` list records which top-level template blocks (`adapt
 - Identify common overrides that indicate when a base template's limits or settings need tuning.
 - Systematically promote reliable configurations into standard templates.
 
+## Adopting a template from the CLI
+
+`uh mission run` and `uh mission dry-run` accept `--template <id>`. The template is loaded from `<root>/.harness/templates/<id>.yaml` and applied to the mission with `applySessionTemplate`, so mission values always win over template values.
+
+The applied result is translated into the extra runtime-config overrides the run path already accepts: the applied `runtime_config_overrides` keys, plus `limits` and `recovery` when stated. An explicit `--runtime-config-overrides <json>` is spread on top, so the command line wins over both the mission and the template. Fleet admission runs after the template is applied, so a template cannot route a run around spend authorization.
+
+When `--runtime` is omitted, the template's `adapter` is used. When `--runtime` is given and differs from the template's adapter, the run is refused with a message naming both. `--auto` cannot be combined with `--template`.
+
+Refusals are reported as `[BLOCKED]` with exit code 2 before any runtime is spawned:
+- An unknown or invalid template.
+- A strict-containment violation (see above).
+- A conflicting `--runtime`.
+
+Dry-run prints a `Template:` line naming the template id, tier, containment, and the keys the mission overrode, plus the resolved effective overrides.
+
+## Recording the adopted template
+
+When a run adopts a template, the CLI writes `session-template.json` into the run directory (`.harness/missions/<mission>/runs/<run_id>/`), next to the adapter's `tool-guard.json`. The file contains exactly the `describeAppliedTemplate` record:
+
+```json
+{
+  "template_id": "balanced",
+  "tier": "balanced",
+  "containment": "standard",
+  "overridden_by_mission": ["limits"]
+}
+```
+
+`indexRuns` reads this file into the run record's `template_id` and `tier` fields and leaves both undefined when a run did not adopt a template. `uh observatory runs --group-by` accepts `template` (grouping by `template_id`) and `tier` in addition to `runtime`, `model`, `workflow_profile`, and `stop_code`.
+
+
 ## Resilient Template Loading
 
 The loader function `loadSessionTemplates(root)`:
