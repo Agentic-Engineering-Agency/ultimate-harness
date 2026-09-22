@@ -316,7 +316,7 @@ function guardTamperEvent(event: Event): boolean {
   return guardTamperRecord(event);
 }
 
-type GuardEvidenceEntry = { call_id?: string; tool?: string; target?: string };
+type GuardEvidenceEntry = { call_id?: string };
 
 function guardLogEntries(logPath: string): { lines: number; tamper: boolean; entries: GuardEvidenceEntry[] } {
   if (!existsSync(logPath)) return { lines: 0, tamper: false, entries: [] };
@@ -331,8 +331,6 @@ function guardLogEntries(logPath: string): { lines: number; tamper: boolean; ent
         const item = record(parsed);
         entries.push({
           call_id: typeof item?.call_id === "string" && item.call_id ? item.call_id : undefined,
-          tool: typeof item?.tool === "string" && item.tool ? item.tool : undefined,
-          target: typeof item?.target === "string" && item.target ? item.target : undefined,
         });
       } catch { entries.push({}); }
     }
