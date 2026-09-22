@@ -150,11 +150,24 @@ export function delegatedRouteMismatch(value: unknown, expected: RuntimeRoute | 
 }
 
 /**
+ * The canonical identity of a provider or model name, for places that need
+ * one string to stand for one model (for example grouping run records):
+ * trimmed, lowercased (locale-independent), and with any `provider/` prefix
+ * removed, so the key is the part after the last "/".
+ */
+export function canonicalRouteIdentifier(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+}
+
+/**
  * Whether two provider or model identifiers name the same route. Comparison
  * trims and lowercases (locale-independent), and reconciles an optional
  * `provider/model` prefix: when exactly one side is prefixed, only the part
- * after its last "/" is compared. Nothing else is normalized; there is no
- * alias table and no partial or substring matching.
+ * after its last "/" is compared (the `canonicalRouteIdentifier` of that
+ * side). Nothing else is normalized; there is no alias table and no partial
+ * or substring matching.
  */
 export function sameRouteIdentifier(a: string, b: string): boolean {
   const left = a.trim().toLowerCase();
@@ -163,7 +176,7 @@ export function sameRouteIdentifier(a: string, b: string): boolean {
   const leftSlash = left.lastIndexOf("/");
   const rightSlash = right.lastIndexOf("/");
   if ((leftSlash >= 0) === (rightSlash >= 0)) return false;
-  return leftSlash >= 0 ? left.slice(leftSlash + 1) === right : right.slice(rightSlash + 1) === left;
+  return leftSlash >= 0 ? canonicalRouteIdentifier(left) === right : left === canonicalRouteIdentifier(right);
 }
 
 export function runtimeRouteMismatch(observed: RuntimeRoute | undefined, expected: RuntimeRoute | undefined): boolean {

@@ -384,6 +384,59 @@ describe("uh observatory runs", () => {
     expect(`${res.stdout}${res.stderr}`).toMatch(/must be one of runtime, model, workflow_profile, stop_code/i);
   });
 
+  test("groups model spellings onto one canonical key row in --group-by model", async () => {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "model-group");
+    const runsDir = join(missionDir, "runs");
+    await mkdir(runsDir, { recursive: true });
+    await writeFile(
+      join(missionDir, "mission.yaml"),
+      stringify({
+        schema_version: "uh.mission.v0",
+        id: "model-group",
+        title: "Model Identity",
+        workflow_profile: "spec-first-feature",
+        objective: "One model reported under several spellings",
+      }),
+      "utf-8",
+    );
+    const spellings = ["Qwen3.8-Flash", "Qwen/Qwen3.8-Flash", "qwen/qwen3.8-flash"];
+    for (const [index, model] of spellings.entries()) {
+      const runDir = join(runsDir, `run-spelled-${index}`);
+      await mkdir(runDir, { recursive: true });
+      await writeFile(
+        join(runDir, "runtime-result.yaml"),
+        stringify({
+          schema_version: "uh.runtime-result.v0",
+          mission_id: "model-group",
+          runtime: "hermes",
+          status: "passed",
+          started_at: "2026-09-22T00:00:00.000Z",
+          finished_at: "2026-09-22T00:00:02.000Z",
+          prompt_path: "prompt.md",
+          stdout_path: "stdout.log",
+          stderr_path: "stderr.log",
+          provider: "openrouter",
+          model,
+          usage: { source: "runtime", input_tokens: 10, output_tokens: 2 },
+        }),
+        "utf-8",
+      );
+    }
+
+    const { stdout } = await runUh(["observatory", "runs", "--root", TEST_ROOT, "--group-by", "model", "--json"]);
+    const parsed = JSON.parse(stdout) as { summaries: Array<{ key?: string; runs: number; passed: number }> };
+    expect(parsed.summaries).toHaveLength(1);
+    expect(parsed.summaries[0]).toMatchObject({ key: "qwen3.8-flash", runs: 3, passed: 3 });
+
+    const { stdout: plain } = await runUh(["observatory", "runs", "--root", TEST_ROOT, "--group-by", "model"]);
+    expect(plain).toMatch(/MODEL\s+RUNS\s+PASSED/);
+    const row = plain.split("\n").find((line) => line.includes("qwen3.8-flash"));
+    expect(row).toBeDefined();
+    expect(row).toMatch(/\s3\s/);
+    // The table shows the canonical key, never a raw reported spelling.
+    expect(plain).not.toContain("Qwen/");
+  });
+
   test("shows native token totals and operator-priced provenance for a command-code run", async () => {
     const missionDir = join(TEST_ROOT, ".harness", "missions", "mission-cmdc");
     const runDir = join(missionDir, "runs", "run-cmdc-usage");
