@@ -83,6 +83,39 @@ test("real process with no progress is stopped without a provider call", async (
   expect(result.timedOut).toBe(true);
 });
 
+test("a native max_turns result settles its receipt as turn_limit with a non-empty reason", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-native-turn-cap-"));
+  try {
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'turn-cap'})); console.log(JSON.stringify({type:'result',subtype:'error_max_turns',stopReason:'max_turns',num_turns:100}))"],
+      cwd: root,
+      artifacts: { directory: root, missionId: "one", runId: "turn-cap", runtime: "fixture" },
+    });
+    expect(result.supervisionStopCode).toBe("turn_limit");
+    const control = JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ status: "failed", stop_code: "turn_limit" });
+    expect(control.stop_reason).toBe("Native turn cap (max_turns) reached after 100 turns");
+    expect(control.turns).toBe(100);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test("an unrecognized native terminal stop settles as runtime_error with the reason copied", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-native-stop-reason-"));
+  try {
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'native-stop'})); console.log(JSON.stringify({type:'result',finalText:'partial',stopReason:'aborted',num_turns:4}))"],
+      cwd: root,
+      artifacts: { directory: root, missionId: "one", runId: "native-stop", runtime: "fixture" },
+    });
+    expect(result.supervisionStopCode).toBe("runtime_error");
+    const control = JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ status: "failed", stop_code: "runtime_error" });
+    expect(control.stop_reason).toBe("Runtime reported failure (aborted)");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
 test.skipIf(process.platform !== "win32")("job cap prevents an owned child from committing excessive memory", async () => {
   const outcome = await runRuntimeProcess({
     command: process.execPath,
