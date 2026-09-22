@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
@@ -9,6 +10,9 @@ import {
   type VerificationResultDocument,
 } from "../schema/artifacts.js";
 import { RuntimeControlSchema, RuntimeRecoveryRecordSchema, type RuntimeControl } from "../schema/runtime-control.js";
+import { CanonicalTeamStateSchema, type CanonicalTeamState } from "../schema/team.js";
+import { readNativeCostFacts, resolveRunCost, tokenTotalsFromUsage, type RunTokenTotals } from "./runtime-accounting.js";
+import { loadOperatorPriceTable, type OperatorPriceTable } from "./cost-table.js";
 
 export type RunRecord = {
   mission_id: string;
@@ -33,11 +37,19 @@ export type RunRecord = {
   output_tokens?: number;
   cache_read_tokens?: number;
   cache_write_tokens?: number;
+  /** Token totals summed from the run's native event stream, or its recorded usage. */
+  token_totals?: RunTokenTotals;
   cost_usd?: number;
   cost_basis?: string;
   resumed_from?: string;
   verification_status?: string;
   peak_memory_bytes?: number;
+  /** Provenance of `cost_usd`: reported by the runtime, or estimated by the harness. */
+  cost_source?: "reported" | "estimated";
+  /** Why `cost_usd` is unknown; present exactly when it is. */
+  cost_unknown_reason?: string;
+  /** Team context when this run was a worker dispatched by `run-team`. */
+  team?: { mission_id: string; role: string };
 };
 
 export type RunGroupSummary = {
@@ -91,7 +103,13 @@ function duration(startedAt: string | undefined, finishedAt: string | undefined)
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-async function indexRun(missionId: string, missionRoot: string, runId: string): Promise<RunRecord | undefined> {
+async function indexRun(
+  missionId: string,
+  missionRoot: string,
+  runId: string,
+  priceTable: OperatorPriceTable | undefined,
+  team?: { mission_id: string; role: string },
+): Promise<RunRecord | undefined> {
   const runRoot = path.join(missionRoot, "runs", runId);
   const [resultRaw, controlRaw, recoveryRaw, verificationRaw, workflowProfile, templateRaw] = await Promise.all([
     readYamlFile(path.join(runRoot, "runtime-result.yaml")),
@@ -115,13 +133,21 @@ async function indexRun(missionId: string, missionRoot: string, runId: string): 
   const usage = usageOf(result, control);
   const startedAt = result?.started_at ?? control?.started_at;
   const finishedAt = result?.finished_at;
+  const runtime = result?.runtime ?? control?.runtime;
   const cost = optionalNumber(result?.cost_usd ?? usage?.cost_usd);
+  const costBasis = result?.cost_basis ?? usage?.cost_basis;
+  // A Command Code run consults its native stream even when its result already
+  // carries a price: the stream is where token totals and the model come from,
+  // and where an unpriced run's cost gap gets explained (never guessed).
+  const native = runtime === "command-code" ? await readNativeCostFacts(runRoot) : undefined;
+  const resolvedCost = resolveRunCost({ runtime, resultCostUsd: cost, resultCostBasis: costBasis, native, priceTable });
+  const tokenTotals = tokenTotalsFromUsage(native?.usage) ?? tokenTotalsFromUsage(usage);
   return {
     mission_id: result?.mission_id ?? control?.mission_id ?? missionId,
     run_id: runId,
-    runtime: result?.runtime ?? control?.runtime,
+    runtime,
     provider: result?.provider ?? usage?.provider ?? control?.usage?.provider,
-    model: result?.model ?? usage?.model ?? control?.usage?.model,
+    model: result?.model ?? usage?.model ?? control?.usage?.model ?? native?.model,
     workflow_profile: workflowProfile,
     template_id: optionalString(templateRecord?.template_id),
     tier: optionalString(templateRecord?.tier),
@@ -137,12 +163,54 @@ async function indexRun(missionId: string, missionRoot: string, runId: string): 
     output_tokens: optionalNumber(usage?.output_tokens),
     cache_read_tokens: optionalNumber(usage?.cache_read_tokens),
     cache_write_tokens: optionalNumber(usage?.cache_write_tokens),
-    cost_usd: cost,
-    cost_basis: result?.cost_basis ?? usage?.cost_basis,
+    ...(tokenTotals !== undefined ? { token_totals: tokenTotals } : {}),
+    cost_usd: resolvedCost.cost_usd,
+    cost_basis: costBasis,
+    ...(resolvedCost.cost_source !== undefined ? { cost_source: resolvedCost.cost_source } : {}),
+    ...(resolvedCost.cost_unknown_reason !== undefined ? { cost_unknown_reason: resolvedCost.cost_unknown_reason } : {}),
     resumed_from: recovery?.source_run_id,
     verification_status: verification?.status,
     peak_memory_bytes: control?.peak_memory_bytes,
+    ...(team !== undefined ? { team } : {}),
   };
+}
+
+async function readTeamState(filePath: string): Promise<CanonicalTeamState | undefined> {
+  const raw = await readJsonFile(filePath);
+  if (raw === undefined) return undefined;
+  try { return CanonicalTeamStateSchema.parse(raw); } catch { return undefined; }
+}
+
+/**
+ * Index the worker runs a team parent recorded under its `team/artifacts/`
+ * scope. Role and team identity come from the parent's canonical
+ * `team-state.json`; each worker's own canonical run lives one `.harness` tree
+ * deeper than the mission that owns the team.
+ */
+async function indexTeamRuns(missionId: string, missionRoot: string, priceTable: OperatorPriceTable | undefined): Promise<RunRecord[]> {
+  const teamRoot = path.join(missionRoot, "team");
+  let parents: Dirent[] = [];
+  try { parents = await readdir(path.join(teamRoot, "artifacts"), { withFileTypes: true }); } catch { return []; }
+  const records: RunRecord[] = [];
+  for (const parent of parents.filter(entry => entry.isDirectory())) {
+    const state = await readTeamState(path.join(missionRoot, "runs", parent.name, "team-state.json"));
+    if (!state || state.mission_id !== missionId) continue;
+    for (const worker of state.workers) {
+      const workerRoot = path.resolve(teamRoot, worker.artifact_scope);
+      const relative = path.relative(teamRoot, workerRoot);
+      if (relative.length === 0 || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+      const workerMissionId = worker.mission_id ?? missionId;
+      const record = await indexRun(
+        workerMissionId,
+        path.join(workerRoot, ".harness", "missions", workerMissionId),
+        worker.run_id,
+        priceTable,
+        { mission_id: missionId, role: worker.role },
+      );
+      if (record) records.push(record);
+    }
+  }
+  return records;
 }
 
 export async function indexRuns(root: string, options: { missionId?: string } = {}): Promise<RunRecord[]> {
@@ -150,16 +218,31 @@ export async function indexRuns(root: string, options: { missionId?: string } = 
   let missions;
   try { missions = await readdir(missionsRoot, { withFileTypes: true }); } catch { return []; }
   const selected = missions.filter(entry => entry.isDirectory() && (options.missionId === undefined || entry.name === options.missionId));
-  const records: RunRecord[] = [];
+  // The operator price table is loaded once per index pass; a missing or
+  // malformed table prices nothing.
+  const priceTable = await loadOperatorPriceTable(root);
+  // A run is identified by (mission, run id). A team worker run is also
+  // reachable through the parent's team-state pointer, so it must not be
+  // counted twice: the team-recorded view (which carries the role) wins.
+  const records = new Map<string, RunRecord>();
+  const keyOf = (record: RunRecord): string => `${record.mission_id}\u0000${record.run_id}`;
   for (const mission of selected) {
-    let runs;
-    try { runs = await readdir(path.join(missionsRoot, mission.name, "runs"), { withFileTypes: true }); } catch { continue; }
+    const missionRoot = path.join(missionsRoot, mission.name);
+    let runs: Dirent[] = [];
+    try { runs = await readdir(path.join(missionRoot, "runs"), { withFileTypes: true }); } catch { runs = []; }
     for (const run of runs.filter(entry => entry.isDirectory())) {
-      const record = await indexRun(mission.name, path.join(missionsRoot, mission.name), run.name);
-      if (record) records.push(record);
+      const record = await indexRun(mission.name, missionRoot, run.name, priceTable);
+      if (record) records.set(keyOf(record), record);
     }
   }
-  return records;
+  // Second pass so the team-recorded view of a shared run always wins,
+  // independent of the order missions are read.
+  for (const mission of selected) {
+    for (const record of await indexTeamRuns(mission.name, path.join(missionsRoot, mission.name), priceTable)) {
+      records.set(keyOf(record), record);
+    }
+  }
+  return [...records.values()];
 }
 
 export type RunGroupDimension = "runtime" | "model" | "workflow_profile" | "stop_code" | "template" | "tier";

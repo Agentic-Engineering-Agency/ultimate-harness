@@ -690,7 +690,7 @@ observatoryCmd
         return;
       }
 
-      const headers = ["MISSION_ID", "RUN_ID", "RUNTIME", "MODEL", "WORKFLOW_PROFILE", "STATUS", "STOP_CODE", "DURATION", "COST"];
+      const headers = ["MISSION_ID", "RUN_ID", "RUNTIME", "MODEL", "WORKFLOW_PROFILE", "STATUS", "STOP_CODE", "DURATION", "TOKENS", "COST", "COST_SOURCE"];
       const rows = records.map((r) => {
         const missionStr = r.mission_id || "unknown";
         const runStr = r.run_id || "unknown";
@@ -700,8 +700,13 @@ observatoryCmd
         const statusStr = r.status || "unknown";
         const stopCodeStr = r.stop_code || "unknown";
         const durationStr = r.duration_ms !== undefined ? `${r.duration_ms}ms` : "unknown";
-        const costStr = r.cost_usd !== undefined ? `$${r.cost_usd}` : "unknown";
-        return [missionStr, runStr, runtimeStr, modelStr, workflowStr, statusStr, stopCodeStr, durationStr, costStr];
+        const tokensStr = r.token_totals === undefined
+          ? "unknown"
+          : String((r.token_totals.input ?? 0) + (r.token_totals.output ?? 0)
+            + (r.token_totals.cache_read ?? 0) + (r.token_totals.cache_write ?? 0));
+        const costStr = r.cost_usd !== undefined ? `$${r.cost_usd.toFixed(4)}` : "unknown";
+        const costSourceStr = r.cost_source ?? "unknown";
+        return [missionStr, runStr, runtimeStr, modelStr, workflowStr, statusStr, stopCodeStr, durationStr, tokensStr, costStr, costSourceStr];
       });
 
       renderAlignedTable(headers, rows);

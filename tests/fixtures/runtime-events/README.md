@@ -12,6 +12,7 @@ timestamps are rebased. Streaming delta events are dropped.
 | `command-code-denied-retries.ndjson` | Command Code | A run whose writes are denied by the guard hook (`tool_hooks`, `tool_hook_blocked`) and retried by other routes. |
 | `command-code-repeated-shell-failure.ndjson` | Command Code | Three identical failing `shell_command` calls. The `tool_completed` result text opens with the literal `Exit code: 1` line Command Code emits instead of an error field. |
 | `command-code-shell-exit-code-in-stdout.ndjson` | Command Code | A succeeding `shell_command` whose stdout mentions `Exit code` in a later line, which must not read as a failure. |
+| `command-code-usage.ndjson` | Command Code | A run whose every model call reports usage on `model_request_end` and the same usage object again on its matching `turn_end` (sums must not double count). Three calls, one turn each; the final `result` event carries no price, so the run's cost is only knowable from an operator price table. |
 | `oh-my-pi-healthy.ndjson` | oh-my-pi | A run using `tool_execution_start` / `tool_execution_end` with arguments under `args`. |
 
 The literal `Exit code: <n>` lines of Command Code shell results are kept
