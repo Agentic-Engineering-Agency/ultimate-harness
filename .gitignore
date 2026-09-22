@@ -40,3 +40,4 @@ __pycache__/
 /.claude/skills/gitnexus-guide/
 /.claude/skills/gitnexus-impact-analysis/
 /.claude/skills/gitnexus-refactoring/
+/.harness/sandboxes/
