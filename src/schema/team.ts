@@ -43,6 +43,21 @@ const CanonicalWorkerOutputSchema = z.object({
   notes: z.string().optional(),
 }).strict();
 
+/**
+ * Salvage record for a worker that settled as failed with a recoverable stop
+ * code (turn_limit / timeout / deadline / stall / policy). Records whether the
+ * worktree held non-protected changes (`eligible`) and, when it did, whether
+ * the worker's declared outputs and its `verification.required_checks` both
+ * passed. A committed `branch` is only written when both passed — the leader
+ * never merges a failed worker automatically.
+ */
+const CanonicalWorkerSalvageSchema = z.object({
+  eligible: z.boolean(),
+  outputs_passed: z.boolean(),
+  checks_passed: z.boolean(),
+  branch: z.string().min(1),
+}).strict();
+
 export const CanonicalTeamWorkerSchema = z.object({
   id: z.string().min(1),
   role: z.string().min(1),
@@ -58,6 +73,7 @@ export const CanonicalTeamWorkerSchema = z.object({
   contract: CanonicalWorkerContractSchema.optional(),
   blocked_reason: z.string().optional(),
   outputs: z.array(CanonicalWorkerOutputSchema).optional(),
+  salvage: CanonicalWorkerSalvageSchema.optional(),
 }).strict();
 
 export const CanonicalTeamLeaderSchema = z.object({
