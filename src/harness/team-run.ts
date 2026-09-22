@@ -57,6 +57,7 @@ import { readRuntimeAccounting } from "./runtime-accounting.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists, isPathWithin } from "./mission.js";
 import { listLiveRuns, registerLiveRun } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
+import { elapsedMs, notifyTeamSettled } from "./notifications.js";
 import { getSessionTemplate } from "./session-templates.js";
 import { appendWorkerRules } from "./session-template-adoption.js";
 import type { SessionTemplate } from "../schema/session-template.js";
@@ -1610,6 +1611,14 @@ export async function runTeamMission(
     await gitOps.removeWorktree(root, plan.leader.worktreePath);
     await gitOps.deleteBranch(root, plan.leader.branch);
   }
+
+  notifyTeamSettled(root, {
+    run_id: parentRunId,
+    mission: mission.id,
+    status: overallStatus,
+    duration_ms: elapsedMs(startedAt, canonicalState.finished_at ?? undefined),
+    files_written: workerOutcomes.reduce((total, worker) => total + worker.filesTouched.length, 0),
+  });
 
   return {
     missionId: mission.id,
