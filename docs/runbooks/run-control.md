@@ -243,9 +243,66 @@ under. Use `--team` (or `--all`) for that.
 * Nothing is inferred from a stale heartbeat alone; liveness is the process
   lister's answer.
 
+## Steering a worker
+
+A worker can be nudged mid-run only by stopping it and resuming its native
+session with a message. `uh steer` does both in one command:
+
+```bash
+# Stop the run, then resume its saved session with the message injected as the
+# first instruction of the resumed turn. The new run id is printed.
+uh steer 20260922T101500Z-a1b2c3 "Skip the retry loop; the endpoint already returns 429."
+
+# Ask for a status report before the worker continues.
+uh steer <run-id> "Continue" --report
+
+# Machine-readable outcome.
+uh steer <run-id> "<message>" --json
+```
+
+`--report` prepends a fixed request: write a report in the shape "done so far /
+in progress / blocked on / next three actions / files touched" before anything
+else, then continue.
+
+Steering resolves the run exactly like `uh ps` does — by id or a unique prefix,
+from the project root, including team workers under their own artifact roots. It
+cancels through the normal cancel path and waits for settlement, then starts a
+new run for the same mission, in the same artifact root and sandbox, bound to
+`resume_from_run = <run-id>`. The operator's message becomes the recovery notes.
+
+**The honest caveat**: steering is not a live channel. It costs a stop and a
+restart of the native session. The transcript and prior work survive because the
+runtime resumes the same session, but the worker re-reads its context before it
+acts on the message.
+
+## Resuming
+
+`uh resume` continues a run that has already settled, without a new message:
+
+```bash
+uh resume <run-id> [--notes "<text>"] [--json]
+```
+
+It refuses a run that is still live — steer that one instead — and refuses a
+runtime with no session resume path:
+
+```
+unsupported: <runtime> has no session resume
+```
+
+For a supported runtime (Command Code, oh-my-pi, Claude Code) it starts a new
+run in the same mission, artifact root, and sandbox with
+`resume_from_run = <run-id>`, and records the lineage both ways: `resumed_from`
+on the new run and `resumed_by` on the old one, with `resume_origin: "operator"`
+in `runs/<run-id>/resume-link.json` on each. Operator resumes are authorized
+outside the automatic recovery loop, so they never spend the mission's
+`recovery.max_resumes` budget.
+
 ## Related
 
 - `uh status` / `uh status --json` include live-run counts.
 - `uh mission cancel` — cancel an owned local run.
 - `uh kill` — stop runs by id, role, mission, team, `--all` or `--orphans`.
+- `uh steer` — cancel a run and resume its session with a message.
+- `uh resume` — continue a settled run's session as a new run.
 - Team fan-out and worker artifact layout: `docs/runbooks/resource-wave-smoke.md`.
