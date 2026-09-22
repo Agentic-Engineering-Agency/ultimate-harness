@@ -40,6 +40,29 @@ async function fixture(): Promise<string> {
   return root;
 }
 
+/** A team mission whose single worker is described by `workerLines`. */
+async function teamFixture(workerLines: string[], templateAdapter: string | null): Promise<string> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "uh-observatory-team-"));
+  roots.push(root);
+  await mkdir(path.join(root, ".harness", "missions", "work-one"), { recursive: true });
+  await writeFile(path.join(root, ".harness", "project.yaml"), [
+    "schema_version: uh.project.v0", "id: project-one", "name: Safe project", `root_path: ${root}`,
+    "created_at: 2026-08-23T12:00:00Z", "issue_sources: []", "default_workflow_profiles: []",
+  ].join("\n"));
+  await writeFile(path.join(root, ".harness", "missions", "work-one", "mission.yaml"), [
+    "schema_version: uh.mission.v0", "id: work-one", "name: Team work", "workflow_profile: staged",
+    "shape: team", "team:", "  workers:", ...workerLines, "  leader:", "    adapter: hermes",
+  ].join("\n"));
+  if (templateAdapter) {
+    await mkdir(path.join(root, ".harness", "templates"), { recursive: true });
+    await writeFile(path.join(root, ".harness", "templates", "omp-worker.yaml"), [
+      "schema_version: uh.session-template.v0", "id: omp-worker", "title: OMP worker",
+      "tier: balanced", `adapter: ${templateAdapter}`,
+    ].join("\n"));
+  }
+  return root;
+}
+
 describe("Delivery Observatory projector", () => {
   it("emits a strict safe snapshot with explicit unknown route and usage facts", async () => {
     const root = await fixture();
@@ -161,5 +184,29 @@ describe("Delivery Observatory projector", () => {
     expect(aged.work_items[0].operation).toBe("failed");
     const lifecycle = aged.events.find(event => event.occurred_at === "2026-09-15T00:00:16.000Z");
     expect(lifecycle?.state.freshness).toBe("stale");
+  });
+
+  it("resolves a configured team worker's adapter from its session template", async () => {
+    const now = "2026-08-23T12:01:00Z";
+    const viaTemplate = await projectDeliveryObservatory(
+      await teamFixture(["    - role: backend", "      template: omp-worker"], "oh-my-pi"),
+      { now },
+    );
+    const explicit = await projectDeliveryObservatory(
+      await teamFixture(["    - role: backend", "      adapter: oh-my-pi"], null),
+      { now },
+    );
+    const otherTemplate = await projectDeliveryObservatory(
+      await teamFixture(["    - role: backend", "      template: omp-worker"], "codex"),
+      { now },
+    );
+    const workerId = (snapshot: Awaited<ReturnType<typeof projectDeliveryObservatory>>) =>
+      snapshot.agents.find((agent) => agent.safe_name === "Configured executor")?.agent_id;
+    // The worker's opaque agent identity folds in the resolved adapter, so an
+    // equal id proves the template's adapter was used; a different template
+    // adapter yields a different id.
+    expect(workerId(viaTemplate)).toBeDefined();
+    expect(workerId(viaTemplate)).toBe(workerId(explicit));
+    expect(workerId(otherTemplate)).not.toBe(workerId(viaTemplate));
   });
 });

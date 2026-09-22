@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { access, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
-import { MissionSchema, type MissionDocument } from "../../schema/mission.js";
+import { MissionSchema, resolveWorkerAdapter, type MissionDocument } from "../../schema/mission.js";
 import { LatestRunPointerSchema, RunsIndexSchema, type RunsIndex } from "../../schema/runs.js";
 import {
   RuntimeResultSchema,
@@ -24,6 +24,7 @@ import {
   type ObservatoryValue,
 } from "../../schema/delivery-observatory.js";
 import { missionsDir } from "../paths.js";
+import { loadSessionTemplates } from "../session-templates.js";
 
 const SOURCE_ID = "source-ultimate-harness-local";
 const SOURCE_STALE_AFTER_MS = 60_000;
@@ -392,6 +393,10 @@ export async function projectDeliveryObservatory(root: string, input: ProjectInp
   const projectId = opaqueId("project", projectSeed);
   const projectName = safeLabel(projectYaml.data?.name, "Local harness project");
   const { records, rejected } = await collectMissionProjections(root);
+  // A team worker may name a session template instead of an adapter; load the
+  // templates once so the configured-agent projection can resolve the adapter
+  // the same way the team runner does.
+  const templatesById = new Map((await loadSessionTemplates(root)).map((template) => [template.id, template]));
   const observedAt = input.sourceObservedAt ?? generatedAt;
   let omitted = 0;
 
@@ -662,7 +667,11 @@ export async function projectDeliveryObservatory(root: string, input: ProjectInp
         });
       }
       const configured = [
-        ...team.workers.flatMap((worker) => Array.from({ length: worker.count }, (_, index) => ({ role: worker.role, adapter: worker.adapter, index }))),
+        ...team.workers.flatMap((worker) => {
+          const template = worker.template ? templatesById.get(worker.template) : undefined;
+          const adapter = resolveWorkerAdapter(worker, template) ?? "unresolved";
+          return Array.from({ length: worker.count }, (_, index) => ({ role: worker.role, adapter, index }));
+        }),
         { role: team.leader.role ?? "integrator", adapter: team.leader.adapter, index: 0 },
       ];
       return configured.map((agent, index) => {

@@ -1,6 +1,6 @@
 import { mapResourceWaves, workerConcurrency } from "./runtime-resources.js";
 import { DEFAULT_PROTECTED_PATHS, RuntimeControlSchema, type RuntimeLimits, type TeamResourceLimits } from "../schema/runtime-control.js";
-import type { TeamWorker } from "../schema/mission.js";
+import { resolveWorkerAdapter, type TeamWorker } from "../schema/mission.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
 import { captureReplace } from "./interventions.js";
@@ -69,7 +69,7 @@ const execFileP = promisify(execFile);
 export type LeaderStrategy = "merge" | "cherry-pick" | "rebase";
 
 export type { TeamWorker } from "../schema/mission.js";
-type TeamWorkerSpec = Omit<TeamWorker, "adapter"> & { adapter: string };
+type TeamWorkerSpec = Omit<TeamWorker, "adapter"> & { adapter?: string };
 
 export interface TeamLeader {
   /** Adapter id the leader dispatches against. */
@@ -472,7 +472,7 @@ export interface TeamRunResult {
 export function planTeamRun(
   mission: TeamMission,
   root: string,
-  options: { strategy?: LeaderStrategy } = {},
+  options: { strategy?: LeaderStrategy; templates?: ReadonlyMap<string, SessionTemplate> } = {},
 ): TeamPlan {
   assertSafeMissionId(mission.id);
   if (!mission.team || !Array.isArray(mission.team.workers) || mission.team.workers.length === 0) {
@@ -497,8 +497,15 @@ export function planTeamRun(
     if (!isSafeSegment(spec.role)) {
       throw new Error(`Team worker role must be a safe identifier, got: ${spec.role}`);
     }
-    if (!isSafeSegment(spec.adapter)) {
-      throw new Error(`Team worker adapter must be a safe identifier, got: ${spec.adapter}`);
+    // The effective adapter is resolved once here: the worker's explicit
+    // adapter wins, otherwise the adapter of the session template it adopts.
+    const template = spec.template ? options.templates?.get(spec.template) : undefined;
+    const adapter = resolveWorkerAdapter(spec, template);
+    if (adapter === undefined) {
+      throw new Error(`Team worker ${spec.role} must declare an adapter or a template that supplies one`);
+    }
+    if (!isSafeSegment(adapter)) {
+      throw new Error(`Team worker adapter must be a safe identifier, got: ${adapter}`);
     }
     const count = spec.count ?? 1;
     if (!Number.isInteger(count) || count <= 0) {
@@ -509,7 +516,7 @@ export function planTeamRun(
       const worktreePath = path.join(workersRoot, id);
       workers.push({
         role: spec.role,
-        adapter: spec.adapter,
+        adapter,
         index: i,
         id,
         worktreePath,
@@ -1080,7 +1087,7 @@ export async function runTeamMission(
     if (spec.template === undefined || workerTemplates.has(spec.template)) continue;
     workerTemplates.set(spec.template, await getSessionTemplate(root, spec.template));
   }
-  const plan = planTeamRun(mission, root, { strategy: options.strategy });
+  const plan = planTeamRun(mission, root, { strategy: options.strategy, templates: workerTemplates });
   workerConcurrency(plan.workers.length, mission.team.resources);
   const workerMemory = mission.team.resources?.worker_memory_mb;
   if (workerMemory && (process.platform !== "win32" || plan.workers.some(worker => !["oh-my-pi", "command-code", "claude-code"].includes(worker.adapter)))) {

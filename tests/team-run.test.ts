@@ -1756,4 +1756,51 @@ describe("runTeamMission — worker session templates", () => {
     expect(dispatched).toEqual([]);
     expect(repo.branches.has("uh/team/team-mission/backend")).toBe(false);
   });
+
+  test("a worker with only a template runs on the template's adapter", async () => {
+    await writeWorkerTemplate();
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const dispatchedAdapters: string[] = [];
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", template: "omp-worker" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        dispatchedAdapters.push(adapter);
+        return makeRunner({ writes: { backend: { files: { "src/a.ts": "a\n" } } } }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(dispatchedAdapters).toEqual(["oh-my-pi"]);
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].adapter).toBe("oh-my-pi");
+    expect(state.workers[0].contract?.limits?.max_turns).toBe(260);
+  });
+
+  test("an explicit worker adapter beats the template's adapter", async () => {
+    await writeWorkerTemplate();
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const dispatchedAdapters: string[] = [];
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", template: "omp-worker" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        dispatchedAdapters.push(adapter);
+        return makeRunner({ writes: { backend: { files: { "src/a.ts": "a\n" } } } }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(dispatchedAdapters).toEqual(["hermes"]);
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].adapter).toBe("hermes");
+  });
 });

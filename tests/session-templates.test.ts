@@ -18,7 +18,7 @@ import {
   adoptSessionTemplate,
   appendWorkerRules,
 } from "../src/harness/session-template-adoption.js";
-import { validateMission, type MissionDocument } from "../src/schema/mission.js";
+import { validateMission, resolveWorkerAdapter, type MissionDocument } from "../src/schema/mission.js";
 
 const BASE_VALID_TEMPLATE = {
   schema_version: "uh.session-template.v0",
@@ -52,6 +52,47 @@ const BASE_MISSION: MissionDocument = validateMission({
   id: "test-mission",
   title: "Test Mission",
   workflow_profile: "spec-first-feature",
+});
+
+describe("team worker adapter resolution", () => {
+  function teamMission(worker: Record<string, unknown>): Record<string, unknown> {
+    return {
+      schema_version: "uh.mission.v0",
+      id: "team-mission",
+      title: "Team Mission",
+      workflow_profile: "spec-first-feature",
+      shape: "team",
+      team: {
+        workers: [worker],
+        leader: { adapter: "hermes" },
+      },
+    };
+  }
+
+  test("a worker with only a template validates and leaves the adapter to the template", () => {
+    const mission = validateMission(teamMission({ role: "backend", template: "omp-worker" }));
+    const worker = mission.team!.workers[0];
+    expect(worker.adapter).toBeUndefined();
+    expect(worker.template).toBe("omp-worker");
+  });
+
+  test("a worker with an explicit adapter validates without a template", () => {
+    const mission = validateMission(teamMission({ role: "backend", adapter: "codex" }));
+    expect(mission.team!.workers[0].adapter).toBe("codex");
+  });
+
+  test("a worker with neither an adapter nor a template fails validation", () => {
+    expect(() => validateMission(teamMission({ role: "backend" }))).toThrow(
+      /team worker requires an adapter, or a template that supplies one/,
+    );
+  });
+
+  test("resolveWorkerAdapter prefers the explicit adapter, else the template's", () => {
+    expect(resolveWorkerAdapter({ adapter: "codex", template: "omp-worker" }, { adapter: "hermes" })).toBe("codex");
+    expect(resolveWorkerAdapter({ template: "omp-worker" }, { adapter: "hermes" })).toBe("hermes");
+    expect(resolveWorkerAdapter({ adapter: "codex" }, undefined)).toBe("codex");
+    expect(resolveWorkerAdapter({}, undefined)).toBeUndefined();
+  });
 });
 
 describe("SessionTemplateSchema strictness", () => {
