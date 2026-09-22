@@ -12,7 +12,7 @@ import { registerRuntimeConfigSchema, type AdapterDocument } from "../schema/ada
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow } from "../schema/workflow.js";
 import { RuntimePricingSchema, validateRuntimeResult, type RuntimeResultDocument } from "../schema/artifacts.js";
-import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, type RuntimeLimits, type RuntimeRecoveryDeadline, DEFAULT_PROTECTED_PATHS, ToolGuardArtifactSchema, type ToolGuardPolicy } from "../schema/runtime-control.js";
+import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, type RuntimeLimits, type RuntimeRecoveryDeadline, DEFAULT_PROTECTED_PATHS, ToolGuardArtifactSchema, resolveToolGuardPolicy, type ToolGuardPolicy } from "../schema/runtime-control.js";
 import { estimateConfiguredCost, type RuntimeUsage } from "../harness/usage.js";
 import { runtimeRegistry, type AdapterCheckResult } from "../harness/registry.js";
 import { buildDispatchContext } from "../harness/dispatch-context.js";
@@ -31,6 +31,7 @@ export const CommandCodeRuntimeConfigSchema = z.object({
   model: z.string().optional().default(""),
   cli_args: z.array(z.string()).optional().default([]),
   trust_workspace: z.boolean().optional().default(false),
+  role: z.enum(["worker", "orchestrator"]).optional().default("worker"),
   permission_mode: z.enum(["guard", "yolo", "prompt"]).optional(),
   resume_session: z.string().min(1).optional(),
   resume_from_run: z.string().min(1).optional(),
@@ -43,6 +44,13 @@ export const CommandCodeRuntimeConfigSchema = z.object({
 }).strict();
 registerRuntimeConfigSchema("command-code", CommandCodeRuntimeConfigSchema);
 const exec = promisify(execFile);
+
+function controllerGuard(guard: ToolGuardPolicy | undefined): ToolGuardPolicy & { controller_commands: boolean } {
+  return { ...(guard ?? resolveToolGuardPolicy(undefined)), controller_commands: true };
+}
+
+/** Fixed closing paragraph for the orchestrator role: delegate only through the guarded harness. */
+const ORCHESTRATOR_DELEGATION_INSTRUCTION = "Orchestrator role: delegate only by running harness controller commands (`uh mission run`, `run-all`, `run-team`, or `node dist/cli.js` with the same verbs) through the guarded shell; never start an agent client or a native sub-agent tool. Each delegated worker needs its own mission packet and bound sandbox. Wait for a worker's settlement line before depending on its output. Never do a worker's job yourself.";
 
 export type CommandCodeProbeRunner = (
   command: string,
@@ -106,6 +114,9 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   if (!mission.guard && config.permission_mode === undefined) {
     throw new Error("Command Code print mode requires a guard policy or runtime_config.permission_mode: \"yolo\" (or \"prompt\")");
   }
+  if (config.role === "orchestrator" && !mission.guard) {
+    throw new Error("Command Code orchestrator runs require a mission guard policy");
+  }
   const permissionMode = mission.guard ? "guard" as const : config.permission_mode ?? "prompt" as const;
   const reviewRequestSha256 = await assertIndependentReviewExecution(root, missionPath, mission, {
     canonicalRoot: options.artifactRoot ?? root, runtime: "command-code", model: config.model,
@@ -118,7 +129,9 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   const grace = config.recovery_grace === true || resume?.grace === true;
   const deadline = config.recovery?.on_deadline;
   const workflow = validateWorkflow(parse(await readFile(path.join(root, ".harness", "workflows", `${mission.workflow_profile}.yaml`), "utf8")));
-  const prompt = renderPrompt(buildDispatchContext(mission, workflow)) + (resume ? recoveryPrompt(resume) : "");
+  const guard = config.role === "orchestrator" ? controllerGuard(mission.guard) : mission.guard;
+  const prompt = renderPrompt(buildDispatchContext(mission, workflow)) + (resume ? recoveryPrompt(resume) : "")
+    + (config.role === "orchestrator" ? `\n\n${ORCHESTRATOR_DELEGATION_INSTRUCTION}` : "");
   // Preserve native sessions; authorization remains with the configured CLI and sandbox.
   const args = [...config.cli_args, "-p", prompt];
   const resumeSession = resume?.sessionId ?? config.resume_session;
@@ -130,7 +143,7 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   return { command: cliCommand, args, prompt, mission, config, resume,
     grace, deadline,
     permission_mode: permissionMode,
-    ...(mission.guard ? { guard: mission.guard as ToolGuardPolicy } : {}),
+    ...(guard ? { guard } : {}),
     expectedRoute: { model: config.model }, reviewRequestSha256, worktree: false, session_id_passthrough: false, errors: [] as string[] };
 }
 
@@ -181,6 +194,7 @@ export async function runCommandCode(root: string, missionPath: string, options:
       ...plan.guard,
       worker_root: root,
       protected_paths: protectedPaths,
+      controller_commands: plan.config.role === "orchestrator",
     });
     const policyPath = path.join(artifacts.runDir, "tool-guard.json");
     const logPath = path.join(artifacts.runDir, "tool-guard.log");

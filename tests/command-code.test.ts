@@ -1,12 +1,14 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
 import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { stringify, parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
-import { runCommandCode, planCommandCodeRun, checkCommandCode, buildCommandCodeProbeArgs, parseCommandCodeVersion } from "../src/adapters/command-code.js";
+import { runCommandCode, planCommandCodeRun, checkCommandCode, buildCommandCodeProbeArgs, parseCommandCodeVersion, CommandCodeRuntimeConfigSchema } from "../src/adapters/command-code.js";
 import { validateAdapter, type AdapterDocument } from "../src/schema/adapter.js";
 
 async function fixture() {
@@ -301,4 +303,117 @@ test("checkCommandCode probe asserts --no-auto-update in args and parses version
     version: "",
     errors: ["Configured Command Code CLI could not be executed"],
   });
+});
+
+test("the role field defaults to worker and accepts only worker or orchestrator", () => {
+  expect(CommandCodeRuntimeConfigSchema.parse({}).role).toBe("worker");
+  expect(CommandCodeRuntimeConfigSchema.parse({ role: "worker" }).role).toBe("worker");
+  expect(CommandCodeRuntimeConfigSchema.parse({ role: "orchestrator" }).role).toBe("orchestrator");
+  expect(() => CommandCodeRuntimeConfigSchema.parse({ role: "commander" })).toThrow();
+});
+
+test("the guard artifact carries controller_commands true only for the orchestrator role", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+    const overrides = mission.runtime_config_overrides as Record<string, unknown>;
+    mission.guard = { write_roots: ["out"] };
+
+    overrides.role = "orchestrator";
+    await writeFile(missionPath, stringify(mission));
+    const plan = await planCommandCodeRun(root, missionPath);
+    expect(plan.permission_mode).toBe("guard");
+    expect(plan.guard).toMatchObject({ write_roots: ["out"], controller_commands: true });
+    let orchestratorEnv: NodeJS.ProcessEnv | undefined;
+    await runCommandCode(root, missionPath, {
+      runId: "orchestrator-guard",
+      runner: async input => { orchestratorEnv = input.env; return { stdout: "", stderr: "", exitCode: 1, timedOut: false }; },
+      collectDiff: async () => ({ patch: "" }),
+    });
+    const orchestratorArtifact = JSON.parse(await readFile(path.join(path.dirname(missionPath), "runs", "orchestrator-guard", "tool-guard.json"), "utf8")) as Record<string, unknown>;
+    expect(orchestratorArtifact.controller_commands).toBe(true);
+    expect(orchestratorEnv?.UH_TOOL_GUARD_POLICY).toContain("tool-guard.json");
+
+    overrides.role = "worker";
+    await writeFile(missionPath, stringify(mission));
+    await runCommandCode(root, missionPath, {
+      runId: "worker-guard",
+      runner: async () => ({ stdout: "", stderr: "", exitCode: 1, timedOut: false }),
+      collectDiff: async () => ({ patch: "" }),
+    });
+    const workerArtifact = JSON.parse(await readFile(path.join(path.dirname(missionPath), "runs", "worker-guard", "tool-guard.json"), "utf8")) as Record<string, unknown>;
+    expect(workerArtifact.controller_commands).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an orchestrator mission without a guard is refused before spawn", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+    (mission.runtime_config_overrides as Record<string, unknown>).role = "orchestrator";
+    await writeFile(missionPath, stringify(mission));
+    await expect(planCommandCodeRun(root, missionPath)).rejects.toThrow(/orchestrator.*guard/i);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("the orchestrator prompt ends with a fixed delegation paragraph under 80 words", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+    mission.guard = { write_roots: ["out"] };
+    (mission.runtime_config_overrides as Record<string, unknown>).role = "orchestrator";
+    await writeFile(missionPath, stringify(mission));
+    const plan = await planCommandCodeRun(root, missionPath);
+    const trimmed = plan.prompt.trimEnd();
+    const paragraph = trimmed.slice(trimmed.lastIndexOf("\n\n") + 2).trim();
+    expect(paragraph).toMatch(/delegate only by running harness controller commands/i);
+    expect(paragraph.split(/\s+/).filter(Boolean).length).toBeLessThan(80);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+function runCmdcHook(input: unknown, env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const hook = fileURLToPath(new URL("../src/extensions/tool-guard/cmdc-hook.ts", import.meta.url));
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", hook], { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", chunk => { stdout += String(chunk); });
+    child.stderr.on("data", chunk => { stderr += String(chunk); });
+    child.on("error", reject);
+    child.on("close", code => resolve({ code, stdout, stderr }));
+    child.stdin.end(JSON.stringify(input));
+  });
+}
+
+test("the Command Code hook admits controller commands only for the orchestrator", { timeout: 180_000 }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-cmdc-hook-"));
+  try {
+    const logPath = path.join(root, "tool-guard.log");
+    const policyEnv = async (controller: boolean): Promise<NodeJS.ProcessEnv> => {
+      const policyPath = path.join(root, `tool-guard-${controller}.json`);
+      await writeFile(policyPath, JSON.stringify({
+        schema_version: "uh.tool-guard.v0", write_roots: ["."], deny_git_mutations: true,
+        deny_package_installs: true, deny_network_clients: true, agent_clients: ["omp", "cmdc"],
+        worker_root: root, protected_paths: [".harness", ".git"], controller_commands: controller,
+      }));
+      return { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
+    };
+    const decision = async (env: NodeJS.ProcessEnv, toolName: string, toolInput: unknown): Promise<string | undefined> => {
+      const result = await runCmdcHook({ tool_name: toolName, tool_input: toolInput }, env);
+      const output = result.stdout.trim();
+      return output ? (JSON.parse(output) as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision : undefined;
+    };
+
+    const orchestrator = await policyEnv(true);
+    expect(await decision(orchestrator, "Bash", { command: "uh mission run x.yaml" })).toBeUndefined();
+    expect(await decision(orchestrator, "Bash", { command: "node dist/cli.js mission run-team y" })).toBeUndefined();
+    expect(await decision(orchestrator, "Bash", { command: "omp -p hi" })).toBe("deny");
+    expect(await decision(orchestrator, "task", { tasks: [] })).toBe("deny");
+    expect(await decision(orchestrator, "Bash", { command: "uh mission run x --force" })).toBe("deny");
+    expect(await decision(orchestrator, "Bash", { command: "uh mission run x.yaml && omp -p hi" })).toBe("deny");
+
+    const worker = await policyEnv(false);
+    expect(await decision(worker, "Bash", { command: "uh mission run x.yaml" })).toBe("deny");
+    expect(await decision(worker, "Bash", { command: "node dist/cli.js mission run-team y" })).toBe("deny");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
