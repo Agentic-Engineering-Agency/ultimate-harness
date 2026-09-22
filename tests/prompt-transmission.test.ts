@@ -101,5 +101,34 @@ runtime_config_overrides:
       "- ac-review [warn] A reviewer confirms the result.\n\n",
     );
   });
+
+  test("renders empty mission lists explicitly as none, add nothing", async () => {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "sparse-transmission");
+    await mkdir(missionDir, { recursive: true });
+    const missionPath = join(missionDir, "mission.yaml");
+    await writeFile(
+      missionPath,
+      `schema_version: uh.mission.v0
+id: sparse-transmission
+name: Sparse Transmission
+objective: Every mission list must render, even when empty.
+workflow_profile: research-docs
+`,
+      "utf-8",
+    );
+
+    const plan = await planOhMyPiRun(TEST_ROOT, missionPath);
+    const transmittedPrompt = plan.args[plan.args.length - 1];
+
+    expect(transmittedPrompt).toBe(plan.prompt);
+    expect(transmittedPrompt).toContain(
+      "## Read First\n- none, add nothing\n\n" +
+      "## Expected Artifacts\n- none, add nothing\n\n" +
+      "## Verification Checks\n- none, add nothing\n\n" +
+      "## Constraints\n- none, add nothing\n\n" +
+      "## Acceptance Criteria\n- none, add nothing\n\n" +
+      "Execute this mission and produce the expected artifacts.\n",
+    );
+  });
 });
 afterAll(cleanup);
