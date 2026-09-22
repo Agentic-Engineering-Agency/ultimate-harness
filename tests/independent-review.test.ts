@@ -8,7 +8,7 @@ import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
 import { proposeMission } from "../src/harness/propose.js";
 import { prepareIndependentReview, collectIndependentReview, validateIndependentReviewReport } from "../src/harness/independent-review.js";
-import { IndependentReviewRequestSchema, IndependentReviewReportSchema } from "../src/schema/independent-review.js";
+import { IndependentReviewAssessmentSchema, IndependentReviewRequestSchema, IndependentReviewReportSchema } from "../src/schema/independent-review.js";
 import { createSandbox } from "../src/harness/sandbox.js";
 import { runCommandCode, planCommandCodeRun } from "../src/adapters/command-code.js";
 import { verifyMission } from "../src/harness/verify.js";
@@ -62,7 +62,8 @@ const report = {schema_version:'uh.independent-review-report.v0', request_sha256
   const passed = observed === '42';
   return {mission_id:source.mission_id, claims_checked:[{claim:'Answer equals 42',source:output.snapshot_path,observed,verdict:passed?'supported':'contradicted'}],
    acceptance:source.acceptance.map(item=>({id:item.id,status:passed?'passed':'failed',evidence:observed})),
-   checks:source.checks.map(item=>({id:item.id,status:passed?'passed':'failed',evidence:observed})), findings:[],
+   checks:source.checks.map(item=>({id:item.id,status:passed?'passed':'failed',evidence:observed})),
+   findings:passed?[]:[{severity:'error',detail:'Observed answer differs from the required 42',evidence:observed}],
    observations:[{title:'Captured output inspected in full',evidence:observed,relates_to:(source.acceptance[0]||source.checks[0]||{}).id,severity:'info'},
     {title:'No claims outside the listed ids were verified',evidence:'Review covered only the listed ids',severity:'warn'}],
    verdict:passed?'pass':'needs-remediation',reason:'Compared captured answer to 42'};
@@ -121,6 +122,72 @@ test("a separate native review produces an advisory assessment, never owner appr
     await expect(planCommandCodeRun(workspace.path, missionPath, { artifactRoot: root, extraRuntimeConfigOverrides: { model: "another-model" } })).rejects.toThrow();
   } finally { await rm(root, { recursive: true, force: true }); }
 }, 30_000);
+
+test("an assessment without the new evidence fields still parses", () => {
+  const legacy = { schema_version: "uh.independent-review-assessment.v0", review_id: "review",
+    run_id: "20260922T000000Z-000000", request_sha256: "a".repeat(64), recommendation: "pass", human_acceptance_required: true };
+  expect(IndependentReviewAssessmentSchema.parse(legacy)).toEqual(legacy);
+});
+
+test("the collected assessment keeps contradicted claims and warning/error findings", async () => {
+  const root = await fixture();
+  try {
+    await writeFile(path.join(root, "answer.txt"), "0");
+    await executeFixture(root);
+    const assessment = await collectIndependentReview(root, "review");
+    expect(assessment.recommendation).toBe("needs-remediation");
+    expect(assessment.claims).toEqual([
+      { source: "source", claim: "Answer equals 42", verdict: "contradicted", evidence_source: expect.any(String) },
+    ]);
+    expect(assessment.findings).toEqual([
+      { source: "source", severity: "error", detail: "Observed answer differs from the required 42", evidence: "0" },
+    ]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test("review-prepare captures the worker's real diff, deletions, and skips protected paths", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-independent-review-changed-"));
+  const worktreeParent = await mkdtemp(path.join(tmpdir(), "uh-independent-review-worktree-"));
+  const worktree = path.join(worktreeParent, "wt");
+  const git = (args: string[], cwd = root) =>
+    execFileSync("git", ["-c", "user.name=UH Fixture", "-c", "user.email=fixture@example.invalid", ...args], { cwd });
+  try {
+    await initializeHarness(root);
+    await addAdapter(root, "command-code");
+    await writeFile(path.join(root, "answer.txt"), "42");
+    await writeFile(path.join(root, "companion.txt"), "before");
+    await writeFile(path.join(root, "obsolete.txt"), "old");
+    await proposeMission(root, { id: "source", title: "Answer", objective: "Produce answer 42", workflow: "research-docs",
+      expectedOutputs: ["answer.txt"], completionCriteria: ["Answer equals 42"] });
+    git(["init", "--quiet"]);
+    git(["add", "--force", "."]);
+    git(["commit", "--quiet", "-m", "base"]);
+    const base = git(["rev-parse", "HEAD"]).toString().trim();
+    git(["worktree", "add", "--quiet", "-b", "worker", worktree, base]);
+    await writeFile(path.join(worktree, "companion.txt"), "after");
+    await writeFile(path.join(worktree, "added.ts"), "export const added = true;\n");
+    await rm(path.join(worktree, "obsolete.txt"));
+    await writeFile(path.join(worktree, ".harness", "note.txt"), "protected change\n");
+    git(["add", "--force", "."], worktree);
+    git(["commit", "--quiet", "-m", "worker"], worktree);
+    git(["config", "branch.worker.base", base]);
+    const prepared = await prepareIndependentReview(root, { id: "review",
+      sources: [{ missionId: "source", workspaceRoot: worktree }], runtime: "command-code", model: "offline-review-fixture" });
+    expect(prepared.reportPath).toBe("out/review-report.json");
+    const request = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(prepared.requestPath, "utf8")));
+    const changed = new Map(request.sources[0].files.filter(file => file.kind === "changed").map(file => [file.original_path, file]));
+    expect([...changed.keys()].sort()).toEqual(["added.ts", "companion.txt", "obsolete.txt"]);
+    expect(changed.get("companion.txt")).toMatchObject({ state: "present" });
+    expect(changed.get("companion.txt")!.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(changed.get("added.ts")!.state).toBe("present");
+    expect(changed.get("obsolete.txt")).toEqual({ kind: "changed", original_path: "obsolete.txt", state: "absent" });
+    expect(await readFile(path.join(root, changed.get("companion.txt")!.snapshot_path!), "utf8")).toBe("after");
+    expect(request.sources[0].files.some(file => file.kind === "output" && file.original_path === "answer.txt" && file.state === "present")).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(worktreeParent, { recursive: true, force: true });
+  }
+});
 
 test("an empty review report cannot satisfy the required output", async () => {
   const root = await fixture();

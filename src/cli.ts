@@ -1755,7 +1755,9 @@ missionCmd.command("review-prepare")
     try {
       const sources = z.array(z.object({ missionId: z.string().min(1), workspaceRoot: z.string().min(1).optional() }).strict()).min(1).parse(JSON.parse(opts.sources));
       const runtime = z.enum(["oh-my-pi", "command-code", "claude-code"]).parse(opts.runtime);
-      console.log(JSON.stringify(await prepareIndependentReview(resolveRoot(opts.root), { id, sources, runtime, model: opts.model, workflow: opts.workflow }), null, 2));
+      const prepared = await prepareIndependentReview(resolveRoot(opts.root), { id, sources, runtime, model: opts.model, workflow: opts.workflow });
+      console.log(JSON.stringify(prepared, null, 2));
+      console.log(`Report: ${prepared.reportPath} (relative to the review workspace; the reviewer writes it inside the review sandbox)`);
     } catch (error) {
       console.error(`[FAIL] mission review-prepare: ${(error as Error).message}`);
       process.exitCode = 1;
@@ -1768,7 +1770,16 @@ missionCmd.command("review-collect")
   .option("--root <path>", "Canonical project root (default: cwd)")
   .action(async (id: string, opts: { root?: string }) => {
     try {
-      console.log(JSON.stringify(await collectIndependentReview(resolveRoot(opts.root), id), null, 2));
+      const assessment = await collectIndependentReview(resolveRoot(opts.root), id);
+      console.log(JSON.stringify(assessment, null, 2));
+      const contradicted = (assessment.claims ?? []).filter(claim => claim.verdict === "contradicted");
+      const attention = (assessment.findings ?? []).filter(finding => finding.severity === "error" || finding.severity === "warning");
+      if (contradicted.length === 0 && attention.length === 0) {
+        console.log("No contradicted claims or warning/error findings.");
+        return;
+      }
+      for (const claim of contradicted) console.log(`Contradicted claim [${claim.source}]: ${claim.claim}`);
+      for (const finding of attention) console.log(`${finding.severity.toUpperCase()} finding [${finding.source}]: ${finding.detail}`);
     } catch (error) {
       console.error(`[FAIL] mission review-collect: ${(error as Error).message}`);
       process.exitCode = 1;

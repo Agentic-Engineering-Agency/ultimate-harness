@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, realpath, rm, lstat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -76,6 +78,58 @@ async function fileDigest(file: string): Promise<string> {
 }
 
 
+const execFileP = promisify(execFile);
+
+/** Best-effort git read: any failure (not a checkout, missing ref) yields undefined. */
+async function gitOutput(cwd: string, args: string[]): Promise<string | undefined> {
+  try {
+    return String((await execFileP("git", ["-C", cwd, ...args])).stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Protected roots whose changed files are never captured into a review packet. */
+const PROTECTED_CHANGED_ROOTS = [".harness", ".commandcode", ".omp", ".git"] as const;
+
+function isProtectedChangedPath(target: string): boolean {
+  const normalized = path.posix.normalize(target.trim().replaceAll("\\", "/")).replace(/^\.\/+/, "");
+  return PROTECTED_CHANGED_ROOTS.some((root) => normalized === root || normalized.startsWith(`${root}/`));
+}
+
+/**
+ * The ref a worker branched from, resolved from git alone: the branch's own
+ * configured fork point (`branch.<name>.base`) when present, else the
+ * repository default branch. Returns undefined when none resolves.
+ */
+async function reviewBaseRef(worktree: string): Promise<string | undefined> {
+  const branch = (await gitOutput(worktree, ["rev-parse", "--abbrev-ref", "HEAD"]))?.trim();
+  if (branch && branch !== "HEAD") {
+    const configured = (await gitOutput(worktree, ["config", "--get", `branch.${branch}.base`]))?.trim();
+    if (configured) return configured;
+  }
+  for (const candidate of ["origin/HEAD", "main", "master"]) {
+    if ((await gitOutput(worktree, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]))?.trim()) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Every path the worker changed between its merge-base with its base ref and
+ * its HEAD. Empty when the source workspace is not a git checkout or no base
+ * ref resolves.
+ */
+async function changedGitPaths(sourceRoot: string): Promise<string[]> {
+  if ((await gitOutput(sourceRoot, ["rev-parse", "--is-inside-work-tree"]))?.trim() !== "true") return [];
+  const baseRef = await reviewBaseRef(sourceRoot);
+  if (!baseRef) return [];
+  const mergeBase = (await gitOutput(sourceRoot, ["merge-base", baseRef, "HEAD"]))?.trim();
+  if (!mergeBase) return [];
+  const output = await gitOutput(sourceRoot, ["diff", "--name-only", mergeBase, "HEAD"]);
+  if (output === undefined) return [];
+  return output.split(/\r?\n/).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+}
+
 async function snapshotFile(sourceRoot: string, original: string, destination: string): Promise<string | undefined> {
   const candidate = path.resolve(sourceRoot, original);
   if (!isPathWithin(candidate, sourceRoot)) throw new Error(`Review input escapes its source workspace: ${original}`);
@@ -144,6 +198,25 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
           ...(hash ? { snapshot_path: relativeArtifactPath(root, snapshot), sha256: hash } : {}) });
         if (hash) readFirst.push(relativeArtifactPath(root, snapshot));
       }
+      // Workers legitimately touch companion files outside their declared
+      // outputs. When the source workspace is a git worktree, capture the real
+      // diff so the review judges those files too. Protected roots and files
+      // already captured above are never duplicated.
+      const captured = new Set(files.map(file => file.original_path.replaceAll("\\", "/")));
+      for (const [index, changedPath] of (await changedGitPaths(sourceRoot)).entries()) {
+        const normalized = changedPath.replaceAll("\\", "/");
+        if (isProtectedChangedPath(normalized) || captured.has(normalized)) continue;
+        captured.add(normalized);
+        const snapshot = path.join(inputDir, `changed-${index}-${path.basename(normalized)}`);
+        const hash = await snapshotFile(sourceRoot, normalized, snapshot);
+        if (hash) {
+          files.push({ kind: "changed", original_path: normalized, state: "present",
+            snapshot_path: relativeArtifactPath(root, snapshot), sha256: hash });
+          readFirst.push(relativeArtifactPath(root, snapshot));
+        } else {
+          files.push({ kind: "changed", original_path: normalized, state: "absent" });
+        }
+      }
       sources.push({ mission_id: source.missionId, source_root: sourceRoot, files,
         reference_paths: mission.read_first,
         acceptance: mission.acceptance_criteria.map(criterion => ({ id: criterion.id, description: criterion.description })),
@@ -174,7 +247,9 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
       deny_git_mutations: true, deny_package_installs: true, deny_network_clients: true,
     } };
     await writeFile(packet.path, stringify(guardedMission), "utf-8");
-    return { missionPath: packet.path, requestPath, reportPath, requestSha256: binding.request_sha256 };
+    // `reportPath` is reported relative to the review workspace (and so to the
+    // sandbox worktree the reviewer runs in), never as an absolute project path.
+    return { missionPath: packet.path, requestPath, reportPath: binding.report_path, requestSha256: binding.request_sha256 };
   } catch (error) {
     await rm(missionDir, { recursive: true, force: true });
     throw error;
@@ -244,7 +319,7 @@ export async function collectIndependentReview(root: string, missionId: string) 
   if (await fileDigest(workspaceRequest) !== binding.request_sha256) throw new Error("Independent review request changed in its workspace");
   for (const source of request.sources) {
     for (const file of source.files) {
-      if (file.state === "missing") continue;
+      if (file.state !== "present") continue;
       for (const scope of new Set([root, route.effectiveRoot])) {
         const snapshot = path.resolve(scope, file.snapshot_path!);
         await assertWritableArtifact(path.join(scope, ".harness", "missions", missionId), snapshot);
@@ -291,9 +366,17 @@ export async function collectIndependentReview(root: string, missionId: string) 
   });
   const observations = report.sources.flatMap(source =>
     (source.observations ?? []).map(observation => ({ source: source.mission_id, ...observation })));
+  // Preserve the reviewer's stated reasons on the canonical assessment: without
+  // these a needs-attention/needs-remediation recommendation carries no cause.
+  const findings = report.sources.flatMap(source =>
+    source.findings.map(finding => ({ source: source.mission_id, severity: finding.severity, detail: finding.detail, evidence: finding.evidence })));
+  const claims = report.sources.flatMap(source =>
+    source.claims_checked.map(claim => ({ source: source.mission_id, claim: claim.claim, verdict: claim.verdict, evidence_source: claim.source })));
   const assessment = IndependentReviewAssessmentSchema.parse({ schema_version: "uh.independent-review-assessment.v0", review_id: missionId,
     run_id: latest.run_id, request_sha256: binding.request_sha256, recommendation, human_acceptance_required: true,
-    ...(observations.length > 0 ? { observations } : {}) });
+    ...(observations.length > 0 ? { observations } : {}),
+    ...(findings.length > 0 ? { findings } : {}),
+    ...(claims.length > 0 ? { claims } : {}) });
   const assessmentPath = path.join(missionDir, "review-assessment.json");
   await assertWritableArtifact(missionDir, assessmentPath);
   await writeAtomicArtifact(assessmentPath, JSON.stringify(assessment, null, 2));

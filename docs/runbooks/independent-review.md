@@ -30,6 +30,14 @@ Notes:
 - The packet objective lists, per source, the exact acceptance criterion ids and required check ids the report must contain — including explicit `acceptance: [] exactly; add nothing` when a list is empty — and points everything that no listed id covers at `observations`, never into `acceptance` or `checks`.
 - `review-collect` re-checks request and snapshot digests, requires a successful native runtime receipt bound to the request, and validates that each acceptance criterion and required check id is covered exactly once. Invented ids are rejected; observations are surfaced in the assessment and printed summary without changing the recommendation.
 
+## What preparation and collection surface
+
+`review-prepare` prints the report path relative to the review workspace (`out/review-report.json`) and says that it is resolved inside the review sandbox, so the operator never sees an absolute project path that does not exist in the reviewer's worktree.
+
+When a source workspace is a git worktree, preparation also captures every path the worker changed between its merge-base with its base ref and its HEAD (`git diff --name-only`) as kind `changed` with a SHA-256 digest. A deleted path is recorded with state `absent` and no snapshot, protected roots (`.harness`, `.commandcode`, `.omp`, `.git`) are never captured, and a path already captured as a contract or output is not duplicated.
+
+`review-collect` preserves the reviewer's stated reasons on the assessment — per-source `findings` (severity, detail, evidence) and a per-claim `claims` summary (claim text, verdict, and the claim's evidence source) — and, after the assessment JSON, prints a short summary of contradicted claims and warning/error findings, so a needs-attention or needs-remediation recommendation carries its cause.
+
 ## What it proves
 
 - The recommendation is evidence-backed and advisory: a recorded acceptance decision with `human_acceptance_required: true`.
