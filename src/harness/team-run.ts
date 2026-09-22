@@ -187,8 +187,11 @@ export interface GitOps {
    * write roots produces no commit. Both the worker commit and the salvage
    * commit route through it. When omitted (a stub gitOps that cannot enumerate
    * the worktree), the whole worktree is staged minus the protected roots.
+   * `forcePaths` lists declared outputs that git ignores (an `out/` directory in
+   * `.gitignore` is the case that motivated it) and must be staged with
+   * `git add -f`; only declared outputs ever reach it.
    */
-  commitAll: (cwd: string, message: string, stagePaths?: readonly string[]) => Promise<void>;
+  commitAll: (cwd: string, message: string, stagePaths?: readonly string[], forcePaths?: readonly string[]) => Promise<void>;
   /**
    * List the paths with uncommitted changes (staged, unstaged, untracked) in a
    * worktree, relative to the worktree root. Used to decide whether a stopped
@@ -326,6 +329,13 @@ interface WorkerCommitScope {
    * the write roots as pathspecs.
    */
   stagePaths?: string[];
+  /**
+   * Declared outputs that exist in the worktree but `dirtyPaths` never listed —
+   * an `out/` directory in `.gitignore` is the motivating case — so `git add`
+   * needs `-f` to stage them. Only declared outputs, protected paths excluded,
+   * ever land here; an ignored file that is not declared stays out of the commit.
+   */
+  forcePaths?: string[];
   /** Changed paths outside the write roots and declared outputs, protected paths excluded. */
   outOfRoots?: NonNullable<CanonicalTeamWorker["out_of_roots"]>;
 }
@@ -336,7 +346,9 @@ interface WorkerCommitScope {
  * unstaged and are reported as `out_of_roots`. Protected roots keep their
  * existing exclusion behaviour and are never listed as out-of-roots. A child
  * process (a build) can write outside the roots without the tool guard seeing
- * it, which is exactly what this classification catches.
+ * it, which is exactly what this classification catches. A declared output that
+ * exists but git ignores is returned separately in `forcePaths` so the commit
+ * can stage it with `-f`.
  */
 async function resolveWorkerCommitScope(args: {
   gitOps: GitOps;
@@ -356,13 +368,29 @@ async function resolveWorkerCommitScope(args: {
   }
   const stagePaths: string[] = [];
   const outside: string[] = [];
+  const staged = new Set<string>();
   for (const candidate of changed) {
     if (isProtectedPath(candidate, DEFAULT_PROTECTED_PATHS)) continue;
-    if (allowedRoots.some((root) => isWithinRelativeRoot(candidate, root))) stagePaths.push(candidate);
-    else outside.push(candidate);
+    if (allowedRoots.some((root) => isWithinRelativeRoot(candidate, root))) {
+      stagePaths.push(candidate);
+      staged.add(normalizeRelativePath(candidate));
+    } else outside.push(candidate);
+  }
+  // A declared output under an ignored directory (`out/` in `.gitignore`) never
+  // shows up in `dirtyPaths`, so it is not in `stagePaths` and a plain `git add`
+  // would refuse it. Such an output still belongs to the worker's commit: stage
+  // it explicitly with `git add -f`. Only declared outputs are force-added, and
+  // one under a protected root stays excluded like any other changed path.
+  const forcePaths: string[] = [];
+  for (const outputPath of args.expectedOutputs) {
+    if (isProtectedPath(outputPath, DEFAULT_PROTECTED_PATHS)) continue;
+    const normalized = normalizeRelativePath(outputPath);
+    if (normalized.length === 0 || staged.has(normalized)) continue;
+    if (await fileExists(path.join(args.worktreePath, outputPath))) forcePaths.push(outputPath);
   }
   outside.sort();
   const scope: WorkerCommitScope = { stagePaths };
+  if (forcePaths.length > 0) scope.forcePaths = forcePaths;
   if (outside.length > 0) {
     scope.outOfRoots = { paths: outside.slice(0, OUT_OF_ROOTS_LIST_CAP), total: outside.length };
   }
@@ -603,10 +631,11 @@ export const defaultGitOps: GitOps = {
       await execFileP("git", ["branch", "-D", branch], { cwd: root });
     } catch { /* best-effort */ }
   },
-  async commitAll(cwd, message, stagePaths) {
+  async commitAll(cwd, message, stagePaths, forcePaths) {
     // An explicit empty list means "nothing is inside the worker's roots":
-    // stage nothing and create no commit, mirroring the protected-path case.
-    if (stagePaths !== undefined && stagePaths.length === 0) return;
+    // stage nothing and create no commit, mirroring the protected-path case —
+    // unless a declared output was force-added (its own ignored `out/` file).
+    if (stagePaths !== undefined && stagePaths.length === 0 && (forcePaths?.length ?? 0) === 0) return;
     // Stage only the worker's own work. When `stagePaths` is given it lists the
     // exact changed paths inside the worker's write roots (plus its declared
     // outputs) — the caller already filtered the protected roots out, so it is
@@ -615,10 +644,21 @@ export const defaultGitOps: GitOps = {
     // pathspecs are mixed in: a file include combined with excludes can
     // mis-stage on some git builds. Otherwise the whole worktree is staged
     // minus the protected roots, so a harness-owned file is never staged.
-    const pathspecs = stagePaths === undefined
-      ? [".", ...COMMIT_PROTECTED_EXCLUDES]
-      : stagePaths.map((entry) => `:(literal)${entry}`);
-    await execFileP("git", ["add", "-A", "--", ...pathspecs], { cwd });
+    if (stagePaths === undefined) {
+      await execFileP("git", ["add", "-A", "--", ".", ...COMMIT_PROTECTED_EXCLUDES], { cwd });
+    } else {
+      const stagePathspecs = stagePaths.map((entry) => `:(literal)${entry}`);
+      if (stagePathspecs.length > 0) {
+        await execFileP("git", ["add", "-A", "--", ...stagePathspecs], { cwd });
+      }
+      // Declared outputs under an ignored directory need `-f`: a plain `git add`
+      // refuses them. Only declared outputs reach `forcePaths`, so an ignored
+      // stray never gets staged alongside them.
+      const forcePathspecs = (forcePaths ?? []).map((entry) => `:(literal)${entry}`);
+      if (forcePathspecs.length > 0) {
+        await execFileP("git", ["add", "-f", "-A", "--", ...forcePathspecs], { cwd });
+      }
+    }
     // Any residual out-of-root or protected change stays in the worktree
     // unstaged (the worktree is discarded or retained as evidence), so gate the
     // commit on the INDEX being non-empty rather than on the worktree being clean.
@@ -1180,6 +1220,7 @@ export async function runTeamMission(
       // recorded as out_of_roots.
       let outOfRoots: WorkerOutcome["outOfRoots"] = canonicalWorker.out_of_roots;
       let stagePaths: string[] | undefined;
+      let forcePaths: string[] | undefined;
       if (status === "succeeded") {
         const scope = await resolveWorkerCommitScope({
           gitOps,
@@ -1188,6 +1229,7 @@ export async function runTeamMission(
           expectedOutputs: expectedOutputs?.files ?? [],
         });
         stagePaths = scope.stagePaths;
+        forcePaths = scope.forcePaths;
         outOfRoots = scope.outOfRoots;
         if (outOfRoots) canonicalWorker.out_of_roots = outOfRoots;
       }
@@ -1195,7 +1237,7 @@ export async function runTeamMission(
       let commitErr: string | null = null;
       if (status === "succeeded") {
         try {
-          await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths);
+          await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths, forcePaths);
         } catch (err) {
           commitErr = err instanceof Error ? err.message : String(err);
         }
@@ -1468,14 +1510,17 @@ async function evaluateWorkerSalvage(args: {
   // undefined scope means the worktree could not be inspected at all (a stub
   // gitOps without `dirtyPaths`, or one that threw) — we cannot tell salvageable
   // work from harness-owned churn, so we record nothing rather than guess.
-  const { stagePaths, outOfRoots } = await resolveWorkerCommitScope({
+  const { stagePaths, forcePaths, outOfRoots } = await resolveWorkerCommitScope({
     gitOps: args.gitOps,
     worktreePath: args.worktreePath,
     writeRoots: args.writeRoots,
     expectedOutputs: args.expectedOutputs ?? [],
   });
   if (stagePaths === undefined) return { stopCode };
-  const eligible = stagePaths.length > 0;
+  // A declared output under an ignored directory arrives in `forcePaths` rather
+  // than `stagePaths`, but it is still salvageable work, so either list makes the
+  // stopped worker eligible.
+  const eligible = stagePaths.length > 0 || (forcePaths?.length ?? 0) > 0;
   let outputsPassed = false;
   let checksPassed = false;
   if (eligible) {
@@ -1494,7 +1539,7 @@ async function evaluateWorkerSalvage(args: {
     }
     if (outputsPassed && checksPassed) {
       try {
-        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`, stagePaths);
+        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`, stagePaths, forcePaths);
       } catch { /* best-effort: the record still points at the branch for a human */ }
     }
   }

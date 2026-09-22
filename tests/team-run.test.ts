@@ -1341,3 +1341,116 @@ describe("runTeamMission — real git (smoke)", () => {
     expect(snapshot.agents.filter((agent) => agent.operation === "succeeded")).toHaveLength(3);
   });
 });
+
+/* ---------------------------------------- declared outputs under .gitignore  */
+
+describe("runTeamMission — declared outputs under an ignored directory", () => {
+  const PASSING_VERIFIER = async (): Promise<VerifyMissionLike> => ({
+    status: "passed",
+    path: "/fake/verification.yaml",
+    checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+    acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+  });
+
+  /** Files present in a branch's tree, in git's stable order. */
+  async function branchFiles(branch: string): Promise<string[]> {
+    const { stdout } = await execFileP("git", ["ls-tree", "-r", "--name-only", branch], { cwd: ROOT });
+    return stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+
+  /** A repo whose `.gitignore` lists `out/`, so an `out/` file is never dirty. */
+  async function seedIgnoredOutRepo(): Promise<void> {
+    await initGitRepo(ROOT);
+    await writeFile(join(ROOT, ".gitignore"), "out/\n", "utf-8");
+    await seedMissionPacket(ROOT, "team-mission");
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+  }
+
+  test("a declared output under an ignored directory is committed; an undeclared ignored file is not", async () => {
+    await seedIgnoredOutRepo();
+    const runner = (_adapter: string) => async (_a: string, root: string) => {
+      await mkdir(join(root, "out"), { recursive: true });
+      await writeFile(join(root, "out", "report.md"), "declared\n", "utf-8");
+      await writeFile(join(root, "out", "scratch.txt"), "stray\n", "utf-8");
+      const sentinelDir = join(root, ".harness", "missions", "team-mission");
+      await mkdir(sentinelDir, { recursive: true });
+      await writeFile(join(sentinelDir, "runtime-final.txt"), "done", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", expected_outputs: { files: ["out/report.md"] } }],
+    }), ROOT, { runnerFor: runner, verifier: PASSING_VERIFIER, retainOnSuccess: true });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("succeeded");
+
+    const files = await branchFiles(backend.plan.branch);
+    expect(files).toContain("out/report.md");
+    expect(files).not.toContain("out/scratch.txt");
+  });
+
+  test("a declared output that does not exist is not staged and still fails the declared-output check", async () => {
+    await seedIgnoredOutRepo();
+    const runner = (_adapter: string) => async (_a: string, root: string) => {
+      await mkdir(join(root, "out"), { recursive: true });
+      await writeFile(join(root, "out", "scratch.txt"), "stray\n", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", expected_outputs: { files: ["out/missing.md"] } }],
+    }), ROOT, { runnerFor: runner, verifier: PASSING_VERIFIER, retainOnSuccess: true });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("blocked");
+    expect(backend.errorMessage).toMatch(/^Declared output out\/missing\.md:/);
+
+    const files = await branchFiles(backend.plan.branch);
+    expect(files).not.toContain("out/missing.md");
+    expect(files).not.toContain("out/scratch.txt");
+  });
+
+  test("a stopped worker's declared ignored output reaches the salvage commit", async () => {
+    await seedIgnoredOutRepo();
+    const runner = (_adapter: string) => async (
+      _a: string,
+      root: string,
+      _missionPath: string,
+      context: { artifactRoot: string; runId: string; missionId?: string },
+    ) => {
+      await mkdir(join(root, "out"), { recursive: true });
+      await writeFile(join(root, "out", "artifact.txt"), "complete\n", "utf-8");
+      const missionId = context.missionId ?? "team-mission";
+      const runDir = join(context.artifactRoot, ".harness", "missions", missionId, "runs", context.runId);
+      await mkdir(runDir, { recursive: true });
+      await writeFile(join(runDir, "runtime-control.json"), JSON.stringify({
+        schema_version: "uh.runtime-control.v0",
+        mission_id: missionId,
+        run_id: context.runId,
+        runtime: "hermes",
+        controller_pid: 4242,
+        started_at: "2026-01-01T00:00:00.000Z",
+        heartbeat_at: "2026-01-01T00:00:01.000Z",
+        status: "failed",
+        stop_code: "turn_limit",
+        turns: 3,
+        denials: 0,
+        inflight_tools: 0,
+      }), "utf-8");
+      return { exitCode: 1, stdout: "", stderr: "", result: { status: "failed" } };
+    };
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", expected_outputs: { files: ["out/artifact.txt"] } }],
+    }), ROOT, { runnerFor: runner, verifier: PASSING_VERIFIER, retainOnSuccess: true });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("failed");
+    expect(backend.salvage).toMatchObject({ eligible: true, outputs_passed: true, checks_passed: true });
+
+    const files = await branchFiles(backend.plan.branch);
+    expect(files).toContain("out/artifact.txt");
+  });
+});
