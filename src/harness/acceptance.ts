@@ -3,17 +3,27 @@ import { mkdir, readFile, readdir, writeFile, cp, symlink } from "node:fs/promis
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
+import { z } from "zod";
 import { initializeHarness } from "./init.js";
-import { AcceptanceEvidenceSchema, AcceptanceRegistrySchema, type AcceptanceEvidence, type AcceptanceExpected, type AcceptanceRegistry, type AcceptanceRegistryEntry } from "../schema/acceptance.js";
+import { AcceptanceEvidenceSchema, AcceptanceRegistryEntrySchema, AcceptanceRegistrySchema, type AcceptanceEvidence, type AcceptanceExpected } from "../schema/acceptance.js";
 
 const execFileAsync = promisify(execFile);
 const UNKNOWN: string = "unknown";
 export type AcceptanceFacts = Record<string, unknown>;
 export type AcceptanceState = "proven" | "stale" | "failed" | "unproven" | "fixture_only";
 
+/**
+ * Registry entries may declare `support_shim`. The shared schema module owns
+ * the base contract, so the runner layers the optional field on where it
+ * consumes it and keeps every other field strict.
+ */
+const SupportShimRegistryEntrySchema = AcceptanceRegistryEntrySchema.extend({ support_shim: z.string().min(1).optional() });
+export type AcceptanceRegistryEntry = z.infer<typeof SupportShimRegistryEntrySchema>;
+export type AcceptanceRegistry = { schema_version: "uh.acceptance-registry.v0"; entries: Record<string, AcceptanceRegistryEntry> };
+
 export async function loadAcceptanceRegistry(root: string): Promise<AcceptanceRegistry> {
   const raw = await readFile(path.join(root, "acceptance", "registry.yaml"), "utf8");
-  return AcceptanceRegistrySchema.parse(parse(raw));
+  return AcceptanceRegistrySchema.extend({ entries: z.record(z.string().min(1), SupportShimRegistryEntrySchema) }).parse(parse(raw));
 }
 
 function readPath(value: unknown, key: string): unknown {
@@ -145,9 +155,9 @@ export async function renderAcceptanceReport(root: string, now = new Date()): Pr
   return `${rows.join("\n")}\n`;
 }
 
-async function runProcess(command: string, args: string[], cwd: string, distRoot?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runProcess(command: string, args: string[], cwd: string, distRoot?: string, extraEnv?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
   return await new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, env: { ...process.env, ...(distRoot ? { UH_HARNESS_DIST: path.resolve(distRoot, "dist") } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd, env: { ...process.env, ...(distRoot ? { UH_HARNESS_DIST: path.resolve(distRoot, "dist") } : {}), ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += String(chunk); });
@@ -158,9 +168,9 @@ async function runProcess(command: string, args: string[], cwd: string, distRoot
     child.on("error", (error) => resolve({ code: 1, stdout, stderr: `${stderr}${error.message}` }));
   });
 }
-async function runProcessAndCancel(command: string, args: string[], cwd: string, cancelCommand: string, cancelArgs: string[], delayMs: number, distRoot?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runProcessAndCancel(command: string, args: string[], cwd: string, cancelCommand: string, cancelArgs: string[], delayMs: number, distRoot?: string, extraEnv?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
   return await new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, env: { ...process.env, ...(distRoot ? { UH_HARNESS_DIST: path.resolve(distRoot, "dist") } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd, env: { ...process.env, ...(distRoot ? { UH_HARNESS_DIST: path.resolve(distRoot, "dist") } : {}), ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => { void runProcess(cancelCommand, cancelArgs, cwd, distRoot); }, delayMs);
@@ -250,6 +260,13 @@ export async function collectFacts(runRoot: string, missionId: string, expected?
           }
         } catch { /* optional artifact */ }
       }
+      try {
+        const guardLog = await readFile(path.join(missionRoot, "runs", entry.name, "tool-guard.log"), "utf8");
+        const lines = guardLog.split(/\r?\n/).filter((line) => line.trim() !== "").length;
+        observed.tool_guard_lines = lines;
+        factSources.tool_guard_lines = source;
+        if (source === "first" || source === "last") sourceValues[source].tool_guard_lines = lines;
+      } catch { /* runs without guard hooks have no tool-guard.log */ }
     }
   } catch { /* no runs */ }
   const pending = [path.join(missionRoot, "team", "artifacts")];
@@ -422,6 +439,18 @@ async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: 
   return checked;
 }
 
+/**
+ * Extra env for the mission-run child. Entries declaring `support_shim` get
+ * the copied acceptance/support directory prepended to PATH for that run
+ * only; every other entry keeps the parent PATH untouched.
+ */
+export function acceptanceSpawnEnv(entry: Pick<AcceptanceRegistryEntry, "support_shim">, runRoot: string): Record<string, string> {
+  if (!entry.support_shim) return {};
+  const supportDir = path.join(runRoot, "acceptance", "support");
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+  return { [pathKey]: `${supportDir}${path.delimiter}${process.env[pathKey] ?? ""}` };
+}
+
 async function runOneAcceptance(sourceRoot: string, capability: string, entry: AcceptanceRegistryEntry, options: AcceptanceRunOptions): Promise<AcceptanceEvidence> {
 
   if (!options.workspace) throw new Error("acceptance run requires --workspace <dir>");
@@ -490,6 +519,7 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   const cancelRunId = "20260101T000000Z-abcdef";
   const controllerLossRunId = "20260101T000001Z-abcdef";
   const launchArgs = baseAcceptanceCapability(capability) === "R5" ? [...args, "--run-id", cancelRunId] : args;
+  const spawnEnv = acceptanceSpawnEnv(entry, runRoot);
   let result: { code: number; stdout: string; stderr: string };
   if (baseAcceptanceCapability(capability) === "R5") {
     result = await runProcessAndCancel(process.execPath, launchArgs, sourceRoot, process.execPath, [cli, "mission", "cancel", "--mission", missionId, "--run-id", cancelRunId, "--root", runRoot], 750, sourceRoot);
@@ -502,9 +532,10 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
       : [...args, "--runtime-config-overrides", JSON.stringify({ resume_from_run: controllerLossRunId, recovery_notes: "Recover the controller-lost attempt and create out/controller-recovered.txt." })];
     result = await runProcess(process.execPath, resumeArgs, sourceRoot, sourceRoot);
   } else {
-    result = await runProcess(process.execPath, launchArgs, sourceRoot, sourceRoot);
+    result = await runProcess(process.execPath, launchArgs, sourceRoot, sourceRoot, spawnEnv);
   }
   const facts = await collectFacts(runRoot, missionId, entry.expected);
+  if (entry.support_shim) facts.observed.shim_on_path = true;
   if (result.code !== 0 && facts.observed.status === "passed") facts.observed.status = "failed";
   const mismatches = compareAcceptanceFacts(entry.expected, facts.observed);
   const evidence: AcceptanceEvidence = {
