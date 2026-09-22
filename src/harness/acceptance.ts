@@ -280,10 +280,31 @@ export async function collectFacts(runRoot: string, missionId: string, expected?
       }
       try {
         const guardLog = await readFile(path.join(missionRoot, "runs", entry.name, "tool-guard.log"), "utf8");
-        const lines = guardLog.split(/\r?\n/).filter((line) => line.trim() !== "").length;
-        observed.tool_guard_lines = lines;
+        // tool_guard_lines counts denials only: a guard log line is a denial when its parsed
+        // JSON has a class other than "allow". A line that does not parse as JSON (a truncated
+        // or corrupt write) counts as a denial only if it contains "deny".
+        let denials = 0;
+        let allows = 0;
+        for (const line of guardLog.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed === "") continue;
+          try {
+            const parsed: unknown = JSON.parse(trimmed);
+            const guardClass = parsed !== null && typeof parsed === "object" ? (parsed as { class?: unknown }).class : undefined;
+            if (guardClass === "allow") allows += 1;
+            else denials += 1;
+          } catch {
+            if (trimmed.includes("\"deny\"")) denials += 1;
+          }
+        }
+        observed.tool_guard_lines = denials;
+        observed.tool_guard_allow_lines = allows;
         factSources.tool_guard_lines = source;
-        if (source === "first" || source === "last") sourceValues[source].tool_guard_lines = lines;
+        factSources.tool_guard_allow_lines = source;
+        if (source === "first" || source === "last") {
+          sourceValues[source].tool_guard_lines = denials;
+          sourceValues[source].tool_guard_allow_lines = allows;
+        }
       } catch { /* runs without guard hooks have no tool-guard.log */ }
     }
   } catch { /* no runs */ }
