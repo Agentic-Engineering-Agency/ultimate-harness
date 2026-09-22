@@ -81,4 +81,12 @@ describe("fleet admission from disk", () => {
     await setFleet();
     await expect(assertFleetAdmission(ROOT, await mission("unassigned"), "oh-my-pi")).rejects.toThrow(/no assigned model/);
   });
+  test("a model authorized only as a worker is refused as an orchestrator on command-code", async () => {
+    const file = join(ROOT, ".harness", "project.yaml");
+    await writeFile(file, `${await readFile(file, "utf-8")}\nfleet:\n  routes:\n    - adapter: command-code\n      model: z-ai/glm-5.3-flash\n      roles:\n        - worker\n`, "utf-8");
+    const workerOnly = await mission("cmdc-worker-only", "runtime_config_overrides:\n  model: z-ai/glm-5.3-flash\n  role: worker\n");
+    await expect(assertFleetAdmission(ROOT, workerOnly, "command-code")).resolves.toBeUndefined();
+    const asOrchestrator = await mission("cmdc-as-orchestrator", "runtime_config_overrides:\n  model: z-ai/glm-5.3-flash\n  role: orchestrator\n");
+    await expect(assertFleetAdmission(ROOT, asOrchestrator, "command-code")).rejects.toThrow(/orchestrator/);
+  });
 });
