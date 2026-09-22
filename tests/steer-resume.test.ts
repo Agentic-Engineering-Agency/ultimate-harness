@@ -415,6 +415,105 @@ test("the completed-before-steer race records not_applied and uh steer reports i
   }
 });
 
+/** Mirror the record a controller writes when it refuses a steer. */
+async function writeSteerRecord(runDir: string, missionId: string, runId: string, message: string, reason: string): Promise<void> {
+  await writeFile(path.join(runDir, "steer-record.json"), JSON.stringify({
+    schema_version: "uh.steer-record.v0",
+    mission_id: missionId,
+    run_id: runId,
+    status: "not_applied",
+    reason,
+    message_digest: createHash("sha256").update(message).digest("hex"),
+    recorded_at: new Date().toISOString(),
+  }));
+}
+
+test("uh steer reports not_applied when its controller cannot prepare the resume", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runId = "unresumable-run";
+    const runDir = await seedRun(root, "one", runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    const message = "Switch to the parser.";
+    const reason = "Policy-stopped attempts cannot be automatically resumed";
+    let ran = false;
+    const result = await steerRun(root, runId, message, {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: async () => {
+        // The controller refuses the steer: recorded, and the request consumed.
+        await writeSteerRecord(runDir, "one", runId, message, reason);
+        await rm(path.join(runDir, "steer-request.json"), { force: true });
+        return { ok: true, status: "cancelled" };
+      },
+      processes: alive(4242),
+    });
+    expect(ran).toBe(false);
+    expect(result).toMatchObject({
+      ok: false,
+      mode: "controller",
+      sourceRunId: runId,
+      missionId: "one",
+      status: "not_applied",
+      reason,
+      message_digest: createHash("sha256").update(message).digest("hex"),
+    });
+    expect(result.runId).toBeUndefined();
+    expect(await readdir(runDir)).not.toContain("steer-request.json");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a refusal recorded for a different message never reports this steer", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runId = "stale-record-run";
+    const runDir = await seedRun(root, "one", runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    // An earlier steer of this run was refused; this one is taken and resumed.
+    await writeSteerRecord(runDir, "one", runId, "An earlier message.", "attempt completed before the steer took effect");
+    let ran = false;
+    const result = await steerRun(root, runId, "This message is applied.", {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: async () => {
+        await rm(path.join(runDir, "steer-request.json"), { force: true });
+        return { ok: true, status: "cancelled" };
+      },
+      processes: alive(4242),
+    });
+    expect(ran).toBe(false);
+    expect(result).toMatchObject({ ok: true, mode: "controller", sourceRunId: runId });
+    expect(result.status).toBeUndefined();
+    expect(result.reason).toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("steer of a live run whose controller has not answered yet still reports the controller path", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runId = "unanswered-run";
+    const runDir = await seedRun(root, "one", runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    let ran = false;
+    const started = Date.now();
+    const result = await steerRun(root, runId, "Nudge.", {}, {
+      run: async () => { ran = true; return {}; },
+      cancel: unusedCancel,
+      processes: alive(4242),
+    });
+    expect(ran).toBe(false);
+    expect(result).toMatchObject({ ok: true, mode: "controller", sourceRunId: runId });
+    expect(result.status).toBeUndefined();
+    // The wait for a verdict is bounded, and the request survives for the owner.
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(await readdir(runDir)).toContain("steer-request.json");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 15000);
+
 test("steering an old run id while its successor is live is refused with the live id named", async () => {
   const root = await project();
   try {

@@ -1,4 +1,6 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -19,8 +21,10 @@ import {
   DEFAULT_OPERATOR_RESUME_NOTE,
   REPORT_REQUEST,
   readSteerRecord,
+  readSteerRequest,
   steerNotes,
   type ResumeOrigin,
+  type SteerRecord,
 } from "./runtime-recovery.js";
 
 export { DEFAULT_OPERATOR_RESUME_NOTE, REPORT_REQUEST, steerNotes };
@@ -376,6 +380,40 @@ async function writeSteerRequest(target: ResumableRun, message: string, report: 
 }
 
 /**
+ * How long `uh steer` watches a live run for its controller's verdict on the
+ * request after signalling the stop, and how often it looks. A controller that
+ * never answers only costs this wait; the steer is never reported on a guess.
+ */
+const STEER_VERDICT_TIMEOUT_MS = 1500;
+const STEER_VERDICT_POLL_MS = 75;
+
+/** The identity a steer record carries for the message it describes. */
+function steerMessageDigest(message: string): string {
+  return createHash("sha256").update(message).digest("hex");
+}
+
+/**
+ * The controller's verdict on the steer request this command just wrote, when it
+ * can be observed: the not_applied record it wrote for exactly this message, or
+ * nothing once the controller has taken the request to act on it. Matching on the
+ * message digest keeps a record left by an earlier steer from being reported
+ * against this one, and the bounded wait keeps a wedged controller from hanging
+ * the command.
+ */
+async function observeSteerVerdict(root: string, missionId: string, runId: string, messageDigest: string): Promise<SteerRecord | undefined> {
+  const deadline = Date.now() + STEER_VERDICT_TIMEOUT_MS;
+  for (;;) {
+    const record = await readSteerRecord(root, missionId, runId).catch(() => undefined);
+    if (record?.message_digest === messageDigest) return record;
+    const pending = await readSteerRequest(root, missionId, runId).catch(() => undefined);
+    if (!pending) return undefined;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return undefined;
+    await delay(Math.min(STEER_VERDICT_POLL_MS, remaining));
+  }
+}
+
+/**
  * Start a new run for the same mission, in the same artifact root and sandbox,
  * bound to `resume_from_run`. Records the operator lineage in both directions.
  */
@@ -487,12 +525,13 @@ export async function steerRun(
   await assertNoLiveInLineage(root, target, "steer", resolveDeps(deps));
   const report = options.report === true;
   if (target.liveness === "live") {
-    await writeSteerRequest(target, message.trim(), report);
+    const trimmed = message.trim();
+    await writeSteerRequest(target, trimmed, report);
     // Signal the attempt to stop; the owning controller consumes the request
     // and resumes the session, so no new run is started here.
     await deps.cancel(root, target.missionId, target.runId);
-    const record = await readSteerRecord(target.artifactRoot, target.missionId, target.runId);
-    if (record?.status === "not_applied") {
+    const record = await observeSteerVerdict(target.artifactRoot, target.missionId, target.runId, steerMessageDigest(trimmed));
+    if (record) {
       return {
         ok: false,
         mode: "controller",

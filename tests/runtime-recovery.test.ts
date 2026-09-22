@@ -302,3 +302,190 @@ test("the completed-before-steer race records not_applied and does not resume", 
     });
   } finally { await rm(root, { recursive: true, force: true }); }
 }, 15000);
+
+/* -------------------------------------------------------------------------- */
+/* A steer whose resume cannot be prepared is recorded, not dropped            */
+/* -------------------------------------------------------------------------- */
+
+/** Read the steer record an attempt left behind, failing clearly when there is none. */
+async function readRecord(root: string, runId: string): Promise<{ status: string; reason: string; message_digest: string }> {
+  return JSON.parse(await readFile(path.join(root, ".harness", "missions", "one", "runs", runId, "steer-record.json"), "utf8"));
+}
+
+/**
+ * Drive one attempt that cannot be resumed: `seed` lays down whatever artifacts
+ * the failing state has, and the steer request arrives afterwards. The loop must
+ * finish on that attempt alone, with the steer recorded rather than dropped.
+ */
+async function steerAnUnresumableAttempt(
+  root: string,
+  runId: string,
+  message: string,
+  seed: (runDir: string) => Promise<void>,
+): Promise<void> {
+  const result = await runWithRuntimeRecovery({
+    root, missionId: "one", runtime: "command-code", runId,
+    // A steer needs no automatic recovery policy, and none may be spent here.
+    run: async (options) => {
+      const runDir = path.join(root, ".harness", "missions", "one", "runs", options.runId);
+      await mkdir(runDir, { recursive: true });
+      await seed(runDir);
+      await writeSteerRequest(runDir, options.runId, message);
+      return { runId: options.runId, result: { status: "failed" } };
+    },
+  });
+  expect(result.runId).toBe(runId);
+}
+
+test("a steer blocked by a concurrent policy stop records not_applied with that reason and consumes the request", async () => {
+  const root = await steerFixture();
+  const firstRun = "steer-policy-stop";
+  const steerMessage = "Switch to the parser.";
+  try {
+    let attempts = 0;
+    const result = await runWithRuntimeRecovery({
+      root, missionId: "one", runtime: "command-code", runId: firstRun,
+      recovery: { max_resumes: 1, notes: "Automatic policy notes." },
+      run: async (options) => {
+        attempts += 1;
+        // The attempt was stopped by policy while the steer's stop was in
+        // flight, so its saved session cannot be resumed.
+        const runDir = await writeAttempt(root, options.runId, { status: "failed", stopCode: "policy", sessionId: "saved-session" });
+        await writeSteerRequest(runDir, options.runId, steerMessage);
+        return { runId: options.runId, result: { status: "failed" } };
+      },
+    });
+    // Nothing was restarted: no second attempt, and the source run is returned.
+    expect(attempts).toBe(1);
+    expect(result.runId).toBe(firstRun);
+    expect(result.result?.status).toBe("failed");
+    // The request is consumed, so no later attempt can replay it.
+    await expect(readFile(path.join(root, ".harness", "missions", "one", "runs", firstRun, "steer-request.json"), "utf8")).rejects.toThrow();
+    // The message is recorded as refused, with the reason it was refused.
+    const record = await readRecord(root, firstRun);
+    expect(record).toMatchObject({
+      schema_version: "uh.steer-record.v0",
+      mission_id: "one",
+      run_id: firstRun,
+      status: "not_applied",
+      reason: "Policy-stopped attempts cannot be automatically resumed",
+      message_digest: createHash("sha256").update(steerMessage).digest("hex"),
+    });
+    // The attempt keeps its own stop: never relabelled `steered`, never restarted.
+    const control = JSON.parse(await readFile(path.join(root, ".harness", "missions", "one", "runs", firstRun, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ status: "failed", stop_code: "policy", session_id: "saved-session" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test("a steer whose saved session is missing is recorded, with a reason carrying no artifact paths", async () => {
+  const root = await steerFixture();
+  const runId = "steer-missing-session";
+  const steerMessage = "Where did the session go?";
+  try {
+    // The attempt recorded no control receipt at all, so preparing its resume
+    // fails on the filesystem with the absolute path in the error message.
+    await steerAnUnresumableAttempt(root, runId, steerMessage, async () => {});
+    const record = await readRecord(root, runId);
+    expect(record).toMatchObject({
+      status: "not_applied",
+      message_digest: createHash("sha256").update(steerMessage).digest("hex"),
+    });
+    expect(record.reason).toMatch(/ENOENT/);
+    expect(record.reason).not.toContain(root);
+    expect(record.reason).not.toContain(path.join(".harness", "missions"));
+    expect(record.reason).not.toMatch(/[A-Za-z]:[\\/]/);
+    expect(record.reason).not.toMatch(/(^|\s)[\\/][^\s]*runtime-control\.json/);
+    await expect(readFile(path.join(root, ".harness", "missions", "one", "runs", runId, "steer-request.json"), "utf8")).rejects.toThrow();
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test("a reason taken from a validation failure is collapsed to one bounded line", async () => {
+  const root = await steerFixture();
+  const runId = "steer-corrupt-receipt";
+  const steerMessage = "Keep going.";
+  try {
+    await steerAnUnresumableAttempt(root, runId, steerMessage, async (runDir) => {
+      await writeAttempt(root, runId, { status: "failed", stopCode: "stall", sessionId: "saved-session" });
+      await writeFile(path.join(runDir, "runtime-control.json"), "{}");
+    });
+    const record = await readRecord(root, runId);
+    expect(record.status).toBe("not_applied");
+    // A multi-issue validation failure is far longer than the budget, so the
+    // record proves both the bound and the whitespace collapsing.
+    expect(record.reason.length).toBeLessThanOrEqual(240);
+    expect(record.reason.length).toBeGreaterThan(200);
+    expect(record.reason).toMatch(/\.\.\.$/);
+    expect(record.reason).not.toMatch(/[\r\n]/);
+    expect(record.reason).not.toMatch(/\s\s/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test("a steer request left by an unresumable attempt is never replayed by the next attempt", async () => {
+  const root = await steerFixture();
+  const firstRun = "steer-then-resume";
+  try {
+    let attempts = 0;
+    const seen: string[] = [];
+    const result = await runWithRuntimeRecovery({
+      root, missionId: "one", runtime: "command-code", runId: firstRun,
+      recovery: { max_resumes: 1, notes: "Automatic policy notes." },
+      run: async (options) => {
+        attempts += 1;
+        seen.push(options.runId);
+        if (attempts === 1) {
+          // Refused steer: recorded, consumed, and the attempt stays as it was.
+          const runDir = await writeAttempt(root, options.runId, { status: "failed", stopCode: "policy", sessionId: "saved-session" });
+          await writeSteerRequest(runDir, options.runId, "Refused message.");
+          return { runId: options.runId, result: { status: "failed" } };
+        }
+        await writeAttempt(root, options.runId, { status: "passed", sessionId: "saved-session" });
+        return { runId: options.runId, result: { status: "passed" } };
+      },
+    });
+    // The refused steer did not resume, so there is exactly one attempt.
+    expect(attempts).toBe(1);
+    expect(seen).toEqual([firstRun]);
+    expect(result.runId).toBe(firstRun);
+    const record = await readRecord(root, firstRun);
+    expect(record.reason).toBe("Policy-stopped attempts cannot be automatically resumed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test("a normal steer still resumes the same session after a refused steer was recorded", async () => {
+  const root = await steerFixture();
+  try {
+    const refused = "resumable-after-refusal";
+    // First attempt: a steer that cannot be prepared and is recorded as such.
+    await steerAnUnresumableAttempt(root, refused, "Refused message.", async () => {
+      await writeAttempt(root, refused, { status: "failed", stopCode: "policy", sessionId: "saved-session" });
+    });
+    expect((await readRecord(root, refused)).status).toBe("not_applied");
+
+    // Second attempt, on a resumable stop: the steer is applied as usual.
+    const resumable = "resumable-target";
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const result = await runWithRuntimeRecovery({
+      root, missionId: "one", runtime: "command-code", runId: resumable,
+      recovery: { max_resumes: 0, notes: "Automatic policy notes." },
+      run: async (options) => {
+        seen.push(options.extraRuntimeConfigOverrides);
+        const runDir = await writeAttempt(root, options.runId, { status: "failed", stopCode: "cancelled", sessionId: "saved-session" });
+        if (options.runId === resumable) {
+          await writeSteerRequest(runDir, options.runId, "Switch to the auth path.");
+          return { runId: options.runId, result: { status: "failed" } };
+        }
+        await writeAttempt(root, options.runId, { status: "passed", sessionId: "saved-session" });
+        return { runId: options.runId, result: { status: "passed" } };
+      },
+    });
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toMatchObject({ resume_from_run: resumable });
+    expect(String(seen[1]?.recovery_notes)).toContain("Switch to the auth path.");
+    expect(result.runId).not.toBe(resumable);
+    expect(result.result?.status).toBe("passed");
+    const control = JSON.parse(await readFile(path.join(root, ".harness", "missions", "one", "runs", resumable, "runtime-control.json"), "utf8"));
+    expect(control.stop_code).toBe("steered");
+    // The applied steer left no refusal record for its message.
+    await expect(readFile(path.join(root, ".harness", "missions", "one", "runs", resumable, "steer-record.json"), "utf8")).rejects.toThrow();
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);

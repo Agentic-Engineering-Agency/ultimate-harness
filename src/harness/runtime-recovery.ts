@@ -126,11 +126,37 @@ export async function readSteerRequest(root: string, missionId: string, runId: s
   return request;
 }
 
+/** The outcome recorded when a steer was refused because the attempt had already finished. */
+const COMPLETED_BEFORE_STEER_REASON = "attempt completed before the steer took effect";
+
+/** A recorded reason stays short and carries no host paths. */
+const STEER_REASON_MAX_LENGTH = 240;
+const STEER_REASON_PATH_PATTERN = /['"`][^'"`\r\n]*[\\/][^'"`\r\n]*['"`]|(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s'"`]+/g;
+
 /**
- * Record that a steer request could not be applied because the attempt already
- * completed successfully before the steer took effect.
+ * Turn a resume-preparation failure into the reason of a not_applied steer
+ * record: whitespace collapsed, filesystem locations elided, and bounded so a
+ * runtime or parsing error cannot smuggle artifact paths into the record.
  */
-export async function recordSteerNotApplied(root: string, missionId: string, runId: string, message: string): Promise<SteerRecord> {
+function steerResumeFailureReason(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const scrubbed = raw.replace(STEER_REASON_PATH_PATTERN, "<path>").replace(/\s+/g, " ").trim();
+  if (!scrubbed) return "resume could not be prepared";
+  return scrubbed.length <= STEER_REASON_MAX_LENGTH ? scrubbed : `${scrubbed.slice(0, STEER_REASON_MAX_LENGTH - 3)}...`;
+}
+
+/**
+ * Record that a steer request could not be applied: either the attempt already
+ * completed successfully before the steer took effect, or its saved session
+ * could not be prepared for a resume.
+ */
+export async function recordSteerNotApplied(
+  root: string,
+  missionId: string,
+  runId: string,
+  message: string,
+  reason: string = COMPLETED_BEFORE_STEER_REASON,
+): Promise<SteerRecord> {
   assertSafeMissionId(missionId);
   assertValidRunId(runId);
   const digest = createHash("sha256").update(message).digest("hex");
@@ -139,7 +165,7 @@ export async function recordSteerNotApplied(root: string, missionId: string, run
     mission_id: missionId,
     run_id: runId,
     status: "not_applied",
-    reason: "attempt completed before the steer took effect",
+    reason,
     message_digest: digest,
     digest,
     recorded_at: new Date().toISOString(),
@@ -167,18 +193,6 @@ export async function readSteerRecord(root: string, missionId: string, runId: st
     throw error;
   }
   return SteerRecordSchema.parse(JSON.parse(raw));
-}
-
-/**
- * The `uh steer` request written next to a run's `runtime-control.json`, if one
- * is pending, deleted once read so a controller can never replay it.
- */
-export async function consumeSteerRequest(root: string, missionId: string, runId: string): Promise<RuntimeSteerRequest | undefined> {
-  const request = await readSteerRequest(root, missionId, runId);
-  if (!request) return undefined;
-  const requestPath = path.join(root, ".harness", "missions", missionId, "runs", runId, "steer-request.json");
-  await rm(requestPath, { force: true });
-  return request;
 }
 
 /**
@@ -253,6 +267,7 @@ export async function runWithRuntimeRecovery<T extends RecoverableRuntimeResult>
       if (input.cancellationSignal?.aborted) return result;
       const steer = await readSteerRequest(input.root, input.missionId, runId);
       if (!steer) break;
+      const requestPath = path.join(input.root, ".harness", "missions", input.missionId, "runs", runId, "steer-request.json");
       let isPassed = result.result?.status === "passed";
       if (!isPassed) {
         try {
@@ -262,20 +277,23 @@ export async function runWithRuntimeRecovery<T extends RecoverableRuntimeResult>
       }
       if (isPassed) {
         await recordSteerNotApplied(input.root, input.missionId, runId, steer.message);
-        const requestPath = path.join(input.root, ".harness", "missions", input.missionId, "runs", runId, "steer-request.json");
         await rm(requestPath, { force: true });
         break;
       }
       const notes = steerNotes(steer.message, steer.report);
       try {
         await prepareRuntimeResume(input.root, input.missionId, runId, input.runtime, notes, "operator");
-      } catch {
-        // The attempt cannot be resumed (for example a concurrent policy stop);
-        // it is left settled rather than relabelled or restarted from scratch.
+      } catch (error) {
+        // The attempt cannot be resumed (for example a concurrent policy stop or a
+        // missing session), so the message can neither be applied nor replayed
+        // later: it is recorded as not applied with the reason, and the request is
+        // removed. The attempt itself is left settled, never relabelled or
+        // restarted from scratch.
+        await recordSteerNotApplied(input.root, input.missionId, runId, steer.message, steerResumeFailureReason(error));
+        await rm(requestPath, { force: true });
         break;
       }
       // Consume the steer request only when acting on it.
-      const requestPath = path.join(input.root, ".harness", "missions", input.missionId, "runs", runId, "steer-request.json");
       await rm(requestPath, { force: true });
       await markAttemptSteered(input.root, input.missionId, runId, steer.message);
       overrides = { ...input.extraRuntimeConfigOverrides, resume_session: undefined, resume_from_run: runId, recovery_notes: notes };
