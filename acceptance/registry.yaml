@@ -16,6 +16,23 @@ entries:
         worker-b: passed
     freshness_days: 30
     notes: Two workers have distinct objectives, thinking levels, budgets, and declared outputs.
+  C1-cmdc:
+    title: Per-worker contracts
+    capability: C1
+    mission: missions/C1-cmdc/mission.yaml
+    shape: team
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      workers:
+        worker-a: { status: succeeded }
+        worker-b: { status: succeeded }
+      outputs:
+        worker-a: passed
+        worker-b: passed
+    freshness_days: 30
+    notes: Command Code port of C1 with identical per-worker contracts.
   S1:
     title: Resource wave baseline
     capability: S1
@@ -30,6 +47,21 @@ entries:
         worker-c: { status: succeeded }
     freshness_days: 30
     notes: Three workers run in waves with max_parallel 2.
+  S1-cmdc:
+    title: Resource wave baseline
+    capability: S1
+    mission: missions/S1-cmdc/mission.yaml
+    shape: team
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      workers:
+        worker-a: { status: succeeded }
+        worker-b: { status: succeeded }
+        worker-c: { status: succeeded }
+    freshness_days: 30
+    notes: Command Code port of S1 with identical wave scheduling.
   S2:
     title: Resource wave accounting
     capability: S2
@@ -44,6 +76,21 @@ entries:
         worker-c: { status: succeeded }
     freshness_days: 30
     notes: Cost budget admits all workers.
+  S2-cmdc:
+    title: Resource wave accounting
+    capability: S2
+    mission: missions/S2-cmdc/mission.yaml
+    shape: team
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      workers:
+        worker-a: { status: succeeded }
+        worker-b: { status: succeeded }
+        worker-c: { status: succeeded }
+    freshness_days: 30
+    notes: Command Code port of S2 with identical cost accounting.
   S3:
     title: Resource wave settlement
     capability: S3
@@ -58,6 +105,21 @@ entries:
         worker-c: { status: succeeded }
     freshness_days: 30
     notes: Worker wave facts remain canonical after cleanup.
+  S3-cmdc:
+    title: Resource wave settlement
+    capability: S3
+    mission: missions/S3-cmdc/mission.yaml
+    shape: team
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      workers:
+        worker-a: { status: succeeded }
+        worker-b: { status: succeeded }
+        worker-c: { status: succeeded }
+    freshness_days: 30
+    notes: Command Code port of S3 with identical settlement facts.
   G2:
     title: Denial budget
     capability: G2
@@ -75,6 +137,25 @@ entries:
         stop_code: last
         resumed: last
     notes: The expected failure is evidence that the gate observes real runtime facts.
+  G2-cmdc:
+    title: Denial budget
+    capability: G2
+    mission: missions/G2-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      stop_code: denial_budget
+      resumed: true
+      required_records:
+        denials: 3
+      fact_sources:
+        denials: first
+        stop_code: last
+        resumed: last
+    freshness_days: 30
+    notes: The runtime hits its denial budget through three real guard denials (outside write, git commit, package install); the guard replaces the oh-my-pi denial wrapper.
   R5:
     title: Guardian ownership
     capability: R5
@@ -87,6 +168,19 @@ entries:
       guardian_receipt: true
     freshness_days: 30
     notes: A freshly launched run is cancelled and settles with a guardian receipt.
+  R5-cmdc:
+    title: Guardian ownership
+    capability: R5
+    mission: missions/R5-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: cancelled
+      settlement_confirmed: true
+      guardian_receipt: true
+    freshness_days: 30
+    notes: Command Code port of R5 with identical guardian settlement.
   policy:
     title: Protected-path policy stop
     capability: G3
@@ -99,6 +193,19 @@ entries:
       resumed: false
     freshness_days: 30
     notes: A protected-path write must stop the runtime.
+  policy-cmdc:
+    title: Protected-path policy stop
+    capability: G3
+    mission: missions/policy-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: failed
+      stop_code: policy
+      resumed: false
+    freshness_days: 30
+    notes: Command Code port of the G3 protected-path policy stop.
   R10-stall:
     title: Stall recovery
     capability: R10
@@ -107,6 +214,21 @@ entries:
     runtime: oh-my-pi
     real_mission: not_applicable
     reason: Print-mode runtimes never idle without a tool in flight before the first response, so a real stall has no resumable native session; fixture smoke is the only evidence.
+    expected:
+      status: passed
+      stop_code: stall
+      resumed: true
+    freshness_days: 30
+    notes: Fixture-only mechanism; no real mission evidence is claimed.
+  R10-stall-cmdc:
+    title: Stall recovery
+    capability: R10
+    mission: missions/R10-stall-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    real_mission: not_applicable
+    reason: Command Code print mode never idles without a tool in flight before the first response, so a real stall has no resumable native session.
     expected:
       status: passed
       stop_code: stall
@@ -129,6 +251,23 @@ entries:
         resumed: last
     freshness_days: 30
     notes: A settled controller-loss attempt is resumed from its recorded run.
+  R10-controller-loss-cmdc:
+    title: Controller loss recovery
+    capability: R10
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    mission: missions/R10-controller-loss-cmdc/mission.yaml
+    expected:
+      status: passed
+      stop_code: controller_lost
+      resumed: true
+      fact_sources:
+        status: last
+        stop_code: first
+        resumed: last
+    freshness_days: 30
+    notes: Command Code port of R10 controller loss; the controller-loss wrapper supervises the harness controller, not the runtime.
   R7-turn-cap:
     title: Turn limit
     capability: R7
@@ -141,6 +280,19 @@ entries:
       resumed: false
     freshness_days: 30
     notes: A two-turn cap stops a task that requires a third turn.
+  R7-turn-cap-cmdc:
+    title: Turn limit
+    capability: R7
+    mission: missions/R7-turn-cap-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: failed
+      stop_code: turn_limit
+      resumed: false
+    freshness_days: 30
+    notes: Command Code port of the R7 turn limit.
   R7-repeated-failure:
     title: Repeated-failure stop and recovery
     capability: R7
@@ -157,6 +309,23 @@ entries:
         resumed: last
     freshness_days: 30
     notes: Repeating the same failed command triggers bounded recovery; recovery is the inventory R10 half of this probe.
+  R7-repeated-failure-cmdc:
+    title: Repeated-failure stop and recovery
+    capability: R7
+    mission: missions/R7-repeated-failure-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      stop_code: repeated_failure
+      resumed: true
+      fact_sources:
+        status: last
+        stop_code: first
+        resumed: last
+    freshness_days: 30
+    notes: Command Code port of repeated-failure stop and bounded recovery.
   C1-missing-output:
     title: Missing worker output
     capability: C1
@@ -172,6 +341,22 @@ entries:
         worker-good: { status: succeeded }
     freshness_days: 30
     notes: A missing declared output blocks only its worker while a sibling succeeds.
+  C1-missing-output-cmdc:
+    title: Missing worker output
+    capability: C1
+    mission: missions/C1-missing-output-cmdc/mission.yaml
+    shape: team
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed_partial
+      workers:
+        worker-missing:
+          status: blocked
+          blocked_reason: "Declared output out/missing.txt: Declared output is missing, unreadable, or outside the workspace"
+        worker-good: { status: succeeded }
+    freshness_days: 30
+    notes: Command Code port of the missing declared output contract.
   S3-budget-exhausted:
     title: Exhausted team budget
     capability: S3
@@ -188,6 +373,23 @@ entries:
         admission_blocked_reason: Remaining team cost budget cannot reserve another worker
     freshness_days: 30
     notes: Two admitted workers consume the budget and the next reservation is blocked.
+  S3-budget-exhausted-cmdc:
+    title: Exhausted team budget
+    capability: S3
+    mission: missions/S3-budget-exhausted-cmdc/mission.yaml
+    shape: team
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: blocked
+      workers:
+        worker-a: { status: succeeded }
+        worker-b: { status: succeeded }
+        worker-c: { status: blocked }
+      required_records:
+        admission_blocked_reason: Remaining team cost budget cannot reserve another worker
+    freshness_days: 30
+    notes: Command Code port of the exhausted team budget admission.
   S3-unknown-cost:
     title: Unknown cost admission
     capability: S3
@@ -204,6 +406,23 @@ entries:
         admission_blocked_reason: Completed worker cost is unknown; refusing further paid admission
     freshness_days: 30
     notes: Missing usage cost blocks the next paid wave.
+  S3-unknown-cost-cmdc:
+    title: Unknown cost admission
+    capability: S3
+    mission: missions/S3-unknown-cost-cmdc/mission.yaml
+    shape: team
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: blocked
+      workers:
+        worker-a: { status: succeeded }
+        worker-b: { status: succeeded }
+        worker-c: { status: blocked }
+      required_records:
+        admission_blocked_reason: Completed worker cost is unknown; refusing further paid admission
+    freshness_days: 30
+    notes: The command-code costless wrapper strips runtime usage so completed worker cost stays unknown and the next paid wave is refused.
   R5-deep-path:
     title: Deep workspace path
     capability: R5
@@ -216,6 +435,19 @@ entries:
       guardian_receipt: true
     freshness_days: 30
     notes: A deep-path run settles with a guardian receipt while the project root remains short.
+  R5-deep-path-cmdc:
+    title: Deep workspace path
+    capability: R5
+    mission: missions/R5-deep-path-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      settlement_confirmed: true
+      guardian_receipt: true
+    freshness_days: 30
+    notes: Command Code port of the deep workspace path settlement.
   G1-cmdc-guard:
     title: Command Code guard
     capability: G1
@@ -242,6 +474,18 @@ entries:
       path_style: forward_slashes
     freshness_days: 30
     notes: Canonical runtime artifact paths remain portable on Windows.
+  X1-paths-cmdc:
+    title: Forward-slash paths
+    capability: X1
+    mission: missions/X1-paths-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      path_style: forward_slashes
+    freshness_days: 30
+    notes: Command Code port of the canonical forward-slash path probe.
   R11-deadline-grace:
     title: Deadline grace delivery
     capability: R11
@@ -258,6 +502,23 @@ entries:
         grace: true
     freshness_days: 30
     notes: A four-turn mission receives one grace attempt that preserves an incomplete report and explicit missing-work handoff.
+  R11-deadline-grace-cmdc:
+    title: Deadline grace delivery
+    capability: R11
+    mission: missions/R11-deadline-grace-cmdc/mission.yaml
+    shape: single
+    runtime: command-code
+    model: qwen/qwen3.8-flash
+    expected:
+      status: passed
+      stop_code: deadline
+      resumed: true
+      required_files: [out/REPORT.md]
+      required_records:
+        completion: incomplete
+        grace: true
+    freshness_days: 30
+    notes: Command Code port of the deadline grace delivery probe.
   G1-cmdc-shell-policy:
     title: Command Code shell protected-path policy
     capability: G1

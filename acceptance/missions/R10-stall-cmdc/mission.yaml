@@ -1,0 +1,25 @@
+schema_version: uh.mission.v0
+id: r10-stall-cmdc-acceptance
+title: Stall recovery
+workflow_profile: bugfix-contained
+objective: >-
+  On the first attempt, do not call any tools; end your turn with exactly one
+  question and wait. If the harness resumes this mission after a stall, create
+  out/stall-recovered.txt containing exactly the single line recovered, then stop.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+runtime_config_overrides:
+  permission_mode: yolo
+  limits: { stall_timeout_ms: 1500 }
+  recovery:
+    max_resumes: 2
+    notes: After a stall, create out/stall-recovered.txt containing exactly recovered.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved
