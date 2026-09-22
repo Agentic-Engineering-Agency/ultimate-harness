@@ -2,7 +2,7 @@ import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { parse, stringify } from "yaml";
-import { RuntimeControlSchema, type RuntimeControl } from "../schema/runtime-control.js";
+import { RuntimeControlSchema, type RuntimeControl, type RuntimeStopCode } from "../schema/runtime-control.js";
 import { RuntimeResultSchema, type RuntimeResultDocument, type RuntimeResultStatus, RuntimeSessionSchema } from "../schema/artifacts.js";
 import { assertWritableArtifact, getMissionArtifactContext } from "../adapters/_artifact-context.js";
 import { assertSafeMissionId } from "./mission.js";
@@ -72,6 +72,83 @@ function resultStatusAgreesWithControl(controlStatus: RuntimeControl["status"], 
   // final block) that the control receipt cannot express, so a control
   // receipt of `passed` does not contradict a `blocked` result.
   return controlStatus === "passed" && resultStatus === "blocked";
+}
+
+/** Which native budget a terminal event exhausted. */
+export type NativeBudgetCap = "turn" | "time";
+
+export interface NativeCapSettlementInput {
+  /** The native budget the terminal event exhausted. */
+  cap: NativeBudgetCap;
+  /** The raw native stop reason (`max_turns`, `max_time`, `timeout` …). */
+  reason: string;
+  /** The attempt is the single deadline grace delivery attempt. */
+  grace: boolean;
+  /** The attempt produced its deliverable (a non-empty final message). */
+  deliverable: boolean;
+  /** Turn count the terminal event named, when known. */
+  turns?: number;
+}
+
+export interface NativeCapSettlement {
+  status: RuntimeResultStatus;
+  stopCode: RuntimeStopCode;
+  /** Stop reason text; for a turn cap it names the cap and the turn count. */
+  reason: string;
+  /** True when the cap is the expected end of the deadline grace attempt. */
+  graceExpectedEnd: boolean;
+}
+
+/**
+ * Settle an attempt that ended on a native budget cap.
+ *
+ * A native cap is never a natural end. Outside deadline grace the attempt
+ * settles `failed` even when the model emitted a final message or the
+ * final-message sentinel, with the existing `turn_limit`/`timeout` stop code
+ * and reason — completion requires a natural end, not a cap. The single
+ * deadline grace attempt runs under a native cap of `grace_turns + 1`, so its
+ * cap is the expected end: it settles by its deliverable (`passed` when one is
+ * present, else `failed`) with stop code `deadline`, never `turn_limit`.
+ */
+export function settleNativeCap(input: NativeCapSettlementInput): NativeCapSettlement {
+  const reason = input.cap === "turn"
+    ? `Native turn cap (${input.reason}) reached${input.turns === undefined ? "" : ` after ${input.turns} turns`}`
+    : `Native time cap (${input.reason}) reached`;
+  if (input.grace) {
+    return { status: input.deliverable ? "passed" : "failed", stopCode: "deadline", reason, graceExpectedEnd: true };
+  }
+  return { status: "failed", stopCode: input.cap === "turn" ? "turn_limit" : "timeout", reason, graceExpectedEnd: false };
+}
+
+/**
+ * Rewrite a run's control receipt to a native-cap settlement.
+ *
+ * A settled control receipt is the run's authoritative terminal fact, so the
+ * deadline grace attempt records `stop_code: deadline` with the status its
+ * deliverable earned instead of the launcher exit code that ended it.
+ * Best-effort: a missing receipt is left untouched.
+ */
+export async function reconcileNativeCapSettlement(root: string, missionId: string, runId: string, settlement: NativeCapSettlement): Promise<boolean> {
+  assertSafeMissionId(missionId);
+  assertValidRunId(runId);
+  const controlPath = path.join(root, ".harness", "missions", missionId, "runs", runId, "runtime-control.json");
+  const artifacts = await getMissionArtifactContext(root, path.join(root, ".harness", "missions", missionId, "mission.yaml"), runId);
+  if (!artifacts) return false;
+  let control: RuntimeControl;
+  try { control = RuntimeControlSchema.parse(JSON.parse(await readFile(controlPath, "utf8"))); }
+  catch { return false; }
+  if (control.mission_id !== missionId || control.run_id !== runId) return false;
+  const rewritten: RuntimeControl = {
+    ...control,
+    status: settlement.status,
+    stop_code: settlement.stopCode,
+    stop_reason: settlement.reason,
+  };
+  await withArtifactTransaction(path.join(artifacts.runDir, "runtime-settlement"), async () => {
+    await assertWritableArtifact(artifacts.missionDir, controlPath);
+    await writeAtomicArtifact(controlPath, JSON.stringify(rewritten));
+  });
+  return true;
 }
 
 /**

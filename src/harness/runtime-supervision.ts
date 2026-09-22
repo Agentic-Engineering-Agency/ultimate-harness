@@ -2,6 +2,7 @@ import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { DEFAULT_PROTECTED_PATHS, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode } from "../schema/runtime-control.js";
 import { nativeToolFailure } from "./native-tool-result.js";
+import { settleNativeCap, type NativeBudgetCap } from "./runtime-settlement.js";
 import { SHELL_TOOLS, WRITE_TOOLS } from "./tool-guard.js";
 type Event = Record<string, unknown>;
 const record = (value: unknown): Event | undefined =>
@@ -66,13 +67,6 @@ export function runtimeTerminalFailure(event: Event): string | undefined {
   return undefined;
 }
 
-/** Native terminal stop reasons that are budget caps, mapped to UH stop codes. */
-const NATIVE_BUDGET_STOP_REASONS: Record<string, RuntimeStopCode> = {
-  max_turns: "turn_limit",
-  max_time: "timeout",
-  timeout: "timeout",
-};
-
 /** The native stopReason of a terminal event, scanning the same records as `runtimeTerminalFailure`. */
 export function nativeTerminalStopReason(event: Event): string | undefined {
   const records = [event, record(event.result), record(event.message),
@@ -81,6 +75,28 @@ export function nativeTerminalStopReason(event: Event): string | undefined {
     if (!item) continue;
     const reason = item.stopReason ?? item.stop_reason;
     if (typeof reason === "string" && reason) return reason;
+  }
+  return undefined;
+}
+
+/**
+ * The native budget cap a terminal event reports, scanned from the same
+ * records as `runtimeTerminalFailure`. Runtimes name the cap either in
+ * `stopReason`/`stop_reason` (`max_turns`, `max_time`, `timeout`) or in a
+ * `subtype` such as `error_max_turns`; both spell the same cap.
+ */
+export function nativeTerminalBudgetCap(value: unknown): NativeBudgetCap | undefined {
+  const event = nativeRuntimeEvent(value);
+  if (!event) return undefined;
+  const records = [event, record(event.result), record(event.message),
+    ...(Array.isArray(event.messages) ? event.messages.map(record).filter(item => item?.role !== "toolResult") : [])];
+  for (const item of records) {
+    if (!item) continue;
+    const named = item.stopReason ?? item.stop_reason ?? item.subtype;
+    if (typeof named !== "string") continue;
+    const reason = item.stopReason ?? item.stop_reason ?? String(named).replace(/^error_/, "");
+    if (reason === "max_turns") return "turn";
+    if (reason === "max_time" || reason === "timeout") return "time";
   }
   return undefined;
 }
@@ -447,6 +463,8 @@ export class RuntimeSupervision {
   stopCode?: RuntimeStopCode;
   lastProgressAt: number;
   private observedRoute: RuntimeRoute = {};
+  /** This attempt is the single deadline grace delivery attempt. */
+  private readonly deadlineGrace: boolean;
 
   constructor(
     readonly limits: RuntimeLimits,
@@ -455,22 +473,28 @@ export class RuntimeSupervision {
     readonly workingDirectory?: string,
     readonly permissionMode?: "guard" | "yolo" | "prompt",
     readonly guardLogPath?: string,
-    readonly onDeadline?: { grace_turns: number; grace_timeout_ms: number },
+    readonly onDeadline?: { grace_turns: number; grace_timeout_ms: number; grace?: boolean },
   ) {
     this.lastProgressAt = startedAt;
+    this.deadlineGrace = this.onDeadline?.grace === true;
   }
 
   private deadlineReason(now: number): string | undefined {
     if (!this.onDeadline) return undefined;
+    // The grace attempt runs on the grace budget itself, so the whole
+    // remaining budget is the deadline boundary: exhausting it still settles
+    // as `deadline` rather than as a raw `turn_limit`/`timeout`.
+    const graceTurns = this.deadlineGrace ? 0 : this.onDeadline.grace_turns;
+    const graceTimeout = this.deadlineGrace ? 0 : this.onDeadline.grace_timeout_ms;
     if (this.limits.timeout_ms !== undefined) {
       const remaining = Math.max(0, this.limits.timeout_ms - (now - this.startedAt));
-      if (now - this.startedAt >= Math.max(0, this.limits.timeout_ms - this.onDeadline.grace_timeout_ms)) {
+      if (now - this.startedAt >= Math.max(0, this.limits.timeout_ms - graceTimeout)) {
         return this.stop(`Runtime deadline reached; ${remaining}ms remaining for grace`, "deadline");
       }
     }
     if (this.limits.max_turns !== undefined) {
       const remaining = Math.max(0, this.limits.max_turns - this.turns);
-      if (this.turns >= Math.max(0, this.limits.max_turns - this.onDeadline.grace_turns)) {
+      if (this.turns >= Math.max(0, this.limits.max_turns - graceTurns)) {
         return this.stop(`Runtime deadline reached; ${remaining} turns remaining for grace`, "deadline");
       }
     }
@@ -530,25 +554,34 @@ export class RuntimeSupervision {
    * classification: budget caps settle as their own stop code (so salvage
    * sees them), every other native failure settles as `runtime_error` with
    * the native reason copied into the stop reason, never empty.
+   *
+   * A native cap is never a natural end, so outside deadline grace it is a
+   * failure even when the model emitted a final message. The single deadline
+   * grace attempt runs under a cap of `grace_turns + 1`, so its cap is the
+   * expected end: it settles with stop code `deadline` and no failure. Returns
+   * true when the event is that expected grace end, so the caller does not
+   * record a native terminal failure for it.
    */
-  private stopFromNativeTerminal(event: Event): void {
-    if (this.failure) return;
-    const reason = nativeTerminalStopReason(event);
-    const budgetCode = reason ? NATIVE_BUDGET_STOP_REASONS[reason] : undefined;
-    if (budgetCode) {
-      if (budgetCode === "turn_limit") {
-        const nativeTurns = event.num_turns ?? record(event.result)?.num_turns;
-        const count = typeof nativeTurns === "number" && Number.isInteger(nativeTurns) && nativeTurns > 0
-          ? nativeTurns
-          : this.turns > 0 ? this.turns : undefined;
-        this.stop(`Native turn cap (${reason}) reached${count === undefined ? "" : ` after ${count} turns`}`, "turn_limit");
-      } else {
-        this.stop(`Native time cap (${reason}) reached`, budgetCode);
+  private stopFromNativeTerminal(event: Event): boolean {
+    if (this.failure) return false;
+    const cap = nativeTerminalBudgetCap(event);
+    if (cap) {
+      const reason = nativeTerminalStopReason(event) ?? (cap === "turn" ? "max_turns" : "max_time");
+      const nativeTurns = event.num_turns ?? record(event.result)?.num_turns;
+      const turns = typeof nativeTurns === "number" && Number.isInteger(nativeTurns) && nativeTurns > 0
+        ? nativeTurns
+        : this.turns > 0 ? this.turns : undefined;
+      const settlement = settleNativeCap({ cap, reason, grace: this.deadlineGrace, deliverable: false, turns });
+      if (settlement.graceExpectedEnd) {
+        this.stopCode = "deadline";
+        return true;
       }
-      return;
+      this.stop(settlement.reason, settlement.stopCode);
+      return false;
     }
     const failure = runtimeTerminalFailure(event);
     if (failure) this.stop(failure, "runtime_error");
+    return false;
   }
 
   get stopReason(): RuntimeStopCode | undefined {
@@ -661,8 +694,7 @@ export class RuntimeSupervision {
     }
     if (type === "run_end" || type === "result" || type === "agent_end") {
       this.terminal = true;
-      this.stopFromNativeTerminal(event);
-      this.terminalFailure ??= runtimeTerminalFailure(event);
+      if (!this.stopFromNativeTerminal(event)) this.terminalFailure ??= runtimeTerminalFailure(event);
       this.markProgress(now);
     }
     // Text deltas are not progress: malformed repetitive output must not defeat a stall budget.
