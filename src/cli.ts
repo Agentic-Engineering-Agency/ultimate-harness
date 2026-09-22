@@ -533,6 +533,87 @@ program
     }
   });
 
+/** One resumed attempt for `uh resume` / `uh steer`, wired to the live CLI. */
+interface OperatorResumeRequest {
+  artifactRoot: string;
+  missionId: string;
+  missionPath: string;
+  runtime: string;
+  sourceRunId: string;
+  runId: string;
+  recoveryNotes: string;
+  report: boolean;
+}
+
+async function runOperatorResumedAttempt(request: OperatorResumeRequest): Promise<{ runId?: string; result?: { status?: string } }> {
+  const wiring = RUNTIME_WIRINGS[request.runtime];
+  if (!wiring) throw new Error(`Unknown runtime: ${request.runtime}`);
+  const routing = await resolveSandboxMissionRoot(request.artifactRoot, request.missionPath, true);
+  if (routing.error) throw new Error(routing.error);
+  const recovery = await resolveRuntimeRecoveryPolicy(routing.effectiveRoot, routing.missionPath, request.runtime, {});
+  return runWithRuntimeRecovery({
+    root: request.artifactRoot,
+    missionId: request.missionId,
+    runtime: request.runtime,
+    runId: request.runId,
+    recovery: recovery.recovery,
+    extraRuntimeConfigOverrides: { resume_from_run: request.sourceRunId, recovery_notes: request.recoveryNotes },
+    // The operator's own resume is authorized outside the automatic budget.
+    priorResumeOrigins: ["operator"],
+    run: async (attempt) => {
+      const res = await wiring.run(routing.effectiveRoot, routing.missionPath, { ...attempt, artifactRoot: request.artifactRoot });
+      return { ...res, runId: attempt.runId };
+    },
+  });
+}
+
+// uh resume — continue a settled run's native session as a new run.
+program
+  .command("resume")
+  .description("Resume a settled run's native session as a new run for the same mission")
+  .argument("<run-id>", "Run id, or a unique prefix of one")
+  .option("--notes <text>", "Text injected as the first instruction of the resumed turn")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the resume outcome as JSON")
+  .action(async (runId: string, opts: { notes?: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { resumeRun } = await import("./harness/steer.js");
+      const result = await resumeRun(root, runId, opts.notes !== undefined ? { notes: opts.notes } : {},
+        { run: runOperatorResumedAttempt, cancel: (cancelRoot, missionId, id) => cancelLocalMissionRun(cancelRoot, missionId, id) });
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`Resumed ${result.sourceRunId} as ${result.runId}`);
+    } catch (err) {
+      console.error(`[FAIL] resume error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh steer — cancel a live or settled run and resume it with a message.
+program
+  .command("steer")
+  .description("Cancel a run, then resume its native session with a message")
+  .argument("<run-id>", "Run id, or a unique prefix of one")
+  .argument("<message>", "Message injected as the first instruction of the resumed turn")
+  .option("--report", "Ask the worker to write a status report before continuing")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the steer outcome as JSON")
+  .action(async (runId: string, message: string, opts: { report?: boolean; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { steerRun } = await import("./harness/steer.js");
+      const result = await steerRun(root, runId, message, { report: opts.report === true },
+        { run: runOperatorResumedAttempt, cancel: (cancelRoot, missionId, id) => cancelLocalMissionRun(cancelRoot, missionId, id) });
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`Steered ${result.sourceRunId} into ${result.runId}`);
+    } catch (err) {
+      console.error(`[FAIL] steer error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
 // uh acceptance — real runtime evidence, separate from test and fixture status.
 const acceptanceCmd = program.command("acceptance").description("Run and inspect real runtime acceptance evidence");
 
