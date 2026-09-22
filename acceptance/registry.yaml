@@ -462,7 +462,7 @@ entries:
         denials: 3
         tool_guard_lines: 3
     freshness_days: 30
-    notes: Command Code denies an outside write, git commit, and package install while allowing the report.
+    notes: Command Code denies an outside write, git commit, and package install while allowing the report. Run 20260922T040135Z-6c706a failed only because max_turns 12 was exhausted after the registered model spent 48 exploratory tool calls reading the workspace before the three denials; the budget was raised to 40 and the expected facts were not changed.
   X1-paths:
     title: Forward-slash paths
     capability: X1
@@ -541,6 +541,7 @@ entries:
     shape: single
     runtime: command-code
     model: z-ai/glm-5.3-flash
+    support_shim: cmdc.cmd
     expected:
       status: failed
       stop_code: policy
