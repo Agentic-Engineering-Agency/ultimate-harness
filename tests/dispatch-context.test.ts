@@ -125,6 +125,12 @@ describe("UH-80 dispatch context contract", () => {
       - bun run typecheck
       - bun run test
 
+      ## Constraints
+      - none, add nothing
+
+      ## Acceptance Criteria
+      - none, add nothing
+
       Execute this mission and produce the expected artifacts.
       ::FINAL::"
     `);
@@ -245,7 +251,7 @@ describe("UH-80 dispatch context contract", () => {
     expect(enriched.slice(base.length)).toBe("\n\n[Persistent memory]\nx");
   });
 
-  test("renderPrompt omits sections when their lists are empty", () => {
+  test("renderPrompt renders empty mission lists explicitly as none, add nothing", () => {
     const sparse = validateMission({
       schema_version: "uh.mission.v0",
       id: "m-sparse",
@@ -261,6 +267,21 @@ describe("UH-80 dispatch context contract", () => {
       "# Mission: Sparse
 
       Just the basics.
+
+      ## Read First
+      - none, add nothing
+
+      ## Expected Artifacts
+      - none, add nothing
+
+      ## Verification Checks
+      - none, add nothing
+
+      ## Constraints
+      - none, add nothing
+
+      ## Acceptance Criteria
+      - none, add nothing
 
       Execute this mission and produce the expected artifacts.
       ::F::"

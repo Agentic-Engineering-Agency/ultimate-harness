@@ -6,7 +6,7 @@ import { relativeArtifactPath } from "./artifact-paths.js";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
-import { parse } from "yaml";
+import { parse, stringify } from "yaml";
 import { isDeepStrictEqual } from "node:util";
 import { assertWritableArtifact } from "../adapters/_artifact-context.js";
 import { IndependentReviewAssessmentSchema, IndependentReviewBindingSchema, IndependentReviewReportSchema, IndependentReviewRequestSchema,
@@ -31,6 +31,23 @@ export interface PrepareIndependentReviewOptions {
 
 function digest(bytes: string): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function pinReportIdEnum(listSchema: unknown, ids: string[]): void {
+  const list = listSchema as { maxItems?: number; items?: { properties?: { id?: Record<string, unknown> } } } | undefined;
+  if (!list?.items?.properties) throw new Error("Unexpected generated review report schema shape");
+  list.items.properties.id = { ...list.items.properties.id, enum: ids };
+  list.maxItems = ids.length;
+}
+
+/** The report schema pinned to the exact ids this request allows; empty lists allow nothing. */
+function emittedReportSchema(request: IndependentReviewRequest): Record<string, unknown> {
+  const schema = z.toJSONSchema(IndependentReviewReportSchema) as { properties?: Record<string, unknown> };
+  const sourceItems = (schema.properties?.sources as { items?: { properties?: Record<string, unknown> } } | undefined)?.items?.properties;
+  if (!sourceItems) throw new Error("Unexpected generated review report schema shape");
+  pinReportIdEnum(sourceItems.acceptance, request.sources.flatMap(source => source.acceptance.map(item => item.id)));
+  pinReportIdEnum(sourceItems.checks, request.sources.flatMap(source => source.checks.map(item => item.id)));
+  return schema;
 }
 
 const INDEPENDENT_REVIEW_REPORT_PATH = "out/review-report.json";
@@ -139,17 +156,24 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
       report_path: reportRelative, request_sha256: digest(serialized) });
     await writeFile(requestPath, serialized, { flag: "wx" });
     const schemaPath = path.join(missionDir, "review-report.schema.json");
-    await writeFile(schemaPath, JSON.stringify(z.toJSONSchema(IndependentReviewReportSchema), null, 2), { flag: "wx" });
+    await writeFile(schemaPath, JSON.stringify(emittedReportSchema(request), null, 2), { flag: "wx" });
     readFirst.push(relativeArtifactPath(root, schemaPath));
+    const idClause = (ids: string[]) => ids.length > 0 ? ids.join(", ") : "[] exactly; add nothing";
+    const requiredIds = sources.map(source => `- ${source.mission_id}: acceptance: ${idClause(source.acceptance.map(item => item.id))}; checks: ${idClause(source.checks.map(item => item.id))}.`).join("\n");
     const packet = await proposeMission(root, {
       id: options.id, title: `Independent review: ${options.sources.map(source => source.missionId).join(", ")}`, workflow,
-      objective: `Independently assess the captured contracts and outputs in ${binding.request_path}. Read every captured contract and available output in full. Check claims against sources, cover every listed acceptance and check id exactly once, and report missing or unverifiable evidence honestly. Write ${binding.report_path} conforming to the supplied JSON schema and bind it to request_sha256 ${binding.request_sha256}. Missing outputs require needs-remediation; unverified required evidence cannot receive pass. This is an advisory recommendation, not Main/owner acceptance.`,
+      objective: `Independently assess the captured contracts and outputs in ${binding.request_path}. Read every captured contract and available output in full. Check claims against sources, cover exactly the ids listed below once each, and report missing or unverifiable evidence honestly. The report must contain exactly these ids per source, each exactly once:\n${requiredIds}\nAnything you verified that no listed id covers goes into observations, never into acceptance or checks. Write ${binding.report_path} conforming to the supplied JSON schema and bind it to request_sha256 ${binding.request_sha256}. Missing outputs require needs-remediation; unverified required evidence cannot receive pass. This is an advisory recommendation, not Main/owner acceptance.`,
       readFirst, expectedOutputs: [binding.report_path], sandboxBackend: "directory", promotionPolicy: "human-approved",
       constraints: ["Do not edit source worker outputs or captured review inputs.", "Do not delegate, spawn subagents, or reuse a worker session.",
         "Reference paths are relative to each source_root; captured snapshots, not later source changes, define this review."],
       runtimeConfigOverrides: { model: binding.model, ...(binding.runtime === "oh-my-pi" ? { honcho_memory: false } : {}) }, independentReview: binding,
       completionCriteria: ["Every source has an evidence-backed recommendation; Main/owner acceptance remains required."],
     });
+    const guardedMission = { ...packet.mission, guard: {
+      write_roots: [path.posix.dirname(binding.report_path)],
+      deny_git_mutations: true, deny_package_installs: true, deny_network_clients: true,
+    } };
+    await writeFile(packet.path, stringify(guardedMission), "utf-8");
     return { missionPath: packet.path, requestPath, reportPath, requestSha256: binding.request_sha256 };
   } catch (error) {
     await rm(missionDir, { recursive: true, force: true });
@@ -265,8 +289,11 @@ export async function collectIndependentReview(root: string, missionId: string) 
       return recommendation;
     },
   });
+  const observations = report.sources.flatMap(source =>
+    (source.observations ?? []).map(observation => ({ source: source.mission_id, ...observation })));
   const assessment = IndependentReviewAssessmentSchema.parse({ schema_version: "uh.independent-review-assessment.v0", review_id: missionId,
-    run_id: latest.run_id, request_sha256: binding.request_sha256, recommendation, human_acceptance_required: true });
+    run_id: latest.run_id, request_sha256: binding.request_sha256, recommendation, human_acceptance_required: true,
+    ...(observations.length > 0 ? { observations } : {}) });
   const assessmentPath = path.join(missionDir, "review-assessment.json");
   await assertWritableArtifact(missionDir, assessmentPath);
   await writeAtomicArtifact(assessmentPath, JSON.stringify(assessment, null, 2));

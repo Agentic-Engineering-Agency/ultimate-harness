@@ -58,6 +58,14 @@ const ReviewedCheckSchema = z.object({
   evidence: EvidenceSchema,
 }).strict();
 
+/** Verified observations that no listed id covers; never graded, never part of the recommendation. */
+export const IndependentReviewObservationSchema = z.object({
+  title: EvidenceSchema,
+  evidence: EvidenceSchema,
+  relates_to: z.string().optional(),
+  severity: z.enum(["info", "warn"]).optional(),
+}).strict();
+
 export const IndependentReviewReportSchema = z.object({
   schema_version: z.literal("uh.independent-review-report.v0"),
   request_sha256: DigestSchema,
@@ -76,6 +84,7 @@ export const IndependentReviewReportSchema = z.object({
       detail: EvidenceSchema,
       evidence: EvidenceSchema,
     }).strict()),
+    observations: z.array(IndependentReviewObservationSchema).optional(),
     verdict: VerdictValueSchema,
     reason: EvidenceSchema,
   }).strict()).min(1),
@@ -89,4 +98,7 @@ export const IndependentReviewAssessmentSchema = z.object({
   request_sha256: DigestSchema,
   recommendation: VerdictValueSchema,
   human_acceptance_required: z.literal(true),
+  observations: z.array(IndependentReviewObservationSchema.extend({
+    source: z.string().min(1),
+  }).strict()).optional(),
 }).strict();
