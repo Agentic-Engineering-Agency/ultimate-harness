@@ -61,6 +61,7 @@ import {
   discardSandbox,
   getSandboxStatus,
   listSandboxes,
+  repairSandboxes,
 } from "./harness/sandbox.js";
 import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
@@ -2768,6 +2769,35 @@ sandboxCmd
       }
     } catch (err) {
       console.error(`[FAIL] sandbox discard error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("repair")
+  .description("Re-register sandbox directories whose index entry is missing")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const repaired = await repairSandboxes(root);
+      if (repaired.length === 0) {
+        console.log("No sandbox registrations repaired.");
+        return;
+      }
+      for (const entry of repaired) {
+        console.log(`[REPAIRED] ${entry.id}`);
+        console.log(`  mission: ${entry.mission_id}`);
+        console.log(`  backend: ${entry.backend}`);
+        if (entry.branch) {
+          console.log(`  branch: ${entry.branch}`);
+        }
+        console.log(`  path: ${entry.path}`);
+        console.log(`  status: ${entry.status}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox repair error:`);
       console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }
