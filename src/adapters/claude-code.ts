@@ -259,8 +259,8 @@ export async function planClaudeCodeRun(root: string, missionPath: string, optio
   };
 }
 
-export async function dryRunClaudeCode(root: string, missionPath: string): Promise<ClaudeCodeRunPlan> {
-  const plan = await planClaudeCodeRun(root, missionPath);
+export async function dryRunClaudeCode(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<ClaudeCodeRunPlan> {
+  const plan = await planClaudeCodeRun(root, missionPath, options);
   const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
   if (artifacts) await persistPromptAndSession(artifacts, plan.prompt, {
     schema_version: "uh.runtime-session.v0",

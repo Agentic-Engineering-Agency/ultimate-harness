@@ -288,9 +288,9 @@ export async function checkOhMyPi(root?: string): Promise<CheckResult> {
   return runOhMyPiCliCheck("omp");
 }
 
-export async function dryRunOhMyPi(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunOhMyPi(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planOhMyPiRun(root, missionPath);
+    const plan = await planOhMyPiRun(root, missionPath, options);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
