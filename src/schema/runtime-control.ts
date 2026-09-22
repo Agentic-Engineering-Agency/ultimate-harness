@@ -51,8 +51,29 @@ export const ToolGuardArtifactSchema = ToolGuardPolicySchema.extend({
    * rewritten identically everywhere is still caught.
    */
   written_files: z.record(z.string().min(1), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
-}).strict();
+}).passthrough();
 export type ToolGuardArtifact = z.infer<typeof ToolGuardArtifactSchema>;
+
+export type AppliedToolGuardPolicy = ToolGuardPolicy & {
+  worker_root: string;
+  protected_paths?: string[];
+  controller_commands?: boolean;
+};
+
+/** Extract applied policy from an artifact, isolating policy fields from metadata. */
+export function policyFromArtifact(artifact: ToolGuardArtifact): AppliedToolGuardPolicy {
+  return {
+    write_roots: artifact.write_roots,
+    deny_git_mutations: artifact.deny_git_mutations,
+    deny_package_installs: artifact.deny_package_installs,
+    deny_network_clients: artifact.deny_network_clients,
+    agent_clients: artifact.agent_clients,
+    allow_native_subagents: artifact.allow_native_subagents,
+    worker_root: artifact.worker_root,
+    protected_paths: artifact.protected_paths,
+    controller_commands: artifact.controller_commands,
+  };
+}
 
 /** Optional limits are enforced by UH, independently of model compliance. */
 export const RuntimeLimitsSchema = z.object({
