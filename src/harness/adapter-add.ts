@@ -279,7 +279,6 @@ capabilities:
   - cli-execution
   - non-interactive
   - one-shot
-  - worktree-isolation
   - json-output
   - diff-output
 status: experimental
@@ -293,7 +292,7 @@ config:
   runtime_config:
     server_command: acp-agent
     server_args: []
-    protocol_version: "1.0"
+    protocol_version: 1
     timeout_ms: 600000
 `,
 };
