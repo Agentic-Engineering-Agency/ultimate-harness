@@ -86,6 +86,66 @@ uh mission cancel --mission <mission-id> --run-id <run-id> --root <project>
 `--root` may be the project root even when the run is a team worker whose
 `runtime-control.json` lives deeper in the harness tree.
 
+## Asking for a report
+
+`uh ps` tells you *which* runs exist and their verdict. `uh report` answers the
+follow-up — "what is this run doing right now?" — for one run, in under a second
+and without spending a token. It reads only what is already on disk (the run's
+`runtime-control.json` and its `events.ndjson`) and never starts a controller or
+calls a model.
+
+```bash
+# One run, by id or by a unique prefix of one.
+uh report 20260922T101500Z-a1b2c3
+uh report 20260922T101500Z-a1b2
+
+# Machine-readable, plus the projection knobs.
+uh report 20260922T101500Z-a1b2c3 --json
+uh report 20260922T101500Z-a1b2c3 --last 20   # project the last 20 tool calls (default: 10)
+uh report 20260922T101500Z-a1b2c3 --full      # read the whole events.ndjson, not just its last 256 KB
+```
+
+A report carries:
+
+- **Mission, team role, runtime and model** — the run's identity, from the live-run
+  registry and its control file. (A registered run records its model; a
+  pre-registry run discovered by scan may not have one.)
+- **Liveness verdict** — the same `live` / `orphaned` / `stale` / `settled`
+  decision `uh ps` makes, against the same process lister.
+- **Elapsed, turns, denials** — elapsed is `started_at` to the settled time (or
+  now); turns and the denial count come from `runtime-control.json`.
+- **Denials, with guard class and target** — each denial in the stream, reduced to
+  its guard class (`write_outside`, `git_mutation`, `package_install`,
+  `network_client`, and the other `ToolGuardClass` values, or `denied` when the
+  stream disclosed no finer class) and its **relative** target.
+- **Tokens and cost** — reported when the stream carries them; otherwise `null`
+  with a `tokens_unknown_reason` / `cost_unknown_reason`. Cost is never guessed:
+  a price the runtime reported is `reported`, a harness estimate from
+  `.harness/prices.yaml` is `estimated`, and anything else stays unknown.
+- **Activity** — the last N completed tool calls, projected with the same
+  `projectActivity` the loop probe uses: tool, kind, target, ok, error class and
+  the age of the completion.
+- **Loop signals** — `identical_repeats`, `alternating_pairs` and
+  `distinct_targets` over that window, computed deterministically with no model.
+- **Files written so far** — the distinct write targets that completed
+  successfully, as relative paths.
+- **Last assistant text** — the last assistant-authored text, bounded to 600
+  characters and scrubbed of recognizable credentials.
+
+Two guarantees hold for every field: no absolute path and no credential is ever
+printed. Guard targets and written files are resolved relative to the run's
+working directory (or to the bounded placeholders `<outside>` / `<pattern>` /
+`unknown`), and the assistant text is passed through a conservative key/token
+redactor before it is bounded.
+
+By default only the **last 256 KB** of `events.ndjson` is read — the tail is
+where the current window lives, and it keeps the answer instant even on a huge
+log. `--full` reads the whole file when you need the history the tail dropped
+(for example, an early usage event that prices the run).
+
+Exit codes: `0` on success, `1` when the run cannot be resolved (unknown or
+ambiguous id) or the report itself fails.
+
 ## Stopping runs
 
 `uh kill` stops runs and proves they are dead. Targets are always resolved

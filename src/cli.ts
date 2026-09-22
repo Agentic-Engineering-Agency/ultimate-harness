@@ -533,6 +533,38 @@ program
     }
   });
 
+// uh report — an instant, model-free status report of any run, from disk only.
+program
+  .command("report")
+  .description("Report what a run is doing right now from disk, without a model")
+  .argument("<run-id>", "Run id, or a unique prefix of one")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the report as JSON")
+  .option("--last <n>", "How many recent tool calls to project (default: 10)")
+  .option("--full", "Read the whole events.ndjson instead of its last 256 KB")
+  .action(async (runId: string, opts: { root?: string; json?: boolean; last?: string; full?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const last = opts.last === undefined ? undefined : Number.parseInt(opts.last, 10);
+    if (last !== undefined && (!Number.isFinite(last) || last <= 0)) {
+      console.error(`[FAIL] --last must be a positive integer, got: ${opts.last}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const { reportRun, formatRunReport } = await import("./harness/report.js");
+      const report = await reportRun(root, runId, {
+        ...(last !== undefined ? { last } : {}),
+        ...(opts.full === true ? { full: true } : {}),
+      });
+      if (opts.json) console.log(JSON.stringify(report, null, 2));
+      else console.log(formatRunReport(report));
+    } catch (err) {
+      console.error(`[FAIL] report error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
 // uh acceptance — real runtime evidence, separate from test and fixture status.
 const acceptanceCmd = program.command("acceptance").description("Run and inspect real runtime acceptance evidence");
 
