@@ -24,6 +24,16 @@ Evidence records include actual `fact_sources`; registry `expected.fact_sources`
 
 Run the campaign at one harness commit before evaluating freshness. The report drift check compares the registry and available local evidence with the generated report. A clean checkout ships no local execution records, so its report does not claim live proof. Fixture-only capabilities render `fixture_only` without real evidence; attempted fixture missions retain their actual outcome. Review any generated report before publication: local run identifiers, timestamps, paths, transcripts and account information are not public documentation.
 
+## Campaign runtime snapshot and CLI outcome
+
+`uh acceptance run` materializes a snapshot of the harness under `<workspace>/.acceptance-runtime` (dist and src, plus a junction to the nearest `node_modules` found by walking up from the harness root — a git worktree or team leader tree without its own install resolves the parent checkout). When no `node_modules` exists anywhere above the root, the run refuses loudly with exit 2 and names the searched path instead of spawning a snapshot CLI that dies on `ERR_MODULE_NOT_FOUND`. A dangling junction is never reused: the preload stats the junction target and recreates the junction when the target is gone. On Windows, each workspace repo is initialized with `core.longpaths true` so deep-path runs can `git add` long fixture paths.
+
+Every evidence record stores the mission CLI outcome as `cli: { exit_code, stderr_tail (last 2 KB), stdout_tail (last 2 KB) }`; wrapper-unavailable records store `exit_code: null` with empty tails. A run that produced no observed status keeps that fact visible instead of fabricating `status: failed`, and its FAIL line ends with the first line of the CLI stderr, so the cause (for example a missing dependency in the snapshot) is readable without hand-running the snapshot CLI.
+
+`acceptance/support/costless-wrapper-cmdc.mjs` resolves a `.cmd` shim (Node 22 refuses to spawn `.cmd`/`.bat` without a shell) to the node entry point it wraps and spawns that directly, falling back to the Windows shell only for shims it cannot parse; the `S3-unknown-cost-cmdc` route therefore attests on Windows.
+
+The committed-report drift check renders the report against an empty evidence root (`renderAcceptanceReport(root, now, { evidenceRoot })`) and compares it with `docs/acceptance/README.md`, so local campaign records under `acceptance/evidence/` never fail the check; `uh acceptance report` keeps rendering local evidence for humans.
+
 ## Support shims and failed evidence
 
 Registry entries may declare `support_shim` (for example `cmdc.cmd` on the hook-broken probe): the runner prepends the copied `acceptance/support` directory to the child process PATH for that run only, records `shim_on_path: true` in the evidence, and every other capability keeps the untouched parent PATH. When a capability fails, read the failed evidence and its artifact root first — run directories, the tool-guard log, `fact_sources` — before changing anything: expectations describe the mechanism, so a failure usually means the runner or the budget mis-modeled reality (for example a turn budget exhausted by exploratory tool calls), not that the expectation should move.
