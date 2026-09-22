@@ -2789,6 +2789,145 @@ missionCmd
     }
   });
 
+const LEDGER_CAUSES = ["tool", "info", "permission", "capability", "unclear-spec", "unknown"] as const;
+const LEDGER_QUALIFIERS = ["missing", "incorrect", "insufficient", "unknown"] as const;
+
+function ledgerEnum<T extends string>(name: string, value: string, allowed: readonly T[]): T {
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Error(`${name} must be one of ${allowed.join(" | ")}, got ${value}`);
+  }
+  return value as T;
+}
+
+// uh note
+program
+  .command("note")
+  .description("Record an intervention on the ledger (a moment a run needed correction)")
+  .argument("<text>", "What the intervention was")
+  .option("--source <source>", "Who intervened: owner | orchestrator (default: owner)", "owner")
+  .option("--run <id>", "Related run id")
+  .option("--mission <id>", "Related mission id")
+  .option("--cause <cause>", `Cause category: ${LEDGER_CAUSES.join(" | ")} (default: unknown)`, "unknown")
+  .option("--qualifier <qualifier>", `Qualifier: ${LEDGER_QUALIFIERS.join(" | ")} (default: unknown)`, "unknown")
+  .option("--detection <text>", "How this was or can be detected")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (text: string, opts: { source: string; run?: string; mission?: string; cause: string; qualifier: string; detection?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const source = ledgerEnum("--source", opts.source, ["owner", "orchestrator"] as const);
+      const cause = ledgerEnum("--cause", opts.cause, LEDGER_CAUSES);
+      const qualifier = ledgerEnum("--qualifier", opts.qualifier, LEDGER_QUALIFIERS);
+      const { recordIntervention } = await import("./harness/interventions.js");
+      const entry = await recordIntervention(root, {
+        source, trigger: "note", cause, qualifier, what: text,
+        refs: { ...(opts.run !== undefined ? { run_id: opts.run } : {}), ...(opts.mission !== undefined ? { mission_id: opts.mission } : {}) },
+        detection: opts.detection ?? "recorded by hand",
+      });
+      console.log(`recorded ${entry.id}`);
+    } catch (err) {
+      console.error(`[FAIL] note: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh ledger
+const ledgerCmd = program
+  .command("ledger")
+  .description("Inspect and update the intervention ledger at .harness/ledger/interventions.ndjson");
+
+ledgerCmd
+  .command("list")
+  .description("List interventions (the latest state per id)")
+  .option("--open", "Only open interventions")
+  .option("--cause <cause>", `Filter by cause: ${LEDGER_CAUSES.join(" | ")}`)
+  .option("--mission <id>", "Filter by mission id")
+  .option("--json", "Emit JSON")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { open?: boolean; cause?: string; mission?: string; json?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const cause = opts.cause === undefined ? undefined : ledgerEnum("--cause", opts.cause, LEDGER_CAUSES);
+      const { listInterventions, formatInterventionList } = await import("./harness/interventions.js");
+      const entries = await listInterventions(root, { open: opts.open === true, cause, missionId: opts.mission });
+      console.log(opts.json === true ? JSON.stringify(entries, null, 2) : formatInterventionList(entries));
+    } catch (err) {
+      console.error(`[FAIL] ledger list: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+ledgerCmd
+  .command("summary")
+  .description("Summarize interventions per mission, by cause and qualifier, and countermeasure recurrence")
+  .option("--json", "Emit JSON")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { json?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { readLedger, summarizeLedger, formatLedgerSummary } = await import("./harness/interventions.js");
+      const summary = summarizeLedger(await readLedger(root));
+      console.log(opts.json === true ? JSON.stringify(summary, null, 2) : formatLedgerSummary(summary));
+    } catch (err) {
+      console.error(`[FAIL] ledger summary: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+ledgerCmd
+  .command("land")
+  .description("Land an intervention: append a status change with its evidence")
+  .argument("<id>", "Intervention id")
+  .requiredOption("--evidence <text>", "Evidence that the fix landed")
+  .option("--countermeasure <id>", "Id of the rule, check, or gate this became")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { evidence: string; countermeasure?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { landIntervention } = await import("./harness/interventions.js");
+      const entry = await landIntervention(root, id, { evidence: opts.evidence, ...(opts.countermeasure !== undefined ? { countermeasure: opts.countermeasure } : {}) });
+      console.log(`landed ${entry.id}${entry.countermeasure ? ` -> countermeasure ${entry.countermeasure}` : ""}`);
+    } catch (err) {
+      console.error(`[FAIL] ledger land: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+ledgerCmd
+  .command("confirm")
+  .description("Confirm an intervention as verified by the owner (only the owner should run this)")
+  .argument("<id>", "Intervention id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { confirmIntervention } = await import("./harness/interventions.js");
+      const entry = await confirmIntervention(root, id);
+      console.log(`verified ${entry.id} by owner`);
+      console.log("Notice: only the owner should run `uh ledger confirm`; an agent may never set verified_by owner.");
+    } catch (err) {
+      console.error(`[FAIL] ledger confirm: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+ledgerCmd
+  .command("import")
+  .description("Import a predecessor corrections ledger (JSON lines: correction, status, evidence, confirmed_by_owner)")
+  .argument("<file>", "Path to the predecessor JSON lines file")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (file: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { importPredecessorLedger } = await import("./harness/interventions.js");
+      const content = await readFileAsync(file, "utf-8");
+      const created = await importPredecessorLedger(root, content);
+      console.log(`imported ${created.length} intervention(s)`);
+    } catch (err) {
+      console.error(`[FAIL] ledger import: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
 async function resolveActiveRuntimes(root: string): Promise<string[]> {
   const entries = await runtimeRegistry.list(root);
   return entries

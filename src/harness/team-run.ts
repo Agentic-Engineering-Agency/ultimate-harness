@@ -3,6 +3,7 @@ import { DEFAULT_PROTECTED_PATHS, RuntimeControlSchema, type RuntimeLimits, type
 import type { TeamWorker } from "../schema/mission.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
+import { captureReplace } from "./interventions.js";
 /**
  * UH-72 — Team mission runtime.
  *
@@ -1866,6 +1867,7 @@ async function guardTeamRelaunch(args: {
   }
   if (args.replace) {
     await archiveTeamRun(args.gitOps, args.root, args.plan);
+    await captureReplace(args.root, { missionId: args.missionId });
     return;
   }
   const retained = [...preexisting.branches, ...preexisting.worktrees];

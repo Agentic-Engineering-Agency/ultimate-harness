@@ -23,6 +23,7 @@ import { reconcileRuntimeSettlement } from "./runtime-settlement.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { assertSafeMissionId } from "./mission.js";
 import { assertValidRunId } from "./run-id.js";
+import { captureKill } from "./interventions.js";
 
 /** Cancellation-target resolution, re-exported so `uh kill` owns one surface. */
 export { runRootForRecord } from "./mission-cancel.js";
@@ -769,6 +770,14 @@ export async function killRuns(projectRoot: string, options: KillOptions = {}): 
       teamMarks.push(await markTeamStateCancelled(root, options.teamId, runId, now));
     }
   }
+
+  await captureKill(root, entries.map((entry) => ({
+    run_id: entry.run_id,
+    mission_id: entry.mission_id,
+    outcome: entry.outcome,
+    ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
+    ...(entry.team?.mission_id !== undefined ? { team_id: entry.team.mission_id } : {}),
+  })));
 
   return buildReport(root, new Date(now).toISOString(), entries, teamMarks);
 }
