@@ -469,13 +469,15 @@ export function lastAssistantText(events: Iterable<unknown>): string | undefined
 /**
  * Command Code names token counters in camelCase; oh-my-pi names them in short
  * camelCase (`input`, `output`, `cacheRead`, `cacheWrite`); canonical usage uses
- * snake_case. Every spelling of the same counter maps to one canonical field.
+ * snake_case. Claude Code reports Anthropic's snake_case names, where the two
+ * prompt caches are `cache_read_input_tokens` and `cache_creation_input_tokens`.
+ * Every spelling of the same counter maps to one canonical field.
  */
 const TOKEN_FIELDS = [
   { canonical: "input_tokens", aliases: ["inputTokens", "input_tokens", "input", "prompt_tokens"] },
   { canonical: "output_tokens", aliases: ["outputTokens", "output_tokens", "output", "completion_tokens"] },
-  { canonical: "cache_read_tokens", aliases: ["cacheReadTokens", "cache_read_tokens", "cacheRead", "cache_read"] },
-  { canonical: "cache_write_tokens", aliases: ["cacheWriteTokens", "cache_write_tokens", "cacheWrite", "cache_write"] },
+  { canonical: "cache_read_tokens", aliases: ["cacheReadTokens", "cache_read_tokens", "cacheRead", "cache_read", "cacheReadInputTokens", "cache_read_input_tokens"] },
+  { canonical: "cache_write_tokens", aliases: ["cacheWriteTokens", "cache_write_tokens", "cacheWrite", "cache_write", "cacheCreationInputTokens", "cache_creation_input_tokens"] },
 ] as const;
 
 /** The aliases of the input counter, which is the context size of a model request. */
@@ -511,6 +513,42 @@ function isRuntimeUsageEvent(event: Event, type: string): boolean {
 /** The usage object of a `runtime.usage` event: its `usage` object, or the event itself. */
 function runtimeUsageObjectOf(event: Event): Event | undefined {
   return record(event.usage) ?? event;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Claude Code stream-json                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Claude Code's stream-json delivers one turn per assistant message. An
+ * `assistant` line carries the message id in `message.id`, its `tool_use` blocks
+ * in `message.content`, and the request's token counters in `message.usage`
+ * (Anthropic's snake_case names). The matching output returns under a `user`
+ * line, whose `message.content` blocks carry `tool_result` keyed by
+ * `tool_use_id`. Neither is a native `tool_execution_start`/`end`, so the
+ * projection expands the blocks itself; a terminal `result` line repeats the
+ * run's totals.
+ */
+
+/** The object blocks an assistant or user line carries under `message.content`. */
+function claudeContentBlocks(event: Event, type: string): Event[] {
+  if (type !== "assistant" && type !== "user") return [];
+  const content = record(event.message)?.content;
+  if (!Array.isArray(content)) return [];
+  return content.map(record).filter((item): item is Event => Boolean(item));
+}
+
+/**
+ * The context a Claude request was given: its input tokens plus both prompt
+ * caches it read and wrote. Command Code and oh-my-pi report context as input
+ * only; Claude reports the cached prompt separately, so the two are folded in.
+ */
+function claudeContextTokens(usage: Event): number | undefined {
+  const input = firstNumber(usage, TOKEN_FIELDS[0].aliases);
+  if (input === undefined) return undefined;
+  const cacheRead = firstNumber(usage, TOKEN_FIELDS[2].aliases) ?? 0;
+  const cacheWrite = firstNumber(usage, TOKEN_FIELDS[3].aliases) ?? 0;
+  return input + cacheRead + cacheWrite;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -598,8 +636,12 @@ export class RunDigestBuilder {
   private readonly requestUsages: Event[] = [];
   private readonly runtimeUsages: Event[] = [];
   private readonly turnEndUsages: Event[] = [];
-  private sawModelRequestEnd = false;
+  private sawRequestUsage = false;
   private nativeRefusals = 0;
+  // Claude Code: one turn per assistant message id, one request usage per id.
+  private readonly claudeMessageIds = new Set<string>();
+  private readonly claudeUsageIds = new Set<string>();
+  private claudeTurnOpen = false;
   private lastAssistantRaw: string | undefined;
   // Efficiency accumulators. Each is only published once it has been measured.
   private readonly requestContexts: number[] = [];
@@ -632,7 +674,7 @@ export class RunDigestBuilder {
 
   private observeUsage(event: Event, type: string): void {
     if (type === "model_request_end") {
-      this.sawModelRequestEnd = true;
+      this.sawRequestUsage = true;
       const usage = usageObjectOf(event);
       if (!usage) return;
       this.requestUsages.push(usage);
@@ -645,6 +687,14 @@ export class RunDigestBuilder {
     // and repeats the same object on `turn_end` (summing both would double count).
     if (isRuntimeUsageEvent(event, type)) {
       const usage = runtimeUsageObjectOf(event);
+      if (usage) this.runtimeUsages.push(usage);
+      return;
+    }
+    // A terminal `result` line repeats the run's totals. A run that also reports
+    // per-request usage keeps the per-request counters and ignores this one, so
+    // the two are never summed together.
+    if (type === "result") {
+      const usage = usageObjectOf(event);
       if (usage) this.runtimeUsages.push(usage);
       return;
     }
@@ -668,6 +718,13 @@ export class RunDigestBuilder {
     if (!type) return;
     const assistant = assistantTextFromEvent(event);
     if (assistant !== undefined) this.lastAssistantRaw = assistant;
+
+    // Claude Code carries its tools inside assistant/user content blocks rather
+    // than in native start/end events, so it is expanded into the same shapes.
+    if (type === "assistant" || type === "user") {
+      this.observeClaudeStream(event, type, now);
+      return;
+    }
 
     const thinking = thinkingEventKind(event, type);
     if (thinking !== undefined) {
@@ -699,6 +756,9 @@ export class RunDigestBuilder {
 
     const nativeTurns = numberOf(event.num_turns) ?? numberOf(record(event.result)?.num_turns);
     if (nativeTurns !== undefined && Number.isInteger(nativeTurns)) this.turns = Math.max(this.turns, nativeTurns);
+    // A terminal `result` closes the last Claude turn, whose tool tally was not
+    // yet flushed by a following assistant message.
+    if (type === "result") this.closeClaudeTurn();
     if (type === "turn_end") {
       this.turns += 1;
       this.turnToolCallCounts.push(this.callsInTurn);
@@ -780,8 +840,58 @@ export class RunDigestBuilder {
     }
   }
 
+  /**
+   * Expand a Claude Code stream-json assistant or user line. A `tool_use` block
+   * becomes a tool start and a `tool_result` block a tool end, both handed to the
+   * same projection the native events use. A turn is counted once per assistant
+   * message id, and the request's usage is taken once per id: one message may be
+   * split across several lines that repeat the same id, and counting either per
+   * line would inflate the turn count and double the tokens.
+   */
+  private observeClaudeStream(event: Event, type: string, now: number): void {
+    const message = record(event.message);
+    const blocks = claudeContentBlocks(event, type);
+    if (type === "assistant" && message && Array.isArray(message.content)) {
+      const messageId = typeof message.id === "string" && message.id ? message.id : undefined;
+      if (messageId !== undefined && !this.claudeMessageIds.has(messageId)) {
+        this.claudeMessageIds.add(messageId);
+        this.closeClaudeTurn();
+        this.turns += 1;
+        this.claudeTurnOpen = true;
+      }
+      const usage = record(message.usage);
+      if (usage && (messageId === undefined || !this.claudeUsageIds.has(messageId))) {
+        if (messageId !== undefined) this.claudeUsageIds.add(messageId);
+        this.sawRequestUsage = true;
+        this.requestUsages.push(usage);
+        const context = claudeContextTokens(usage);
+        if (context !== undefined) this.requestContexts.push(context);
+      }
+    }
+    for (const block of blocks) {
+      if (type === "assistant" && block.type === "tool_use") {
+        this.observe({ type: "tool_execution_start", toolCallId: block.id, toolName: block.name, input: block.input }, now);
+      } else if (type === "user" && block.type === "tool_result") {
+        this.observe({
+          type: "tool_execution_end",
+          toolCallId: block.tool_use_id,
+          result: { content: block.content, is_error: block.is_error },
+          isError: block.is_error === true,
+        }, now);
+      }
+    }
+  }
+
+  /** Flush the tool tally of the open Claude turn so its single-call share is measured. */
+  private closeClaudeTurn(): void {
+    if (!this.claudeTurnOpen) return;
+    this.turnToolCallCounts.push(this.callsInTurn);
+    this.callsInTurn = 0;
+    this.claudeTurnOpen = false;
+  }
+
   private usageTotals(): RunDigestUsage {
-    const chosen = this.sawModelRequestEnd
+    const chosen = this.sawRequestUsage
       ? this.requestUsages
       : this.runtimeUsages.length > 0 ? this.runtimeUsages : this.turnEndUsages;
     const totals = new Map<string, number>();

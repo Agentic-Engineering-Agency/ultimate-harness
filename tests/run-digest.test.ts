@@ -79,6 +79,62 @@ describe("run digest — Command Code fixtures", () => {
   });
 });
 
+describe("run digest — Claude Code orchestrator", () => {
+  // Two of the assistant lines repeat `msg_02`; the terminal `result` carries no
+  // `num_turns`, so the turn count can only come from the message ids.
+  const digest = (): RunDigest => digestOf(fixture("claude-code-orchestrator.ndjson"), { runtime: "claude-code" });
+
+  test("counts one turn per assistant message id, not per stream line", () => {
+    const projected = digest();
+
+    expect(projected.runtime).toBe("claude-code");
+    expect(projected.turns).toBe(6);
+  });
+
+  test("starts tool activity at tool_use and ends it at tool_result", () => {
+    const projected = digest();
+
+    expect(projected.recent_calls.map((call) => call.tool))
+      .toEqual(["Read", "Read", "Glob", "Edit", "Write", "Bash", "Read"]);
+    expect(projected.recent_calls.map((call) => call.kind))
+      .toEqual(["read", "read", "read", "write", "write", "shell", "read"]);
+    expect(projected.recent_calls[0]).toMatchObject({ target: "src/harness/run-digest.ts", status: "ok", error_class: "none" });
+    expect(projected.recent_calls[2]).toMatchObject({ tool: "Glob", target: "<pattern>" });
+    expect(projected.recent_calls.at(-1)).toMatchObject({ tool: "Read", target: "src/harness/run-digest.ts", status: "ok" });
+    // A failing `tool_result` is a failed call, not a denial.
+    expect(projected.recent_calls[5]).toMatchObject({ tool: "Bash", kind: "shell", target: "bunx", status: "failed", error_class: "tool_error" });
+    expect(projected.denials).toEqual([]);
+    expect(projected.native_refusals).toBe(0);
+    expect(projected.current_activity.kind).toBe("idle");
+  });
+
+  test("lists files written by Write and Edit only when the call succeeded", () => {
+    expect(digest().files_written).toEqual({ files: ["src/harness/run-digest.ts", "docs/run-digest-notes.md"], total: 2 });
+  });
+
+  test("sums per-request usage once, folding the prompt caches into the totals", () => {
+    // The terminal `result` repeats these totals; they must not be added again.
+    expect(digest().usage).toEqual({ input_tokens: 7400, output_tokens: 270, cache_read_tokens: 13000, cache_write_tokens: 300 });
+  });
+
+  test("measures the efficiency block from the Claude stream", () => {
+    const projected = digest();
+
+    // Context is input plus the prompt caches read and written; the split
+    // `msg_02` contributes its context once.
+    expect(projected.efficiency).toEqual({
+      context_tokens_first: 1700,
+      context_tokens_after_five: 5000,
+      context_tokens_last: 5000,
+      single_tool_turn_share: 0.5,
+      read_calls: 4,
+      re_read_calls: 1,
+      tool_output_bytes: { read: 7, write: 7, shell: 2, other: 0 },
+      tool_time_ms: 0,
+    });
+  });
+});
+
 describe("run digest — target resolution", () => {
   test("resolves the three Windows path forms against the working directory", () => {
     expect(relativeRunTarget("C:\\worker\\src\\a.ts", "C:\\worker")).toBe("src/a.ts");
