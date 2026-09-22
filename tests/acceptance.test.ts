@@ -1,9 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { parse } from "yaml";
 import { AcceptanceEvidenceSchema, AcceptanceRegistrySchema } from "../src/schema/acceptance.js";
-import { classifyAcceptance, collectFacts, compareAcceptanceFacts, renderAcceptanceReport, runAcceptance } from "../src/harness/acceptance.js";
+import { validateMission } from "../src/schema/mission.js";
+import { applyTeamMissionOverrides, classifyAcceptance, collectFacts, compareAcceptanceFacts, loadAcceptanceRegistry, renderAcceptanceReport, runAcceptance, wrapperMechanismUnavailable } from "../src/harness/acceptance.js";
 
 const expected = { status: "passed", required_records: { denials: 3 } } as const;
 
@@ -107,5 +109,128 @@ describe("acceptance evidence", () => {
   });
   test("refuses acceptance run without workspace", async () => {
     await expect(runAcceptance(process.cwd())).rejects.toThrow(/--workspace/);
+  });
+});
+
+describe("command-code fleet registry entries", () => {
+  test("every oh-my-pi entry has a -cmdc command-code sibling with identical capability and expectations", async () => {
+    const registry = await loadAcceptanceRegistry(process.cwd());
+    const ohMyPiIds = Object.keys(registry.entries).filter((id) => registry.entries[id].runtime === "oh-my-pi");
+    expect(ohMyPiIds.length).toBe(17);
+    for (const id of ohMyPiIds) {
+      const sibling = registry.entries[`${id}-cmdc`];
+      expect(sibling, `${id}-cmdc must be registered`).toBeDefined();
+      expect(sibling.runtime).toBe("command-code");
+      expect(sibling.model).toBe("qwen/qwen3.8-flash");
+      expect(sibling.capability).toBe(registry.entries[id].capability);
+      expect(sibling.expected).toEqual(registry.entries[id].expected);
+      expect(sibling.real_mission).toBe(registry.entries[id].real_mission);
+    }
+    for (const [id, entry] of Object.entries(registry.entries)) {
+      if (!id.endsWith("-cmdc")) continue;
+      expect(registry.entries[id.slice(0, -"-cmdc".length)], `${id} must mirror a registry entry`).toBeDefined();
+      if (id === "R10-stall-cmdc") {
+        expect(entry.real_mission).toBe("not_applicable");
+        expect(entry.reason).toMatch(/print mode/);
+      } else {
+        expect(entry.real_mission).toBe("real");
+        await expect(access(path.join(process.cwd(), "acceptance", entry.mission))).resolves.toBeUndefined();
+      }
+    }
+  });
+
+  test("every real -cmdc mission file validates and uses only command-code adapters", async () => {
+    const registry = await loadAcceptanceRegistry(process.cwd());
+    for (const [id, entry] of Object.entries(registry.entries)) {
+      if (!id.endsWith("-cmdc") || entry.real_mission !== "real") continue;
+      const missionPath = path.join(process.cwd(), "acceptance", entry.mission);
+      const mission = validateMission(parse(await readFile(missionPath, "utf8")));
+      expect(mission.id).toBe(`${id.toLowerCase()}-acceptance`);
+      if (mission.shape !== "team" || !mission.team) continue;
+      expect(mission.team.leader.adapter).toBe("command-code");
+      for (const worker of mission.team.workers) expect(worker.adapter).toBe("command-code");
+    }
+  });
+
+  test("renders the command-code fleet entries in the generated report", async () => {
+    const report = await renderAcceptanceReport(process.cwd());
+    expect(report).toContain("| C1-cmdc | C1 | Per-worker contracts | unproven | — | command-code | qwen/qwen3.8-flash | — | — |");
+    expect(report).toContain("| S3-unknown-cost-cmdc | S3 | Unknown cost admission | unproven | — | command-code | qwen/qwen3.8-flash | — | — |");
+    expect(report).toContain("| R10-stall-cmdc | R10 | Stall recovery | fixture_only | — | command-code | qwen/qwen3.8-flash | — | — |");
+  });
+});
+
+describe("acceptance runtime override honesty", () => {
+  test("rewrites every worker and leader adapter and injects the model in the copied team mission", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-override-"));
+    const missionPath = path.join(root, "mission.yaml");
+    await writeFile(missionPath, [
+      "schema_version: uh.mission.v0",
+      "id: c1-acceptance",
+      "title: Per-worker contracts",
+      "workflow_profile: bugfix-contained",
+      "objective: Create the declared worker outputs under out/.",
+      "shape: team",
+      "team:",
+      "  resources: { max_parallel: 2 }",
+      "  workers:",
+      "    - adapter: oh-my-pi",
+      "      role: worker-a",
+      "      objective: Create out/worker-a.txt containing exactly the single line worker-a, then stop.",
+      "      runtime_config_overrides: { thinking: low }",
+      "      limits: { max_turns: 12 }",
+      "    - adapter: oh-my-pi",
+      "      role: worker-b",
+      "      objective: Create out/worker-b.txt containing exactly the single line worker-b, then stop.",
+      "      runtime_config_overrides: { thinking: low }",
+      "      limits: { max_turns: 12 }",
+      "  leader: { adapter: oh-my-pi }",
+      "",
+    ].join("\n"), "utf8");
+    await applyTeamMissionOverrides(missionPath, { runtime: "command-code", model: "qwen/qwen3.8-flash" });
+    const mission = parse(await readFile(missionPath, "utf8")) as {
+      team: {
+        leader: { adapter: string };
+        workers: { adapter: string; runtime_config_overrides: Record<string, unknown>; limits?: Record<string, unknown> }[];
+      };
+    };
+    expect(mission.team.leader.adapter).toBe("command-code");
+    expect(mission.team.workers.map((worker) => worker.adapter)).toEqual(["command-code", "command-code"]);
+    for (const worker of mission.team.workers) {
+      expect(worker.runtime_config_overrides.model).toBe("qwen/qwen3.8-flash");
+      expect(worker.runtime_config_overrides.thinking).toBe("low");
+      expect(worker.limits).toEqual({ max_turns: 12 });
+    }
+  });
+
+  test("wrapper mechanism support follows the effective runtime", () => {
+    expect(wrapperMechanismUnavailable("G2", "oh-my-pi")).toBe(false);
+    expect(wrapperMechanismUnavailable("G2", "command-code")).toBe(true);
+    expect(wrapperMechanismUnavailable("G2-cmdc", "command-code")).toBe(false);
+    expect(wrapperMechanismUnavailable("G2-cmdc", "oh-my-pi")).toBe(true);
+    expect(wrapperMechanismUnavailable("S3-unknown-cost", "oh-my-pi")).toBe(false);
+    expect(wrapperMechanismUnavailable("S3-unknown-cost", "command-code")).toBe(true);
+    expect(wrapperMechanismUnavailable("S3-unknown-cost-cmdc", "command-code")).toBe(false);
+    expect(wrapperMechanismUnavailable("S3-unknown-cost-cmdc", "oh-my-pi")).toBe(true);
+    expect(wrapperMechanismUnavailable("R10-controller-loss", "command-code")).toBe(false);
+    expect(wrapperMechanismUnavailable("R10-controller-loss-cmdc", "oh-my-pi")).toBe(false);
+    expect(wrapperMechanismUnavailable("C1", "command-code")).toBe(false);
+  });
+
+  test("wrapper-dependent capabilities fail with wrapper_unavailable evidence instead of launching", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-wrapper-"));
+    await mkdir(path.join(root, "acceptance"), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), "schema_version: uh.acceptance-registry.v0\nentries:\n  G2:\n    title: Denial budget\n    capability: G2\n    mission: missions/G2/mission.yaml\n    shape: single\n    runtime: oh-my-pi\n    expected: { status: passed, stop_code: denial_budget, resumed: true, required_records: { denials: 3 } }\n");
+    const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-wrapper-ws-"));
+    const evidence = await runAcceptance(root, { workspace, runtime: "command-code", cliPath: "node" });
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].outcome).toBe("failed");
+    expect(evidence[0].runtime).toBe("command-code");
+    expect(evidence[0].observed.reason).toBe("wrapper_unavailable");
+    expect(evidence[0].mismatches.map((mismatch) => mismatch.observed)).toContain("wrapper_unavailable");
+    expect(evidence[0].run_ids).toEqual([]);
+    const persisted = JSON.parse(await readFile(path.join(root, "acceptance", "evidence", "G2", "latest.json"), "utf8")) as { observed: { reason?: string }; outcome: string };
+    expect(persisted.outcome).toBe("failed");
+    expect(persisted.observed.reason).toBe("wrapper_unavailable");
   });
 });

@@ -334,14 +334,104 @@ async function preloadAcceptanceCampaign(sourceRoot: string, workspace: string):
   try { await symlink(path.join(sourceRoot, "node_modules"), path.join(snapshot, "node_modules"), "junction"); } catch { /* Existing campaign snapshot is reusable. */ }
   return path.join(snapshot, "cli.js");
 }
+const CMD_SUFFIX = "-cmdc";
+
+function baseAcceptanceCapability(capability: string): string {
+  return capability.endsWith(CMD_SUFFIX) ? capability.slice(0, -CMD_SUFFIX.length) : capability;
+}
+
+function acceptanceMissionId(capability: string): string {
+  return capability === "R7-repeated-failure" ? "r8-repeated-failure-acceptance" : `${capability.toLowerCase()}-acceptance`;
+}
+
+/**
+ * Capabilities whose mechanism is hard-wired to acceptance support files, and
+ * the runtimes each mechanism actually supports. A run whose effective runtime
+ * is outside this list must fail the capability instead of launching a wrapper
+ * that cannot drive the runtime.
+ */
+const WRAPPER_MECHANISM_RUNTIMES: Record<string, readonly string[]> = {
+  G2: ["oh-my-pi"],
+  "G2-cmdc": ["command-code"],
+  "S3-unknown-cost": ["oh-my-pi"],
+  "S3-unknown-cost-cmdc": ["command-code"],
+  "R10-controller-loss": ["oh-my-pi", "command-code"],
+  "R10-controller-loss-cmdc": ["oh-my-pi", "command-code"],
+};
+
+export function wrapperMechanismUnavailable(capability: string, runtime: string): boolean {
+  const supported = WRAPPER_MECHANISM_RUNTIMES[capability];
+  return supported !== undefined && !supported.includes(runtime);
+}
+
+/**
+ * Team-shaped entries select worker runtimes only through the mission file, so
+ * a `--runtime` override must rewrite every adapter (workers and leader) in the
+ * copied mission; the requested model is injected into each worker's
+ * runtime_config_overrides.
+ */
+export async function applyTeamMissionOverrides(missionPath: string, overrides: { runtime?: string; model?: string }): Promise<void> {
+  if (!overrides.runtime && !overrides.model) return;
+  const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+  const team = mission.team as Record<string, unknown> | undefined;
+  if (!team || typeof team !== "object") return;
+  if (overrides.runtime) {
+    const leader = team.leader;
+    if (leader && typeof leader === "object") (leader as Record<string, unknown>).adapter = overrides.runtime;
+  }
+  const workers = Array.isArray(team.workers) ? team.workers : [];
+  for (const worker of workers) {
+    if (!worker || typeof worker !== "object") continue;
+    const record = worker as Record<string, unknown>;
+    if (overrides.runtime) record.adapter = overrides.runtime;
+    if (overrides.model) record.runtime_config_overrides = { ...(record.runtime_config_overrides as Record<string, unknown> | undefined), model: overrides.model };
+  }
+  await writeFile(missionPath, stringify(mission), "utf8");
+}
+
+async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: string, entry: AcceptanceRegistryEntry, runtime: string, options: AcceptanceRunOptions): Promise<AcceptanceEvidence> {
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, "").replace(/Z$/, "Z");
+  const workspace = path.resolve(options.workspace ?? sourceRoot);
+  const runRoot = path.join(workspace, capability, timestamp);
+  const missionId = acceptanceMissionId(capability);
+  const evidence: AcceptanceEvidence = {
+    schema_version: "uh.acceptance-evidence.v0",
+    capability,
+    outcome: "failed",
+    checked_at: new Date().toISOString(),
+    harness_commit: await gitCommit(sourceRoot),
+    runtime,
+    provider: UNKNOWN,
+    model: entry.model ?? options.model ?? UNKNOWN,
+    cost_usd: "unknown",
+    workspace: runRoot,
+    run_ids: [],
+    mission_id: missionId,
+    expected: entry.expected,
+    observed: { status: "failed", reason: "wrapper_unavailable" },
+    fact_sources: {},
+    mismatches: [{ field: "wrapper", expected: `${capability} mechanism for runtime ${runtime}`, observed: "wrapper_unavailable" }],
+    artifact_root: path.join(runRoot, ".harness", "missions", missionId),
+  };
+  const checked = AcceptanceEvidenceSchema.parse(evidence);
+  const evidenceDir = path.join(sourceRoot, "acceptance", "evidence", capability);
+  await mkdir(evidenceDir, { recursive: true });
+  await writeFile(path.join(evidenceDir, `${timestamp}.json`), JSON.stringify(checked, null, 2) + "\n", "utf8");
+  await writeFile(path.join(evidenceDir, "latest.json"), JSON.stringify(checked, null, 2) + "\n", "utf8");
+  console.log(`FAIL ${capability} — wrapper_unavailable: no ${capability} mechanism for runtime ${runtime}`);
+  return checked;
+}
+
 async function runOneAcceptance(sourceRoot: string, capability: string, entry: AcceptanceRegistryEntry, options: AcceptanceRunOptions): Promise<AcceptanceEvidence> {
 
   if (!options.workspace) throw new Error("acceptance run requires --workspace <dir>");
+  const runtime = options.runtime ?? entry.runtime;
+  if (options.runtime && options.runtime !== entry.runtime) console.warn(`WARN ${capability}: runtime override ${options.runtime} differs from registry runtime ${entry.runtime}`);
   const timestamp = new Date().toISOString().replace(/[-:.]/g, "").replace(/Z$/, "Z");
-  const deepSegments = capability === "R5-deep-path"
+  const deepSegments = baseAcceptanceCapability(capability) === "R5-deep-path"
     ? Array.from({ length: 2 }, (_, index) => `deep-${index}-${"x".repeat(64)}`)
     : [];
-  const runBase = capability === "R5-deep-path" ? path.join(options.workspace, ...deepSegments) : options.workspace;
+  const runBase = baseAcceptanceCapability(capability) === "R5-deep-path" ? path.join(options.workspace, ...deepSegments) : options.workspace;
   const runRoot = path.join(runBase, capability, timestamp);
   await mkdir(runRoot, { recursive: true });
   await runProcess("git", ["init", "--quiet"], runRoot);
@@ -351,41 +441,43 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   } catch {
     // Optional support files are only needed by missions that declare them.
   }
-  const adapterSource = entry.runtime === "command-code"
+  const adapterSource = runtime === "command-code"
     ? path.join(runRoot, "acceptance", "support", "command-code.yaml")
-    : path.join(sourceRoot, ".harness", "adapters", `${entry.runtime}.yaml`);
+    : path.join(sourceRoot, ".harness", "adapters", `${runtime}.yaml`);
   try {
-    await cp(adapterSource, path.join(runRoot, ".harness", "adapters", `${entry.runtime}.yaml`));
+    await cp(adapterSource, path.join(runRoot, ".harness", "adapters", `${runtime}.yaml`));
   } catch {
     // The run will produce failed evidence when its adapter is unavailable.
   }
-  const missionId = capability === "R7-repeated-failure" ? "r8-repeated-failure-acceptance" : `${capability.toLowerCase()}-acceptance`;
+  const missionId = acceptanceMissionId(capability);
   const missionDir = path.join(runRoot, ".harness", "missions", missionId);
   await mkdir(missionDir, { recursive: true });
   const sourceMission = path.resolve(sourceRoot, "acceptance", entry.mission);
   await cp(sourceMission, path.join(missionDir, "mission.yaml"));
   const model = entry.model ?? options.model;
-  if (model && entry.shape === "team") {
-    const missionPath = path.join(missionDir, "mission.yaml");
-    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
-    const team = mission.team as Record<string, unknown> | undefined;
-    const workers = Array.isArray(team?.workers) ? team.workers : [];
-    for (const worker of workers) {
-      if (!worker || typeof worker !== "object") continue;
-      const record = worker as Record<string, unknown>;
-      record.runtime_config_overrides = { ...(record.runtime_config_overrides as Record<string, unknown> | undefined), model };
-    }
-    await writeFile(missionPath, stringify(mission), "utf8");
+  if ((model || options.runtime) && entry.shape === "team") {
+    await applyTeamMissionOverrides(path.join(missionDir, "mission.yaml"), { runtime: options.runtime, model });
   }
-  const runtime = options.runtime ?? entry.runtime;
-  if (options.runtime && options.runtime !== entry.runtime) console.warn(`WARN ${capability}: runtime override ${options.runtime} differs from registry runtime ${entry.runtime}`);
-  if (capability === "G2" || capability === "S3-unknown-cost") {
-    const manifestName = path.join(runRoot, "acceptance", "support", capability === "G2" ? "oh-my-pi-denial.yaml" : path.basename(path.join(sourceRoot, ".harness", "adapters", "oh-my-pi.yaml")));
-    const manifest = parse(await readFile(manifestName, "utf8")) as Record<string, unknown>;
+  if (capability === "G2" && runtime === "oh-my-pi") {
+    const manifest = parse(await readFile(path.join(runRoot, "acceptance", "support", "oh-my-pi-denial.yaml"), "utf8")) as Record<string, unknown>;
     const config = (manifest.config ?? {}) as Record<string, unknown>;
-    config.cli_command = path.join(runRoot, "acceptance", "support", capability === "G2" ? "denial-wrapper.mjs" : "costless-wrapper.mjs");
+    config.cli_command = path.join(runRoot, "acceptance", "support", "denial-wrapper.mjs");
     manifest.config = config;
     await writeFile(path.join(runRoot, ".harness", "adapters", "oh-my-pi.yaml"), stringify(manifest), "utf8");
+  }
+  if (capability === "S3-unknown-cost" && runtime === "oh-my-pi") {
+    const manifest = parse(await readFile(path.join(runRoot, "acceptance", "support", "oh-my-pi.yaml"), "utf8")) as Record<string, unknown>;
+    const config = (manifest.config ?? {}) as Record<string, unknown>;
+    config.cli_command = path.join(runRoot, "acceptance", "support", "costless-wrapper.mjs");
+    manifest.config = config;
+    await writeFile(path.join(runRoot, ".harness", "adapters", "oh-my-pi.yaml"), stringify(manifest), "utf8");
+  }
+  if (capability === "S3-unknown-cost-cmdc" && runtime === "command-code") {
+    const manifest = parse(await readFile(path.join(runRoot, "acceptance", "support", "command-code.yaml"), "utf8")) as Record<string, unknown>;
+    const config = (manifest.config ?? {}) as Record<string, unknown>;
+    config.cli_command = path.join(runRoot, "acceptance", "support", "costless-wrapper-cmdc.mjs");
+    manifest.config = config;
+    await writeFile(path.join(runRoot, ".harness", "adapters", "command-code.yaml"), stringify(manifest), "utf8");
   }
   const cli = options.cliPath ?? path.resolve(sourceRoot, "dist", "cli.js");
   const args = [cli, "mission", entry.shape === "team" ? "run-team" : "run", entry.shape === "team" ? missionId : path.join(missionDir, "mission.yaml"), "--root", runRoot];
@@ -397,11 +489,11 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   await configureAcceptanceSeed(runRoot);
   const cancelRunId = "20260101T000000Z-abcdef";
   const controllerLossRunId = "20260101T000001Z-abcdef";
-  const launchArgs = capability === "R5" ? [...args, "--run-id", cancelRunId] : args;
+  const launchArgs = baseAcceptanceCapability(capability) === "R5" ? [...args, "--run-id", cancelRunId] : args;
   let result: { code: number; stdout: string; stderr: string };
-  if (capability === "R5") {
+  if (baseAcceptanceCapability(capability) === "R5") {
     result = await runProcessAndCancel(process.execPath, launchArgs, sourceRoot, process.execPath, [cli, "mission", "cancel", "--mission", missionId, "--run-id", cancelRunId, "--root", runRoot], 750, sourceRoot);
-  } else if (capability === "R10-controller-loss") {
+  } else if (baseAcceptanceCapability(capability) === "R10-controller-loss") {
     const controlPath = path.join(runRoot, ".harness", "missions", missionId, "runs", controllerLossRunId, "runtime-control.json");
     const wrapper = path.join(runRoot, "acceptance", "support", "controller-loss-wrapper.mjs");
     result = await runProcess(process.execPath, [wrapper, controlPath, process.execPath, ...args, "--run-id", controllerLossRunId], sourceRoot, sourceRoot);
@@ -450,9 +542,9 @@ export async function runAcceptance(sourceRoot: string, options: AcceptanceRunOp
   if (!options.workspace) throw new Error("acceptance run requires --workspace <dir>");
   const registry = await loadAcceptanceRegistry(sourceRoot);
   const workspace = path.resolve(options.workspace);
-  const cliPath = options.cliPath ?? await preloadAcceptanceCampaign(sourceRoot, workspace);
   const capabilities = options.capabilities?.length ? options.capabilities : Object.keys(registry.entries);
   const results: AcceptanceEvidence[] = [];
+  const runnable: { capability: string; entry: AcceptanceRegistryEntry }[] = [];
   for (const capability of capabilities) {
     const entry = registry.entries[capability];
     if (!entry) throw new Error(`Unknown acceptance capability: ${capability}`);
@@ -460,6 +552,16 @@ export async function runAcceptance(sourceRoot: string, options: AcceptanceRunOp
       console.log(`FIXTURE ${capability} — ${entry.reason}`);
       continue;
     }
+    const runtime = options.runtime ?? entry.runtime;
+    if (wrapperMechanismUnavailable(capability, runtime)) {
+      results.push(await recordWrapperUnavailableEvidence(sourceRoot, capability, entry, runtime, options));
+      continue;
+    }
+    runnable.push({ capability, entry });
+  }
+  if (runnable.length === 0) return results;
+  const cliPath = options.cliPath ?? await preloadAcceptanceCampaign(sourceRoot, workspace);
+  for (const { capability, entry } of runnable) {
     results.push(await runOneAcceptance(sourceRoot, capability, entry, { ...options, workspace, cliPath }));
   }
   return results;
