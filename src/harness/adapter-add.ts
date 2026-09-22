@@ -268,6 +268,34 @@ config:
     allow_extensions: false
     allow_skills: false
 `,
+  acp: `schema_version: uh.adapter.v0
+id: acp
+name: Agent-Client Protocol (ACP)
+description: >-
+  Communicates with any ACP-compliant agent server (OpenHands, Gemini CLI, etc.)
+  over JSON-RPC on stdio.
+runtime: acp
+capabilities:
+  - cli-execution
+  - non-interactive
+  - one-shot
+  - worktree-isolation
+  - json-output
+  - diff-output
+status: experimental
+config:
+  cli_command: acp-agent
+  default_toolsets: []
+  default_provider: ""
+  default_model: ""
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    server_command: acp-agent
+    server_args: []
+    protocol_version: "1.0"
+    timeout_ms: 600000
+`,
 };
 
 export type AddAdapterResult = {
