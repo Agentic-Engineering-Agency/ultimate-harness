@@ -17,6 +17,10 @@ export type RunRecord = {
   provider?: string;
   model?: string;
   workflow_profile?: string;
+  /** Adopted session template id, from `session-template.json` when present. */
+  template_id?: string;
+  /** Adopted session template tier, from `session-template.json` when present. */
+  tier?: string;
   status?: string;
   stop_code?: string;
   stop_reason?: string;
@@ -89,12 +93,13 @@ function duration(startedAt: string | undefined, finishedAt: string | undefined)
 
 async function indexRun(missionId: string, missionRoot: string, runId: string): Promise<RunRecord | undefined> {
   const runRoot = path.join(missionRoot, "runs", runId);
-  const [resultRaw, controlRaw, recoveryRaw, verificationRaw, workflowProfile] = await Promise.all([
+  const [resultRaw, controlRaw, recoveryRaw, verificationRaw, workflowProfile, templateRaw] = await Promise.all([
     readYamlFile(path.join(runRoot, "runtime-result.yaml")),
     readJsonFile(path.join(runRoot, "runtime-control.json")),
     readJsonFile(path.join(runRoot, "runtime-recovery.json")),
     readYamlFile(path.join(runRoot, "verification.yaml")),
     readMissionWorkflow(path.join(missionRoot, "mission.yaml")),
+    readJsonFile(path.join(runRoot, "session-template.json")),
   ]);
   let result: RuntimeResultDocument | undefined;
   let control: RuntimeControl | undefined;
@@ -104,6 +109,7 @@ async function indexRun(missionId: string, missionRoot: string, runId: string): 
   try { if (controlRaw !== undefined) control = RuntimeControlSchema.parse(controlRaw); } catch { /* partial artifact */ }
   try { if (recoveryRaw !== undefined) recovery = RuntimeRecoveryRecordSchema.parse(recoveryRaw); } catch { /* partial artifact */ }
   try { if (verificationRaw !== undefined) verification = validateVerificationResult(verificationRaw); } catch { /* partial artifact */ }
+  const templateRecord = templateRaw !== null && typeof templateRaw === "object" ? templateRaw as Record<string, unknown> : undefined;
   if (!result && !control) return undefined;
 
   const usage = usageOf(result, control);
@@ -117,6 +123,8 @@ async function indexRun(missionId: string, missionRoot: string, runId: string): 
     provider: result?.provider ?? usage?.provider ?? control?.usage?.provider,
     model: result?.model ?? usage?.model ?? control?.usage?.model,
     workflow_profile: workflowProfile,
+    template_id: optionalString(templateRecord?.template_id),
+    tier: optionalString(templateRecord?.tier),
     status: result?.status ?? control?.status,
     stop_code: control?.stop_code,
     stop_reason: control?.stop_reason,
@@ -154,10 +162,17 @@ export async function indexRuns(root: string, options: { missionId?: string } = 
   return records;
 }
 
-export function summarizeRuns(records: RunRecord[], groupBy: "runtime" | "model" | "workflow_profile" | "stop_code"): RunGroupSummary[] {
+export type RunGroupDimension = "runtime" | "model" | "workflow_profile" | "stop_code" | "template" | "tier";
+
+/** The `groupBy` "template" dimension reads the run record's `template_id`. */
+function groupKeyFor(record: RunRecord, groupBy: RunGroupDimension): string | undefined {
+  return groupBy === "template" ? record.template_id : record[groupBy];
+}
+
+export function summarizeRuns(records: RunRecord[], groupBy: RunGroupDimension): RunGroupSummary[] {
   const groups = new Map<string | undefined, RunRecord[]>();
   for (const record of records) {
-    const key = record[groupBy];
+    const key = groupKeyFor(record, groupBy);
     const group = groups.get(key) ?? [];
     group.push(record);
     groups.set(key, group);

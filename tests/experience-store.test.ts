@@ -41,6 +41,7 @@ describe("experience store", () => {
       "mission.yaml": { schema_version: "uh.mission.v0", id: "mission-a", title: "A", workflow_profile: "spec-first-feature" },
       "runtime-result.yaml": result(), "runtime-control.json": control(),
       "verification.yaml": { schema_version: "uh.verification-result.v0", mission_id: "mission-a", status: "passed", checks: [] },
+      "session-template.json": { template_id: "balanced", tier: "balanced", containment: "standard", overridden_by_mission: [] },
     });
     await writeFile(path.join(root, ".harness", "missions", "mission-a", "mission.yaml"), stringify({
       schema_version: "uh.mission.v0", id: "mission-a", title: "A", workflow_profile: "spec-first-feature",
@@ -61,9 +62,12 @@ describe("experience store", () => {
     expect(records.find((record) => record.run_id === "run-a")).toMatchObject({
       mission_id: "mission-a", workflow_profile: "spec-first-feature", duration_ms: 2000,
       turns: 4, denials: 1, cost_usd: 1.25, verification_status: "passed", peak_memory_bytes: 4096,
+      template_id: "balanced", tier: "balanced",
     });
     expect(records.find((record) => record.run_id === "run-b")).toMatchObject({ status: "failed", stop_code: "timeout" });
     expect(records.find((record) => record.run_id === "run-b")?.cost_usd).toBeUndefined();
+    expect(records.find((record) => record.run_id === "run-b")?.template_id).toBeUndefined();
+    expect(records.find((record) => record.run_id === "run-b")?.tier).toBeUndefined();
     expect(records.find((record) => record.run_id === "run-c")).toMatchObject({ resumed_from: "run-b", runtime: "codex" });
   });
 
@@ -76,6 +80,39 @@ describe("experience store", () => {
     const all = await indexRuns(root);
     const summaries = summarizeRuns(all, "runtime");
     expect(summaries.find((summary) => summary.key === "hermes")).toMatchObject({ runs: 1, passed: 1, success_rate: 1, known_cost_runs: 1, total_cost_usd: 2, mean_cost_usd: 2 });
+  });
+
+  test("groups runs by adopted template id and tier, leaving runs without the file ungrouped", async () => {
+    root = await mkdtemp(path.join(tmpdir(), "uh-experience-"));
+    await putRun("mission-a", "run-balanced", {
+      "runtime-result.yaml": result({ mission_id: "mission-a" }),
+      "runtime-control.json": control({ mission_id: "mission-a", run_id: "run-balanced" }),
+      "session-template.json": { template_id: "balanced", tier: "balanced", containment: "standard", overridden_by_mission: [] },
+    });
+    await putRun("mission-a", "run-cheap", {
+      "runtime-result.yaml": result({ mission_id: "mission-a" }),
+      "runtime-control.json": control({ mission_id: "mission-a", run_id: "run-cheap" }),
+      "session-template.json": { template_id: "low-cost", tier: "low-cost", containment: "standard", overridden_by_mission: ["limits"] },
+    });
+    await putRun("mission-a", "run-untemplated", {
+      "runtime-result.yaml": result({ mission_id: "mission-a" }),
+      "runtime-control.json": control({ mission_id: "mission-a", run_id: "run-untemplated" }),
+    });
+
+    const records = await indexRuns(root);
+    const untemplated = records.find((record) => record.run_id === "run-untemplated");
+    expect(untemplated?.template_id).toBeUndefined();
+    expect(untemplated?.tier).toBeUndefined();
+
+    const byTemplate = summarizeRuns(records, "template");
+    expect(byTemplate.find((summary) => summary.key === "balanced")).toMatchObject({ runs: 1, passed: 1, success_rate: 1 });
+    expect(byTemplate.find((summary) => summary.key === "low-cost")).toMatchObject({ runs: 1, passed: 1 });
+    expect(byTemplate.find((summary) => summary.key === undefined)).toMatchObject({ runs: 1, passed: 1 });
+
+    const byTier = summarizeRuns(records, "tier");
+    expect(byTier.find((summary) => summary.key === "balanced")).toMatchObject({ runs: 1 });
+    expect(byTier.find((summary) => summary.key === "low-cost")).toMatchObject({ runs: 1 });
+    expect(byTier.find((summary) => summary.key === undefined)).toMatchObject({ runs: 1 });
   });
 
   test("removes dominated groups and never treats unknown cost as free", () => {

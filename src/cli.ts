@@ -35,6 +35,8 @@ import { resolveSandboxMissionRoot, type SandboxMissionRoute } from "./harness/s
 import { finalizeRuntimeCancelledRun } from "./harness/runtime-events.js";
 import { cancelLocalMissionRun, cancelMissionRunViaPlugin, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
+import { adoptSessionTemplate, type SessionTemplateAdoption } from "./harness/session-template-adoption.js";
+import { writeArtifactFile } from "./adapters/_artifact-context.js";
 import { parseScaffoldLang, scaffoldTestsFromSpec } from "./harness/test-scaffold.js";
 import { assertValidRunId, generateRunId } from "./harness/run-id.js";
 import { parse as parseYaml } from "yaml";
@@ -62,6 +64,7 @@ import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
 import { recordManualVerdict } from "./harness/verdict.js";
 import { SandboxesIndexSchema, type VerdictValue } from "./schema/artifacts.js";
+import { serveMcpStdio } from "./harness/mcp-server.js";
 
 function readPackageVersion(): string {
   try {
@@ -514,13 +517,13 @@ observatoryCmd
   .description("List indexed runs or summarize run groups with Pareto frontier")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--mission <id>", "Filter by mission id")
-  .option("--group-by <dimension>", "Group runs by runtime, model, workflow_profile, or stop_code")
+  .option("--group-by <dimension>", "Group runs by runtime, model, workflow_profile, stop_code, template, or tier")
   .option("--json", "Emit raw structures as JSON")
   .action(async (opts: { root?: string; mission?: string; groupBy?: string; json?: boolean }) => {
     try {
       const root = resolveRoot(opts.root);
       if (opts.groupBy !== undefined) {
-        const validDimensions = ["runtime", "model", "workflow_profile", "stop_code"] as const;
+        const validDimensions = ["runtime", "model", "workflow_profile", "stop_code", "template", "tier"] as const;
         type ValidDimension = typeof validDimensions[number];
         if (!validDimensions.includes(opts.groupBy as ValidDimension)) {
           console.error(`Invalid --group-by: must be one of ${validDimensions.join(", ")}`);
@@ -1314,15 +1317,44 @@ missionCmd
   .command("dry-run")
   .description("Show what command would be executed without running it")
   .argument("[file]", "Mission file path")
-  .option("--runtime <runtime>", "Runtime to use (default: hermes)")
+  .option("--runtime <runtime>", "Runtime to use (default: hermes, or the template adapter)")
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--no-sandbox", "Do not auto-route into the mission's bound sandbox worktree")
   .option("--force", "Bypass mission capability matching and runtime_requirements for this runtime")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean }) => {
+  .option("--template <id>", "Adopt a session template from .harness/templates/<id>.yaml")
+  .option("--runtime-config-overrides <json>", "JSON object of runtime_config overrides applied on top of the template and mission file")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; template?: string; runtimeConfigOverrides?: string }) => {
     const root = resolveRoot(opts.root);
-    const runtime = opts.runtime || "hermes";
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
+    let extraRuntimeConfigOverrides: Record<string, unknown> | undefined;
+    if (opts.runtimeConfigOverrides !== undefined) {
+      try {
+        extraRuntimeConfigOverrides = parseRuntimeConfigOverridesJson(opts.runtimeConfigOverrides);
+      } catch (e) {
+        console.error(`[BLOCKED] ${(e as Error).message}`);
+        process.exit(exitCodeForRun("blocked"));
+        return;
+      }
+    }
+
+    let templateAdoption: SessionTemplateAdoption | undefined;
+    if (opts.template !== undefined) {
+      try {
+        templateAdoption = await adoptSessionTemplate({ root, missionPath: filePath, templateId: opts.template, explicitRuntime: opts.runtime });
+      } catch (err) {
+        console.error(`[BLOCKED] session template refused:`);
+        console.error(`  error: ${(err as Error).message}`);
+        process.exit(exitCodeForRun("blocked"));
+        return;
+      }
+      extraRuntimeConfigOverrides = {
+        ...templateAdoption.runtimeConfigOverrides,
+        ...(extraRuntimeConfigOverrides ?? {}),
+      };
+    }
+
+    const runtime = templateAdoption ? templateAdoption.runtime : (opts.runtime || "hermes");
     const wiring = RUNTIME_WIRINGS[runtime];
     if (!wiring) {
       console.error(`Unknown runtime: ${runtime}`);
@@ -1353,6 +1385,13 @@ missionCmd
     // Dry-run never blocks on a missing binding: it only shows where the run
     // would go before anything is spent.
     console.log(sandboxRouteLine(routing, opts.sandbox));
+    if (templateAdoption) {
+      const overridden = templateAdoption.description.overridden_by_mission;
+      console.log(
+        `Template: ${templateAdoption.description.template_id} (tier=${templateAdoption.description.tier}, containment=${templateAdoption.description.containment}, overridden_by_mission=${overridden.length > 0 ? overridden.join(",") : "none"})`,
+      );
+      console.log(`Template effective overrides: ${JSON.stringify(extraRuntimeConfigOverrides ?? {})}`);
+    }
     const result = await wiring.dryRun(routing.effectiveRoot, routing.missionPath);
     if (result.errors.length > 0) {
       console.log("[FAIL] dry-run errors:");
@@ -1382,11 +1421,12 @@ missionCmd
     "--runtime-config-overrides <json>",
     "JSON object of runtime_config overrides applied on top of the mission file (e.g. '{\"model\":\"gpt-5\"}')",
   )
+  .option("--template <id>", "Adopt a session template from .harness/templates/<id>.yaml")
   .option("--run-id <id>", "Explicit run id; auto-generated if omitted")
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
   .option("--quiet", "Do not print the runtime's stdout or stderr")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean }) => {
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -1395,7 +1435,23 @@ missionCmd
       process.exit(1);
       return;
     }
-    let runtime = opts.runtime || "hermes";
+    if (opts.auto && opts.template !== undefined) {
+      console.error("[BLOCKED] --auto cannot be combined with --template");
+      process.exit(exitCodeForRun("blocked"));
+      return;
+    }
+    let templateAdoption: SessionTemplateAdoption | undefined;
+    if (opts.template !== undefined) {
+      try {
+        templateAdoption = await adoptSessionTemplate({ root, missionPath: filePath, templateId: opts.template, explicitRuntime: opts.runtime });
+      } catch (err) {
+        console.error(`[BLOCKED] session template refused:`);
+        console.error(`  error: ${(err as Error).message}`);
+        process.exit(exitCodeForRun("blocked"));
+        return;
+      }
+    }
+    let runtime = templateAdoption ? templateAdoption.runtime : (opts.runtime || "hermes");
     if (opts.auto) {
       try {
         const installed = (await runtimeRegistry.list(root))
@@ -1495,6 +1551,14 @@ missionCmd
         return;
       }
     }
+    if (templateAdoption) {
+      // Mission values already won inside the template merge; an explicit
+      // --runtime-config-overrides still wins over both.
+      extraRuntimeConfigOverrides = {
+        ...templateAdoption.runtimeConfigOverrides,
+        ...(extraRuntimeConfigOverrides ?? {}),
+      };
+    }
     try {
       await assertFleetAdmission(root, filePath, runtime, extraRuntimeConfigOverrides);
     } catch (err) {
@@ -1543,6 +1607,22 @@ missionCmd
     const finalRunId = result.runId ?? runId;
     const runDir = path.join(root, ".harness", "missions", missionId, "runs", finalRunId);
     const relativeRunDir = path.relative(path.resolve(root), runDir).replace(/\\/g, "/");
+
+    if (templateAdoption) {
+      // Record the adopted template beside the adapter's own per-run
+      // artifacts (e.g. tool-guard.json) using the shared write helper.
+      try {
+        const missionArtifactDir = path.join(root, ".harness", "missions", missionId);
+        await mkdir(runDir, { recursive: true });
+        await writeArtifactFile(
+          missionArtifactDir,
+          path.join(runDir, "session-template.json"),
+          JSON.stringify(templateAdoption.description, null, 2),
+        );
+      } catch (err) {
+        console.error(`[WARN] failed to record adopted session template: ${(err as Error).message}`);
+      }
+    }
 
     if (result.runId && (!opts.runId || result.runId !== runId)) {
       console.log(`Run id: ${result.runId}`);
@@ -2202,6 +2282,26 @@ tuiCmd
       process.stderr.write(`uh tui screenshot: failed to spawn bun: ${err.message}\n`);
       process.exit(1);
     });
+  });
+
+// uh mcp
+const mcpCmd = program
+  .command("mcp")
+  .description("Model Context Protocol (MCP) server commands");
+
+mcpCmd
+  .command("serve")
+  .description("Serve newline-delimited JSON-RPC MCP server on stdin/stdout")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      await serveMcpStdio({ root, version: VERSION }, process.stdin, process.stdout);
+      process.exit(0);
+    } catch (err) {
+      process.stderr.write(`uh mcp serve: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    }
   });
 
 await program.parseAsync();

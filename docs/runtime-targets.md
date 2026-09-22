@@ -10,11 +10,13 @@ Ultimate Harness is runtime-agnostic: mission packets and verification artifacts
 | OpenRouter | `openrouter` | OpenAI-compatible HTTP | Requires `OPENROUTER_API_KEY`. |
 | Pi CLI | `pi` | Local CLI | Base Pi command surface. |
 | oh-my-pi | `oh-my-pi` | Local CLI | Opt-in OMP route with documented posture. |
-| Command Code | `command-code` | Local CLI | Print-mode runner; requires a guard or explicit `runtime_config.permission_mode`. |
+| Command Code | `command-code` | Local CLI | Print-mode runner; requires a guard or explicit `runtime_config.permission_mode`. `runtime_config.role: orchestrator` arms harness-only controller commands. |
 | Claude Code | `claude-code` | Native CLI with stream JSON | Worker guard required; integrated coordinator acceptance remains incomplete. |
 | Anthropic Messages API | `anthropic` | Local HTTP API | Experimental native Anthropic Messages API adapter. |
 
 Command Code print-mode missions must declare a `guard` block or an explicit `runtime_config.permission_mode`; without either, planning refuses before process spawn, including custom CLI commands. See [Tool Guard](./tool-guard.md) for the permission-mode and hook boundary.
+
+`runtime_config.role` defaults to `worker`. An orchestrator mission must still declare a `guard` block; the guard artifact then carries `controller_commands: true`, and the Command Code `PreToolUse` hook admits only harness controller commands (`uh mission ...`, `node dist/cli.js mission ...`, and the other controller verbs) while agent CLIs, native sub-agent tools and `--force`-style invocations stay denied. The orchestrator prompt ends with a fixed delegation paragraph: delegate only through harness commands, give every delegated worker its own mission packet and bound sandbox, wait for a worker settlement line before depending on its output, and never do a worker job yourself. Fleet admission reads `role`, so a model authorized only as `worker` is refused as an orchestrator.
 
 ### Claude Code boundaries
 

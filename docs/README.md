@@ -96,6 +96,7 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 - [Worker-contract smoke](./runbooks/worker-contract-smoke.md)
 - [Tool-guard smoke](./runbooks/tool-guard-smoke.md)
 - [Supervisor-loop smoke](./runbooks/supervisor-loop-smoke.md)
+- [MCP server](./runbooks/mcp-server.md)
 
 ### Workflows
 
