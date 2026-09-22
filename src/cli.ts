@@ -47,6 +47,7 @@ import { readFileSync } from "node:fs";
 import { readFile as readFileAsync, writeFile as writeFileAsync, readdir, mkdir } from "node:fs/promises";
 import { exitCodeForRun } from "./harness/exit-codes.js";
 import { indexRuns, summarizeRuns, paretoFrontier } from "./harness/experience-store.js";
+import { BEST_OF_N_CAP, MIN_ARM_RUNS, attemptsToMatch, bestOfN, compareArms } from "./harness/run-comparison.js";
 import { exportRunToOtlp, type OtlpTraceExport } from "./harness/otel-export.js";
 import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js";
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
@@ -591,6 +592,174 @@ observatoryCmd
       process.exit(1);
     }
   });
+
+// uh observatory compare --by <dimension> --a <value> --b <value>
+// Two arms of one indexed run set, compared on outcome (Wilson score interval,
+// never a bare percentage) and on cost, with the plain-repeats alternative made
+// explicit: a configuration only earns a "better" verdict against the option of
+// running the weaker arm more times at the same budget.
+observatoryCmd
+  .command("compare")
+  .description("Compare two run arms on outcome and cost with honest uncertainty")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--mission <id>", "Filter by mission id")
+  .option("--by <dimension>", "Compare arms by template, tier, model, or runtime")
+  .option("--a <value>", "Grouping value for arm A")
+  .option("--b <value>", "Grouping value for arm B")
+  .option("--json", "Emit the comparison as JSON")
+  .action(async (opts: { root?: string; mission?: string; by?: string; a?: string; b?: string; json?: boolean }) => {
+    const compareDimensions = ["template", "tier", "model", "runtime"] as const;
+    type CompareDimension = typeof compareDimensions[number];
+    if (!compareDimensions.includes(opts.by as CompareDimension)) {
+      console.error(`Invalid --by: must be one of ${compareDimensions.join(", ")}`);
+      process.exit(1);
+      return;
+    }
+    if (opts.a === undefined || opts.b === undefined) {
+      console.error("uh observatory compare requires --a <value> and --b <value>");
+      process.exit(1);
+      return;
+    }
+    try {
+      const root = resolveRoot(opts.root);
+      const by = opts.by as CompareDimension;
+      const valueA = opts.a;
+      const valueB = opts.b;
+      const records = await indexRuns(root, { missionId: opts.mission });
+      const keyOf = (record: (typeof records)[number]): string | undefined =>
+        by === "template" ? record.template_id : by === "tier" ? record.tier : record[by];
+      const comparison = compareArms(
+        records.filter((record) => keyOf(record) === valueA),
+        records.filter((record) => keyOf(record) === valueB),
+      );
+
+      const weakerRef: "a" | "b" = comparison.a.success_rate >= comparison.b.success_rate ? "b" : "a";
+      const strongerRef: "a" | "b" = weakerRef === "a" ? "b" : "a";
+      const weaker = comparison[weakerRef];
+      const stronger = comparison[strongerRef];
+      const weakerValue = weakerRef === "a" ? valueA : valueB;
+      const strongerValue = strongerRef === "a" ? valueA : valueB;
+      const attempts = attemptsToMatch(weaker.success_rate, stronger.success_rate);
+      const repeatsCost = attempts === undefined || weaker.mean_cost_usd === undefined
+        ? undefined
+        : attempts * weaker.mean_cost_usd;
+      const reachesTarget = attempts === undefined
+        ? false
+        : bestOfN(weaker.success_rate, attempts) >= stronger.success_rate;
+      const equalRates = comparison.a.success_rate === comparison.b.success_rate;
+
+      if (opts.json) {
+        console.log(JSON.stringify({
+          by,
+          a_value: valueA,
+          b_value: valueB,
+          comparison,
+          plain_repeats_of_weaker: {
+            arm: weakerRef,
+            value: weakerValue,
+            baseline_success_rate: weaker.success_rate,
+            target_success_rate: stronger.success_rate,
+            attempts,
+            reaches_target: reachesTarget,
+            mean_cost_usd: weaker.mean_cost_usd,
+            total_cost_usd: repeatsCost,
+          },
+        }, null, 2));
+        return;
+      }
+
+      const headers = ["ARM", "VALUE", "RUNS", "PASSED", "SUCCESS_RATE", "WILSON_95", "KNOWN_COST_RUNS", "MEAN_COST", "TOTAL_COST", "COST_PER_SUCCESS", "MEAN_DURATION"];
+      const armRow = (ref: "a" | "b", value: string, arm: typeof comparison.a) => [
+        ref.toUpperCase(),
+        value,
+        String(arm.runs),
+        String(arm.passed),
+        rateText(arm.success_rate),
+        `${rateText(arm.interval.low)} - ${rateText(arm.interval.high)}`,
+        String(arm.known_cost_runs),
+        moneyOrUnknown(arm.mean_cost_usd),
+        moneyOrUnknown(arm.total_cost_usd),
+        moneyOrUnknown(arm.cost_per_success_usd),
+        arm.mean_duration_ms === undefined ? "unknown" : `${Math.round(arm.mean_duration_ms)}ms`,
+      ];
+      renderAlignedTable(headers, [armRow("a", valueA, comparison.a), armRow("b", valueB, comparison.b)]);
+
+      console.log(`\nVerdict: ${verdictSentence(comparison, valueA, valueB)}`);
+      console.log(`Cost: ${comparison.cheaper_per_success === "unknown"
+        ? `cheaper per success is unknown (${costPerSuccessText(comparison.a, valueA)} vs ${costPerSuccessText(comparison.b, valueB)})`
+        : `${comparison.cheaper_per_success === "a" ? valueA : valueB} is cheaper per success (${costPerSuccessText(comparison.a, valueA)} vs ${costPerSuccessText(comparison.b, valueB)})`}`);
+      console.log(`Plain repeats: ${repeatsSentence({ weakerValue, strongerValue, weaker, stronger, attempts, reachesTarget, repeatsCost, equalRates })}`);
+    } catch (err) {
+      console.error(`[FAIL] observatory compare error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+function moneyOrUnknown(value: number | undefined): string {
+  return value === undefined ? "unknown" : `$${value.toFixed(4)}`;
+}
+
+function rateText(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function intervalText(arm: { interval: { low: number; high: number } }): string {
+  return `${rateText(arm.interval.low)}-${rateText(arm.interval.high)}`;
+}
+
+function costPerSuccessText(arm: { cost_per_success_usd: number | undefined }, value: string): string {
+  return `${moneyOrUnknown(arm.cost_per_success_usd)} for ${value}`;
+}
+
+function verdictSentence(
+  comparison: ReturnType<typeof compareArms>,
+  valueA: string,
+  valueB: string,
+): string {
+  if (comparison.verdict === "insufficient_data") {
+    return `insufficient_data — ${valueA} has ${comparison.a.runs} run(s) and ${valueB} has ${comparison.b.runs}; at least ${MIN_ARM_RUNS} per arm are needed before any difference is reportable.`;
+  }
+  if (comparison.verdict === "no_clear_difference") {
+    return `no_clear_difference — the 95% Wilson intervals overlap (${intervalText(comparison.a)} vs ${intervalText(comparison.b)}), so ${rateText(comparison.a.success_rate)} vs ${rateText(comparison.b.success_rate)} is within noise.`;
+  }
+  const winner = comparison.verdict === "a_better" ? valueA : valueB;
+  const loser = comparison.verdict === "a_better" ? valueB : valueA;
+  const winnerArm = comparison.verdict === "a_better" ? comparison.a : comparison.b;
+  const loserArm = comparison.verdict === "a_better" ? comparison.b : comparison.a;
+  return `${comparison.verdict} — ${winner} beats ${loser} on success rate (${rateText(winnerArm.success_rate)} vs ${rateText(loserArm.success_rate)}) with non-overlapping 95% Wilson intervals (${intervalText(winnerArm)} vs ${intervalText(loserArm)}).`;
+}
+
+function repeatsSentence(context: {
+  weakerValue: string;
+  strongerValue: string;
+  weaker: { success_rate: number; mean_cost_usd: number | undefined };
+  stronger: { success_rate: number };
+  attempts: number | undefined;
+  reachesTarget: boolean;
+  repeatsCost: number | undefined;
+  equalRates: boolean;
+}): string {
+  const { weakerValue, strongerValue, weaker, stronger, attempts, reachesTarget, repeatsCost, equalRates } = context;
+  const target = rateText(stronger.success_rate);
+  if (equalRates) {
+    return stronger.success_rate === 0
+      ? "neither arm passed a run, so repeats cannot separate them yet."
+      : `both arms pass at ${target}, so repeating either one does not change the comparison.`;
+  }
+  if (attempts === undefined) {
+    return `none of ${weakerValue}'s runs passed, so no number of plain repeats reaches ${strongerValue}'s ${target}.`;
+  }
+  const costClause = repeatsCost === undefined
+    ? `cost unknown because ${weakerValue}'s mean cost per run is unknown`
+    : `about $${repeatsCost.toFixed(2)} at its ${moneyOrUnknown(weaker.mean_cost_usd)} mean cost per run`;
+  if (reachesTarget) {
+    return `${attempts} plain repeat(s) of ${weakerValue} at ${rateText(weaker.success_rate)} would match ${strongerValue}'s ${target}, ${costClause}.`;
+  }
+  if (stronger.success_rate >= 1) {
+    return `no number of plain repeats of ${weakerValue} at ${rateText(weaker.success_rate)} reaches ${strongerValue}'s ${target} success rate; ${attempts} repeats (the ${BEST_OF_N_CAP} cap) would cost ${costClause}.`;
+  }
+  return `${attempts} plain repeats of ${weakerValue} (the ${BEST_OF_N_CAP} cap) reach only ${rateText(bestOfN(weaker.success_rate, BEST_OF_N_CAP))}, short of ${strongerValue}'s ${target}, ${costClause}.`;
+}
 
 observatoryCmd
   .command("export")
