@@ -1,7 +1,13 @@
 import { describe, expect, test } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { validateMission, type MissionDocument } from "../src/schema/mission.js";
 import { validateWorkflow, type WorkflowDocument } from "../src/schema/workflow.js";
-import { buildDispatchContext } from "../src/harness/dispatch-context.js";
+import {
+  buildDispatchContext,
+  PROJECT_FACTS_CHAR_LIMIT,
+} from "../src/harness/dispatch-context.js";
 import { renderPrompt } from "../src/harness/render-prompt.js";
 
 const FIXTURE_MISSION: MissionDocument = validateMission({
@@ -286,5 +292,84 @@ describe("UH-80 dispatch context contract", () => {
       Execute this mission and produce the expected artifacts.
       ::F::"
     `);
+  });
+});
+
+describe("project facts and template worker rules", () => {
+  test("appends template worker rules after the mission's own constraints", () => {
+    const ctx = buildDispatchContext(STRUCTURED_MISSION, undefined, {
+      finalMessageInstruction: FINAL_INSTRUCTION,
+      workerRules: ["Work in many small turns."],
+    });
+    expect(ctx.constraints).toEqual([
+      ...STRUCTURED_MISSION.constraints,
+      "Work in many small turns.",
+    ]);
+
+    const prompt = renderPrompt(ctx);
+    expect(prompt).toContain("- Work in many small turns.");
+    // The rule lands after the mission's own constraints, never before them.
+    expect(prompt.indexOf("- Work in many small turns.")).toBeGreaterThan(
+      prompt.indexOf("- Second constraint arrives after the first."),
+    );
+  });
+
+  test("renders the project brief once in a Project facts section", () => {
+    const ctx = buildDispatchContext(FIXTURE_MISSION, FIXTURE_WORKFLOW, {
+      finalMessageInstruction: FINAL_INSTRUCTION,
+      projectBrief: "Bun + vitest. No new dependencies.",
+    });
+    expect(ctx.projectFacts).toBe("Bun + vitest. No new dependencies.");
+
+    const prompt = renderPrompt(ctx);
+    expect(prompt).toContain("## Project facts\nBun + vitest. No new dependencies.\n\n");
+    expect(prompt.split("## Project facts").length - 1).toBe(1);
+  });
+
+  test("omits the Project facts section when there is no brief", async () => {
+    // An explicit root keeps this independent of the working directory.
+    const dir = await mkdtemp(path.join(tmpdir(), "uh-nobrief-"));
+    try {
+      const ctx = buildDispatchContext(FIXTURE_MISSION, undefined, {
+        root: dir,
+        finalMessageInstruction: FINAL_INSTRUCTION,
+      });
+      expect(ctx.projectFacts).toBeUndefined();
+      expect(renderPrompt(ctx)).not.toContain("## Project facts");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("reads .harness/project-brief.md from the given root", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "uh-brief-"));
+    try {
+      await mkdir(path.join(dir, ".harness"), { recursive: true });
+      await writeFile(path.join(dir, ".harness", "project-brief.md"), "Repo facts from disk.\n", "utf-8");
+      const ctx = buildDispatchContext(FIXTURE_MISSION, undefined, {
+        root: dir,
+        finalMessageInstruction: FINAL_INSTRUCTION,
+      });
+      expect(ctx.projectFacts).toBe("Repo facts from disk.");
+      expect(renderPrompt(ctx)).toContain("## Project facts\nRepo facts from disk.");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("caps the project brief at the limit with a clear truncation note", () => {
+    const long = "a".repeat(PROJECT_FACTS_CHAR_LIMIT + 500);
+    const ctx = buildDispatchContext(FIXTURE_MISSION, undefined, {
+      finalMessageInstruction: FINAL_INSTRUCTION,
+      projectBrief: long,
+    });
+
+    expect(ctx.projectFacts).toBeDefined();
+    expect(ctx.projectFacts!.length).toBeLessThanOrEqual(PROJECT_FACTS_CHAR_LIMIT);
+    expect(ctx.projectFacts).toContain("project brief truncated");
+
+    const prompt = renderPrompt(ctx);
+    expect(prompt).toContain("project brief truncated");
+    expect(prompt.split("## Project facts").length - 1).toBe(1);
   });
 });

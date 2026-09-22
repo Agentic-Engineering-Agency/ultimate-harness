@@ -14,6 +14,10 @@ import {
   applySessionTemplate,
   describeAppliedTemplate,
 } from "../src/harness/session-templates.js";
+import {
+  adoptSessionTemplate,
+  appendWorkerRules,
+} from "../src/harness/session-template-adoption.js";
 import { validateMission, type MissionDocument } from "../src/schema/mission.js";
 
 const BASE_VALID_TEMPLATE = {
@@ -386,6 +390,7 @@ describe("applySessionTemplate precedence", () => {
       deny_network_clients: true,
       allow_native_subagents: false,
     },
+    worker_rules: [],
     attempts: 2,
     notes: "Template notes",
   };
@@ -486,6 +491,7 @@ describe("write_roots never widened by template", () => {
       deny_git_mutations: true,
       deny_network_clients: true,
     },
+    worker_rules: [],
     attempts: 1,
   };
 
@@ -542,6 +548,7 @@ describe("Strict containment refusals", () => {
     adapter: "hermes",
     runtime_config_overrides: {},
     limits: {},
+    worker_rules: [],
     attempts: 1,
   };
 
@@ -647,6 +654,7 @@ describe("describeAppliedTemplate", () => {
       write_roots: ["src"],
       deny_network_clients: true,
     },
+    worker_rules: [],
     attempts: 1,
   };
 
@@ -778,5 +786,113 @@ describe("Shipped template examples validation", () => {
     expect(applied.guard?.write_roots).not.toContain(".");
     expect(applied.guard?.deny_network_clients).toBe(true);
     expect(applied.guard?.allow_native_subagents).toBe(false);
+  });
+});
+
+describe("SessionTemplate worker_rules", () => {
+  test("defaults worker_rules to an empty list", () => {
+    const tpl = validateSessionTemplate(BASE_VALID_TEMPLATE);
+    expect(tpl.worker_rules).toEqual([]);
+  });
+
+  test("accepts a list of short worker rules", () => {
+    const tpl = validateSessionTemplate({
+      ...BASE_VALID_TEMPLATE,
+      worker_rules: ["This runtime works in many small turns.", "Print the seed."],
+    });
+    expect(tpl.worker_rules).toEqual([
+      "This runtime works in many small turns.",
+      "Print the seed.",
+    ]);
+  });
+
+  test("rejects non-string, empty, or whitespace-only worker rules", () => {
+    expect(() => validateSessionTemplate({ ...BASE_VALID_TEMPLATE, worker_rules: [42] })).toThrow();
+    expect(() => validateSessionTemplate({ ...BASE_VALID_TEMPLATE, worker_rules: [""] })).toThrow();
+    expect(() => validateSessionTemplate({ ...BASE_VALID_TEMPLATE, worker_rules: ["   "] })).toThrow();
+  });
+});
+
+describe("adoptSessionTemplate worker_rules", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(path.join(tmpdir(), "uh-template-adopt-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("appends the template's worker_rules after the mission's own constraints", async () => {
+    const templatesDir = path.join(tmpDir, ".harness", "templates");
+    await mkdir(templatesDir, { recursive: true });
+    await writeFile(
+      path.join(templatesDir, "omp-worker.yaml"),
+      [
+        "schema_version: uh.session-template.v0",
+        "id: omp-worker",
+        "title: OMP worker",
+        "tier: balanced",
+        "adapter: oh-my-pi",
+        "limits:",
+        "  max_turns: 260",
+        "worker_rules:",
+        "  - This runtime works in many small turns.",
+        "  - Prefer small, reviewable edits.",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    const missionPath = path.join(tmpDir, "mission.yaml");
+    await writeFile(
+      missionPath,
+      [
+        "schema_version: uh.mission.v0",
+        "id: m-rules",
+        "workflow_profile: spec-first-feature",
+        "constraints:",
+        "  - Mission constraint one.",
+        "  - Mission constraint two.",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const adoption = await adoptSessionTemplate({
+      root: tmpDir,
+      missionPath,
+      templateId: "omp-worker",
+    });
+
+    expect(adoption.workerRules).toEqual([
+      "This runtime works in many small turns.",
+      "Prefer small, reviewable edits.",
+    ]);
+    expect(adoption.constraints).toEqual([
+      "Mission constraint one.",
+      "Mission constraint two.",
+      "This runtime works in many small turns.",
+      "Prefer small, reviewable edits.",
+    ]);
+    // Worker rules are not runtime overrides; they must not leak into the
+    // runtime-config merge the CLI prints as effective overrides.
+    expect(adoption.runtimeConfigOverrides).toEqual({ limits: { max_turns: 260 } });
+  });
+});
+
+describe("appendWorkerRules", () => {
+  test("appends rules after the base constraints without mutating either input", () => {
+    const base = ["base one"];
+    const rules = ["rule one", "rule two"];
+    const out = appendWorkerRules(base, rules);
+    expect(out).toEqual(["base one", "rule one", "rule two"]);
+    expect(base).toEqual(["base one"]);
+    expect(rules).toEqual(["rule one", "rule two"]);
+    expect(out).not.toBe(base);
+  });
+
+  test("handles empty inputs", () => {
+    expect(appendWorkerRules(["a"], [])).toEqual(["a"]);
+    expect(appendWorkerRules([], ["b"])).toEqual(["b"]);
+    expect(appendWorkerRules([], [])).toEqual([]);
   });
 });

@@ -57,6 +57,9 @@ import { readRuntimeAccounting } from "./runtime-accounting.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists, isPathWithin } from "./mission.js";
 import { listLiveRuns, registerLiveRun } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
+import { getSessionTemplate } from "./session-templates.js";
+import { appendWorkerRules } from "./session-template-adoption.js";
+import type { SessionTemplate } from "../schema/session-template.js";
 const execFileP = promisify(execFile);
 
 /* -------------------------------------------------------------------------- */
@@ -825,6 +828,7 @@ function resolveWorkerContract(
   canonicalPacket: Record<string, unknown>,
   spec: TeamWorkerSpec,
   basePacket: Record<string, unknown> = canonicalPacket,
+  template?: SessionTemplate,
 ): WorkerContract {
   const baseObjective = typeof basePacket.objective === "string" ? basePacket.objective : "";
   const parentObjective = typeof canonicalPacket.objective === "string" ? canonicalPacket.objective : "";
@@ -836,27 +840,52 @@ function resolveWorkerContract(
   const baseOverrides = objectRecord(basePacket.runtime_config_overrides);
   const parentOverrides = objectRecord(canonicalPacket.runtime_config_overrides);
   const workerOverrides = spec.runtime_config_overrides ?? {};
-  const runtimeConfigOverrides = { ...parentOverrides, ...baseOverrides, ...workerOverrides };
-  if (spec.limits) {
-    runtimeConfigOverrides.limits = {
-      ...objectRecord(parentOverrides.limits),
-      ...objectRecord(baseOverrides.limits),
-      ...spec.limits,
-    };
+  // The template is the least specific source: the parent packet, the worker's
+  // own packet, and the worker spec each override it key by key.
+  const runtimeConfigOverrides = {
+    ...(template?.runtime_config_overrides ?? {}),
+    ...parentOverrides,
+    ...baseOverrides,
+    ...workerOverrides,
+  };
+  const mergedLimits = {
+    ...(template?.limits ?? {}),
+    ...objectRecord(parentOverrides.limits),
+    ...objectRecord(baseOverrides.limits),
+    ...(spec.limits ?? {}),
+  };
+  if (Object.keys(mergedLimits).length > 0) {
+    runtimeConfigOverrides.limits = mergedLimits;
+  }
+  const mergedRecovery = {
+    ...(template?.recovery ?? {}),
+    ...objectRecord(parentOverrides.recovery),
+    ...objectRecord(baseOverrides.recovery),
+  };
+  if (Object.keys(mergedRecovery).length > 0) {
+    runtimeConfigOverrides.recovery = mergedRecovery;
   }
   const expectedOutputs = spec.expected_outputs ?? (
     basePacket.expected_outputs && typeof basePacket.expected_outputs === "object"
       ? basePacket.expected_outputs as WorkerContract["expected_outputs"]
       : undefined
   );
-  const constraints = Array.isArray(basePacket.constraints)
+  const baseConstraints = Array.isArray(basePacket.constraints)
     ? basePacket.constraints.filter((item): item is string => typeof item === "string")
-    : undefined;
+    : [];
+  // Worker rules land after the worker's own constraints, the same order the
+  // prompt renders: mission guidance first, then the template's.
+  const constraints = appendWorkerRules(baseConstraints, template?.worker_rules ?? []);
+  // `memory_mb` is a team-resource concern, not a runtime limit; the canonical
+  // contract's strict limits schema rejects it, so keep it out of `limits` (it
+  // still rides in `runtime_config_overrides.limits` for the runtime packet).
+  const contractLimits: Record<string, unknown> = { ...mergedLimits };
+  delete contractLimits.memory_mb;
   return {
     ...(objective ? { objective } : {}),
-    ...(constraints && constraints.length > 0 ? { constraints } : {}),
+    ...(constraints.length > 0 ? { constraints } : {}),
     ...(Object.keys(runtimeConfigOverrides).length > 0 ? { runtime_config_overrides: runtimeConfigOverrides } : {}),
-    ...(spec.limits ? { limits: spec.limits } : {}),
+    ...(Object.keys(contractLimits).length > 0 ? { limits: contractLimits } : {}),
     ...(expectedOutputs ? { expected_outputs: expectedOutputs } : {}),
     ...(spec.seed !== undefined ? { seed: spec.seed } : {}),
   };
@@ -1042,6 +1071,15 @@ export async function runTeamMission(
   root: string,
   options: RunTeamMissionOptions,
 ): Promise<TeamRunResult> {
+  // Resolve every worker's session template BEFORE planning or dispatch, so an
+  // unknown template id fails the whole team up front instead of after a
+  // worker's worktree exists. Each id is loaded once and reused by every worker
+  // that names it.
+  const workerTemplates = new Map<string, SessionTemplate>();
+  for (const spec of mission.team.workers) {
+    if (spec.template === undefined || workerTemplates.has(spec.template)) continue;
+    workerTemplates.set(spec.template, await getSessionTemplate(root, spec.template));
+  }
   const plan = planTeamRun(mission, root, { strategy: options.strategy });
   workerConcurrency(plan.workers.length, mission.team.resources);
   const workerMemory = mission.team.resources?.worker_memory_mb;
@@ -1107,8 +1145,12 @@ export async function runTeamMission(
       const artifactRoot = workerArtifactRoot(plan.teamRoot, worker.id, parentRunId);
       const workerSpec = worker.spec ?? { role: worker.role, adapter: worker.adapter as TeamWorker["adapter"] };
       const workerMission = workerMissionPackets.get(worker.id);
-      const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet);
+      const template = workerSpec.template ? workerTemplates.get(workerSpec.template) : undefined;
+      const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet, template);
+      // The runtime receives the same limits the contract adopted: template
+      // defaults first, then the worker's own limits, then the memory cap.
       const limits = {
+        ...(template?.limits ?? {}),
         ...(workerSpec.limits ?? {}),
         ...(workerMemory ? { memory_mb: workerMemory } : {}),
       };
@@ -1183,7 +1225,8 @@ export async function runTeamMission(
       }
       await seedMissionPacket(canonicalMissionDir, wp.worktreePath, mission.id);
       const workerSpec = wp.spec ?? { role: wp.role, adapter: wp.adapter as TeamWorker["adapter"] };
-      const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet);
+      const template = workerSpec.template ? workerTemplates.get(workerSpec.template) : undefined;
+      const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet, template);
       const sourceBytes = workerMission?.bytes ?? canonicalBytes;
       const derivedBytes = await writeDerivedMissionPacket(sourceBytes, wp.worktreePath, workerMissionId, contract);
       if (workerMission) {
