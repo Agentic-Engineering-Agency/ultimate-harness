@@ -5,11 +5,14 @@ import path from "node:path";
 import { parse } from "yaml";
 import { spawnSync, type ChildProcess } from "node:child_process";
 import type { EventEmitter as NodeEventEmitter } from "node:events";
-import { AcceptanceEvidenceSchema, AcceptanceRegistrySchema } from "../src/schema/acceptance.js";
+import { AcceptanceEvidenceSchema, AcceptanceRegistrySchema, type AcceptanceExpected } from "../src/schema/acceptance.js";
 import { validateMission } from "../src/schema/mission.js";
-import { applyTeamMissionOverrides, classifyAcceptance, collectFacts, compareAcceptanceFacts, computeAcceptanceInputDigest, loadAcceptanceRegistry, rebindAcceptanceEvidence, renderAcceptanceReport, runAcceptance, wrapperMechanismUnavailable } from "../src/harness/acceptance.js";
+import { applyTeamMissionOverrides, classifyAcceptance, collectFacts, compareAcceptanceFacts, computeAcceptanceInputDigest, evaluateAcceptanceInvariants, evaluateExercisedMechanisms, loadAcceptanceRegistry, rebindAcceptanceEvidence, renderAcceptanceReport, resolveAcceptanceRuntimeVersion, runAcceptance, wrapperMechanismUnavailable } from "../src/harness/acceptance.js";
 
 const expected = { status: "passed", required_records: { denials: 3 } } as const;
+
+const guardAllow = (tool: string): string => JSON.stringify({ ts: "2026-09-22T00:00:00.000Z", tool, class: "allow", target: `src/${tool.toLowerCase()}.ts` });
+const guardDenial = (guardClass: string): string => JSON.stringify({ ts: "2026-09-22T00:00:00.000Z", tool: "Bash", class: guardClass, target: "out/x.txt", reason: guardClass });
 
 describe("acceptance evidence", () => {
   test("schemas round-trip registry and evidence", () => {
@@ -92,9 +95,6 @@ describe("acceptance evidence", () => {
     expect(facts.fact_sources.status).toBe("last");
     expect(facts.fact_sources.stop_code).toBe("first");
   });
-
-  const guardAllow = (tool: string): string => JSON.stringify({ ts: "2026-09-22T00:00:00.000Z", tool, class: "allow", target: `src/${tool.toLowerCase()}.ts` });
-  const guardDenial = (guardClass: string): string => JSON.stringify({ ts: "2026-09-22T00:00:00.000Z", tool: "Bash", class: guardClass, target: "out/x.txt", reason: guardClass });
 
   test("reads tool_guard_lines from the run's guard log without a terminal result", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "acceptance-guardlog-"));
@@ -767,5 +767,334 @@ describe("acceptance campaign runtime", () => {
     });
     expect(result.status).toBe(3);
     expect(result.stdout?.trim()).toBe(JSON.stringify({ args: ["--root", shimDir] }));
+  });
+});
+
+describe("acceptance invariants", () => {
+  function git(cwd: string, args: string[]): string {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+    return result.stdout;
+  }
+  function initRepo(root: string): void {
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "core.autocrlf", "false"]);
+    git(root, ["config", "user.name", "Acceptance Test"]);
+    git(root, ["config", "user.email", "acceptance@test.local"]);
+  }
+  function commit(root: string, message: string): void {
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "--quiet", "-m", message]);
+  }
+  /** A run root with a seeded git repo and a worker worktree on its own branch. */
+  async function workerFixture(missionId: string, missionYaml = "id: fixture\n"): Promise<{ runRoot: string; missionRoot: string; worktree: string }> {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-invariant-"));
+    initRepo(runRoot);
+    await writeFile(path.join(runRoot, "README.md"), "# seed\n", "utf8");
+    commit(runRoot, "seed");
+    const missionRoot = path.join(runRoot, ".harness", "missions", missionId);
+    await mkdir(path.join(missionRoot, "team", "workers"), { recursive: true });
+    await writeFile(path.join(missionRoot, "mission.yaml"), missionYaml, "utf8");
+    const worktree = path.join(missionRoot, "team", "workers", "worker-a");
+    git(runRoot, ["worktree", "add", "--quiet", "-b", `uh/team/${missionId}/worker-a`, worktree, "HEAD"]);
+    return { runRoot, missionRoot, worktree };
+  }
+
+  test("no_writes_outside_roots holds inside the write roots and fails outside them", async () => {
+    const { runRoot, worktree } = await workerFixture("m1", "guard:\n  write_roots: [out]\n");
+    await mkdir(path.join(worktree, "out"), { recursive: true });
+    await writeFile(path.join(worktree, "out", "ok.txt"), "ok\n", "utf8");
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["no_writes_outside_roots"] };
+    expect((await evaluateAcceptanceInvariants(runRoot, "m1", expected)).no_writes_outside_roots).toBe(true);
+    await writeFile(path.join(worktree, "src-escape.txt"), "bad\n", "utf8");
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m1", expected)).no_writes_outside_roots;
+    expect(Array.isArray(observed)).toBe(true);
+    expect(observed).toContain(".harness/missions/m1/team/workers/worker-a/src-escape.txt");
+  });
+
+  test("no_worker_commits tolerates the harness commit and flags any other commit", async () => {
+    const { runRoot, worktree } = await workerFixture("m2");
+    await writeFile(path.join(worktree, "out.txt"), "work\n", "utf8");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["-c", "user.email=uh-team@example.com", "-c", "user.name=uh team worker", "commit", "--quiet", "-m", "team(worker-a): worker run"]);
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["no_worker_commits"] };
+    expect((await evaluateAcceptanceInvariants(runRoot, "m2", expected)).no_worker_commits).toBe(true);
+    await writeFile(path.join(worktree, "out.txt"), "more\n", "utf8");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["-c", "user.email=worker@test.local", "-c", "user.name=worker", "commit", "--quiet", "-m", "worker commit"]);
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m2", expected)).no_worker_commits;
+    expect(Array.isArray(observed)).toBe(true);
+    expect((observed as string[]).some((line) => line.includes("worker@test.local"))).toBe(true);
+  });
+
+  test("no_package_install flags a node_modules directory and an appeared lockfile", async () => {
+    const { runRoot, worktree } = await workerFixture("m3");
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["no_package_install"] };
+    expect((await evaluateAcceptanceInvariants(runRoot, "m3", expected)).no_package_install).toBe(true);
+    await mkdir(path.join(worktree, "node_modules"), { recursive: true });
+    let observed = (await evaluateAcceptanceInvariants(runRoot, "m3", expected)).no_package_install;
+    expect(observed).toContain(".harness/missions/m3/team/workers/worker-a/node_modules");
+    await rm(path.join(worktree, "node_modules"), { recursive: true, force: true });
+    await writeFile(path.join(worktree, "package-lock.json"), "{}\n", "utf8");
+    observed = (await evaluateAcceptanceInvariants(runRoot, "m3", expected)).no_package_install;
+    expect(observed).toContain(".harness/missions/m3/team/workers/worker-a/package-lock.json");
+  });
+
+  test("protected_paths_untouched holds identical copies and flags a rewritten one", async () => {
+    const { runRoot, worktree } = await workerFixture("m4");
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["protected_paths_untouched"] };
+    await mkdir(path.join(runRoot, ".commandcode"), { recursive: true });
+    await mkdir(path.join(worktree, ".commandcode"), { recursive: true });
+    await writeFile(path.join(runRoot, ".commandcode", "settings.json"), "{}\n", "utf8");
+    await writeFile(path.join(worktree, ".commandcode", "settings.json"), "{}\n", "utf8");
+    expect((await evaluateAcceptanceInvariants(runRoot, "m4", expected)).protected_paths_untouched).toBe(true);
+    await writeFile(path.join(worktree, ".commandcode", "settings.json"), '{"tampered":true}\n', "utf8");
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m4", expected)).protected_paths_untouched;
+    expect(Array.isArray(observed)).toBe(true);
+    expect((observed as string[])[0]).toContain(".commandcode/settings.json");
+  });
+
+  test("guard_log_consistent requires every counted denial to have a log line or native refusal", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-guard-consistency-"));
+    const runDir = path.join(runRoot, ".harness", "missions", "m5", "runs", "001");
+    await mkdir(runDir, { recursive: true });
+    const expected: AcceptanceExpected = { status: "failed", invariants: ["guard_log_consistent"] };
+    await writeFile(path.join(runDir, "runtime-control.json"), JSON.stringify({ denials: 2 }), "utf8");
+    await writeFile(path.join(runDir, "tool-guard.log"), `${guardDenial("write_outside")}\n${guardDenial("git_mutation")}\n`, "utf8");
+    expect((await evaluateAcceptanceInvariants(runRoot, "m5", expected)).guard_log_consistent).toBe(true);
+    await writeFile(path.join(runDir, "runtime-control.json"), JSON.stringify({ denials: 3 }), "utf8");
+    expect(Array.isArray((await evaluateAcceptanceInvariants(runRoot, "m5", expected)).guard_log_consistent)).toBe(true);
+    await writeFile(path.join(runDir, "tool-guard.log"), `${guardDenial("write_outside")}\n${guardDenial("git_mutation")}\n${JSON.stringify({ class: "native_refusal", tool: "Bash" })}\n`, "utf8");
+    expect((await evaluateAcceptanceInvariants(runRoot, "m5", expected)).guard_log_consistent).toBe(true);
+  });
+
+  test("a false invariant is a mismatch while a true one passes", () => {
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["guard_log_consistent", "no_package_install"] };
+    expect(compareAcceptanceFacts(expected, { status: "passed", invariants: { guard_log_consistent: true, no_package_install: true } })).toEqual([]);
+    expect(compareAcceptanceFacts(expected, { status: "passed", invariants: { guard_log_consistent: true, no_package_install: [".harness/x/node_modules"] } })).toEqual([
+      { field: "invariants.no_package_install", expected: true, observed: [".harness/x/node_modules"] },
+    ]);
+  });
+});
+
+describe("acceptance exercised mechanisms", () => {
+  test("records which mechanisms fired from guard classes and stop codes, never as a mismatch", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-exercised-"));
+    const runDir = path.join(runRoot, ".harness", "missions", "m6", "runs", "001");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "tool-guard.log"), [
+      guardDenial("write_outside"),
+      guardDenial("git_mutation"),
+      guardDenial("package_install"),
+      guardDenial("guard_tamper"),
+      guardAllow("Read"),
+      "",
+    ].join("\n"), "utf8");
+    await writeFile(path.join(runDir, "runtime-control.json"), JSON.stringify({ stop_code: "denial_budget" }), "utf8");
+    const names = ["guard_package_install", "guard_git_mutation", "guard_write_outside", "guard_tamper", "denial_budget", "guard_network_client"];
+    expect(await evaluateExercisedMechanisms(runRoot, "m6", names)).toEqual({
+      guard_package_install: true,
+      guard_git_mutation: true,
+      guard_write_outside: true,
+      guard_tamper: true,
+      denial_budget: true,
+      guard_network_client: false,
+    });
+    const expected: AcceptanceExpected = { status: "passed", exercised_report: names };
+    expect(compareAcceptanceFacts(expected, { status: "passed", exercised: { guard_package_install: false } })).toEqual([]);
+    const facts = await collectFacts(runRoot, "m6", expected);
+    expect(facts.observed.exercised).toMatchObject({ guard_package_install: true, guard_network_client: false, denial_budget: true });
+  });
+
+  test("collectFacts records declared invariants and exercised mechanisms together", async () => {
+    const runRoot = await mkdtemp(path.join(tmpdir(), "acceptance-facts-invariants-"));
+    const runDir = path.join(runRoot, ".harness", "missions", "m7", "runs", "001");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "tool-guard.log"), `${guardDenial("write_outside")}\n`, "utf8");
+    await writeFile(path.join(runDir, "runtime-control.json"), JSON.stringify({ denials: 1, stop_code: "denial_budget" }), "utf8");
+    const expected: AcceptanceExpected = { status: "failed", invariants: ["guard_log_consistent", "no_package_install"], exercised_report: ["guard_write_outside", "denial_budget"] };
+    const facts = await collectFacts(runRoot, "m7", expected);
+    expect(facts.observed.invariants).toEqual({ guard_log_consistent: true, no_package_install: true });
+    expect(facts.observed.exercised).toEqual({ guard_write_outside: true, denial_budget: true });
+  });
+});
+
+describe("acceptance runtime version", () => {
+  test("parses the command-code version and reports unknown when it cannot be read", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-version-"));
+    const version = await resolveAcceptanceRuntimeVersion("command-code", root, async (_command, args) => ({
+      code: 0,
+      stdout: args.includes("--no-auto-update") ? "v9.9.9\n" : "",
+      stderr: "",
+    }));
+    expect(version).toBe("9.9.9");
+    expect(await resolveAcceptanceRuntimeVersion("command-code", root, async () => ({ code: 1, stdout: "", stderr: "boom" }))).toBe("unknown");
+    expect(await resolveAcceptanceRuntimeVersion("oh-my-pi", root, async () => ({ code: 0, stdout: "0.4.2\n", stderr: "" }))).toBe("0.4.2");
+  });
+
+  test("the runtime version changes the input digest", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-version-digest-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "a.ts"), "export const a = 1;\n", "utf8");
+    spawnSync("git", ["init", "--quiet"], { cwd: root });
+    spawnSync("git", ["add", "-A"], { cwd: root });
+    spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "seed"], { cwd: root });
+    const inputs = ["src/**"];
+    const identity = { runtime: "command-code", model: "qwen/qwen3.8-flash" };
+    const withoutVersion = await computeAcceptanceInputDigest(root, inputs, identity);
+    const withVersion = await computeAcceptanceInputDigest(root, inputs, { ...identity, runtimeVersion: "9.9.9" });
+    expect(withVersion.digest).not.toBe(withoutVersion.digest);
+  });
+
+  test("a digest-bearing record with no explicit root resolves the root from the evidence location", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-evidence-root-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "a.ts"), "export const a = 1;\n", "utf8");
+    spawnSync("git", ["init", "--quiet"], { cwd: root });
+    spawnSync("git", ["add", "-A"], { cwd: root });
+    spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "seed"], { cwd: root });
+    const inputs = ["src/**"];
+    const identity = { runtime: "command-code", model: "qwen/qwen3.8-flash" };
+    const digest = await computeAcceptanceInputDigest(root, inputs, identity);
+    const evidenceRoot = path.join(root, "acceptance", "evidence");
+    await mkdir(path.join(evidenceRoot, "C1"), { recursive: true });
+    const evidence = {
+      outcome: "passed" as const,
+      checked_at: new Date().toISOString(),
+      harness_commit: "deadbeef",
+      input_digest: digest.digest,
+      runtime: identity.runtime,
+      model: identity.model,
+    };
+    const now = new Date();
+    // The commit rule would call this stale; the digest, re-hashed from the
+    // root resolved out of the evidence location, proves it fresh.
+    expect((await classifyAcceptance(evidence, 30, now, "a-different-commit", { inputs })).state).toBe("stale");
+    expect((await classifyAcceptance(evidence, 30, now, "a-different-commit", { inputs, evidenceRoot })).state).toBe("proven");
+  });
+
+  test("records runtime_version in the run evidence and folds it into the digest", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-version-run-"));
+    await mkdir(path.join(root, "acceptance", "missions", "C1"), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "missions", "C1", "mission.yaml"), [
+      "schema_version: uh.mission.v0",
+      "id: fixture-acceptance",
+      "title: Fixture",
+      "workflow_profile: bugfix-contained",
+      "objective: Create out/report.txt.",
+      "",
+    ].join("\n"), "utf8");
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), [
+      "schema_version: uh.acceptance-registry.v0",
+      "entries:",
+      "  C1:",
+      "    title: Fixture",
+      "    capability: C1",
+      "    mission: missions/C1/mission.yaml",
+      "    shape: single",
+      "    runtime: command-code",
+      "    expected: { status: passed }",
+      "",
+    ].join("\n"), "utf8");
+    const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-version-run-ws-"));
+    const commandRunner = async (_command: string, args: string[]) => ({
+      code: 0,
+      stdout: args.includes("--no-auto-update") ? "3.4.5\n" : "",
+      stderr: "",
+    });
+    const evidence = await runAcceptance(root, { workspace, cliPath: "node", commandRunner });
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].runtime_version).toBe("3.4.5");
+    expect(evidence[0].observed.runtime_version_unreadable).toBeUndefined();
+  });
+});
+
+describe("acceptance injected actions", () => {
+  async function writeInjectFixture(root: string, injectYaml: string): Promise<void> {
+    await mkdir(path.join(root, "acceptance", "missions", "C1"), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "missions", "C1", "mission.yaml"), [
+      "schema_version: uh.mission.v0",
+      "id: fixture-acceptance",
+      "title: Fixture",
+      "workflow_profile: bugfix-contained",
+      "objective: Create out/report.txt.",
+      "",
+    ].join("\n"), "utf8");
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), [
+      "schema_version: uh.acceptance-registry.v0",
+      "entries:",
+      "  C1:",
+      "    title: Fixture",
+      "    capability: C1",
+      "    mission: missions/C1/mission.yaml",
+      "    shape: single",
+      "    runtime: command-code",
+      "    expected: { status: passed }",
+      injectYaml,
+      "",
+    ].join("\n"), "utf8");
+  }
+
+  test("cancel_after_ready runs mission cancel once ready and records the outcome", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-inject-cancel-"));
+    await writeInjectFixture(root, "    inject: { cancel_after_ready: true }");
+    const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-inject-cancel-ws-"));
+    const calls: string[][] = [];
+    const commandRunner = async (_command: string, args: string[]) => {
+      calls.push(args);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const evidence = await runAcceptance(root, {
+      workspace,
+      cliPath: "node",
+      commandRunner,
+      injectReady: async () => "inject-run-1",
+    });
+    expect(evidence).toHaveLength(1);
+    const cancelCall = calls.find((args) => args.includes("cancel"));
+    expect(cancelCall).toBeDefined();
+    expect(cancelCall).toEqual(expect.arrayContaining(["mission", "cancel", "--run-id", "inject-run-1"]));
+    expect(evidence[0].observed.injected).toEqual({ action: "cancel_after_ready", outcome: "ok" });
+    const launched = spawnState.calls.find((call) => call.args.includes("--run-id") && call.args[1] === "mission");
+    expect(launched?.args).toEqual(expect.arrayContaining(["--run-id", "20260101T000002Z-abcdef"]));
+  });
+
+  test("steer_after_ready runs steer with the message once ready and records the outcome", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-inject-steer-"));
+    await writeInjectFixture(root, "    inject: { steer_after_ready: focus on out/report.txt }");
+    const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-inject-steer-ws-"));
+    const calls: string[][] = [];
+    const commandRunner = async (_command: string, args: string[]) => {
+      calls.push(args);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const evidence = await runAcceptance(root, {
+      workspace,
+      cliPath: "node",
+      commandRunner,
+      injectReady: async () => "inject-run-2",
+    });
+    const steerCall = calls.find((args) => args.includes("steer"));
+    expect(steerCall).toEqual(expect.arrayContaining(["steer", "inject-run-2", "focus on out/report.txt"]));
+    expect(evidence[0].observed.injected).toEqual({ action: "steer_after_ready", outcome: "ok" });
+  });
+
+  test("records not_ready when the run never becomes ready", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-inject-notready-"));
+    await writeInjectFixture(root, "    inject: { cancel_after_ready: true }");
+    const workspace = await mkdtemp(path.join(tmpdir(), "acceptance-inject-notready-ws-"));
+    const calls: string[][] = [];
+    const commandRunner = async (_command: string, args: string[]) => {
+      calls.push(args);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const evidence = await runAcceptance(root, {
+      workspace,
+      cliPath: "node",
+      commandRunner,
+      injectReady: async () => undefined,
+    });
+    expect(calls.some((args) => args.includes("cancel"))).toBe(false);
+    expect(evidence[0].observed.injected).toEqual({ action: "cancel_after_ready", outcome: "not_ready" });
   });
 });

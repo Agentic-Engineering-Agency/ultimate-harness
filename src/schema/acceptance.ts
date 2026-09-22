@@ -10,6 +10,40 @@ const AcceptanceWorkerExpectedSchema = z.object({
 
 const AcceptanceFactSourceSchema = z.enum(["first", "last"]);
 
+/**
+ * Harness invariants a mission run must satisfy regardless of what the model
+ * chose to do. Each name produces one observed fact (`true`, or an array of the
+ * offending paths/lines) and, when false, a mismatch. The runner evaluates them
+ * from the run's own artifacts (worker worktrees, guard logs, runtime control
+ * receipts); see `evaluateAcceptanceInvariants` in `src/harness/acceptance.ts`.
+ */
+export const AcceptanceInvariantSchema = z.enum([
+  "no_writes_outside_roots",
+  "no_worker_commits",
+  "no_package_install",
+  "protected_paths_untouched",
+  "guard_log_consistent",
+]);
+export type AcceptanceInvariant = z.infer<typeof AcceptanceInvariantSchema>;
+
+/**
+ * Runner-side actions injected into a live run: cancel the run once it is
+ * ready (`cancel_after_ready`) or steer it once it is ready
+ * (`steer_after_ready`, carrying the operator message). The injected action and
+ * its outcome are recorded in the evidence.
+ */
+export const AcceptanceInjectSchema = z
+  .object({
+    cancel_after_ready: z.boolean().optional(),
+    steer_after_ready: z.string().min(1).optional(),
+  })
+  .strict()
+  .refine(
+    (value) => value.cancel_after_ready === true || value.steer_after_ready !== undefined,
+    "inject requires cancel_after_ready: true or steer_after_ready: <message>",
+  );
+export type AcceptanceInject = z.infer<typeof AcceptanceInjectSchema>;
+
 export const AcceptanceExpectedSchema = z.object({
   status: z.string().min(1),
   stop_code: z.string().min(1).optional(),
@@ -22,6 +56,15 @@ export const AcceptanceExpectedSchema = z.object({
   guardian_receipt: z.boolean().optional(),
   path_style: z.literal("forward_slashes").optional(),
   fact_sources: z.record(z.string(), AcceptanceFactSourceSchema).optional(),
+  /** Harness invariants judged from the run's own artifacts. */
+  invariants: z.array(AcceptanceInvariantSchema).optional(),
+  /**
+   * Mechanisms the report should attest fired (`guard_package_install`,
+   * `guard_git_mutation`, `guard_write_outside`, `guard_tamper`,
+   * `denial_budget`, ...). These are reported, never mismatches, so a model
+   * that behaves well still passes while the report shows which fired.
+   */
+  exercised_report: z.array(z.string().min(1)).optional(),
 }).strict();
 export type AcceptanceExpected = z.infer<typeof AcceptanceExpectedSchema>;
 
@@ -44,6 +87,8 @@ export const AcceptanceRegistryEntrySchema = z.object({
    * `src/**`). See `acceptanceInputs` in `src/harness/acceptance.ts`.
    */
   inputs: z.array(RelativePathSchema).optional(),
+  /** Runner-side actions injected into a live run (see `AcceptanceInjectSchema`). */
+  inject: AcceptanceInjectSchema.optional(),
 }).strict();
 export type AcceptanceRegistryEntry = z.infer<typeof AcceptanceRegistryEntrySchema>;
 
@@ -87,6 +132,13 @@ export const AcceptanceEvidenceSchema = z.object({
   inputs_resolved: z.number().int().nonnegative().optional(),
   /** The legacy `harness_commit` a rebind revalidated this record against. */
   rebound_from_commit: z.string().min(1).optional(),
+  /**
+   * The runtime version the digest was computed with (`cmdc --version
+   * --no-auto-update` for command-code, `<cli> --version` otherwise), or
+   * `"unknown"` when it could not be read. Freshness reproduces the digest with
+   * this value, so it must be recorded alongside the digest.
+   */
+  runtime_version: z.string().min(1).optional(),
 }).strict();
 export type AcceptanceEvidence = z.infer<typeof AcceptanceEvidenceSchema>;
 
