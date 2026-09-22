@@ -28,7 +28,7 @@ import { verifyExpectedArtifact } from "./output-verification.js";
  * goes wrong).
  */
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "yaml";
 import { promisify } from "node:util";
@@ -54,7 +54,7 @@ import { loadMissionFile } from "./capabilities.js";
 import { aggregateRuntimeUsage, type RuntimeUsage } from "./usage.js";
 import { readRuntimeAccounting } from "./runtime-accounting.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists } from "./mission.js";
-import { registerLiveRun } from "./live-runs.js";
+import { listLiveRuns, registerLiveRun } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 const execFileP = promisify(execFile);
 
@@ -178,8 +178,24 @@ export interface GitOps {
   merge: (cwd: string, branch: string) => Promise<MergeOutcome>;
   /** Return the changed files (relative paths) for `branch` vs `baseRef`. */
   diffFiles: (root: string, baseRef: string, branch: string) => Promise<string[]>;
-  /** Delete a local branch (`git branch -D`). Best-effort. */
+  /**
+   * Delete a local branch (`git branch -D`) and its `branch.<name>` config
+   * section — `git branch -D` leaves the section behind, so the fork-point
+   * record would otherwise outlive the branch. Best-effort.
+   */
   deleteBranch: (root: string, branch: string) => Promise<void>;
+  /**
+   * Resolve `ref` to a full commit id in `root`. Optional so test doubles that
+   * never touch git stay valid; when absent the base ref is used verbatim and
+   * no `branch.<name>.base` record is written.
+   */
+  resolveCommit?: (root: string, ref: string) => Promise<string>;
+  /** Record `git config branch.<branch>.base <commit>` in `root` (the fork point review reads back). */
+  setBranchBase?: (root: string, branch: string, commit: string) => Promise<void>;
+  /** Rename a local branch (`git branch -m <from> <to>`); used to archive a retained run. */
+  renameBranch?: (root: string, from: string, to: string) => Promise<void>;
+  /** True when a local branch exists. Optional so existing test doubles stay valid. */
+  branchExists?: (root: string, branch: string) => Promise<boolean>;
   /**
    * Stage + commit uncommitted changes in `cwd`, no-op when the staged index is
    * empty. `stagePaths` restricts staging to exactly those paths — an empty
@@ -227,6 +243,15 @@ export interface RunTeamMissionOptions {
   baseRef?: string;
   /** When true, do NOT remove worktrees even on success. Useful for tests. */
   retainOnSuccess?: boolean;
+  /**
+   * Relaunch a team whose previous run left worktrees and branches behind: the
+   * old worktrees are removed, each old branch is renamed under
+   * `uh/archive/<team>/<timestamp>/<role>` (never deleted — unmerged work is
+   * kept), and `.harness/missions/<team>/team` is renamed to
+   * `team.<timestamp>`. Without it, a relaunch is refused while retained state
+   * exists. Always refused while a live run of the team is registered.
+   */
+  replace?: boolean;
   /**
    * Leader integration strategy. The mission.yaml surface no longer declares
    * this; callers (CLI, staged workflow) thread it through. Only `"merge"`
@@ -630,6 +655,32 @@ export const defaultGitOps: GitOps = {
     try {
       await execFileP("git", ["branch", "-D", branch], { cwd: root });
     } catch { /* best-effort */ }
+    // `git branch -D` deletes the ref but leaves `branch.<name>` in the config,
+    // so the base record would outlive its branch (and confuse a later review,
+    // or a same-named branch recreated by a relaunch). Drop the section too.
+    try {
+      await execFileP("git", ["config", "--remove-section", `branch.${branch}`], { cwd: root });
+    } catch { /* best-effort: no section, or no config at all */ }
+  },
+  async resolveCommit(root, ref) {
+    const { stdout } = await execFileP("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: root });
+    const commit = stdout.trim();
+    if (commit.length === 0) throw new Error(`Cannot resolve base ref "${ref}" to a commit`);
+    return commit;
+  },
+  async setBranchBase(root, branch, commit) {
+    await execFileP("git", ["config", `branch.${branch}.base`, commit], { cwd: root });
+  },
+  async renameBranch(root, from, to) {
+    await execFileP("git", ["branch", "-m", from, to], { cwd: root });
+  },
+  async branchExists(root, branch) {
+    try {
+      await execFileP("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: root });
+      return true;
+    } catch {
+      return false;
+    }
   },
   async commitAll(cwd, message, stagePaths, forcePaths) {
     // An explicit empty list means "nothing is inside the worker's roots":
@@ -950,12 +1001,25 @@ export async function runTeamMission(
   }
   const gitOps = options.gitOps ?? defaultGitOps;
   const baseRef = options.baseRef ?? "HEAD";
+  // Resolve the base ref to a commit id ONCE, before any worker starts, so every
+  // worker and the leader branch from the same immutable commit (not from a ref
+  // that can advance mid-run), and so independent review can read the exact fork
+  // point back from `branch.<name>.base`.
+  const baseCommit = gitOps.resolveCommit ? await gitOps.resolveCommit(root, baseRef) : undefined;
+  const worktreeBase = baseCommit ?? baseRef;
 
   const canonicalMissionDir = path.resolve(missionsDir(root), mission.id);
   const missionPath = path.join(canonicalMissionDir, "mission.yaml");
   if (!(await fileExists(missionPath))) {
     throw new Error(`Team mission packet not found at ${missionPath}; create the mission before run-team.`);
   }
+  await guardTeamRelaunch({
+    gitOps,
+    root,
+    missionId: mission.id,
+    plan,
+    replace: options.replace === true,
+  });
   // The canonical packet on disk is the single source of truth for workers.
   const canonicalBytes = await readFile(missionPath, "utf-8");
   const canonicalPacket = parse(canonicalBytes) as Record<string, unknown>;
@@ -1018,6 +1082,7 @@ export async function runTeamMission(
         started_at: startedAt,
         finished_at: null,
         contract,
+        ...(baseCommit !== undefined ? { base_commit: baseCommit } : {}),
       };
     }),
   };
@@ -1063,7 +1128,10 @@ export async function runTeamMission(
       const workerMission = workerMissionPackets.get(wp.id);
       const workerMissionId = workerMission?.id ?? mission.id;
       await seedCanonicalWorkerScope(canonicalMissionDir, context.artifactRoot, mission.id);
-      await gitOps.addWorktree(root, wp.branch, wp.worktreePath, baseRef);
+      await gitOps.addWorktree(root, wp.branch, wp.worktreePath, worktreeBase);
+      if (baseCommit !== undefined && gitOps.setBranchBase) {
+        await gitOps.setBranchBase(root, wp.branch, baseCommit);
+      }
       await seedMissionPacket(canonicalMissionDir, wp.worktreePath, mission.id);
       const workerSpec = wp.spec ?? { role: wp.role, adapter: wp.adapter as TeamWorker["adapter"] };
       const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet);
@@ -1075,6 +1143,11 @@ export async function runTeamMission(
         await seedCanonicalWorkerScope(canonicalMissionDir, context.artifactRoot, mission.id, derivedBytes);
       }
       await writeWorkerArtifactGitignore(wp.worktreePath);
+      // The harness owns every protected path; anything it rewrote into this
+      // worktree (the Command Code hook config, the seeded mission packet) must
+      // not masquerade as the worker's own change. `--skip-worktree` is
+      // per-index, so it hides the churn here and nowhere else.
+      await markProtectedPathsSkipWorktree(wp.worktreePath);
     });
     setupQueue = setup.then(() => undefined, () => undefined);
     try { await setup; }
@@ -1302,9 +1375,12 @@ export async function runTeamMission(
   // ------------------------------------------------------------------- leader
   canonicalState.leader.status = "integrating";
   await persistState();
-  const leaderError = await safeAddWorktree(gitOps, root, plan.leader, baseRef);
+  const leaderError = await safeAddWorktree(gitOps, root, plan.leader, worktreeBase);
   const leaderReady = leaderError === null;
   if (leaderReady) {
+    if (baseCommit !== undefined && gitOps.setBranchBase) {
+      await gitOps.setBranchBase(root, plan.leader.branch, baseCommit);
+    }
     await seedMissionPacket(canonicalMissionDir, plan.leader.worktreePath, mission.id);
   } else {
     canonicalState.leader.status = "failed";
@@ -1315,7 +1391,7 @@ export async function runTeamMission(
   // the diff reflects the persisted state on the branch.
   for (const outcome of workerOutcomes) {
     if (outcome.status !== "succeeded") continue;
-    outcome.filesTouched = await gitOps.diffFiles(root, baseRef, outcome.plan.branch);
+    outcome.filesTouched = await gitOps.diffFiles(root, worktreeBase, outcome.plan.branch);
   }
 
   // Leader integrates each successful worker. The strategy guard was
@@ -1585,14 +1661,171 @@ async function writeWorkerArtifactGitignore(worktreePath: string): Promise<void>
   // Patterns are relative to `.harness/` (the .gitignore's directory):
   //   audit/            -> .harness/audit/ (incl. events.ndjson)
   //   missions/*/runs/  -> per-run session dirs for every mission
+  //   .gitignore        -> this harness-owned file itself, so a fresh worktree
+  //                        does not report it as an untracked change
   const body = [
     "# UH-128: per-worker runtime artifacts — kept on disk, never committed,",
     "# so the leader merge cannot bleed forensic files no worker authored.",
     "audit/",
     "missions/*/runs/",
+    ".gitignore",
     "",
   ].join("\n");
   await writeFile(gitignorePath, body, "utf-8");
+}
+
+/** Run `git update-index --skip-worktree` for `files`, streaming paths on stdin (no argv cap). */
+function updateIndexSkipWorktree(worktreePath: string, files: readonly string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      "git",
+      ["update-index", "--skip-worktree", "-z", "--stdin"],
+      { cwd: worktreePath },
+      (error) => (error ? reject(error) : resolve()),
+    );
+    child.stdin?.end(files.map((file) => `${file}\0`).join(""));
+  });
+}
+
+/**
+ * Hide harness-owned churn from `git status` in a worktree without touching the
+ * shared index (each worktree has its own). The harness rewrites tracked files
+ * under the protected roots — `.commandcode/settings.json` (Command Code hook
+ * config with local paths) and the seeded `.harness` packet — none of which the
+ * worker authored. `--skip-worktree` makes a fresh worker worktree report a
+ * clean tree. Worker commits are unaffected: they never stage protected paths.
+ */
+async function markProtectedPathsSkipWorktree(worktreePath: string): Promise<void> {
+  const tracked: string[] = [];
+  for (const protectedPath of DEFAULT_PROTECTED_PATHS) {
+    if (protectedPath === ".git") continue;
+    let listing: string;
+    try {
+      ({ stdout: listing } = await execFileP("git", ["ls-files", "-z", "--", protectedPath], { cwd: worktreePath }));
+    } catch {
+      continue; // not a git worktree, or no index yet
+    }
+    for (const entry of listing.split("\0")) {
+      if (entry.length === 0) continue;
+      if (await fileExists(path.join(worktreePath, entry))) tracked.push(entry);
+    }
+  }
+  if (tracked.length === 0) return;
+  try {
+    await updateIndexSkipWorktree(worktreePath, tracked);
+  } catch {
+    // Best-effort: a cosmetic status entry must never fail the worker setup.
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Relaunch lifecycle                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** A branch or worktree path a planned team run would reuse from an earlier run. */
+interface TeamPreexisting {
+  branches: string[];
+  worktrees: string[];
+}
+
+async function safeBranchExists(gitOps: GitOps, root: string, branch: string): Promise<boolean> {
+  if (!gitOps.branchExists) return false;
+  try {
+    return await gitOps.branchExists(root, branch);
+  } catch {
+    return false;
+  }
+}
+
+/** Planned branches and worktree paths that already exist on disk. */
+async function detectTeamPreexisting(gitOps: GitOps, root: string, plan: TeamPlan): Promise<TeamPreexisting> {
+  const planned = [
+    ...plan.workers.map((worker) => ({ branch: worker.branch, worktreePath: worker.worktreePath })),
+    { branch: plan.leader.branch, worktreePath: plan.leader.worktreePath },
+  ];
+  const branches: string[] = [];
+  const worktrees: string[] = [];
+  for (const entry of planned) {
+    if (await safeBranchExists(gitOps, root, entry.branch)) branches.push(entry.branch);
+    if (await fileExists(entry.worktreePath)) worktrees.push(entry.worktreePath);
+  }
+  return { branches, worktrees };
+}
+
+/** Run ids of live runs registered against this team, so a refusal can name them. */
+async function liveTeamRunIds(root: string, missionId: string): Promise<string[]> {
+  try {
+    const { records } = await listLiveRuns(root, { persist: false });
+    return records
+      .filter((record) => record.liveness === "live" && record.team?.mission_id === missionId)
+      .map((record) => record.run_id)
+      .sort();
+  } catch {
+    // The registry is best-effort; never block a run because it could not be read.
+    return [];
+  }
+}
+
+/**
+ * Archive — never delete — a previous run's retained worktrees, branches, and
+ * team directory so a relaunch starts clean while unmerged work survives under
+ * `uh/archive/<team>/<timestamp>/<role>` and `team.<timestamp>`.
+ */
+async function archiveTeamRun(gitOps: GitOps, root: string, plan: TeamPlan): Promise<void> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archiveBranch = (role: string): string => `uh/archive/${plan.missionId}/${timestamp}/${role}`;
+  for (const worker of plan.workers) {
+    await gitOps.removeWorktree(root, worker.worktreePath);
+    if (gitOps.renameBranch && await safeBranchExists(gitOps, root, worker.branch)) {
+      await gitOps.renameBranch(root, worker.branch, archiveBranch(worker.id));
+    }
+  }
+  await gitOps.removeWorktree(root, plan.leader.worktreePath);
+  if (gitOps.renameBranch && await safeBranchExists(gitOps, root, plan.leader.branch)) {
+    await gitOps.renameBranch(root, plan.leader.branch, archiveBranch("leader"));
+  }
+  // Rename only AFTER the worktrees inside it are gone, or the rename would
+  // move their directories out from under the removal.
+  try {
+    await rename(plan.teamRoot, `${plan.teamRoot}.${timestamp}`);
+  } catch {
+    // No team directory to archive (a run that failed during setup), already gone.
+  }
+}
+
+/**
+ * Refuse (or take over) a relaunch that would collide with a previous run.
+ *
+ * A live run of the same team always refuses, naming its run ids: nothing may
+ * delete a worktree out from under a running worker. Otherwise retained
+ * branches / worktrees refuse by default and name `--replace`, which archives
+ * the old state instead.
+ */
+async function guardTeamRelaunch(args: {
+  gitOps: GitOps;
+  root: string;
+  missionId: string;
+  plan: TeamPlan;
+  replace: boolean;
+}): Promise<void> {
+  const preexisting = await detectTeamPreexisting(args.gitOps, args.root, args.plan);
+  if (preexisting.branches.length === 0 && preexisting.worktrees.length === 0) return;
+  const liveRunIds = await liveTeamRunIds(args.root, args.missionId);
+  if (liveRunIds.length > 0) {
+    throw new Error(
+      `Team mission ${args.missionId} already has a live run (${liveRunIds.join(", ")}); refuse to relaunch. Stop it first.`,
+    );
+  }
+  if (args.replace) {
+    await archiveTeamRun(args.gitOps, args.root, args.plan);
+    return;
+  }
+  const retained = [...preexisting.branches, ...preexisting.worktrees];
+  throw new Error(
+    `Team mission ${args.missionId} has retained state from a previous run (${retained.join(", ")}). `
+    + `Re-run with \`uh mission run-team ${args.missionId} --replace\` to archive the old branches and team directory, `
+    + "or remove them by hand.",
+  );
 }
 
 /**

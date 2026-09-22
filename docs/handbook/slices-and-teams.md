@@ -83,6 +83,18 @@ uh mission run-team <mission-id> --base-ref <ref> --strategy merge
 
 Strategies are `merge`, `cherry-pick`, or `rebase`. The leader merges changes and invokes verification; it does not perform a separate model synthesis run. A `PARTIAL` outcome is a non-blocking success: fewer than all workers landed but the integrated subset passed verification. Worktrees are cleaned up on a full pass and preserved on failure unless `--retain` says otherwise.
 
+`--base-ref` is resolved to a commit id once, before any worker starts, so every worker and the leader branch from the same commit. That commit is recorded as `git config branch.<branch>.base` and on each worker's team-state record as `base_commit`; independent review reads the fork point back from the config instead of falling back to a wide range. When a branch is deleted, its `branch.<name>` config section is removed with it.
+
+A fresh worker worktree reports a clean tree: the harness writes a worktree-local `.harness/.gitignore` that ignores itself, and marks the tracked files it rewrites under the protected roots (`.harness`, `.commandcode`, `.omp`, `.pi`) with `git update-index --skip-worktree` in that worktree only. Worker commits are unaffected, since they never stage protected paths.
+
+Relaunching a team whose previous run was killed is guarded. A team run is refused while a live run of the same team is registered, naming the run ids. Otherwise, retained branches or worktree paths refuse by default; re-run with:
+
+```bash
+uh mission run-team <mission-id> --replace
+```
+
+`--replace` removes the retained worktrees, renames each old branch to `uh/archive/<team>/<timestamp>/<role>` (unmerged work is kept, never deleted), and renames the old `.harness/missions/<team>/team` directory to `team.<timestamp>` before relaunching.
+
 ## Resource waves
 
 Team workers run in resource-admitted waves. `team.resources` controls admission:

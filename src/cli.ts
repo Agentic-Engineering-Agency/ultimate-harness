@@ -2639,8 +2639,9 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--base-ref <ref>", "Base git ref for worker / leader worktrees (default: HEAD)")
   .option("--retain", "Preserve worktrees on success (default: cleanup on PASS, preserve on FAIL)")
+  .option("--replace", "Archive a previous run's worktrees, branches, and team directory, then relaunch (refused while a live run exists)")
   .option("--strategy <strategy>", "Leader integration strategy: merge|cherry-pick|rebase (default: merge)", "merge")
-  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean; strategy: string }) => {
+  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean; replace?: boolean; strategy: string }) => {
     try {
       assertSafeMissionId(missionId);
     } catch (err) {
@@ -2717,6 +2718,7 @@ missionCmd
         verifier: async (workRoot, mid) => verifyMission(workRoot, mid, { useSandbox: false }),
         baseRef: opts.baseRef,
         retainOnSuccess: opts.retain === true,
+        replace: opts.replace === true,
         strategy: opts.strategy as "merge" | "cherry-pick" | "rebase",
       });
       // UH-127: PARTIAL is a non-blocking success — M<N workers landed but the

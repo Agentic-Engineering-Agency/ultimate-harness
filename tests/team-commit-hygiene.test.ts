@@ -224,8 +224,13 @@ describe("worker commit hygiene", () => {
     // must not reset or restore it.
     const onDisk = await readFile(join(backend.plan.worktreePath, ".commandcode", "settings.json"), "utf-8");
     expect(onDisk).toBe('{"worker":true}\n');
+    // The harness marks every tracked protected path `--skip-worktree` in the
+    // worktree, so the edit stays on disk but no longer shows as a change: a
+    // fresh worker worktree reports a clean `git status`.
     const status = await git(backend.plan.worktreePath, ["status", "--porcelain"]);
-    expect(status).toMatch(/\.commandcode\/settings\.json/);
+    expect(status).not.toMatch(/\.commandcode\/settings\.json/);
+    const lsFiles = await git(backend.plan.worktreePath, ["ls-files", "-v", ".commandcode/settings.json"]);
+    expect(lsFiles.trim().startsWith("S")).toBe(true);
   });
 
   test("only paths inside the worker's write roots are committed; the rest are reported as out_of_roots", async () => {

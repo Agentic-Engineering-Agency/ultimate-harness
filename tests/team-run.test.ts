@@ -27,6 +27,7 @@ import type { TeamResourceLimits } from "../src/schema/runtime-control.js";
 import { projectDeliveryObservatory } from "../src/harness/delivery-observatory/project.js";
 import { verifyMission, warnConstraintsAreAdvisory } from "../src/harness/verify.js";
 import { initializeHarness } from "../src/harness/init.js";
+import { listLiveRuns, registerLiveRun, settleLiveRun } from "../src/harness/live-runs.js";
 
 const execFileP = promisify(execFile);
 
@@ -1452,5 +1453,178 @@ describe("runTeamMission — declared outputs under an ignored directory", () =>
 
     const files = await branchFiles(backend.plan.branch);
     expect(files).toContain("out/artifact.txt");
+  });
+});
+
+/* ------------------------------------------- team worktree lifecycle (R3)  */
+
+describe("runTeamMission — team worktree lifecycle", () => {
+  const TEAM = "team-mission";
+
+  async function initTeamRepo(): Promise<void> {
+    await initGitRepo(ROOT);
+    await seedMissionPacket(ROOT, TEAM);
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+  }
+
+  /** A runner that writes one distinct file per worker and settles as passed. */
+  function fileWritingRunner() {
+    return (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      const id = basename(root);
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", `${id}.ts`), `// ${id}\n`, "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+  }
+
+  /** A runner that touches nothing (so a fresh worktree stays clean). */
+  function silentRunner() {
+    return (_adapter: string) => async (): Promise<TeamRuntimeRunResult> =>
+      ({ exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } });
+  }
+
+  /**
+   * The team runner registers each attempt live and the real adapters settle
+   * their own entries; a test double does not, so settle them here. Relaunch
+   * checks only refuse on a *live* run — an orphaned/settled entry is fine.
+   */
+  async function settleEveryRegisteredRun(): Promise<void> {
+    const { records } = await listLiveRuns(ROOT, { persist: false });
+    for (const record of records) {
+      await settleLiveRun(ROOT, record.run_id, { status: "succeeded", settled_at: new Date().toISOString() });
+    }
+  }
+
+  test("every worker and the leader record the same resolved base commit in config and team state", async () => {
+    await initTeamRepo();
+    const head = (await execFileP("git", ["rev-parse", "HEAD"], { cwd: ROOT })).stdout.trim();
+
+    const result = await runTeamMission(mission(TEAM), ROOT, {
+      runnerFor: fileWritingRunner(),
+      retainOnSuccess: true,
+    });
+
+    for (const branch of [...result.workers.map((worker) => worker.plan.branch), result.plan.leader.branch]) {
+      const { stdout } = await execFileP("git", ["config", "--get", `branch.${branch}.base`], { cwd: ROOT });
+      expect(stdout.trim()).toBe(head);
+    }
+    const state = JSON.parse(await readFile(
+      join(ROOT, ".harness", "missions", TEAM, "runs", result.runId!, "team-state.json"),
+      "utf-8",
+    )) as { workers: Array<{ base_commit?: string }> };
+    expect(state.workers.map((worker) => worker.base_commit)).toEqual([head, head]);
+  });
+
+  test("deleting a worker branch also removes its base config section", async () => {
+    await initTeamRepo();
+    const runner = (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      const id = basename(root);
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", `${id}.ts`), `// ${id}\n`, "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+    // A full PASS with the default cleanup removes each worker worktree and
+    // branch — and `git branch -D` leaves `branch.<name>` behind, so the
+    // harness must drop the section itself.
+    const result = await runTeamMission(mission(TEAM), ROOT, {
+      runnerFor: runner,
+      verifier: async () => ({
+        status: "passed", path: "/fake/verification.yaml", checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+        acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+      }),
+    });
+    expect(result.retained).toBe(false);
+    for (const branch of result.workers.map((worker) => worker.plan.branch)) {
+      const stillConfigured = await execFileP("git", ["config", "--get", `branch.${branch}.base`], { cwd: ROOT })
+        .then(() => true, () => false);
+      expect(stillConfigured).toBe(false);
+    }
+  });
+
+  test("a fresh worker worktree reports a clean tree though the repo tracks .commandcode/settings.json", async () => {
+    await initGitRepo(ROOT);
+    await seedMissionPacket(ROOT, TEAM);
+    await mkdir(join(ROOT, ".commandcode"), { recursive: true });
+    await writeFile(join(ROOT, ".commandcode", "settings.json"), "{ \"version\": 1 }\n", "utf-8");
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+
+    const runner = (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      // The Command Code adapter rewrites the hook config with local absolute
+      // paths: harness-owned churn, not the worker's own change.
+      await writeFile(join(root, ".commandcode", "settings.json"), "{ \"version\": 2 }\n", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+    const result = await runTeamMission(mission(TEAM), ROOT, { runnerFor: runner, retainOnSuccess: true });
+
+    for (const worker of result.workers) {
+      const { stdout } = await execFileP("git", ["status", "--porcelain"], { cwd: worker.plan.worktreePath });
+      expect(stdout.trim()).toBe("");
+    }
+  });
+
+  test("a relaunch without --replace is refused and names the flag", async () => {
+    await initTeamRepo();
+    await runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true });
+    await settleEveryRegisteredRun();
+
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true }))
+      .rejects.toThrow(/--replace/);
+  });
+
+  test("--replace archives the retained branch under uh/archive and relaunches", async () => {
+    await initTeamRepo();
+    const first = await runTeamMission(mission(TEAM), ROOT, { runnerFor: fileWritingRunner(), retainOnSuccess: true });
+    await settleEveryRegisteredRun();
+
+    const backendBranch = first.workers.find((worker) => worker.plan.id === "backend")!.plan.branch;
+    const oldSha = (await execFileP("git", ["rev-parse", `refs/heads/${backendBranch}`], { cwd: ROOT })).stdout.trim();
+
+    const second = await runTeamMission(mission(TEAM), ROOT, {
+      runnerFor: fileWritingRunner(),
+      retainOnSuccess: true,
+      replace: true,
+    });
+    expect(second.runId).not.toBe(first.runId);
+
+    // List every head and filter in JS: `for-each-ref` glob patterns do not
+    // cross `/`, so `refs/heads/uh/archive` would miss the nested archive refs.
+    const archived = (await execFileP(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+      { cwd: ROOT },
+    )).stdout.split("\n").map((line) => line.trim()).filter(Boolean)
+      .filter((entry) => entry.startsWith("uh/archive/"));
+    const archivedBackend = archived.find((entry) =>
+      entry.startsWith(`uh/archive/${TEAM}/`) && entry.endsWith("/backend"));
+    expect(archivedBackend).toBeDefined();
+    const archivedSha = (await execFileP("git", ["rev-parse", archivedBackend!], { cwd: ROOT })).stdout.trim();
+    expect(archivedSha).toBe(oldSha);
+
+    const missionDir = await readdir(join(ROOT, ".harness", "missions", TEAM));
+    expect(missionDir.some((entry) => entry.startsWith("team."))).toBe(true);
+  });
+
+  test("a relaunch while a live run of the team is registered is refused", async () => {
+    await initTeamRepo();
+    await runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true });
+    await settleEveryRegisteredRun();
+
+    const liveRunId = "20260922T101010Z-live01";
+    await registerLiveRun({
+      projectRoot: ROOT,
+      artifactRoot: ROOT,
+      runId: liveRunId,
+      missionId: TEAM,
+      runtime: "hermes",
+      team: { mission_id: TEAM, role: "backend" },
+    });
+
+    await expect(runTeamMission(mission(TEAM), ROOT, {
+      runnerFor: silentRunner(),
+      retainOnSuccess: true,
+      replace: true,
+    })).rejects.toThrow(liveRunId);
   });
 });
