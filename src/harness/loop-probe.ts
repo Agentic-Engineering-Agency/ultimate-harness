@@ -4,6 +4,7 @@
 // for the native event shapes this projects.
 import {
   evaluateSystemOne,
+  type EvaluateSystemOneOptions,
   type NoulQuestion,
   type Question,
   type SystemOneResult,
@@ -88,7 +89,12 @@ export type EvaluateLoopProbeOptions = {
   configured?: boolean;
   fetch?: typeof globalThis.fetch;
   delay?: (ms: number) => Promise<void>;
+  /** Injectable System One call; tests substitute it so no request is ever sent. */
+  provider?: LoopProbeProvider;
 };
+
+/** The System One call `evaluateLoopProbe` makes, exposed so a caller may substitute it. */
+export type LoopProbeProvider = (options: EvaluateSystemOneOptions) => Promise<SystemOneResult>;
 
 const READ_TOOLS = new Set(["read_file", "read", "view", "cat", "head", "tail", "glob", "grep", "search", "list_dir", "read_directory", "ls"]);
 const WRITE_TOOLS = new Set(["write_file", "edit_file", "write", "edit", "apply_patch", "patch", "create_file", "str_replace", "multi_edit", "notebook_edit", "search_replace"]);
@@ -475,7 +481,7 @@ export async function evaluateLoopProbe(
   }
 
   const questions = loopProbeQuestions() as Record<string, Question>;
-  const response = await evaluateSystemOne({
+  const response = await (options.provider ?? evaluateSystemOne)({
     state: serializeLoopProbeState(window),
     questions,
     model: options.model,

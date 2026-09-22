@@ -132,6 +132,17 @@ export const DecisionPolicySchema = z.object({
   fallback_model: z.string().min(1).optional(),
 }).strict();
 
+/**
+ * Optional governed runtime switches. `loop_watchdog` selects whether the
+ * shadow loop observer records advisory receipts for a run (`shadow`, the
+ * default) or records nothing at all (`off`). Additive and strict: a legacy
+ * mission that omits it keeps the shadow default.
+ */
+export const RuntimeConfigSchema = z.object({
+  loop_watchdog: z.enum(["shadow", "off"]).default("shadow"),
+}).strict();
+export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
+
 const MissionInputSchema = z.object({
   schema_version: z.literal("uh.mission.v0"),
   id: z.string().min(1),
@@ -142,6 +153,8 @@ const MissionInputSchema = z.object({
   workflow_profile: z.string().min(1),
   priority: z.string().optional(),
   objective: z.string().optional().default(""),
+  /** Governed runtime switches. Additive and strict; absent means the defaults apply. */
+  runtime_config: RuntimeConfigSchema.optional(),
   context: z.object({
     repo_root: z.string().optional(),
     read_first: z.array(z.string()).optional().default([]),

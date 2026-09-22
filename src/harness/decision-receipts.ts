@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import { DecisionReceiptSchema, type DecisionAuthorizer, type DecisionProvider, type DecisionProviderStatus, type DecisionReceipt, type DecisionRecommendation, type DecisionStatus } from "../schema/decisions.js";
+import { DecisionReceiptSchema, type DecisionAuthorizer, type DecisionProvider, type DecisionProviderStatus, type DecisionReceipt, type DecisionRecommendation, type DecisionStatus, type LoopWatchdogAnswer, type LoopWatchdogOutcome, type LoopWatchdogSignals } from "../schema/decisions.js";
 import { assertWritableArtifact } from "../adapters/_artifact-context.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { evaluateThreeVerdict, type SystemOneState, type ThreeVerdictOutcome, type ThreeVerdictResult } from "./typesafe.js";
@@ -164,6 +164,76 @@ export async function recordRouteDecision(missionDir: string, record: RouteDecis
   await appendFile(eventsPath, JSON.stringify({ type: "decision.recorded", kind: "runtime-selection",
     mission_id: record.missionId, run_id: record.runId, decision_id: receipt.decision_id,
     status: receipt.status, provider_status: receipt.provider_status, applied: record.applied,
+    state_transition: receipt.state_transition, timestamp: receipt.created_at }) + "\n");
+  return receipt;
+}
+
+/** The composed loop-watchdog receipt fields, minus the server-owned identity. */
+export interface LoopWatchdogRecord {
+  missionId: string;
+  runId?: string;
+  /** The provider outcome kind; `ok` carries answers, the others only the deterministic signals. */
+  provider_outcome: LoopWatchdogOutcome;
+  provider_status: DecisionProviderStatus;
+  signals: LoopWatchdogSignals;
+  answers?: Record<string, LoopWatchdogAnswer>;
+  model?: string;
+  usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+  latency_ms?: number;
+  input_sha256: string;
+  response_sha256?: string;
+  reason: string;
+  created_at: string;
+}
+
+/**
+ * Persist a shadow loop-watchdog evaluation as one `uh.decision-receipt.v0`
+ * record of kind `retry-stop`. The watchdog is advisory: `status` is always
+ * `advisory`, `applied` is always false and the authorizer is always `shadow`,
+ * so the record can never change a deterministic failure, a stop, or a gate.
+ * Only the deterministic signals, the typed provider outcome and (when the
+ * provider answered) its bounded answers, model and usage are written — never
+ * a path, a command line, a prompt, or a credential.
+ */
+export async function recordLoopWatchdogDecision(missionDir: string, record: LoopWatchdogRecord): Promise<DecisionReceipt> {
+  const receipt = DecisionReceiptSchema.parse({
+    schema_version: "uh.decision-receipt.v0",
+    decision_id: `loop-watchdog-${randomUUID()}`,
+    mission_id: record.missionId,
+    run_id: record.runId,
+    kind: "retry-stop",
+    status: "advisory",
+    provider_status: record.provider_status,
+    authorizer: "shadow",
+    applied: false,
+    deterministic_fallback: record.provider_outcome !== "ok",
+    human_required: true,
+    provider: {
+      name: "typesafe",
+      ...(record.model === undefined ? {} : { model: record.model }),
+      ...(record.latency_ms === undefined ? {} : { latency_ms: record.latency_ms }),
+      ...(record.usage === undefined ? {} : { usage: record.usage }),
+    },
+    input_sha256: record.input_sha256,
+    response_sha256: record.response_sha256,
+    reason: record.reason,
+    state_transition: { from: "activity", to: "activity", unlocked: [] },
+    loop_signals: record.signals,
+    provider_outcome: record.provider_outcome,
+    ...(record.answers === undefined ? {} : { answers: record.answers }),
+    created_at: record.created_at,
+  });
+  const directory = path.join(missionDir, "decision-receipts");
+  await assertWritableArtifact(missionDir, directory);
+  await mkdir(directory, { recursive: true });
+  const receiptPath = path.join(directory, `${receipt.decision_id}.json`);
+  await assertWritableArtifact(missionDir, receiptPath);
+  await writeAtomicArtifact(receiptPath, JSON.stringify(receipt, null, 2));
+  const eventsPath = path.join(missionDir, "events.ndjson");
+  await assertWritableArtifact(missionDir, eventsPath);
+  await appendFile(eventsPath, JSON.stringify({ type: "decision.recorded", kind: "retry-stop",
+    mission_id: record.missionId, run_id: record.runId, decision_id: receipt.decision_id,
+    status: receipt.status, provider_status: receipt.provider_status, applied: false,
     state_transition: receipt.state_transition, timestamp: receipt.created_at }) + "\n");
   return receipt;
 }
