@@ -53,21 +53,34 @@ deterministic state, disabled credentials, transport failure, malformed success
 responses, receipt validation, the all-abstention `uncertain` receipt, and
 omission of synthetic private-data sentinels. The verification integration also
 exercises a real failing subprocess with a synthetic provider answer: the
-deterministic failure remains failed and raw output, command names, diffs, and
-workspace paths are excluded from the provider request.
+deterministic failure remains failed and raw command output, diff text, and
+workspace paths are excluded from the provider request; only the established
+facts — expected-output paths and statuses and required-check names and statuses
+— reach it as evidence for the criteria the provider is asked about.
 
-Both callers project evidence into check dispositions, criterion identifiers and
-descriptions, severities, and review input/claim states. They do not send full
-mission packets, source diffs, raw logs, or review evidence text. Their current
-projections supply dispositions rather than per-criterion evidence states, so live
-requests carry the fixed report battery plus whatever criteria a caller adds as
-`state.criteria`; the atomic per-criterion seam is implemented and tested but the
-callers are not yet migrated to it. Criterion descriptions remain task content,
-not a guarantee of anonymity; these projections are not yet a general-purpose
-privacy filter or a measured minimum-token design. Confidence-policy enforcement
-is still absent (thresholds compose the verdict, they do not gate application),
-and live judgment quality and the other decision flows specified below remain
-unverified or unimplemented.
+`uh verify` now builds the per-criterion projection. Each declared acceptance
+criterion becomes one `state.criteria` entry: a criterion with a `check_command`
+carries its deterministic `status` (passed or failed), `exit_code`, and
+`check_command`, and is never sent to the provider; a criterion without one
+carries its id, description, severity, and an `evidence` object limited to facts
+the harness established — the relative path and verification status of each
+declared expected output, and the names and statuses of the required checks —
+never file contents, diff text, command output, absolute paths, or the mission
+prompt. `tamper` is deterministic: it is true only when the latest run control
+receipt stopped with the `policy` stop code. A deterministic failure stays failed
+regardless of the provider's answer; a missing credential leaves native
+verification untouched, and unavailable, malformed, and non-discriminating
+responses authorize nothing.
+
+The independent-review caller still projects only check dispositions, criterion
+identifiers and descriptions, severities, and review input/claim states, not
+per-criterion evidence states, so its live requests carry the fixed report
+battery alone and it is not yet migrated to the atomic per-criterion seam.
+Criterion descriptions remain task content, not a guarantee of anonymity; these
+projections are not yet a general-purpose privacy filter or a measured
+minimum-token design. Confidence-policy enforcement is still absent (thresholds
+compose the verdict, they do not gate application), and live judgment quality and
+the other decision flows specified below remain unverified or unimplemented.
 
 ## Goal
 

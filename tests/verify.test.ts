@@ -9,6 +9,7 @@ import { initializeHarness } from "../src/harness/init.js";
 import { getStatus } from "../src/harness/status.js";
 import { validateFile } from "../src/harness/validate.js";
 import { verifyMission } from "../src/harness/verify.js";
+import { REPORT_QUESTIONS } from "../src/harness/typesafe.js";
 import { waitForTerminated } from "./process-state.js";
 
 let TEST_ROOT: string;
@@ -116,9 +117,10 @@ describe("uh verify", () => {
     process.env.TYPESAFE_API_KEY = "synthetic-test-key";
     globalThis.fetch = async (_input, init) => {
       payload = String(init?.body);
-      return new Response(JSON.stringify({ answers: {
-        verdict: { choice: "pass", confidence: 0.99 }, tamper: { noul: 0 },
-      } }));
+      const { questions } = JSON.parse(payload) as { questions: Record<string, { type: string }> };
+      const answers: Record<string, unknown> = {};
+      for (const name of Object.keys(questions)) answers[name] = { noul: 0 };
+      return new Response(JSON.stringify({ model: "jev-test", answers }));
     };
     try {
       const result = await verifyMission(TEST_ROOT, "summary-gate");
@@ -393,6 +395,153 @@ describe("uh verify", () => {
     const result = await verifyMission(TEST_ROOT, "no-sandbox", { useSandbox: false });
     expect(result.status).toBe("failed");
     expect(result.sandbox).toBeUndefined();
+  });
+});
+
+describe("verification hands System One per-criterion evidence", () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.TYPESAFE_API_KEY;
+  const DIFF_SENTINEL = "PRIVATE_DIFF_SENTINEL";
+  const OUTPUT_SENTINEL = "PRIVATE_OUTPUT_SENTINEL";
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.TYPESAFE_API_KEY;
+    else process.env.TYPESAFE_API_KEY = originalKey;
+  });
+
+  async function writeCriteriaMission(id: string, options: {
+    acceptanceCriteria?: unknown[];
+    checks?: Array<{ name: string; command?: string }>;
+    expectedArtifacts?: Array<{ path: string }>;
+  } = {}) {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", id);
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(join(missionDir, "mission.yaml"), stringify({
+      schema_version: "uh.mission.v0",
+      id,
+      title: `Mission ${id}`,
+      workflow_profile: "research-docs",
+      objective: "Criteria projection test.",
+      acceptance_criteria: options.acceptanceCriteria ?? [],
+      expected_artifacts: options.expectedArtifacts ?? [],
+      verification: {
+        required_checks: options.checks ?? [],
+        review_gates: [],
+      },
+    }), "utf-8");
+    await writeFile(join(missionDir, "diff.patch"), DIFF_SENTINEL, "utf-8");
+    return missionDir;
+  }
+
+  /** A provider stub that answers every asked question with `noul`, capturing the raw request body. */
+  function answerAllWith(noul: number, capture: (payload: string) => void): void {
+    process.env.TYPESAFE_API_KEY = "synthetic-test-key";
+    globalThis.fetch = (async (_input, init) => {
+      const payload = String(init?.body);
+      capture(payload);
+      const { questions } = JSON.parse(payload) as { questions: Record<string, { type: string }> };
+      const answers: Record<string, unknown> = {};
+      for (const name of Object.keys(questions)) answers[name] = { noul };
+      return new Response(JSON.stringify({ model: "jev-test", answers }));
+    }) as typeof fetch;
+  }
+
+  async function writeRunControl(missionDir: string, missionId: string, runId: string, stopCode: string) {
+    await mkdir(join(missionDir, "runs", runId), { recursive: true });
+    const now = new Date().toISOString();
+    await writeFile(join(missionDir, "runs", runId, "runtime-control.json"), JSON.stringify({
+      schema_version: "uh.runtime-control.v0", mission_id: missionId, run_id: runId, runtime: "oh-my-pi",
+      controller_pid: 4242, started_at: now, heartbeat_at: now, status: "failed", stop_code: stopCode,
+      turns: 0, denials: 0, inflight_tools: 0,
+    }), "utf-8");
+    await writeFile(join(missionDir, "latest.json"), JSON.stringify({
+      schema_version: "uh.latest-run.v0", run_id: runId, started_at: now, status: "failed",
+    }), "utf-8");
+  }
+
+  test("projects one question per non-deterministic criterion and only harness-established evidence", async () => {
+    await writeCriteriaMission("criteria-projection", {
+      acceptanceCriteria: [
+        { id: "ac-det-pass", description: "det pass", check_command: "node -e \"process.exit(0)\"", severity: "block" },
+        { id: "ac-det-fail", description: "det fail", check_command: "node -e \"process.exit(3)\"", severity: "block" },
+        { id: "ac-sem", description: "needs judgment", severity: "block" },
+      ],
+      checks: [{ name: "det-check", command: `node -e "console.log('${OUTPUT_SENTINEL}'); process.exit(0)"` }],
+      expectedArtifacts: [{ path: "out/data.json" }],
+    });
+
+    let payload = "";
+    answerAllWith(1, (body) => { payload = body; });
+    const result = await verifyMission(TEST_ROOT, "criteria-projection", { useSandbox: false });
+
+    const body = JSON.parse(payload) as {
+      questions: Record<string, unknown>;
+      state: { criteria: Array<Record<string, unknown>>; tamper: boolean };
+    };
+
+    // Exactly one criterion question (ac-sem) plus the fixed report battery; a
+    // criterion with a check_command already has a deterministic result.
+    expect(Object.keys(body.questions).sort()).toEqual([
+      "criteria[2]",
+      REPORT_QUESTIONS.work_incomplete,
+      REPORT_QUESTIONS.names_blocker,
+      REPORT_QUESTIONS.claims_failed_check_passed,
+    ].sort());
+
+    const [detPass, detFail, semantic] = body.state.criteria;
+    expect(detPass).toMatchObject({ id: "ac-det-pass", status: "passed", exit_code: 0, check_command: "node -e \"process.exit(0)\"" });
+    expect(detFail).toMatchObject({ id: "ac-det-fail", status: "failed", exit_code: 3, check_command: "node -e \"process.exit(3)\"" });
+    expect(detPass.evidence).toBeUndefined();
+    expect(detFail.evidence).toBeUndefined();
+
+    // The non-deterministic criterion carries no status and only facts the
+    // harness established: expected-output paths/statuses and check names/statuses.
+    expect(semantic).toMatchObject({ id: "ac-sem", description: "needs judgment", severity: "block" });
+    expect(semantic.status).toBeUndefined();
+    expect(semantic.evidence).toEqual({
+      expected_outputs: [{ path: "out/data.json", status: "failed" }],
+      required_checks: [{ name: "det-check", status: "passed" }],
+    });
+    expect(body.state.tamper).toBe(false);
+
+    // A deterministic failure dominates a provider that answers 1.0 everywhere.
+    expect(result.status).toBe("failed");
+
+    // No diff text, command output, or absolute path crosses the boundary.
+    expect(payload).not.toContain(DIFF_SENTINEL);
+    expect(payload).not.toContain(OUTPUT_SENTINEL);
+    expect(payload).not.toContain(TEST_ROOT);
+  });
+
+  test("tamper is true only when the run control receipt stopped with a policy code", async () => {
+    const missionDir = await writeCriteriaMission("criteria-tamper", {
+      checks: [{ name: "ok", command: "node -e \"process.exit(0)\"" }],
+    });
+    await writeRunControl(missionDir, "criteria-tamper", "20260101T000000Z-abcdef", "policy");
+
+    let payload = "";
+    answerAllWith(1, (body) => { payload = body; });
+    const result = await verifyMission(TEST_ROOT, "criteria-tamper", { useSandbox: false });
+
+    expect((JSON.parse(payload) as { state: { tamper: boolean } }).state.tamper).toBe(true);
+    expect(result.status).toBe("failed");
+    const artifact = await readVerification("criteria-tamper");
+    expect(artifact.findings.some((f: { message: string }) => /tamper detected/.test(f.message))).toBe(true);
+  });
+
+  test("tamper stays false for a non-policy stop code and cannot manufacture a failure", async () => {
+    const missionDir = await writeCriteriaMission("criteria-no-tamper", {
+      checks: [{ name: "ok", command: "node -e \"process.exit(0)\"" }],
+    });
+    await writeRunControl(missionDir, "criteria-no-tamper", "20260101T000000Z-fedcba", "timeout");
+
+    let payload = "";
+    answerAllWith(1, (body) => { payload = body; });
+    const result = await verifyMission(TEST_ROOT, "criteria-no-tamper", { useSandbox: false });
+
+    expect((JSON.parse(payload) as { state: { tamper: boolean } }).state.tamper).toBe(false);
+    expect(result.status).toBe("passed");
   });
 });
 
