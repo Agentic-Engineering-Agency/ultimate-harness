@@ -147,8 +147,8 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
     expectedRoute: { model: config.model }, reviewRequestSha256, worktree: false, session_id_passthrough: false, errors: [] as string[] };
 }
 
-export async function dryRunCommandCode(root: string, missionPath: string) {
-  const plan = await planCommandCodeRun(root, missionPath);
+export async function dryRunCommandCode(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}) {
+  const plan = await planCommandCodeRun(root, missionPath, options);
   const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
   if (artifacts) await persistPromptAndSession(artifacts, plan.prompt, {
     schema_version: "uh.runtime-session.v0", mission_id: plan.mission.id, runtime: "command-code",

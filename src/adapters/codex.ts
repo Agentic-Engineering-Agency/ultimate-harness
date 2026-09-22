@@ -230,10 +230,10 @@ export async function checkCodex(root?: string): Promise<CheckResult> {
   return runCodexCliCheck("codex");
 }
 
-export async function dryRunCodex(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunCodex(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
     const runId = generateRunId();
-    const plan = await planCodexRun(root, missionPath, { runId });
+    const plan = await planCodexRun(root, missionPath, { runId, extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides });
     const artifacts = await getMissionArtifactContext(root, missionPath, runId);
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
