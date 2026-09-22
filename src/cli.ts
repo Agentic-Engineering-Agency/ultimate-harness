@@ -118,21 +118,25 @@ interface RuntimeRunOptions {
   cancellationSignal?: AbortSignal;
   limits?: RuntimeLimits;
 }
+/** UH-81 — the merged `--runtime-config-overrides` a dry-run passes into a planner. */
+interface RuntimeDryRunOptions {
+  extraRuntimeConfigOverrides?: Record<string, unknown>;
+}
 interface RuntimeWiring {
-  dryRun(root: string, missionPath: string): Promise<RuntimeDryRunResult>;
+  dryRun(root: string, missionPath: string, options?: RuntimeDryRunOptions): Promise<RuntimeDryRunResult>;
   run(root: string, missionPath: string, options?: RuntimeRunOptions): Promise<RuntimeRunResult>;
   surfaceBlocked: boolean;
 }
 const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
-  hermes: { dryRun: dryRunHermes, run: (root, missionPath, opts) => runHermes(root, missionPath, opts), surfaceBlocked: false },
-  codex: { dryRun: dryRunCodex, run: (root, missionPath, opts) => runCodex(root, missionPath, opts), surfaceBlocked: true },
-  "oh-my-pi": { dryRun: dryRunOhMyPi, run: (root, missionPath, opts) => runOhMyPi(root, missionPath, opts), surfaceBlocked: true },
-  "command-code": { dryRun: dryRunCommandCode, run: (root, missionPath, opts) => runCommandCode(root, missionPath, opts), surfaceBlocked: true },
-  "hermes-proxy": { dryRun: dryRunHermesProxy, run: (root, missionPath, opts) => runHermesProxy(root, missionPath, opts), surfaceBlocked: true },
-  openrouter: { dryRun: dryRunOpenRouter, run: (root, missionPath, opts) => runOpenRouter(root, missionPath, opts), surfaceBlocked: true },
-  anthropic: { dryRun: dryRunAnthropic, run: (root, missionPath, opts) => runAnthropic(root, missionPath, opts), surfaceBlocked: true },
-  pi: { dryRun: dryRunPi, run: (root, missionPath, opts) => runPi(root, missionPath, opts), surfaceBlocked: true },
-  "claude-code": { dryRun: dryRunClaudeCode, run: (root, missionPath, opts) => runClaudeCode(root, missionPath, opts), surfaceBlocked: true },
+  hermes: { dryRun: (root, missionPath, opts) => dryRunHermes(root, missionPath, opts), run: (root, missionPath, opts) => runHermes(root, missionPath, opts), surfaceBlocked: false },
+  codex: { dryRun: (root, missionPath, opts) => dryRunCodex(root, missionPath, opts), run: (root, missionPath, opts) => runCodex(root, missionPath, opts), surfaceBlocked: true },
+  "oh-my-pi": { dryRun: (root, missionPath, opts) => dryRunOhMyPi(root, missionPath, opts), run: (root, missionPath, opts) => runOhMyPi(root, missionPath, opts), surfaceBlocked: true },
+  "command-code": { dryRun: (root, missionPath, opts) => dryRunCommandCode(root, missionPath, opts), run: (root, missionPath, opts) => runCommandCode(root, missionPath, opts), surfaceBlocked: true },
+  "hermes-proxy": { dryRun: (root, missionPath, opts) => dryRunHermesProxy(root, missionPath, opts), run: (root, missionPath, opts) => runHermesProxy(root, missionPath, opts), surfaceBlocked: true },
+  openrouter: { dryRun: (root, missionPath, opts) => dryRunOpenRouter(root, missionPath, opts), run: (root, missionPath, opts) => runOpenRouter(root, missionPath, opts), surfaceBlocked: true },
+  anthropic: { dryRun: (root, missionPath, opts) => dryRunAnthropic(root, missionPath, opts), run: (root, missionPath, opts) => runAnthropic(root, missionPath, opts), surfaceBlocked: true },
+  pi: { dryRun: (root, missionPath, opts) => dryRunPi(root, missionPath, opts), run: (root, missionPath, opts) => runPi(root, missionPath, opts), surfaceBlocked: true },
+  "claude-code": { dryRun: (root, missionPath, opts) => dryRunClaudeCode(root, missionPath, opts), run: (root, missionPath, opts) => runClaudeCode(root, missionPath, opts), surfaceBlocked: true },
 };
 
 
@@ -1392,7 +1396,7 @@ missionCmd
       );
       console.log(`Template effective overrides: ${JSON.stringify(extraRuntimeConfigOverrides ?? {})}`);
     }
-    const result = await wiring.dryRun(routing.effectiveRoot, routing.missionPath);
+    const result = await wiring.dryRun(routing.effectiveRoot, routing.missionPath, { extraRuntimeConfigOverrides });
     if (result.errors.length > 0) {
       console.log("[FAIL] dry-run errors:");
       for (const e of result.errors) {

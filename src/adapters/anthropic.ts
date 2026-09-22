@@ -610,9 +610,9 @@ export const defaultDiffCollector: DiffCollector = async (cwd) => {
 
 // ---------- orchestrator ----------
 
-export async function dryRunAnthropic(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunAnthropic(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planAnthropicRun(root, missionPath);
+    const plan = await planAnthropicRun(root, missionPath, options);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
