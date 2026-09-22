@@ -1,10 +1,12 @@
-import { beforeAll, beforeEach, afterEach, describe, expect, test } from "vitest";
+import { beforeAll, beforeEach, afterEach, afterAll, describe, expect, test } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initializeHarness } from "../src/harness/init.js";
 import { planOhMyPiRun } from "../src/adapters/oh-my-pi.js";
 
-const TEST_ROOT = "/tmp/uh-test-prompt-transmission";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-prompt-transmission-"));
 
 async function cleanup() {
   await rm(TEST_ROOT, { recursive: true, force: true });
@@ -100,3 +102,4 @@ runtime_config_overrides:
     );
   });
 });
+afterAll(cleanup);

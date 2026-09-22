@@ -1,11 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initializeHarness } from "../src/harness/init.js";
 import { assertFleetAdmission, decideFleetAdmission } from "../src/harness/fleet-policy.js";
 import { validateProject } from "../src/schema/project.js";
 
-const ROOT = "/tmp/uh-test-fleet-policy";
+const ROOT = mkdtempSync(join(tmpdir(), "uh-test-fleet-policy-"));
 const LUNA = "openai-codex/gpt-5.6-luna";
 const fleet = { routes: [
   { adapter: "oh-my-pi", model: LUNA, roles: ["worker" as const] },
@@ -67,6 +69,7 @@ describe("fleet admission from disk", () => {
   }
   beforeEach(async () => { await rm(ROOT, { recursive: true, force: true }); await mkdir(ROOT, { recursive: true }); await initializeHarness(ROOT); });
   afterEach(() => rm(ROOT, { recursive: true, force: true }));
+  afterAll(() => rm(ROOT, { recursive: true, force: true }));
 
   test("a project without a fleet block admits any run", async () => {
     await expect(assertFleetAdmission(ROOT, await mission("open"), "oh-my-pi")).resolves.toBeUndefined();

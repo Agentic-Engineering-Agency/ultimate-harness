@@ -1,10 +1,12 @@
-import { test, expect, describe } from "vitest";
+import { test, expect, describe, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile, access, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getStatus } from "../src/harness/status.js";
 import { initializeHarness } from "../src/harness/init.js";
 
-const TEST_ROOT = "/tmp/uh-test-status";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-status-"));
 
 async function cleanup() {
   try { await rm(TEST_ROOT, { recursive: true, force: true }); } catch {}
@@ -12,6 +14,7 @@ async function cleanup() {
 
 test.beforeEach(cleanup);
 test.afterEach(cleanup);
+test.afterAll(cleanup);
 
 describe("uh status", () => {
   test("fails clearly outside a harness project", async () => {

@@ -103,7 +103,7 @@ describe("acceptance evidence", () => {
   test("committed acceptance report is generated from current registry", async () => {
     const report = await renderAcceptanceReport(process.cwd());
     const committed = await readFile(path.join(process.cwd(), "docs", "acceptance", "README.md"), "utf8");
-    expect(committed).toBe(report);
+    expect(committed.replace(/\r\n/g, "\n")).toBe(report.replace(/\r\n/g, "\n"));
   });
   test("refuses acceptance run without workspace", async () => {
     await expect(runAcceptance(process.cwd())).rejects.toThrow(/--workspace/);
