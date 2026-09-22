@@ -1,11 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { planOhMyPiRun, runOhMyPi, type OhMyPiRunner } from "../src/adapters/oh-my-pi.js";
 
-const ROOT = "/tmp/uh-test-omp-route-overlay";
+const ROOT = mkdtempSync(join(tmpdir(), "uh-test-omp-route-overlay-"));
 const SNAPSHOT_ROOT = join(ROOT, "snapshot");
 const SNAPSHOT_DIST = join(SNAPSHOT_ROOT, "dist");
 const MODEL = "openai-codex/gpt-5.6-luna";
@@ -98,4 +100,7 @@ describe("oh-my-pi route overlay", () => {
     expect(written.modelRoles.smol).toBe(MODEL);
     expect(written.task.maxRecursionDepth).toBe(0);
   });
+});
+afterAll(async () => {
+  await rm(ROOT, { recursive: true, force: true });
 });
