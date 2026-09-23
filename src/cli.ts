@@ -56,6 +56,7 @@ import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 import { installTelemetryHooks } from "./harness/telemetry.js";
 import { projectDeliveryObservatory } from "./harness/delivery-observatory/project.js";
 import { acceptanceStatus, rebindAcceptanceEvidence, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
+import { loadPostChecks, postCheckExitCode, runPostChecks, type PostCheckEntry } from "./harness/post-checks.js";
 
 import {
   createSandbox,
@@ -2286,7 +2287,8 @@ missionCmd
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
   .option("--quiet", "Do not print the runtime's stdout or stderr")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean }) => {
+  .option("--post-checks <file>", "YAML or JSON list of operator checks run after the runtime settles; the agent never sees them")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean; postChecks?: string }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -2461,6 +2463,22 @@ missionCmd
       process.exit(exitCodeForRun("blocked"));
       return;
     }
+    // Operator post-checks are read and validated at launch, before any run
+    // directory or runtime process exists. The path resolves against the
+    // process cwd; a missing or malformed file blocks the run. Neither the
+    // path nor any command is echoed, persisted, or handed to the runtime.
+    let postChecks: PostCheckEntry[] | undefined;
+    let postChecksPath: string | undefined;
+    if (opts.postChecks !== undefined) {
+      try {
+        postChecksPath = path.resolve(opts.postChecks);
+        postChecks = await loadPostChecks(postChecksPath);
+      } catch {
+        console.error("[BLOCKED] post-checks file is missing or invalid");
+        process.exit(exitCodeForRun("blocked"));
+        return;
+      }
+    }
     console.log(`Running mission: ${filePath}`);
     console.log(`Runtime: ${runtime}`);
     if (opts.runId) {
@@ -2470,6 +2488,9 @@ missionCmd
     if (extraRuntimeConfigOverrides) {
       const keys = Object.keys(extraRuntimeConfigOverrides);
       console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
+    }
+    if (postChecks) {
+      console.log(`Post-checks: ${postChecks.length}`);
     }
     const runId = opts.runId ?? generateRunId();
     console.log("");
@@ -2566,7 +2587,35 @@ missionCmd
     }
 
     const finalStopCode = controlStopCode ?? resultYamlStopCode;
-    const runExitCode = exitCodeForRun(status, finalStopCode);
+
+    // Operator post-checks run after the runtime settles, whatever its status,
+    // and after the CLI status is derived. They read the run's events.ndjson
+    // via UH_RUN_DIR; a failed, timed-out or unrunnable check makes the run
+    // failed and its exit code uses exitCodeForRun("failed").
+    let postChecksFailed = false;
+    if (postChecks && postChecks.length > 0 && postChecksPath) {
+      const post = await runPostChecks({
+        checks: postChecks,
+        checksFile: postChecksPath,
+        missionId,
+        runId: finalRunId,
+        runDir,
+        root: path.resolve(root),
+        cwd: routing.effectiveRoot,
+      });
+      if (post.errors.length > 0) {
+        status = "failed";
+        postChecksFailed = true;
+        for (const e of post.errors) {
+          console.log(`[FAIL] ${e}`);
+        }
+      }
+    }
+
+    // A failed post-check settles the run as failed: the exit code is
+    // exitCodeForRun("failed") regardless of the runtime's stop code, which
+    // stays in UH_RESULT only as a record. Otherwise unchanged.
+    const runExitCode = postCheckExitCode(status, finalStopCode, postChecksFailed);
 
     if (wiring.surfaceBlocked && result.result?.status === "blocked") {
       console.log(`[BLOCKED] mission classified as blocked`);
