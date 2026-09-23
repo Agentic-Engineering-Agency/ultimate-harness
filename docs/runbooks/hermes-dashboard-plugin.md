@@ -71,12 +71,9 @@ saved backup back to `~/.hermes/plugins/uh` and restart Hermes explicitly.
 
 ### From a release tarball (post UH-68)
 
-The release tarball is produced by the GitHub Actions workflow staged at
-[`docs/ci/release-plugin.yml.example`](../ci/release-plugin.yml.example).
-Move it to `.github/workflows/release-plugin.yml` (requires a GitHub token
-with the `workflow` scope) and tag with `plugin-v*` to trigger a build —
-the staged path keeps the initial branch importable under OAuth tokens
-without `workflow` scope.
+The release tarball is produced by the GitHub Actions workflow
+[`.github/workflows/release-plugin.yml`](../../.github/workflows/release-plugin.yml);
+tag with `plugin-v*` to trigger a build.
 
 ```bash
 mkdir -p ~/.hermes/plugins/uh
