@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto";
 import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
+import {
+  IndependentReviewAssessmentSchema,
+  IndependentReviewRequestSchema,
+  type IndependentReviewRequest,
+} from "../schema/independent-review.js";
 import { LandSchema } from "../schema/project.js";
 import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
 import { projectYaml } from "./paths.js";
@@ -76,6 +82,13 @@ export type LandOptions = {
   messageFile: string;
   acceptReview?: string;
   fastForward?: readonly string[];
+  /**
+   * Main checkout that owns the collected review assessments (the
+   * `review-assessment.json` files under `.harness/missions`) and the
+   * accepted-review decision receipts under `.harness/land`. Defaults to the
+   * target worktree's common git directory parent.
+   */
+  reviewRoot?: string;
   git?: LandGitRunner;
   runCommand?: LandCommandRunner;
 };
@@ -142,7 +155,15 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   const buildCommand = config.build ?? DEFAULT_LAND_BUILD;
 
   // ---- Step 1: gates (no git mutation happens here) ----------------------
+  // `uh mission review-collect` writes the collected assessment in the main
+  // checkout — next to the review's review-request.json — not in the worker
+  // worktree. Resolve that checkout from the target worktree's shared git
+  // directory so a review is read from where it is actually written.
+  const reviewRoot = options.reviewRoot !== undefined
+    ? path.resolve(options.reviewRoot)
+    : await resolveMainCheckout(git, root);
   const worktrees = await listWorktrees(git, root);
+  const reviews = await collectReviews(reviewRoot);
   let reviewAccepted = false;
   const acceptedReviewIds: string[] = [];
   for (const branch of options.workerBranches) {
@@ -150,9 +171,21 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     if (!worktree) {
       throw new LandError("gates", `no retained worktree found for worker branch ${branch}`);
     }
-    await requirePassedVerification(worktree.path, branch);
+    const missionIds = await requirePassedVerification(worktree.path, branch);
+    const tip = await git(["rev-parse", branch], root);
+    if (tip.exitCode !== 0) {
+      throw new LandError("gates", `cannot resolve the tip of worker branch ${branch}: ${reason(tip)}`);
+    }
     try {
-      await requireCleanReview(worktree.path, branch);
+      await requireCleanReview({
+        branch,
+        tip: tip.stdout.trim(),
+        missionIds,
+        reviewRoot,
+        reviews,
+        git,
+        root,
+      });
     } catch (err) {
       if (err instanceof ReviewGateError && options.acceptReview !== undefined) {
         reviewAccepted = true;
@@ -163,7 +196,7 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     }
   }
   const decisionPath = reviewAccepted
-    ? await writeLandDecision(root, {
+    ? await writeLandDecision(reviewRoot, {
         branches: [...options.workerBranches],
         reason: options.acceptReview ?? "",
         review_ids: acceptedReviewIds,
@@ -298,7 +331,7 @@ async function listWorktrees(git: LandGitRunner, root: string): Promise<Worktree
   return worktrees;
 }
 
-async function requirePassedVerification(worktreePath: string, branch: string): Promise<void> {
+async function requirePassedVerification(worktreePath: string, branch: string): Promise<string[]> {
   const files = await collectArtifacts(worktreePath, "verification.yaml");
   if (files.length === 0) {
     throw new LandError(
@@ -306,6 +339,7 @@ async function requirePassedVerification(worktreePath: string, branch: string): 
       `worker branch ${branch} has no retained uh verify result (.harness/missions/*/verification.yaml) in ${worktreePath}`,
     );
   }
+  const missionIds: string[] = [];
   for (const file of files) {
     let doc: unknown;
     try {
@@ -313,42 +347,142 @@ async function requirePassedVerification(worktreePath: string, branch: string): 
     } catch (err) {
       throw new LandError("gates", `cannot read verification ${file}: ${(err as Error).message}`);
     }
-    const status = doc && typeof doc === "object" ? (doc as Record<string, unknown>).status : undefined;
-    if (status !== "passed") {
-      throw new LandError("gates", `worker branch ${branch} verification ${file} status is ${String(status)}, not passed`);
+    const record = (doc && typeof doc === "object" ? doc : {}) as Record<string, unknown>;
+    if (record.status !== "passed") {
+      throw new LandError("gates", `worker branch ${branch} verification ${file} status is ${String(record.status)}, not passed`);
+    }
+    for (const missionId of verificationMissionIds(file, record)) {
+      if (!missionIds.includes(missionId)) missionIds.push(missionId);
     }
   }
+  // A team worker branch encodes the team mission id it belongs to
+  // (`uh/team/<team>/<role>`), which is the only mission id the branch name
+  // itself can prove. `uh verify`'s retained result remains the primary proof.
+  for (const missionId of branchMissionIds(branch)) {
+    if (!missionIds.includes(missionId)) missionIds.push(missionId);
+  }
+  return missionIds;
 }
 
-async function requireCleanReview(worktreePath: string, branch: string): Promise<void> {
-  const files = await collectArtifacts(worktreePath, "review-assessment.json");
-  if (files.length === 0) {
+/** The mission ids a retained verification result proves: its stated id, else its directory name. */
+function verificationMissionIds(file: string, record: Record<string, unknown>): string[] {
+  const stated = record.mission_id;
+  if (typeof stated === "string" && stated.length > 0) return [stated];
+  return [path.basename(path.dirname(file))];
+}
+
+/** The team mission id a `uh/team/<team>/<role>` branch name proves; empty for any other branch. */
+function branchMissionIds(branch: string): string[] {
+  const match = /^uh\/team\/([^/]+)\/[^/]+$/.exec(branch);
+  return match ? [match[1]] : [];
+}
+
+/** The shape of a collected assessment; the schema is the only source of truth. */
+type IndependentReviewAssessment = ReturnType<typeof IndependentReviewAssessmentSchema.parse>;
+
+/** A collected independent review read from the main checkout's review missions. */
+type CollectedReview = {
+  reviewId: string;
+  requestPath: string;
+  assessmentPath: string;
+  request: IndependentReviewRequest;
+  assessment: IndependentReviewAssessment;
+};
+
+async function requireCleanReview(input: {
+  branch: string;
+  tip: string;
+  missionIds: string[];
+  reviewRoot: string;
+  reviews: CollectedReview[];
+  git: LandGitRunner;
+  root: string;
+}): Promise<void> {
+  const { branch, tip, missionIds, reviewRoot, reviews, git, root } = input;
+  const matched = reviews.filter((review) =>
+    review.request.sources.some((source) => missionIds.includes(source.mission_id)));
+  if (matched.length === 0) {
+    if (reviews.length === 0) {
+      throw new ReviewGateError(
+        `worker branch ${branch} has no collected independent review (.harness/missions/*/review-assessment.json) in ${reviewRoot}`,
+        [],
+      );
+    }
+    const first = reviews[0];
     throw new ReviewGateError(
-      `worker branch ${branch} has no collected independent review (.harness/missions/*/review-assessment.json) in ${worktreePath}`,
-      [],
+      `worker branch ${branch} has no collected independent review naming mission ${missionIds.join(", ")}; ` +
+        `review ${first.reviewId} names ${first.request.sources.map((source) => source.mission_id).join(", ")} ` +
+        `(first mismatching path: ${first.requestPath})`,
+      reviews.map((review) => review.reviewId),
     );
   }
-  const reviews: string[] = [];
-  const contradicted: string[] = [];
-  for (const file of files) {
-    let doc: unknown;
+  // Accept the branch as soon as one collected review is bound to it; a single
+  // unrelated or broken review must not mask a clean one.
+  let firstFailure: ReviewGateError | undefined;
+  for (const review of matched) {
     try {
-      doc = parse(await readFile(file, "utf-8"));
+      await assertReviewBoundToTip(review, branch, tip, missionIds, git, root);
+      const contradicted = (review.assessment.claims ?? []).filter((claim) => claim.verdict === "contradicted");
+      if (contradicted.length > 0) {
+        throw new ReviewGateError(
+          `contradicted claims in independent review ${review.reviewId}: ${contradicted.map((claim) => claim.claim).join("; ")}`,
+          [review.reviewId],
+        );
+      }
+      return;
     } catch (err) {
-      throw new ReviewGateError(`cannot read review ${file}: ${(err as Error).message}`, reviews);
+      if (!(err instanceof ReviewGateError)) throw err;
+      if (!firstFailure) firstFailure = err;
     }
-    const record = (doc && typeof doc === "object" ? doc : {}) as { review_id?: unknown; claims?: unknown };
-    const reviewId = typeof record.review_id === "string" && record.review_id.length > 0
-      ? record.review_id
-      : path.basename(path.dirname(file));
-    reviews.push(reviewId);
-    const claims = Array.isArray(record.claims) ? record.claims : [];
-    const count = claims.filter((claim) =>
-      claim && typeof claim === "object" && (claim as Record<string, unknown>).verdict === "contradicted").length;
-    if (count > 0) contradicted.push(`${reviewId} (${count})`);
   }
-  if (contradicted.length > 0) {
-    throw new ReviewGateError(`contradicted claims in independent review(s): ${contradicted.join(", ")}`, reviews);
+  throw firstFailure!;
+}
+
+/**
+ * A review is bound to the slice only when its request hashes to the recorded
+ * request digest and every captured `output`/`changed` file it claims at the
+ * branch's tip still hashes to the branch's own bytes. Every failure names the
+ * review id and the first mismatching path.
+ */
+async function assertReviewBoundToTip(
+  review: CollectedReview,
+  branch: string,
+  tip: string,
+  missionIds: string[],
+  git: LandGitRunner,
+  root: string,
+): Promise<void> {
+  const requestBytes = await readFile(review.requestPath, "utf-8");
+  if (review.assessment.request_sha256 !== sha256Hex(requestBytes)) {
+    throw new ReviewGateError(
+      `review ${review.reviewId} request_sha256 does not match ${review.requestPath} ` +
+        `(first mismatching path: ${review.requestPath})`,
+      [review.reviewId],
+    );
+  }
+  for (const source of review.request.sources) {
+    if (!missionIds.includes(source.mission_id)) continue;
+    for (const file of source.files) {
+      if (file.kind !== "output" && file.kind !== "changed") continue;
+      if (file.state !== "present") continue;
+      const originalPath = file.original_path.replaceAll("\\", "/").replace(/^\.\/+/, "");
+      const shown = await git(["show", `${tip}:${originalPath}`], root);
+      if (shown.exitCode !== 0) {
+        throw new ReviewGateError(
+          `review ${review.reviewId} captures ${originalPath}, which ${branch} does not contain ` +
+            `(first mismatching path: ${originalPath})`,
+          [review.reviewId],
+        );
+      }
+      const actual = sha256Hex(shown.stdout);
+      if (file.sha256 !== actual) {
+        throw new ReviewGateError(
+          `review ${review.reviewId} captured ${originalPath} at sha256 ${String(file.sha256)}, but ${branch} holds ${actual} ` +
+            `(first mismatching path: ${originalPath})`,
+          [review.reviewId],
+        );
+      }
+    }
   }
 }
 
@@ -367,6 +501,55 @@ async function collectArtifacts(root: string, fileName: string): Promise<string[
     if (await fileExists(candidate)) found.push(candidate);
   }
   return found;
+}
+
+/**
+ * The main checkout that owns the worker worktrees: the parent of the shared
+ * git directory the target worktree points at.
+ */
+async function resolveMainCheckout(git: LandGitRunner, root: string): Promise<string> {
+  const result = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], root);
+  if (result.exitCode !== 0) {
+    throw new LandError("gates", `cannot resolve the main checkout from ${root}: ${reason(result)}`);
+  }
+  const commonDir = result.stdout.trim();
+  if (commonDir.length === 0) {
+    throw new LandError("gates", `cannot resolve the main checkout from ${root}: empty git-common-dir`);
+  }
+  return path.dirname(path.resolve(commonDir));
+}
+
+/**
+ * Read every collected independent review in `reviewRoot`, pairing each
+ * assessment with the request it belongs to. Both must parse through the
+ * canonical schemas to count; a malformed mission is skipped, so a broken
+ * review can never be mistaken for a passing gate.
+ */
+async function collectReviews(reviewRoot: string): Promise<CollectedReview[]> {
+  const files = await collectArtifacts(reviewRoot, "review-assessment.json");
+  const reviews: CollectedReview[] = [];
+  for (const assessmentPath of files) {
+    const reviewDir = path.dirname(assessmentPath);
+    let assessment: IndependentReviewAssessment;
+    try {
+      assessment = IndependentReviewAssessmentSchema.parse(JSON.parse(await readFile(assessmentPath, "utf-8")));
+    } catch {
+      continue;
+    }
+    const requestPath = path.join(reviewDir, "review-request.json");
+    let request: IndependentReviewRequest;
+    try {
+      request = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(requestPath, "utf-8")));
+    } catch {
+      continue;
+    }
+    reviews.push({ reviewId: assessment.review_id, requestPath, assessmentPath, request, assessment });
+  }
+  return reviews;
+}
+
+function sha256Hex(bytes: string): string {
+  return createHash("sha256").update(bytes, "utf-8").digest("hex");
 }
 
 async function restoreTarget(git: LandGitRunner, root: string, previousHead: string): Promise<void> {

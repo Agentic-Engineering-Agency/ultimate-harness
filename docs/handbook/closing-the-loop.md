@@ -83,8 +83,10 @@ uh land --worker-branch uh/team/<team>/<worker> --onto <target-branch> \
 It refuses before touching anything unless every branch passes both gates:
 
 1. **Verified.** The branch has a passed `uh verify` result in its retained worktree (run the team with `--retain`).
-2. **Reviewed.** A collected independent review in the main checkout names the branch's mission, matches its request
-   digest, captured the same file hashes as the branch tip, and contradicts no claim.
+2. **Reviewed.** A collected independent review in the main checkout names the branch's team mission (read from
+   `uh/team/<team>/<role>`), matches its request digest, captured the same file hashes as the branch tip, and
+   contradicts no claim. Binding is to the team, not the individual worker; a review of one worker of a team can
+   satisfy the gate for another.
    `--accept-review <reason>` overrides only this gate and writes the reason, branches and review ids to
    `.harness/land/<timestamp>-decision.json`.
 

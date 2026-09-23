@@ -4,15 +4,24 @@
  * Every scenario drives real `git` inside throwaway repositories (never the
  * repository under test) and injects a fake check/build runner, so the real
  * full suite and build never run here.
+ *
+ * Collected independent reviews live in the main checkout
+ * (`.harness/missions/<review-id>/`), exactly where `uh mission review-collect`
+ * writes them, never in the worker worktree.
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { stringify as stringifyYaml } from "yaml";
-import { landWorkerBranches, type LandCommandRunner, type LandOptions } from "../src/harness/land.js";
+import {
+  IndependentReviewAssessmentSchema,
+  IndependentReviewRequestSchema,
+} from "../src/schema/independent-review.js";
+import { landWorkerBranches, ReviewGateError, type LandCommandRunner, type LandOptions } from "../src/harness/land.js";
 import { defaultGitOps } from "../src/harness/team-run.js";
 
 const execFileP = promisify(execFile);
@@ -36,6 +45,7 @@ async function initRepo(root: string): Promise<void> {
   await gitQuiet(root, ["config", "user.name", IDENTITY.name]);
   await gitQuiet(root, ["config", "commit.gpgsign", "false"]);
   await gitQuiet(root, ["config", "core.autocrlf", "false"]);
+  await writeFile(join(root, ".gitignore"), ".harness/\n", "utf-8");
   await writeFile(join(root, "README.md"), "# seed\n", "utf-8");
   await gitQuiet(root, ["add", "-A"]);
   await gitQuiet(root, ["commit", "-q", "-m", "seed"]);
@@ -64,19 +74,58 @@ async function writeVerification(worktree: string, missionId: string, status: st
   }), "utf-8");
 }
 
-async function writeReview(worktree: string, reviewId: string, verdicts: string[]): Promise<void> {
-  const dir = join(worktree, ".harness", "missions", reviewId);
-  await mkdir(dir, { recursive: true });
-  const contradicted = verdicts.includes("contradicted");
-  await writeFile(join(dir, "review-assessment.json"), JSON.stringify({
+function sha256(text: string): string {
+  return createHash("sha256").update(text, "utf-8").digest("hex");
+}
+
+type ReviewFixture = {
+  reviewId: string;
+  missionId: string;
+  changedPath: string;
+  changedSha256: string;
+  requestSha256?: string;
+  verdicts: string[];
+};
+
+/**
+ * Write a collected review whose request and assessment are shaped by the
+ * canonical schemas, plus the request digest the assessment must carry.
+ */
+async function writeCollectedReview(root: string, fixture: ReviewFixture): Promise<void> {
+  const reviewDir = join(root, ".harness", "missions", fixture.reviewId);
+  await mkdir(reviewDir, { recursive: true });
+  const request = IndependentReviewRequestSchema.parse({
+    schema_version: "uh.independent-review-request.v0",
+    review_id: fixture.reviewId,
+    sources: [{
+      mission_id: fixture.missionId,
+      source_root: root,
+      files: [
+        { kind: "contract", state: "present",
+          original_path: `.harness/missions/${fixture.missionId}/mission.yaml`,
+          snapshot_path: "inputs/contract.yaml", sha256: "0".repeat(64) },
+        { kind: "changed", state: "present", original_path: fixture.changedPath,
+          snapshot_path: "inputs/changed-0.txt", sha256: fixture.changedSha256 },
+      ],
+      reference_paths: [],
+      acceptance: [],
+      checks: [],
+    }],
+  });
+  const requestText = `${JSON.stringify(request, null, 2)}\n`;
+  await writeFile(join(reviewDir, "review-request.json"), requestText, "utf-8");
+  const assessment = IndependentReviewAssessmentSchema.parse({
     schema_version: "uh.independent-review-assessment.v0",
-    review_id: reviewId,
+    review_id: fixture.reviewId,
     run_id: "run-1",
-    request_sha256: "a".repeat(64),
-    recommendation: contradicted ? "needs-remediation" : "pass",
+    request_sha256: fixture.requestSha256 ?? sha256(requestText),
+    recommendation: fixture.verdicts.includes("contradicted") ? "needs-remediation" : "pass",
     human_acceptance_required: true,
-    claims: verdicts.map((verdict, index) => ({ source: "work", claim: `claim ${index}`, verdict, evidence_source: "out/report.json" })),
-  }, null, 2) + "\n", "utf-8");
+    claims: fixture.verdicts.map((verdict, index) => ({
+      source: fixture.missionId, claim: `claim ${index}`, verdict, evidence_source: "out/report.json",
+    })),
+  });
+  await writeFile(join(reviewDir, "review-assessment.json"), `${JSON.stringify(assessment, null, 2)}\n`, "utf-8");
 }
 
 function fakeRunner(failing: string[] = []): LandCommandRunner {
@@ -94,6 +143,11 @@ type SetupOptions = {
   message?: string;
   missionId?: string;
   reviewId?: string;
+  reviewMissionId?: string;
+  reviewSha256?: string;
+  reviewRequestSha256?: string;
+  reviewChangedPath?: string;
+  reviewInWorktree?: boolean;
 };
 
 async function setup(options: SetupOptions = {}): Promise<{ worktree: string; messageFile: string; missionId: string; reviewId: string }> {
@@ -107,7 +161,16 @@ async function setup(options: SetupOptions = {}): Promise<{ worktree: string; me
     await writeVerification(worktree, missionId, options.verificationStatus ?? "passed");
   }
   if (options.reviewVerdicts !== null) {
-    await writeReview(worktree, reviewId, options.reviewVerdicts ?? ["supported"]);
+    const changedPath = options.reviewChangedPath ?? "feature.txt";
+    const changedSha256 = options.reviewSha256 ?? sha256(await git(ROOT, ["show", `work:${changedPath}`]));
+    await writeCollectedReview(options.reviewInWorktree ? worktree : ROOT, {
+      reviewId,
+      missionId: options.reviewMissionId ?? missionId,
+      changedPath,
+      changedSha256,
+      requestSha256: options.reviewRequestSha256,
+      verdicts: options.reviewVerdicts ?? ["supported"],
+    });
   }
   const messageFile = join(WORK, "message.txt");
   await writeFile(messageFile, options.message ?? "feat: land worker\n", "utf-8");
@@ -120,6 +183,7 @@ function runLand(overrides: Partial<LandOptions> & { messageFile: string }) {
     workerBranches: ["work"],
     onto: "main",
     runCommand: fakeRunner(),
+    reviewRoot: ROOT,
     ...overrides,
   });
 }
@@ -253,6 +317,82 @@ describe("uh land", () => {
 
     expect(result.fast_forwarded).toEqual([mirror]);
     expect(await head(mirror)).toBe(await head(ROOT));
+  });
+
+  test("lands when the collected review names the worker's mission", async () => {
+    const { messageFile } = await setup();
+
+    // No explicit review root: it must resolve to the main checkout on its own.
+    const result = await runLand({ messageFile, reviewRoot: undefined });
+
+    expect(result.status).toBe("landed");
+  });
+
+  test("refuses a collected review that names another mission id", async () => {
+    const { messageFile, reviewId } = await setup({ reviewMissionId: "other-mission" });
+    const before = await head(ROOT);
+
+    const error = await runLand({ messageFile }).catch((err) => err);
+
+    expect(error).toBeInstanceOf(ReviewGateError);
+    expect((error as Error).message).toContain(reviewId);
+    expect((error as Error).message).toContain("other-mission");
+    expect(await head(ROOT)).toBe(before);
+    expect(await status(ROOT)).toBe("");
+  });
+
+  test("refuses when a captured snapshot hash differs from the branch tip", async () => {
+    const { messageFile, reviewId } = await setup({ reviewSha256: "b".repeat(64) });
+    const before = await head(ROOT);
+
+    const error = await runLand({ messageFile }).catch((err) => err);
+
+    expect(error).toBeInstanceOf(ReviewGateError);
+    expect((error as Error).message).toContain(reviewId);
+    expect((error as Error).message).toContain("feature.txt");
+    expect(await head(ROOT)).toBe(before);
+    expect(await status(ROOT)).toBe("");
+  });
+
+  test("refuses when the assessment digest does not match the review request", async () => {
+    const { messageFile, reviewId } = await setup({ reviewRequestSha256: "c".repeat(64) });
+    const before = await head(ROOT);
+
+    const error = await runLand({ messageFile }).catch((err) => err);
+
+    expect(error).toBeInstanceOf(ReviewGateError);
+    expect((error as Error).message).toContain(reviewId);
+    expect((error as Error).message).toContain("review-request.json");
+    expect(await head(ROOT)).toBe(before);
+    expect(await status(ROOT)).toBe("");
+  });
+
+  test("ignores a collected review that exists only inside the worker worktree", async () => {
+    const { messageFile } = await setup({ reviewInWorktree: true });
+    const before = await head(ROOT);
+
+    const error = await runLand({ messageFile }).catch((err) => err);
+
+    expect(error).toBeInstanceOf(ReviewGateError);
+    expect((error as Error).message).toMatch(/no collected independent review/i);
+    expect(await head(ROOT)).toBe(before);
+    expect(await status(ROOT)).toBe("");
+  });
+
+  test("--accept-review writes the decision into the main checkout", async () => {
+    const { messageFile, reviewId, worktree } = await setup({ reviewVerdicts: ["contradicted"] });
+
+    const result = await runLand({ messageFile, acceptReview: "operator override", reviewRoot: ROOT });
+
+    expect(result.status).toBe("landed");
+    const decisionFile = result.accepted_review!.path;
+    expect(await fileExists(decisionFile)).toBe(true);
+    expect(decisionFile.startsWith(join(ROOT, ".harness", "land"))).toBe(true);
+    // The decision lives in the main checkout, never the worker worktree.
+    expect(await fileExists(join(worktree, ".harness", "land"))).toBe(false);
+    const decision = JSON.parse(await readFile(decisionFile, "utf-8"));
+    expect(decision.review_ids).toEqual([reviewId]);
+    expect(decision.reason).toBe("operator override");
   });
 });
 
