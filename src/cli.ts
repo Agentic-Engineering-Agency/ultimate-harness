@@ -209,15 +209,40 @@ async function evaluateSemanticRoute(options: {
 /**
  * The `Sandbox:` line that `mission run` and `mission dry-run` print, so the
  * routing decision is always visible. `useSandbox` is whether sandbox routing
- * was requested (i.e. `--no-sandbox` was absent).
+ * was requested (i.e. `--no-sandbox` was absent). `orchestratorRootRun` is the
+ * accepted root execution for an orchestrator mission: it runs in the project
+ * root without `--no-sandbox`, with writes limited to its guard's write roots.
  */
-function sandboxRouteLine(routing: SandboxMissionRoute, useSandbox: boolean): string {
+function sandboxRouteLine(routing: SandboxMissionRoute, useSandbox: boolean, orchestratorRootRun = false): string {
   if (routing.sandbox) {
     return `Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`;
   }
-  return useSandbox
-    ? "Sandbox: none (project root)"
-    : "Sandbox: none (project root, --no-sandbox)";
+  if (!useSandbox) {
+    return "Sandbox: none (project root, --no-sandbox)";
+  }
+  return orchestratorRootRun
+    ? "Sandbox: none (orchestrator in the project root; writes limited to its guard's write roots)"
+    : "Sandbox: none (project root)";
+}
+
+/**
+ * The runtime-config role a `mission run` resolves to for this mission: the
+ * mission's own `runtime_config_overrides` sit under the template and CLI
+ * overrides the run is about to pass. Only claude-code and command-code declare
+ * `role`, and only `orchestrator` changes the sandbox decision.
+ */
+async function resolveRuntimeConfigRole(
+  missionPath: string,
+  extra: Record<string, unknown> | undefined,
+): Promise<"worker" | "orchestrator"> {
+  let missionOverrides: Record<string, unknown> | undefined;
+  try {
+    missionOverrides = (await loadMissionFile(missionPath)).runtime_config_overrides;
+  } catch {
+    missionOverrides = undefined;
+  }
+  const role = (extra ?? {}).role ?? missionOverrides?.role;
+  return role === "orchestrator" ? "orchestrator" : "worker";
 }
 
 async function installRuntimeCancelledEventHandler(
@@ -2344,10 +2369,31 @@ missionCmd
       process.exit(exitCodeForRun("blocked"));
       return;
     }
+    // An orchestrator is meant to drive `uh` from the project root, and its
+    // guard confines its writes to its declared write roots, so it runs in the
+    // project root without --no-sandbox. Every other mission still needs an
+    // explicit --no-sandbox: a guarded worker running in the project root edits
+    // the operator's live working tree. An orchestrator's guard and write roots
+    // are validated by the adapter's existing planning checks, not duplicated
+    // here; an orchestrator without a guard, or whose write roots cover the
+    // repository, is still refused.
+    let orchestratorRootRun = false;
     if (opts.sandbox && !routing.sandbox) {
-      // A guarded worker running in the project root edits the operator's live
-      // working tree, so root execution is only reachable through an explicit
-      // --no-sandbox. Refuse before any run directory or process exists.
+      let cliOverrides: Record<string, unknown> | undefined;
+      if (opts.runtimeConfigOverrides !== undefined) {
+        try {
+          cliOverrides = parseRuntimeConfigOverridesJson(opts.runtimeConfigOverrides);
+        } catch {
+          // The run path re-parses and reports a malformed override below.
+        }
+      }
+      orchestratorRootRun = (await resolveRuntimeConfigRole(
+        routing.missionPath,
+        { ...templateAdoption?.runtimeConfigOverrides, ...cliOverrides },
+      )) === "orchestrator";
+    }
+    if (opts.sandbox && !routing.sandbox && !orchestratorRootRun) {
+      // Refuse before any run directory or process exists.
       const blockedMissionId = routing.missionId ?? "unknown";
       console.error(`[BLOCKED] mission ${blockedMissionId} has no bound sandbox; create one with "uh sandbox create <sandbox-id> --mission ${blockedMissionId}" or pass --no-sandbox to run in the project root`);
       const blockedRunId = opts.runId ?? generateRunId();
@@ -2402,7 +2448,7 @@ missionCmd
     if (opts.runId) {
       console.log(`Run id: ${opts.runId}`);
     }
-    console.log(sandboxRouteLine(routing, opts.sandbox));
+    console.log(sandboxRouteLine(routing, opts.sandbox, orchestratorRootRun));
     if (extraRuntimeConfigOverrides) {
       const keys = Object.keys(extraRuntimeConfigOverrides);
       console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
