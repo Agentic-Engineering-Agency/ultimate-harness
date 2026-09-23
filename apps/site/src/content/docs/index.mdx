@@ -1,0 +1,64 @@
+---
+title: Ultimate Harness
+description: Runtime-agnostic CLI and artifact lifecycle for planning, running, verifying and promoting agentic software work.
+template: splash
+hero:
+  tagline: The agent is fungible. The discipline is not. UH turns agentic coding work into schema-backed missions, supervised runs, verified results and recorded human decisions, whichever runtime does the work.
+  actions:
+    - text: Install and first run
+      link: /start/install/
+      icon: right-arrow
+    - text: How it works
+      link: /system/lifecycle/
+      variant: minimal
+    - text: Road to 1.0
+      link: /release/plan/
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## What UH is
+
+Ultimate Harness (`uh`, npm `@agenticengineeringagency/ultimate-harness`) is a control plane that sits above coding agents. It does not write code itself. It standardizes what happens around an agent run:
+
+```text
+request / issue / spec
+  -> workflow profile          which procedure applies
+  -> mission packet            what exactly to do, under which limits
+  -> runtime adapter           Codex, Command Code, oh-my-pi, Hermes, Anthropic, ACP, ...
+  -> supervised run            sandbox or worktree, tool guard, stall and loop detection
+  -> verification              deterministic checks, then an optional model judge
+  -> independent review        a second agent grades the report against the request
+  -> promotion / land          a recorded human decision moves work into canonical state
+```
+
+Every step writes plain YAML or NDJSON under `.harness/`, validated by a versioned Zod schema. No daemon, no hidden state: if `uh status` cannot see it, it did not happen.
+
+<CardGrid>
+  <Card title="Portable discipline" icon="seti:config">
+    Swap Codex for oh-my-pi or Command Code without losing specs, missions, sandboxes, audit trail or approval gates.
+  </Card>
+  <Card title="Supervised execution" icon="warning">
+    A tool guard, fleet admission, route attestation, stall and loop probes keep a worker inside what it was assigned.
+  </Card>
+  <Card title="Evidence, not vibes" icon="approve-check">
+    Diffs, receipts, verification and review records link every change to a prompt, model, sandbox and approver.
+  </Card>
+  <Card title="Run control" icon="rocket">
+    `uh ps`, `wait`, `steer`, `kill`, `queue`, `land` and the hive operate live runs and teams from the project root.
+  </Card>
+</CardGrid>
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Mental model" description="The nouns: project, workflow, mission, run, verification, promotion." href="/start/mental-model/" />
+  <LinkCard title="Architecture map" description="Which module owns what, and how the CLI, harness, schemas and adapters connect." href="/system/architecture/" />
+  <LinkCard title="Road to 1.0" description="Open PRs, branch cleanup and the coordinated merge plan." href="/release/plan/" />
+  <LinkCard title="Technical debt register" description="What to pay down before and after 1.0." href="/release/debt/" />
+</CardGrid>
+
+:::note[Which version these pages describe]
+`main` and npm are at **v0.9.0**. The unpublished **v0.11.0** line (draft PR [#239](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/239) plus stacked PRs #240 to #249) adds run control, teams, the hive and the delivery loop. The "How it works" pages describe the v0.11.0 line because that is what becomes 1.0; features that are not on `main` yet are marked **v0.11**.
+:::
