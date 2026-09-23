@@ -30,14 +30,13 @@ Node 22.12 or newer is required by Astro 7. Search is built at build time by Pag
 
 `.github/workflows/deploy-site.yml`:
 
-- **Pull requests** that touch `apps/site/`, `docs/`, `specs/` or `CHANGELOG.md` build the site and upload `dist/` as an artifact. A broken link to a sidebar page or a malformed frontmatter fails the build.
-- **Pushes to `main`** (and manual dispatch) build, then run `wrangler deploy` with `apps/site/wrangler.jsonc`: a static-assets-only Worker named `uh-site` with the custom domain `uh.agenticeng.app`.
+- **Pull requests** that touch `apps/site/`, `docs/`, `specs/` or `CHANGELOG.md` build the site. A broken link to a sidebar page or a malformed frontmatter fails the build.
+- **Pushes to `main`** (and manual dispatch) build, then run `wrangler deploy` in the same job (no artifact hand-off, so deploys do not depend on Actions storage quota) with `apps/site/wrangler.jsonc`: a static-assets-only Worker named `uh-site` with the custom domain `uh.agenticeng.app`.
 
 Prerequisites, done once by an account admin:
 
 1. The `agenticeng.app` zone is on the same Cloudflare account as the `CLOUDFLARE_ACCOUNT_ID` secret.
 2. The `CLOUDFLARE_API_TOKEN` secret can edit Workers scripts and routes and DNS on that zone. The existing secrets used by `deploy-docs.yml` work if their token covers the new zone.
-3. Optionally, a `docs-site` GitHub environment with required reviewers, to gate production deploys.
 
 Wrangler creates the DNS record and certificate for the custom domain on first deploy.
 
