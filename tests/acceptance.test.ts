@@ -682,14 +682,17 @@ describe("acceptance campaign runtime", () => {
       logSpy.mockRestore();
     }
     expect(evidence).toHaveLength(2);
-    expect(evidence[0].observed.status).toBeUndefined();
+    expect(evidence[0].observed.status).toBe("failed");
+    expect(evidence[0].observed.reason).toBe("no_verdict");
+    expect(evidence[0].outcome).toBe("failed");
+    expect(evidence[0].mismatches.some((mismatch) => mismatch.field === "verdict")).toBe(true);
     expect(evidence[0].cli).toEqual({ exit_code: 1, stderr_tail: stderr.slice(-2048), stdout_tail: "" });
     expect(evidence[0].cli?.stderr_tail).toHaveLength(2048);
     expect(evidence[1].observed.status).toBe("failed");
     const failLines = logs.filter((line) => line.startsWith("FAIL "));
     expect(failLines).toHaveLength(2);
     expect(failLines[0].endsWith("Error: Cannot find package 'commander'")).toBe(true);
-    expect(failLines[1].endsWith("Error: Cannot find package 'commander'")).toBe(false);
+    expect(failLines[1].endsWith("no verdict: Error: Cannot find package 'commander'")).toBe(true);
     const persisted = JSON.parse(await readFile(path.join(root, "acceptance", "evidence", "C1", "latest.json"), "utf8")) as { cli?: { exit_code?: number; stderr_tail?: string } };
     expect(persisted.cli?.exit_code).toBe(1);
     expect(persisted.cli?.stderr_tail).toBe(stderr.slice(-2048));

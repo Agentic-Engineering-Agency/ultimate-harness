@@ -756,13 +756,14 @@ acceptanceCmd
       return;
     }
     try {
-      await runAcceptance(resolveRoot(opts.root), {
+      const results = await runAcceptance(resolveRoot(opts.root), {
         workspace: opts.workspace,
         runtime: opts.runtime,
         model: opts.model,
         keep: opts.keep,
         capabilities: capability ? [capability] : undefined,
       });
+      if (results.some((result) => result.outcome === "failed")) process.exitCode = 1;
     } catch (error) {
       console.error(`[FAIL] acceptance run: ${(error as Error).message}`);
       process.exit(1);

@@ -1132,7 +1132,21 @@ export async function applyTeamMissionOverrides(missionPath: string, overrides: 
   await writeFile(missionPath, stringify(mission), "utf8");
 }
 
-async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: string, entry: AcceptanceRegistryEntry, runtime: string, options: AcceptanceRunOptions): Promise<AcceptanceEvidenceRecord> {
+/**
+ * Evidence for an entry that produced no run of its own: its wrapper runtime is
+ * unavailable, or the runner threw before the entry could run. The failure
+ * reason is recorded as `observed.reason`, `failure.mismatch` becomes the single
+ * mismatch, and `failure.line` is printed. `cli.exit_code` is always null: no
+ * mission CLI process produced this record.
+ */
+async function recordFailedAcceptanceEvidence(
+  sourceRoot: string,
+  capability: string,
+  entry: AcceptanceRegistryEntry,
+  runtime: string,
+  options: AcceptanceRunOptions,
+  failure: { reason: string; mismatch: AcceptanceEvidence["mismatches"][number]; line: string },
+): Promise<AcceptanceEvidenceRecord> {
   const timestamp = new Date().toISOString().replace(/[-:.]/g, "").replace(/Z$/, "Z");
   const workspace = path.resolve(options.workspace ?? sourceRoot);
   const runRoot = path.join(workspace, capability, timestamp);
@@ -1140,7 +1154,7 @@ async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: 
   const model = entry.model ?? options.model ?? UNKNOWN;
   const runtimeVersion = await resolveAcceptanceRuntimeVersion(runtime, path.resolve(sourceRoot), options.commandRunner ?? runProcess);
   const inputDigest = await computeAcceptanceInputDigest(sourceRoot, acceptanceInputs(entry), { runtime, model, runtimeVersion });
-  const observed: AcceptanceFacts = { status: "failed", reason: "wrapper_unavailable" };
+  const observed: AcceptanceFacts = { status: "failed", reason: failure.reason };
   if (runtimeVersion === UNKNOWN) observed.runtime_version_unreadable = true;
   const evidence: AcceptanceEvidenceRecord = {
     schema_version: "uh.acceptance-evidence.v0",
@@ -1158,7 +1172,7 @@ async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: 
     expected: entry.expected,
     observed,
     fact_sources: {},
-    mismatches: [{ field: "wrapper", expected: `${capability} mechanism for runtime ${runtime}`, observed: "wrapper_unavailable" }],
+    mismatches: [failure.mismatch],
     artifact_root: path.join(runRoot, ".harness", "missions", missionId),
     cli: { exit_code: null, stderr_tail: "", stdout_tail: "" },
     input_digest: inputDigest.digest,
@@ -1170,7 +1184,7 @@ async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: 
   await mkdir(evidenceDir, { recursive: true });
   await writeFile(path.join(evidenceDir, `${timestamp}.json`), JSON.stringify(checked, null, 2) + "\n", "utf8");
   await writeFile(path.join(evidenceDir, "latest.json"), JSON.stringify(checked, null, 2) + "\n", "utf8");
-  console.log(`FAIL ${capability} — wrapper_unavailable: no ${capability} mechanism for runtime ${runtime}`);
+  console.log(failure.line);
   return checked;
 }
 
@@ -1391,7 +1405,18 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   if (injectionOutcome) facts.observed.injected = injectionOutcome;
   if (runtimeVersion === UNKNOWN) facts.observed.runtime_version_unreadable = true;
   if (result.code !== 0 && facts.observed.status === "passed") facts.observed.status = "failed";
+  // A run with no run record settles nothing: an entry whose declared expected
+  // fields are all skipped or absent must fail instead of passing vacuously.
+  const noVerdict = facts.runIds.length === 0 || facts.observed.status === undefined;
+  const noVerdictCause = noVerdict
+    ? (firstNonEmptyLine(result.stderr) || `mission CLI exited ${result.code} with no run record`)
+    : "";
+  if (noVerdict) {
+    if (facts.observed.status === undefined) facts.observed.status = "failed";
+    facts.observed.reason = "no_verdict";
+  }
   const mismatches = compareAcceptanceFacts(entry.expected, facts.observed);
+  if (noVerdict) mismatches.push({ field: "verdict", expected: "a settled run record", observed: noVerdictCause });
   const inputDigest = await computeAcceptanceInputDigest(sourceRoot, acceptanceInputs(entry), { runtime, model: facts.model, runtimeVersion });
   const evidence: AcceptanceEvidenceRecord = {
     schema_version: "uh.acceptance-evidence.v0",
@@ -1422,9 +1447,7 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   await writeFile(path.join(evidenceDir, `${timestamp}.json`), JSON.stringify(checked, null, 2) + "\n", "utf8");
   await writeFile(path.join(evidenceDir, "latest.json"), JSON.stringify(checked, null, 2) + "\n", "utf8");
   const cost = checked.cost_usd === "unknown" ? "unknown" : checked.cost_usd.toFixed(6);
-  const stderrFirstLine = result.stderr.split(/\r?\n/).find((line) => line.trim() !== "")?.trim() ?? "";
-  const stderrCause = facts.observed.status === undefined && stderrFirstLine !== "" ? ` — ${stderrFirstLine}` : "";
-  console.log(`${checked.outcome === "passed" ? "PASS" : "FAIL"} ${capability} cost_usd=${cost}${mismatches.length ? ` — ${mismatches.map((m) => `${m.field}: expected ${JSON.stringify(m.expected)} observed ${JSON.stringify(m.observed)}`).join("; ")}` : ""}${stderrCause}`);
+  console.log(`${checked.outcome === "passed" ? "PASS" : "FAIL"} ${capability} cost_usd=${cost}${mismatches.length ? ` — ${mismatches.map((m) => `${m.field}: expected ${JSON.stringify(m.expected)} observed ${JSON.stringify(m.observed)}`).join("; ")}` : ""}${noVerdictCause ? ` no verdict: ${noVerdictCause}` : ""}`);
   return checked;
 }
 
@@ -1445,32 +1468,94 @@ export type AcceptanceRunOptions = {
   injectPollMs?: number;
 };
 
+export type AcceptanceCampaignSummary = {
+  passed: number;
+  failed: number;
+  not_applicable: number;
+  failures: { capability: string; reason: string }[];
+};
+
+/**
+ * Pure campaign tally: counts passed and failed entries and the capabilities the
+ * registry marks not applicable (the FIXTURE branch), and names each failure with
+ * its reason — `observed.reason` when the runner set one, else the first mismatch
+ * rendered as `field: expected X observed Y`.
+ */
+export function summarizeAcceptanceCampaign(
+  results: readonly Pick<AcceptanceEvidence, "capability" | "outcome" | "observed" | "mismatches">[],
+  notApplicable: readonly string[],
+): AcceptanceCampaignSummary {
+  const summary: AcceptanceCampaignSummary = { passed: 0, failed: 0, not_applicable: notApplicable.length, failures: [] };
+  for (const result of results) {
+    if (result.outcome === "passed") {
+      summary.passed += 1;
+      continue;
+    }
+    summary.failed += 1;
+    summary.failures.push({ capability: result.capability, reason: acceptanceFailureReason(result) });
+  }
+  return summary;
+}
+
+function acceptanceFailureReason(result: Pick<AcceptanceEvidence, "observed" | "mismatches">): string {
+  const reason = result.observed.reason;
+  if (typeof reason === "string" && reason.length > 0) return reason;
+  const mismatch = result.mismatches[0];
+  if (!mismatch) return "failed";
+  return `${mismatch.field}: expected ${JSON.stringify(mismatch.expected)} observed ${JSON.stringify(mismatch.observed)}`;
+}
+
 export async function runAcceptance(sourceRoot: string, options: AcceptanceRunOptions = {}): Promise<AcceptanceEvidenceRecord[]> {
   if (!options.workspace) throw new Error("acceptance run requires --workspace <dir>");
   const registry = await loadAcceptanceRegistry(sourceRoot);
   const workspace = path.resolve(options.workspace);
   const capabilities = options.capabilities?.length ? options.capabilities : Object.keys(registry.entries);
   const results: AcceptanceEvidence[] = [];
+  const notApplicable: string[] = [];
   const runnable: { capability: string; entry: AcceptanceRegistryEntry }[] = [];
   for (const capability of capabilities) {
     const entry = registry.entries[capability];
     if (!entry) throw new Error(`Unknown acceptance capability: ${capability}`);
     if (entry.real_mission === "not_applicable") {
       console.log(`FIXTURE ${capability} — ${entry.reason}`);
+      notApplicable.push(capability);
       continue;
     }
     const runtime = options.runtime ?? entry.runtime;
     if (wrapperMechanismUnavailable(capability, runtime)) {
-      results.push(await recordWrapperUnavailableEvidence(sourceRoot, capability, entry, runtime, options));
+      results.push(await recordFailedAcceptanceEvidence(sourceRoot, capability, entry, runtime, options, {
+        reason: "wrapper_unavailable",
+        mismatch: { field: "wrapper", expected: `${capability} mechanism for runtime ${runtime}`, observed: "wrapper_unavailable" },
+        line: `FAIL ${capability} — wrapper_unavailable: no ${capability} mechanism for runtime ${runtime}`,
+      }));
       continue;
     }
     runnable.push({ capability, entry });
   }
-  if (runnable.length === 0) return results;
+  const printSummary = (): void => {
+    const summary = summarizeAcceptanceCampaign(results, notApplicable);
+    console.log(`SUMMARY passed ${summary.passed} failed ${summary.failed} not_applicable ${summary.not_applicable}`);
+    for (const failure of summary.failures) console.log(`  failed ${failure.capability}: ${failure.reason}`);
+  };
+  if (runnable.length === 0) {
+    printSummary();
+    return results;
+  }
   const cliPath = options.cliPath ?? await preloadAcceptanceCampaign(sourceRoot, workspace);
   for (const { capability, entry } of runnable) {
-    results.push(await runOneAcceptance(sourceRoot, capability, entry, { ...options, workspace, cliPath }));
+    const runtime = options.runtime ?? entry.runtime;
+    try {
+      results.push(await runOneAcceptance(sourceRoot, capability, entry, { ...options, workspace, cliPath }));
+    } catch (error) {
+      const message = (error as Error).message;
+      results.push(await recordFailedAcceptanceEvidence(sourceRoot, capability, entry, runtime, { ...options, workspace }, {
+        reason: "runner_error",
+        mismatch: { field: "runner", expected: "entry ran", observed: message },
+        line: `FAIL ${capability} — runner_error: ${message}`,
+      }));
+    }
   }
+  printSummary();
   return results;
 }
 async function configureAcceptanceSeed(runRoot: string): Promise<void> {
