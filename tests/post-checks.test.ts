@@ -458,6 +458,71 @@ describe("runPostChecks mission mirrors", () => {
   });
 });
 
+describe("runPostChecks runner failures", () => {
+  test("a logs directory that cannot be created fails the run without leaking the checks path", async () => {
+    const mission = await makeMissionRoot();
+    const checksDir = await makeTempDir("uh-post-checks-cfg-");
+    const checksFile = path.join(checksDir, "checks.yaml");
+    try {
+      // A regular file named `logs` makes mkdir(logsDir, { recursive: true }) fail.
+      await writeFile(path.join(checksDir, "logs"), "not a directory", "utf-8");
+
+      const outcome = await runGated(mission, checksDir, [{ name: "alpha", command: "node ok.mjs" }]);
+
+      expect(outcome).toEqual({ results: [], errors: ["post-check runner failed"] });
+
+      const runDoc = RuntimeResultSchema.parse(parse(await readFile(mission.runResultPath, "utf-8")));
+      expect(runDoc.status).toBe("failed");
+      expect(runDoc.errors).toEqual(["post-check runner failed"]);
+
+      const mirrorDoc = RuntimeResultSchema.parse(parse(await readFile(mission.mirrorPath, "utf-8")));
+      expect(mirrorDoc.status).toBe("failed");
+
+      const pointer = LatestRunPointerSchema.parse(JSON.parse(await readFile(mission.latestPath, "utf-8")));
+      expect(pointer.status).toBe("failed");
+
+      const index = RunsIndexSchema.parse(JSON.parse(await readFile(mission.indexPath, "utf-8")));
+      expect(index.runs.find((run) => run.run_id === RUN)?.status).toBe("failed");
+
+      // Neither the checks-file path nor its directory reaches any project-root file.
+      const files = await walkFiles(mission.root);
+      expect(files.length).toBeGreaterThan(0);
+      for (const file of files) {
+        const content = await readFile(file, "utf-8");
+        expect(content).not.toContain(checksFile);
+        expect(content).not.toContain(checksDir);
+      }
+    } finally {
+      await rm(mission.root, { recursive: true, force: true });
+      await rm(checksDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a log-write failure keeps the results gathered so far and fails the run", async () => {
+    const mission = await makeMissionRoot();
+    const checksDir = await makeTempDir("uh-post-checks-cfg-");
+    try {
+      const script = await writeScript(checksDir, "ok.mjs", "process.exit(0);\n");
+      // A directory where the log file belongs makes writeFile fail after the check ran.
+      await mkdir(path.join(checksDir, "logs", `${MISSION}-${RUN}-alpha.log`), { recursive: true });
+
+      const outcome = await runGated(mission, checksDir, [{ name: "alpha", command: `node "${script}"` }]);
+
+      expect(outcome.errors).toEqual(["post-check runner failed"]);
+      expect(outcome.results).toHaveLength(1);
+      expect(outcome.results[0]).toMatchObject({ name: "alpha", passed: true, exit_code: 0 });
+
+      const runDoc = RuntimeResultSchema.parse(parse(await readFile(mission.runResultPath, "utf-8")));
+      expect(runDoc.status).toBe("failed");
+      expect(runDoc.errors).toContain("post-check runner failed");
+      expect(runDoc.post_checks).toHaveLength(1);
+    } finally {
+      await rm(mission.root, { recursive: true, force: true });
+      await rm(checksDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("postCheckExitCode", () => {
   test("a failed post-check forces exit 1 whatever the runtime stop code", () => {
     expect(postCheckExitCode("failed", "cancelled", true)).toBe(1);

@@ -563,7 +563,18 @@ export async function runAcp(root: string, missionPath: string, options: AcpRunO
   const plan = await planAcpRun(root, missionPath, options);
   const runId = options.runId ?? generateRunId();
   const canonical = options.artifactRoot ?? root;
-  const artifacts = await getMissionArtifactContext(canonical, missionPath, runId);
+  // Under sandbox routing the mission file lives in the sandbox worktree while
+  // the artifacts belong to the canonical project root. Resolve the packet from
+  // the planned mission id (the way oh-my-pi does) so a routed run still
+  // persists. An un-routed run (no artifactRoot, or one equal to root) keeps
+  // using the mission path, so a mission outside any harness tree stays
+  // artifact-free. `missionPath`/`root` still drive planning, session/new cwd
+  // and diff capture, so the agent keeps working in the sandbox.
+  const routed = options.artifactRoot !== undefined && path.resolve(options.artifactRoot) !== path.resolve(root);
+  const artifactMissionPath = routed
+    ? path.join(canonical, ".harness", "missions", plan.mission.id, "mission.yaml")
+    : missionPath;
+  const artifacts = await getMissionArtifactContext(canonical, artifactMissionPath, runId);
   if (artifacts) await claimRuntimeAttempt(artifacts);
 
   const timeoutMs = options.timeoutMs ?? plan.config.timeout_ms;

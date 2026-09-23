@@ -22,6 +22,13 @@ import { appendRunsIndexEntry, mirrorRuntimeResultToLatest, readLatestPointer, w
 export const POST_CHECK_DEFAULT_TIMEOUT_MS = 900_000;
 const TIMEOUT_KILL_GRACE_MS = 100;
 
+/**
+ * Stable, path-free marker recorded when the runner itself fails (e.g. the logs
+ * directory cannot be created). It never carries the caught message, the checks
+ * path or a command.
+ */
+const POST_CHECK_RUNNER_FAILURE = "post-check runner failed";
+
 /** Safe, log-friendly check name: no separators, no leading punctuation. */
 export const POST_CHECK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -116,9 +123,6 @@ export async function runPostChecks(options: RunPostChecksOptions): Promise<Post
   }
 
   const runDir = path.resolve(options.runDir);
-  const logsDir = path.join(path.dirname(path.resolve(options.checksFile)), "logs");
-  await mkdir(logsDir, { recursive: true });
-
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     UH_MISSION_ID: options.missionId,
@@ -129,14 +133,24 @@ export async function runPostChecks(options: RunPostChecksOptions): Promise<Post
 
   const results: PostCheckResult[] = [];
   const errors: string[] = [];
-  for (const check of options.checks) {
-    const outcome = await runSingleCheck(check, options.cwd, env);
-    results.push(outcome.result);
-    const logPath = path.join(logsDir, `${options.missionId}-${options.runId}-${check.name}.log`);
-    await writeFile(logPath, `${outcome.stdout}${outcome.stderr}`, "utf-8");
-    if (!outcome.result.passed) {
-      errors.push(`post-check ${check.name} failed`);
+  try {
+    const logsDir = path.join(path.dirname(path.resolve(options.checksFile)), "logs");
+    await mkdir(logsDir, { recursive: true });
+
+    for (const check of options.checks) {
+      const outcome = await runSingleCheck(check, options.cwd, env);
+      results.push(outcome.result);
+      const logPath = path.join(logsDir, `${options.missionId}-${options.runId}-${check.name}.log`);
+      await writeFile(logPath, `${outcome.stdout}${outcome.stderr}`, "utf-8");
+      if (!outcome.result.passed) {
+        errors.push(`post-check ${check.name} failed`);
+      }
     }
+  } catch {
+    // Any prepare/run/log failure settles the run as failed. Record only the
+    // stable marker: the caught message, checks path and commands never reach
+    // an artifact or log.
+    errors.push(POST_CHECK_RUNNER_FAILURE);
   }
 
   await recordPostChecks(path.join(runDir, "runtime-result.yaml"), results, errors);

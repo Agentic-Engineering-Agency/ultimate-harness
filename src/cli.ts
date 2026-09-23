@@ -2594,21 +2594,30 @@ missionCmd
     // failed and its exit code uses exitCodeForRun("failed").
     let postChecksFailed = false;
     if (postChecks && postChecks.length > 0 && postChecksPath) {
-      const post = await runPostChecks({
-        checks: postChecks,
-        checksFile: postChecksPath,
-        missionId,
-        runId: finalRunId,
-        runDir,
-        root: path.resolve(root),
-        cwd: routing.effectiveRoot,
-      });
-      if (post.errors.length > 0) {
+      try {
+        const post = await runPostChecks({
+          checks: postChecks,
+          checksFile: postChecksPath,
+          missionId,
+          runId: finalRunId,
+          runDir,
+          root: path.resolve(root),
+          cwd: routing.effectiveRoot,
+        });
+        if (post.errors.length > 0) {
+          status = "failed";
+          postChecksFailed = true;
+          for (const e of post.errors) {
+            console.log(`[FAIL] ${e}`);
+          }
+        }
+      } catch {
+        // Last guard: the runner settles its own failures, but if it still
+        // throws the run fails cleanly rather than aborting unsettled, so
+        // UH_RESULT is printed and the exit code is exitCodeForRun("failed").
         status = "failed";
         postChecksFailed = true;
-        for (const e of post.errors) {
-          console.log(`[FAIL] ${e}`);
-        }
+        console.log("[FAIL] post-check runner failed");
       }
     }
 
