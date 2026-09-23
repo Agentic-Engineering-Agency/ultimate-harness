@@ -17,7 +17,7 @@ Snapshot taken **2026-09-23** against `origin/main` at `c5cec50` (v0.9.0). Branc
 
 ## Open pull requests
 
-All 11 are by Mateo-GarciaL, opened 2026-09-23. **None has a human review**; the Codex review bot hit its usage limit on every one, so no automated review ran either.
+All 11 are by Mateo-GarciaL, opened 2026-09-23. **None has a human review**; the Codex review bot hit its usage limit on every one, so no automated review ran either (the bot is being turned off, see [below](#codex-review-bot)).
 
 | PR | Branch → base | Commits | Diff | CI | Top risk |
 |---|---|---|---|---|---|
@@ -34,6 +34,15 @@ All 11 are by Mateo-GarciaL, opened 2026-09-23. **None has a human review**; the
 | [#249](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/249) | `10-notify-toast` | 3 | +435 / −38 | failing (inherited from #247) | PowerShell toast code was recovered from a stopped worker and never reviewed; `--root` has no CLI test |
 
 Whole line, `main` to stack tip: 171 commits, 399 files, +71,126 / −1,474. Test files grow from 74 to 147, and the stack tip runs 2,176 tests. `src/cli.ts` grows from 1,803 to 3,709 lines.
+
+## Codex review bot
+
+The automated reviewer on these PRs is the **ChatGPT Codex Connector** GitHub App (`chatgpt-codex-connector[bot]`). On every open PR it posted only "Codex usage limits have been reached", so it added noise and no review. The owner decided on 2026-09-23 to turn it off.
+
+It is not configured by any file in the repository, so no branch change can disable it. Turn it off in one of two places; both apply to every branch at once:
+
+- **Codex settings (keeps the app installed):** [chatgpt.com/codex/cloud/settings/code-review](https://chatgpt.com/codex/cloud/settings/code-review), then switch off automatic code review for `Agentic-Engineering-Agency/ultimate-harness`.
+- **GitHub (removes the app):** Organization settings → GitHub Apps → ChatGPT Codex Connector → Configure → remove `ultimate-harness` from repository access, or uninstall the app.
 
 ## The missing v0.10.0
 

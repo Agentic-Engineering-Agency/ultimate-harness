@@ -13,5 +13,14 @@
   // CLOUDFLARE_ACCOUNT_ID. Wrangler creates the DNS record and certificate.
   "routes": [{ "pattern": "uh.agenticeng.app", "custom_domain": true }],
   "workers_dev": false,
-  "observability": { "enabled": false }
+  "observability": { "enabled": false },
+  "env": {
+    // `wrangler deploy --env preview` publishes the Worker `uh-site-preview`
+    // on workers.dev only: no custom domain, so a preview never touches
+    // uh.agenticeng.app. Pull requests deploy here (see deploy-site.yml).
+    "preview": {
+      "routes": [],
+      "workers_dev": true
+    }
+  }
 }

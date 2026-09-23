@@ -29,9 +29,9 @@ Audited **2026-09-23** on the v0.11 stack tip (`db90516`, version 0.11.0). File 
 | [TD-03](#td-03-contracts-are-all-v0-and-14-have-no-schema) | P0 | Contracts | All 45 contract ids are `.v0`; 14 have no Zod schema | M | **yes** |
 | [TD-26](#td-26-release-process-let-a-release-strand) | P0 | Process | v0.10.0 stranded on `dev`; no reviews on 11 open PRs; placeholder authors | S | **yes** |
 | [TD-04](#td-04-srcclits-is-not-a-thin-dispatcher) | P1 | Architecture | `src/cli.ts` is 3,709 lines with 2,403 lines of handler logic | L | no (unless the AGENTS rule is a gate) |
-| [TD-05](#td-05-td-06-td-07-documentation-site) | P1 | Docs | `apps/docs` is a hand-copied mirror: 47 docs missing, 13 badly drifted | M | **yes**, addressed by `apps/site` |
-| [TD-06](#td-05-td-06-td-07-documentation-site) | P1 | Docs | 117 links end in `.md`; 14 point nowhere | S | **yes**, addressed by `apps/site` |
-| [TD-07](#td-05-td-06-td-07-documentation-site) | P1 | Domain | `uh.agenticeng.app` appears nowhere; homepage and plugin assets use `.lat` | S | **yes**, partly addressed |
+| [TD-05](#td-05-td-06-td-07-documentation-site) | P1 | Docs | `apps/docs` is a hand-copied mirror: 47 docs missing, 13 badly drifted | M | resolved in #250 |
+| [TD-06](#td-05-td-06-td-07-documentation-site) | P1 | Docs | 117 links end in `.md`; 14 point nowhere | S | resolved in #250 |
+| [TD-07](#td-05-td-06-td-07-documentation-site) | P1 | Domain | `uh.agenticeng.app` appears nowhere; homepage and plugin assets use `.lat` | S | resolved in #250 |
 | [TD-08](#td-08-changelog-and-roadmap) | P1 | Release notes | v0.10.0 skipped; "planned v0.10.0" still promised; changelog names a missing file | S | **yes** |
 | [TD-09](#td-09-unpinned-dependencies) | P1 | Dependencies | `latest` for `commander`, `yaml`, `zod` in a published package; `@types/node` 25 vs `engines` 20 | S | **yes** |
 | [TD-10](#td-10-td-11-ci-coverage) | P1 | CI | No `setup-node`: the Node 20 promise is never tested | S | **yes** |
@@ -39,7 +39,7 @@ Audited **2026-09-23** on the v0.11 stack tip (`db90516`, version 0.11.0). File 
 | [TD-12](#td-12-no-lint-or-format) | P1 | Tooling | No linter, formatter, `noUnusedLocals`, CODEOWNERS or Dependabot | S–M | no |
 | [TD-13](#td-13-td-14-publishing) | P1 | Release | npm publish runs twice, skips the full suite, uses a long-lived token without provenance | S–M | **yes** |
 | [TD-14](#td-13-td-14-publishing) | P1 | Release | Plugin release fires on every release; plugin still 0.9.0 | S | **yes** |
-| [TD-15](#td-15-old-docs-app-dependencies) | P1 | Docs deploy | Beta `nitro`, unused deps, `bun-version: latest`, `failOnError: false`, not built in PR CI | S | no (retire `apps/docs`) |
+| [TD-15](#td-15-old-docs-app-dependencies) | P1 | Docs deploy | Beta `nitro`, unused deps, `bun-version: latest`, `failOnError: false`, not built in PR CI | S | resolved in #250 (`apps/docs` removed) |
 | [TD-16](#td-16-envexample-is-incomplete) | P1 | Config | `.env.example` misses `ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY`, `HONCHO_*`, `UH_OPENSANDBOX_*`, ... | S | **yes** |
 | [TD-17](#td-17-dead-code) | P2 | Dead code | 60 unused exports, 27 used only by tests | S–M | no |
 | [TD-18](#td-18-duplicated-helpers) | P2 | Duplication | `fileExists` ×7, `loadAdapterConfig` ×7, telemetry host refusal ×2 | M | no |
@@ -58,7 +58,7 @@ Audited **2026-09-23** on the v0.11 stack tip (`db90516`, version 0.11.0). File 
 3. **TD-09, TD-16, TD-07, TD-14**: release-input fixes, each under half a day.
 4. **TD-03, TD-24, TD-20**: choose the public contracts and package surface, freeze them as `v1`.
 5. **TD-10, TD-11, TD-13**: Node and Windows matrices, safer publishing.
-6. **TD-05, TD-06**: switch to `apps/site` and retire `apps/docs`.
+6. **TD-05, TD-06, TD-07, TD-15**: done in PR #250 (`apps/site` replaces `apps/docs`).
 7. **TD-02**: run the acceptance campaign on the release candidate and triage known issues.
 
 TD-04, TD-12, TD-17, TD-18, TD-19 and TD-23 are refactoring work for after 1.0. Doing TD-04 first makes TD-23 cheaper, because command logic becomes testable in-process.
@@ -94,7 +94,7 @@ Added from the [branch audit](/release/branches/). v0.10.0 merged into `dev` in 
 
 The old site mirrors `docs/` by hand. Only `roadmap.mdx` is synced by script. 47 docs have no page, including the whole handbook, `known-issues`, `tool-guard`, `VISION` and 16 runbooks; similarity to source is as low as 0.04 (`runtime-targets`). 117 links keep a `.md` suffix and open the raw-markdown route; 14 point at missing targets; `docs/runbooks/hermes-dashboard-plugin.md` links to a `docs/ci/` folder that does not exist.
 
-**Addressed by `apps/site`:** the new site generates its mirror from `docs/`, `specs/` and `CHANGELOG.md` on every build and rewrites links (see [This site](/contributing/site/)), and binds `uh.agenticeng.app`. **Still open:** `package.json` `homepage`, `apps/hermes-plugin/theme/ultimate-harness.yaml` asset URLs and `apps/docs/alchemy.run.ts` still use `uh.agenticengineering.lat`. Change them once the new site is live, redirect the old domain, and delete `apps/docs` and `deploy-docs.yml`.
+**Addressed by `apps/site`:** the new site generates its mirror from `docs/`, `specs/` and `CHANGELOG.md` on every build and rewrites links (see [This site](/contributing/site/)), and binds `uh.agenticeng.app`. **Resolved in PR #250:** `apps/docs`, `deploy-docs.yml` and `scripts/sync-docs-site.mjs` are removed; `package.json` `homepage` and the plugin theme asset URLs point at `uh.agenticeng.app`, which now serves those assets; a redirect Worker for the old domain is in `apps/site/redirect/`.
 
 ### TD-08: changelog and roadmap
 
@@ -118,7 +118,7 @@ No ESLint, Biome, Prettier, oxlint or `.editorconfig`; `tsconfig.json` sets only
 
 ### TD-15: old docs app dependencies
 
-`apps/docs` pins `nitro@3.0.260429-beta` (nothing imports it), carries unused `lucide-react`, `tslib`, `tsx` and `@cloudflare/vite-plugin`, deploys with `bun-version: latest`, prerenders with `failOnError: false`, and is never built in PR CI. Superseded by retiring `apps/docs`.
+`apps/docs` pins `nitro@3.0.260429-beta` (nothing imports it), carries unused `lucide-react`, `tslib`, `tsx` and `@cloudflare/vite-plugin`, deploys with `bun-version: latest`, prerenders with `failOnError: false`, and is never built in PR CI. Resolved: `apps/docs` is removed in PR #250.
 
 ### TD-16: `.env.example` is incomplete
 

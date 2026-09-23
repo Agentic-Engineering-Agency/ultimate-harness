@@ -10,17 +10,19 @@ Status on **2026-09-23**: `main` and npm are at **v0.9.0**. Two releases' worth 
 
 The details behind each step are on the [branch and PR audit](/release/branches/) and the [technical debt register](/release/debt/).
 
-## Decisions the owners need to make first
+## Decisions on record
 
-These are policy calls. Nothing below should merge until each has an answer on record.
+Decided by the owner on 2026-09-23.
 
-| # | Decision | Options | Recommendation |
+| # | Decision | Outcome | Status |
 |---|---|---|---|
-| D1 | Capability mismatches: **block** (v0.9 and v0.11 behavior) or **warn by default with `--strict` to block** (the unpublished v0.10.0)? | block / warn + `--strict` | Warn + `--strict`, as UH-138 intended, but `run-team` and `queue` should pass `--strict` so unattended runs still block. |
-| D2 | GitNexus: keep it **mandatory** before every symbol edit and commit (`main`'s `AGENTS.md`) or **optional** (commit `ffc1f8d` in PR #246)? | mandatory / optional | Optional, because workers cannot run it. Move the change out of the docs PR into its own PR so the decision is visible in history. |
-| D3 | 36 stack commits are authored by a placeholder `uh-team@example.com`, and one is a `wip:` commit. Rewrite them before merging? | rewrite / keep | Rewrite authorship on the release branch before merge. It is the last moment when history can still change cheaply. |
-| D4 | Version line: publish 0.10.0 and 0.11.0 separately, or fold 0.10.0 into 0.11.0? | two releases / fold | Fold. 0.10.0 was never published; tagging it now only adds a release nobody installed. Note in the changelog that 0.10.0 was skipped. |
-| D5 | Docs domain: keep `uh.agenticengineering.lat` (`apps/docs`) or move to `uh.agenticeng.app` (`apps/site`)? | keep both / move | Move. Redirect the old domain and delete `apps/docs` once the new site is live. |
+| D1 | Capability mismatches: block, or warn with `--strict` to block? | **Warn by default, `--strict` blocks** (UH-138 behavior). `run-team` and `queue` should pass `--strict` so unattended runs still block. | Port onto the bottom stack layer (#240) pending; see below |
+| D2 | GitNexus: mandatory or optional? | **Optional.** Use it when its tools are available; otherwise grep. PR #246 (commit `ffc1f8d`) already makes this change. | Lands with the stack |
+| D3 | Placeholder `uh-team@example.com` authors and the `wip:` commit | **Fix them.** The team-run commits were made by UH's own workers during Mateo-GarciaL's release work, so they are re-attributed to him with a `UH-Team-Role: worker` or `leader` trailer, and the `wip:` commit (`f4de854`, the first cut of the loop probe) gets a descriptive message. | Needs a history rewrite and force-push of `release/v0.11.0` and all 10 stack branches; pending |
+| D4 | Publish 0.10.0 separately, or fold it into 0.11.0? | **Skip 0.10.0.** Its work is folded into 0.11.0 and the changelog says 0.10.0 was never published. | Pending, with D1 |
+| D5 | Keep the old docs domain or move? | **Retire the old site.** `apps/docs` and `deploy-docs.yml` are removed in PR #250; `uh.agenticengineering.lat` redirects to `uh.agenticeng.app`. | Done in #250; redirect deploys after the old Worker is removed |
+
+Also decided: **turn off the Codex review bot** on the repository (see [Branch and PR audit](/release/branches/#codex-review-bot)), and **land stack fixes on the bottom layer (#240)**, never directly on `main`.
 
 ## Phase 0: unblock the stack
 
@@ -51,15 +53,15 @@ Land it at the bottom of the stack (#240), because the vulnerable code is in eve
 Also in Phase 0:
 
 1. **Make the #240 sandbox concurrency test robust.** `git worktree add` races on `.git/worktrees/*/commondir` when eight run at once. Serialize worktree creation per repository inside `createSandbox`, or retry once on that specific error. Do not skip the test.
-2. **Split `ffc1f8d` out of #246** into its own PR (decision D2), and move the `land.ts` fix that rides in the same docs PR into #245.
-3. **Get a human review on every layer.** None of #239 to #249 has one, and the Codex bot hit its usage limit on all of them. Review #243 (shared guard core), #245 (`uh land` moves branches) and #247 (hive) first.
+2. **Move the `land.ts` fix** that rides in the docs PR #246 into #245, where the rest of `uh land` lives. The GitNexus change in #246 stays (decision D2).
+3. **Get a human review on every layer.** None of #239 to #249 has one, and the Codex bot, now being turned off, only posted usage-limit notices. Review #243 (shared guard core), #245 (`uh land` moves branches) and #247 (hive) first.
 
-## Phase 1: fold v0.10.0 into the release branch
+## Phase 1: fold v0.10.0 into 0.11.0
 
-Port from `fix/changelog-roadmap-link-consistency` onto `release/v0.11.0` (a trial merge conflicts in `.gitignore`, `docs/ROADMAP.md`, `package.json` and `src/cli.ts`):
+Port from `fix/changelog-roadmap-link-consistency` onto the bottom stack layer (#240) (a trial merge conflicts in `.gitignore`, `docs/ROADMAP.md`, `package.json` and `src/cli.ts`):
 
 1. UH-138 capability severity and `--strict` (per decision D1), with `tests/capabilities-severity.test.ts`.
-2. UH-139 `examples/missions/hello-uh/` and `scripts/check-doc-links.mjs`. Scope the link checker to `docs/` and the repository Markdown. Do not point it at `apps/docs`, where 131 of its 133 broken links are.
+2. UH-139 `examples/missions/hello-uh/` and `scripts/check-doc-links.mjs`. Scope the link checker to `docs/` and the repository Markdown; `apps/docs`, where 131 of its 133 broken links were, is retired.
 3. The `spec-stale` fix that treats `specs/` as the spec folder (`b894609f`).
 4. Bookkeeping: `docs/ROADMAP.md` "planned v0.10.0" items, the "Deferred to v0.10.0+" changelog line, the plugin `manifest.json` version, and one `[0.11.0]` changelog heading (the release branch says `[0.11.0] — 2026-09-21`, the stack tip says `[Unreleased]`).
 
@@ -82,7 +84,6 @@ These close the gap between "the features exist" and "we can promise them". Each
 - **Thin `src/cli.ts` again.** Split it into one module per command group (`mission`, `team`, `run control`, `observatory`, `acceptance`, `hive`, ...), as `AGENTS.md` requires. It has grown from 1,803 to 3,709 lines.
 - **Acceptance on two fleets.** The acceptance campaign passes on both Command Code and oh-my-pi, and the "unproven" list in the capability inventory is empty or descoped.
 - **Pin dependencies.** No `latest` specifiers in `package.json` for a 1.0 package.
-- **Retire `apps/docs`** once `uh.agenticeng.app` is serving.
 - **Delete merged branches** (see the [audit](/release/branches/#suggested-cleanup-commands)).
 
 ## Phase 4: 1.0.0

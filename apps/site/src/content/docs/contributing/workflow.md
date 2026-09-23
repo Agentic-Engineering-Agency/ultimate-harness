@@ -50,7 +50,9 @@ CI (`.github/workflows/ci.yml`) runs all of these on Blacksmith runners for ever
 
 ## GitNexus
 
-On `main`, `AGENTS.md` makes GitNexus impact analysis mandatory before editing any function, and `gitnexus_detect_changes()` mandatory before every commit. PR [#246](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/246) (commit `ffc1f8d`) relaxes this to "optional when the tools are available", because most workers cannot run GitNexus and their guard may deny it. That is a policy change bundled inside a docs PR; it needs an explicit owner decision before the stack merges. See the [release plan](/release/plan/).
+**Optional** (owner decision, 2026-09-23). When GitNexus tools are available, upstream `gitnexus_impact` before changing a widely used symbol and `gitnexus_detect_changes()` before committing are useful checks; without them, use grep. Most workers cannot run GitNexus and their guard may deny it, which is why the mandatory rule was dropped.
+
+`main`'s `AGENTS.md` still says mandatory until the v0.11 stack merges; PR [#246](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/246) (commit `ffc1f8d`) carries the change.
 
 ## Agent configuration directories
 

@@ -22,8 +22,7 @@ ultimate-harness/
 ├── acceptance/                live acceptance campaign: registry, missions, fixtures, support shims (v0.11)
 ├── apps/
 │   ├── hermes-plugin/         Delivery Observatory dashboard plugin (Python API + esbuild UI)
-│   ├── docs/                  previous docs site (fumadocs + TanStack Start, Alchemy) — to retire
-│   └── site/                  this site (Astro Starlight, Cloudflare)
+│   └── site/                  this site (Astro Starlight, Cloudflare) + redirect/ for the old domain
 ├── docs/                      canonical documentation, mirrored into this site
 │   ├── architecture/  runbooks/  workflows/  verification/  product/  research/
 │   ├── handbook/              operator handbook (v0.11)
@@ -33,7 +32,7 @@ ultimate-harness/
 ├── scripts/                   build, smoke tests (scripts/smoke, v0.11), maintenance
 ├── bin/                       TUI spike entry
 ├── .harness/                  UH's own project state (dogfooding): adapters, workflows, templates
-├── .github/workflows/         ci, publish, release-plugin, deploy-docs, deploy-site
+├── .github/workflows/         ci, publish, release-plugin, deploy-site
 ├── .claude/ .commandcode/ .omp/ .hermes/   agent harness configuration
 ├── AGENTS.md                  rules for every agent (CLAUDE.md imports it)
 ├── CHANGELOG.md  README.md  PRODUCT.md  DESIGN.md
@@ -51,7 +50,6 @@ ultimate-harness/
 | `ci.yml` | every PR; pushes to `dev` and `main` | typecheck, plugin typecheck, build, tests, plugin tests, publish dry-run; optional live smokes for OpenRouter and Anthropic on push when keys are set |
 | `publish.yml` | PRs touching the package, `main`, `v*` tags, releases, manual | pack and publish dry-run; publishes to npm on release or manual dispatch with `publish: true` |
 | `release-plugin.yml` | releases | builds and attaches the Hermes plugin bundle |
-| `deploy-docs.yml` | `main`, `apps/docs/**` | Alchemy deploy of the old site to `uh.agenticengineering.lat` |
-| `deploy-site.yml` | PRs and `main`, `apps/site/**`, `docs/**`, `specs/**`, `CHANGELOG.md` | builds this site; deploys to `uh.agenticeng.app` on `main` |
+| `deploy-site.yml` | PRs and `main`, `apps/site/**`, `docs/**`, `specs/**`, `CHANGELOG.md` | builds this site; deploys a preview to `uh-site-preview` on PRs and production to `uh.agenticeng.app` on `main` |
 
 All jobs run on Blacksmith runners (`blacksmith-4vcpu-ubuntu-2404`); change the label to `ubuntu-24.04` to fall back to GitHub-hosted runners.

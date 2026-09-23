@@ -14,6 +14,10 @@ export default defineConfig({
         'Runtime-agnostic CLI and artifact lifecycle for planning, running, verifying and promoting agentic software work.',
       logo: { src: './src/assets/mark.svg', alt: 'UH' },
       favicon: '/favicon.svg',
+      head: [
+        { tag: 'meta', attrs: { property: 'og:image', content: 'https://uh.agenticeng.app/og.png' } },
+        { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
+      ],
       customCss: ['./src/styles/custom.css'],
       social: [
         {

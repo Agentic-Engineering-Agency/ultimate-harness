@@ -1,0 +1,12 @@
+{
+  // Redirects the retired uh.agenticengineering.lat docs domain to
+  // uh.agenticeng.app. Deploy once, by hand, after the old `uh-docs` Worker has
+  // released the domain (see /contributing/site/ on the docs site):
+  //   bunx wrangler deploy -c redirect/wrangler.jsonc
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "uh-docs-redirect",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "routes": [{ "pattern": "uh.agenticengineering.lat", "custom_domain": true }],
+  "workers_dev": false
+}
