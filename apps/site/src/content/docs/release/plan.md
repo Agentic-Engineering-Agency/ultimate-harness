@@ -16,13 +16,23 @@ Decided by the owner on 2026-09-23.
 
 | # | Decision | Outcome | Status |
 |---|---|---|---|
-| D1 | Capability mismatches: block, or warn with `--strict` to block? | **Warn by default, `--strict` blocks** (UH-138 behavior). `run-team` and `queue` should pass `--strict` so unattended runs still block. | Port onto the bottom stack layer (#240) pending; see below |
+| D1 | Capability mismatches: block, or warn with `--strict` to block? | **Warn by default, `--strict` blocks** (UH-138 behavior). `run-team` and `queue` should pass `--strict` so unattended runs still block. | Ported and tested on the bottom layer; push pending (see [Stack status](#stack-status)) |
 | D2 | GitNexus: mandatory or optional? | **Optional.** Use it when its tools are available; otherwise grep. PR #246 (commit `ffc1f8d`) already makes this change. | Lands with the stack |
 | D3 | Placeholder `uh-team@example.com` authors and the `wip:` commit | **Fix them.** The team-run commits were made by UH's own workers during Mateo-GarciaL's release work, so they are re-attributed to him with a `UH-Team-Role: worker` or `leader` trailer, and the `wip:` commit (`f4de854`, the first cut of the loop probe) gets a descriptive message. | Needs a history rewrite and force-push of `release/v0.11.0` and all 10 stack branches; pending |
-| D4 | Publish 0.10.0 separately, or fold it into 0.11.0? | **Skip 0.10.0.** Its work is folded into 0.11.0 and the changelog says 0.10.0 was never published. | Pending, with D1 |
+| D4 | Publish 0.10.0 separately, or fold it into 0.11.0? | **Skip 0.10.0.** Its work is folded into 0.11.0 and the changelog says 0.10.0 was never published. | Done with D1; push pending |
 | D5 | Keep the old docs domain or move? | **Retire the old site.** `apps/docs` and `deploy-docs.yml` are removed in PR #250; `uh.agenticengineering.lat` redirects to `uh.agenticeng.app`. | Done in #250; redirect deploys after the old Worker is removed |
 
 Also decided: **turn off the Codex review bot** on the repository (see [Branch and PR audit](/release/branches/#codex-review-bot)), and **land stack fixes on the bottom layer (#240)**, never directly on `main`.
+
+## Stack status
+
+As of 2026-09-23, three commits are ready for the bottom layer (#240), prepared and tested but **not pushed**, because pushes to the stack branches need a permission rule in the operator's Claude Code settings:
+
+1. `fix(guard)`: POSIX absolute paths are targets, not `cmd.exe` switches (Phase 0 below), with regression tests.
+2. `feat`: 0.10.0 folded into 0.11.0: capability warn by default with `--strict`, the hello-uh example, the `docs:check-links` CI step (over `docs/`, with two broken links fixed), the spec-stale fix, changelog and roadmap notes that 0.10.0 was skipped, and the plugin version bumped to 0.11.0.
+3. `fix(sandbox)`: `git worktree add` is serialized per repository, fixing #240's flaky concurrency test.
+
+Applied to the stack tip (all of 0.11.0), they pass typecheck, build, the docs link check and the full suite: 148 test files, 2,201 tests, 12 skipped, including the 4 hive tests that fail in CI today. Carrying them up the stack conflicts in three places (`CHANGELOG.md`, the `mission run` options in `src/cli.ts`, and two appended blocks in `tests/tool-guard.test.ts`), all resolved by keeping both sides.
 
 ## Phase 0: unblock the stack
 

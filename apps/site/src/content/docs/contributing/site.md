@@ -14,6 +14,18 @@ The site lives in `apps/site/`. It is an [Astro Starlight](https://starlight.ast
 
 The repository Markdown stays the single source of truth. The sync script lifts each file's first `# Heading` into the page title, maps `README.md` to the folder index, and rewrites relative links: a link to another mirrored Markdown file becomes a site route, and a link to anything else (source files, scripts, fixtures) goes to the file on GitHub. Nothing is copied by hand, so the mirror cannot drift the way `apps/docs/content/` did.
 
+## Code map
+
+The **Code map** section and the [interactive explorer](/explorer/) are generated from a knowledge graph of the codebase, `apps/site/codemap/knowledge-graph.json`, produced by [Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) (MIT). On every build, `scripts/sync-codemap.mjs` turns the graph into the overview, guided tour, hotspots and one page per layer, and copies it next to the explorer. The explorer itself is the dashboard's static build, committed under `public/explorer/`; `scripts/build-explorer.sh` rebuilds it from a pinned Understand-Anything commit.
+
+To refresh the graph after the code changes:
+
+1. Install the plugin in Claude Code: `/plugin marketplace add Egonex-AI/Understand-Anything`, then `/plugin install understand-anything`.
+2. From the repository root on the commit to document, run `/understand --exclude "tests/*,acceptance/*,docs/*,specs/*,examples/*,apps/site/*,.harness/*,.github/*"`. Later runs are incremental.
+3. Copy `.ua/knowledge-graph.json` and `.ua/meta.json` into `apps/site/codemap/`, and commit them. Do not commit the rest of `.ua/`.
+
+The first full analysis reads every file with a model, so it costs real tokens; incremental runs only re-read changed files. Structure (files, symbols, imports, calls) comes from tree-sitter; summaries, layers and the tour are model-written, so review them like any generated artifact.
+
 ## Local development
 
 ```sh

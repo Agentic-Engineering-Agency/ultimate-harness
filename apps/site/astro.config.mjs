@@ -53,6 +53,16 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Code map',
+          items: [
+            { label: 'Overview', slug: 'codemap' },
+            { label: 'Interactive explorer', link: '/explorer/', attrs: { target: '_blank' } },
+            { label: 'Guided tour', slug: 'codemap/tour' },
+            { label: 'Hotspots', slug: 'codemap/hotspots' },
+            { label: 'Layers', collapsed: true, items: [{ autogenerate: { directory: 'codemap/layers' } }] },
+          ],
+        },
+        {
           label: 'Reference',
           items: [
             { label: 'CLI commands', slug: 'reference/cli' },
