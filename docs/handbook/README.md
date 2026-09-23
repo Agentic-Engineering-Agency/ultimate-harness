@@ -33,7 +33,7 @@ An operator drives UH as a loop. Each stage below names the handbook page that c
 
 | Page | Covers | Primary sources |
 |---|---|---|
-| [run-control.md](./run-control.md) | `uh ps`, `uh wait`, `uh kill`, `uh mission cancel`, liveness verdicts, orphans, team cascade | `docs/runbooks/run-control.md`, `src/harness/live-runs.ts`, `src/harness/wait.ts` |
+| [run-control.md](./run-control.md) | `uh ps`, `uh wait`, `uh kill`, `uh mission cancel`, liveness verdicts, orphans, team cascade; `uh report` and `uh steer` are covered in the [run-control runbook](../runbooks/run-control.md) | `docs/runbooks/run-control.md`, `src/harness/live-runs.ts`, `src/harness/wait.ts` |
 | [slices-and-teams.md](./slices-and-teams.md) | Writing mission packets, team missions with per-worker packets, resource waves, the unknown-cost admission rule, salvage of stopped workers | `docs/architecture/mission-packet-schema.md`, `docs/runtime-targets.md` |
 | [review-round-trip.md](./review-round-trip.md) | `review-prepare`, sandbox create, run, `review-collect`, what the validator requires, the observations outlet | `docs/runbooks/independent-review.md`, `src/harness/independent-review.ts` |
 | [acceptance.md](./acceptance.md) | The capability registry, running one capability or the fleet campaign, evidence records, freshness per commit, what "proven" means | `docs/runbooks/acceptance.md`, `acceptance/registry.yaml` |

@@ -38,6 +38,32 @@ Use the runtime-specific runbook:
 
 Do not put provider keys into adapter manifests. Use environment variables or the runtime's own credential store.
 
+## `Invalid mission id` From `run-team`, `report` Or `steer`
+
+`uh mission run-team` takes a mission id (`wave-a`), not a path to `mission.yaml`. `uh report` and `uh steer` take a run id or a unique prefix of one, not a mission id; find it with `uh ps --all`.
+
+## `mission put` Refuses A Team Packet
+
+A team packet installs its worker packets only when they are given in the same call:
+
+```sh
+uh mission put team.yaml worker-a.yaml worker-b.yaml
+```
+
+## `uh land` Says There Is No Collected Review
+
+When the project is itself a linked git worktree, `uh land` looks for collected reviews in the checkout git's common directory belongs to instead of this project (see [known issues](./known-issues.md)). Pass the project explicitly:
+
+```sh
+uh land --worker-branch <branch> --onto <target> --message-file <file> --review-root <project>
+```
+
+`uh land` also refuses a dirty target worktree and a worker branch without a retained worktree; run teams with `--retain`.
+
+## Command Code Exits With `write EOF`
+
+Command Code 1.62.1 crashes after a single tool result of roughly 70K characters or more ([CommandCodeAI/command-code#859](https://github.com/CommandCodeAI/command-code/issues/859)). The guard makes large file reads windowed; keep shell output small in Command Code packets (no recursive listings, no whole-file dumps, no full test-suite output).
+
 ## Plugin Tests Cannot Import FastAPI Or httpx
 
 Install the plugin test dependencies:

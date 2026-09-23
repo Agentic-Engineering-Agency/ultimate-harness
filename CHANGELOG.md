@@ -43,6 +43,7 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Capability inventory: `docs/verification/capability-inventory.md` maps every CLI capability to its implementation, tests and acceptance id, classifies each row, and lists the rows most dangerous to leave unproven.
 - `uh mission check` validates a mission packet and its runtime overrides without launching a runtime, verifying write roots against expected outputs and Change-only paths, checking `read_first` paths, and testing grounding claims against file contents.
 - `uh mission put` validates and installs mission packets into `.harness/missions/<id>/mission.yaml` atomically with audit event logging, refusing overwrite without `--replace` or while a run is live.
+- `uh steer <run-id> <message>` messages a live run: its owning controller stops the attempt with stop code `steered` and resumes the same native session with the message as the first instruction, without consuming restart budgets; `--report` asks for a status report first. Steering an orchestrator orphans the workers it launched (see docs/known-issues.md).
 - `uh wait` blocks without polling until matched runs settle or are orphaned by watching the live-run registry, accepting a run id, unique prefix, `--mission`, or `--team`.
 - `uh note` records manual interventions on the intervention ledger at `.harness/ledger/interventions.ndjson` with cause, qualifier, and source attribution.
 - `uh ledger` inspects and manages the append-only intervention ledger (`list`, `summary`, `land`, `confirm`, `import`), tracking corrections and their countermeasures across runs.
@@ -62,6 +63,7 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - ACP `runtime_config.mcp_servers` passes stdio and http MCP servers to `session/new`, and `runtime_config.env` drops exact names or `PREFIX*` patterns and then sets values before spawn. MCP env and header values go only on the wire. Windows npm shims resolve the same way for check and run.
 - `uh ps` marks a run whose current tool call has produced no output for five minutes with `STALLED tool=<name> <minutes>m`.
 - `uh report` and the run digest count turns, tools, written files and tokens for Claude Code and oh-my-pi runs as for Command Code, and report context size at the first, fifth and last request, single-call turns, re-reads, tool output by kind, and model versus tool time.
+- `docs/known-issues.md` lists every open defect, gap and unproven claim, each marked confirmed or reported; the README gains an operating-runs command table, and the capability inventory gains a section for capabilities added in this development line.
 
 ### Changed
 
