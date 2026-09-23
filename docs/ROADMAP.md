@@ -4,7 +4,7 @@ Source of truth for issue state is [Linear](https://linear.app/agenticengineerin
 
 ## Now
 
-### v0.12.0 — Integrated execution lifecycle
+### v0.11.0 — Integrated execution lifecycle
 
 **In development; not release-ready.** Existing adapter, supervision, recovery,
 resource admission, verification, and review implementations must work together

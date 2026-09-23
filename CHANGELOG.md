@@ -6,6 +6,8 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 
 ## [Unreleased]
 
+Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been published.
+
 ### Added
 - Native ACP (Agent-Client Protocol) v1 adapter: `acp` runtime supporting headless agent orchestration via standard JSON-RPC 2.0 over stdio with run-id integrity, strict `uh.runtime-result.v0` validation, wire-conformance error mapping, bidirectional permission request handling (`session/request_permission`), timeout and cancellation signal threading, and 17 regression tests.
 - Progressive semantic routing: `chooseSemanticRoute` in `src/harness/auto-route.ts` combining Level 0 deterministic eligibility (runtime_requirements, capabilities, fleet, and `decision_policy.allowed_runtimes`) with Level 1 TypeSafe System One (JEV) classification. Evaluates task cognitive complexity and selects the optimal adapter and model from candidate options with calibrated confidence, writing `uh.decision-receipt.v0` receipts.
@@ -64,6 +66,25 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - `uh ps` marks a run whose current tool call has produced no output for five minutes with `STALLED tool=<name> <minutes>m`.
 - `uh report` and the run digest count turns, tools, written files and tokens for Claude Code and oh-my-pi runs as for Command Code, and report context size at the first, fifth and last request, single-call turns, re-reads, tool output by kind, and model versus tool time.
 - `docs/known-issues.md` lists every open defect, gap and unproven claim, each marked confirmed or reported; the README gains an operating-runs command table, and the capability inventory gains a section for capabilities added in this development line.
+- Team workers now receive per-worker objectives, runtime budgets, declared outputs, and seeds with canonical contract and settlement records.
+- Deadline grace recovery now preserves an explicitly incomplete deliverable and missing-work handoff before settling the run.
+- Native runtime supervision now reports denial budgets and repeated commands, stops protected-path mutations, and resumes recoverable denials with source stop facts.
+- Acceptance missions now record attested real-runtime evidence, freshness-aware status, and generated capability reports.
+- Acceptance freshness requires evidence from the current harness commit.
+- Acceptance runtime overrides now select the requested adapter explicitly and warn when they differ from registry defaults.
+- Acceptance campaigns inherit caller environment variables and derive hook distribution paths from the known source root.
+- Acceptance evidence records fact sources for merged attempts, with deterministic sorted-run selection and fixture seams.
+- Attempted fixture-only missions now render their actual failure or pass outcome instead of hiding it as fixture-only.
+- Guardian acceptance requires settlement confirmation and a terminal guardian receipt.
+- Acceptance registry entries carry stable capability identifiers independently of probe names.
+- Deadline acceptance exercises an unscripted task rather than treating a turn-limit fixture as deadline proof.
+- Team budget acceptance remains unproven where canonical state does not expose the required budget or reservation fact.
+- Acceptance report generation is checked for drift against the registry and available evidence.
+- Resource-wave admission now maps `mapResourceWaves` with memory-headroom checks and cost reservations, preventing unsupported workers from entering a wave.
+- Team workers now carry distinct mission contracts through `team.workers[].mission_id`.
+- Native Claude Code adapter with structured event capture, tool-guard hooks, route checks, and saved-session recovery. End-to-end coordinator delegation is not yet validated.
+- TypeSafe System One integration in verification and independent-review collection, with typed verdict parsing, compact evidence summaries, and persisted decision receipts. Semantic routing, scope-change, retry policy, and confidence thresholds remain unimplemented.
+- Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
 
 ### Changed
 
@@ -128,32 +149,6 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - The build resolves `tsc` from the project instead of `npx`, restores the previous build when the swap fails, and restores a lone `dist.old` left by an interrupted build.
 - The experience store groups each model under one canonical key while keeping the reported model and provider on each record.
 - The `no_worker_commits` acceptance invariant recognised the harness's commit only by the placeholder email, so once workers committed under the repository's identity every correct run would have been flagged. It now accepts one commit per worker with the exact subject the harness writes, plus any placeholder-identity commit.
-
-## [0.11.0] — 2026-09-21
-
-### Added
-
-- Team workers now receive per-worker objectives, runtime budgets, declared outputs, and seeds with canonical contract and settlement records.
-- Deadline grace recovery now preserves an explicitly incomplete deliverable and missing-work handoff before settling the run.
-- Native runtime supervision now reports denial budgets and repeated commands, stops protected-path mutations, and resumes recoverable denials with source stop facts.
-- Acceptance missions now record attested real-runtime evidence, freshness-aware status, and generated capability reports.
-- Acceptance freshness requires evidence from the current harness commit.
-- Acceptance runtime overrides now select the requested adapter explicitly and warn when they differ from registry defaults.
-- Acceptance campaigns inherit caller environment variables and derive hook distribution paths from the known source root.
-- Acceptance evidence records fact sources for merged attempts, with deterministic sorted-run selection and fixture seams.
-- Attempted fixture-only missions now render their actual failure or pass outcome instead of hiding it as fixture-only.
-- Guardian acceptance requires settlement confirmation and a terminal guardian receipt.
-- Acceptance registry entries carry stable capability identifiers independently of probe names.
-- Deadline acceptance exercises an unscripted task rather than treating a turn-limit fixture as deadline proof.
-- Team budget acceptance remains unproven where canonical state does not expose the required budget or reservation fact.
-- Acceptance report generation is checked for drift against the registry and available evidence.
-- Resource-wave admission now maps `mapResourceWaves` with memory-headroom checks and cost reservations, preventing unsupported workers from entering a wave.
-- Team workers now carry distinct mission contracts through `team.workers[].mission_id`.
-- Native Claude Code adapter with structured event capture, tool-guard hooks, route checks, and saved-session recovery. End-to-end coordinator delegation is not yet validated.
-- TypeSafe System One integration in verification and independent-review collection, with typed verdict parsing, compact evidence summaries, and persisted decision receipts. Semantic routing, scope-change, retry policy, and confidence thresholds remain unimplemented.
-- Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
-
-### Fixed
 - Command Code print-mode runs now select non-interactive permissions through the harness guard (`--yolo`) and refuse ambiguous launches before spawn.
 - Guarded Command Code runs now fail closed when hook invocation evidence is absent, preventing `--yolo` workers from running unguarded.
 - Team integration-report paths in canonical team state now use relative forward-slash artifact paths, including cross-volume targets.

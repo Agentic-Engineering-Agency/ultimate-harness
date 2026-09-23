@@ -182,7 +182,7 @@ except `R10-stall` (`fixture_only`).
 
 ## 5. Capabilities added since this inventory
 
-Sections 1 to 4 predate the v0.12.0 development line and were not regenerated. The rows below list what was added
+Sections 1 to 4 predate the unreleased 0.11.0 line and were not regenerated. The rows below list what was added
 since, with the class rules of section 1. "Operational use" is not acceptance evidence: it records whether the
 capability has been exercised in this project's own work (local run records, not present in a clean checkout), so a
 row can be used daily and still be `unit-only`. [Known issues](../known-issues.md) lists every open defect.

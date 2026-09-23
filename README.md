@@ -25,7 +25,7 @@ The goal is to combine proven patterns from specification-driven development, ag
 
 ## Current status
 
-UH ships an end-to-end CLI with a schema-backed artifact lifecycle and ten runtime adapters (table below). Sandboxes support `git-worktree` (default) and `directory` backends, plus a `container` execution-isolation backend gated through OpenSandbox (v0.8.0). The latest version on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness) is **v0.9.0**; `0.11.0` and the current `0.12.0` development line are not published. See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status, [`CHANGELOG.md`](./CHANGELOG.md) for release notes, and [`docs/known-issues.md`](./docs/known-issues.md) for open defects and unproven claims.
+UH ships an end-to-end CLI with a schema-backed artifact lifecycle and ten runtime adapters (table below). Sandboxes support `git-worktree` (default) and `directory` backends, plus a `container` execution-isolation backend gated through OpenSandbox (v0.8.0). The latest version on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness) is **v0.9.0**; the `0.11.0` line described here is not published yet. See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status, [`CHANGELOG.md`](./CHANGELOG.md) for release notes, and [`docs/known-issues.md`](./docs/known-issues.md) for open defects and unproven claims.
 
 | Adapter | Status | Notes |
 |---|---|---|
@@ -40,10 +40,10 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and ten runti
 | `claude-code` | integration incomplete | Claude Code adapter with structured event capture and saved-session recovery; used for orchestrator missions. See [runtime targets](./docs/runtime-targets.md#claude-code-boundaries) for current limitations. |
 | `acp` | active | Agent-Client Protocol (ACP) v1 runner for headless agent orchestration via standard JSON-RPC 2.0 over stdio. See [`docs/runbooks/acp-setup.md`](./docs/runbooks/acp-setup.md). |
 
-The unpublished `0.11.0` added native `command-code` and `claude-code` adapters,
-runtime supervision and recovery improvements, platform neutrality fixes, and
-semantic evaluation during verification and independent review. The current
-`0.12.0` development line adds the run-control and delivery-loop commands below.
+The unpublished `0.11.0` line adds native `command-code` and `claude-code` adapters,
+runtime supervision and recovery improvements, platform neutrality fixes, semantic
+evaluation during verification and independent review, and the run-control and
+delivery-loop commands below.
 See [Changelog](./CHANGELOG.md), [runtime limitations](./docs/runtime-targets.md),
 and the [roadmap](./docs/ROADMAP.md).
 

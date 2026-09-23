@@ -1,6 +1,6 @@
 # Known issues
 
-Defects, gaps and unproven claims in the v0.12.0 development line, kept here so every maintainer and reviewer sees the
+Defects, gaps and unproven claims in the unreleased 0.11.0 line, kept here so every maintainer and reviewer sees the
 same list. **Confirmed** means reproduced or read in the code at this commit. **Reported** means found in an earlier
 session and not re-checked at this commit. A fix removes its entry in the same commit and names it in the changelog.
 
@@ -72,7 +72,6 @@ session and not re-checked at this commit. A fix removes its entry in the same c
 | What goes wrong | Status |
 |---|---|
 | The docs site (`apps/docs`) syncs only the roadmap from `docs/` (`scripts/sync-docs-site.mjs`); its other pages are maintained separately and do not include the handbook or the runbooks added since. | Confirmed. |
-| `package.json` says `0.11.0` and the changelog dates `0.11.0` to 2026-09-21, but the latest version on npm is `0.9.0`. | Confirmed. |
 | `docs/verification/capability-inventory.md` predates this development line; capabilities added since are listed in its section 5 without per-row test and evidence detail. | Confirmed. |
 
 ## Easy to trip on
