@@ -16,6 +16,11 @@ const DELETE_TOOLS = new Set(["delete_file", "remove"]);
 export const AGENT_TOOLS = new Set(["task", "agent", "subagent", "spawn_agent", "dispatch_agent", "delegate"]);
 const DEL_VERBS = new Set(["remove-item", "ri", "rm", "rmdir", "rd", "del", "erase"]);
 const COPY_VERBS = new Set(["copy", "cp", "move", "mv", "xcopy", "robocopy", "copy-item", "move-item", "cpi", "mi"]);
+/** cmd.exe verbs whose `/x` tokens are switches. POSIX `rm`, `cp` and `mv` never take them, so `/etc/x` stays a path. */
+const CMD_SWITCH_VERBS = new Set(["rmdir", "rd", "del", "erase", "copy", "move", "xcopy", "robocopy"]);
+function isSwitch(verb: string, token: string): boolean {
+  return token.startsWith("-") || (CMD_SWITCH_VERBS.has(verb) && /^\/[a-z?][a-z0-9]*(?::[^/\\]*)?$/i.test(token));
+}
 const NULL_TARGETS = new Set(["nul", "null", "/dev/null", "$null", "&1", "&2", "con", "prn"]);
 const VALUE_FLAGS = new Set(["-erroraction", "-warningaction", "-filter", "-include", "-exclude", "-encoding", "-confirm", "-ea", "-wa", "-value", "-inputobject", "-variable"]);
 
@@ -368,7 +373,7 @@ function collectShellTargets(command: string, initialDirectory: string | undefin
         for (const target of redirectionTargets(segment)) writes.push(shellTarget(target, state, workerRoot, vars));
         const verb = ts[0].toLowerCase();
         if (COPY_VERBS.has(verb)) {
-          const positional = ts.slice(1).filter(token => !token.startsWith("-") && !token.startsWith("/"));
+          const positional = ts.slice(1).filter(token => !isSwitch(verb, token));
           let destination = positional.at(-1);
           const destinationFlag = ts.findIndex(token => token.toLowerCase() === "-destination");
           if (destinationFlag >= 0) destination = ts[destinationFlag + 1];
@@ -402,7 +407,7 @@ function collectShellTargets(command: string, initialDirectory: string | undefin
             const token = ts[index], low = token.toLowerCase();
             if ((low === "-path" || low === "-literalpath") && ts[index + 1]) { args.push(...ts[++index].split(",")); continue; }
             if (VALUE_FLAGS.has(low) || VALUE_FLAGS.has(low.split(":")[0])) { if (!token.includes(":")) index += 1; continue; }
-            if (token.startsWith("-") || token.startsWith("/")) continue;
+            if (isSwitch(verb, token)) continue;
             args.push(...token.split(","));
           }
           if (!args.length && separator === "|" && previous) {
