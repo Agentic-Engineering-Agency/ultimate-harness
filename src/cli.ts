@@ -33,6 +33,7 @@ import { forecastCost } from "./harness/cost-forecast.js";
 import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
 import { COST_CLASSES } from "./schema/adapter-capabilities.js";
 import { resolveSandboxMissionRoot, type SandboxMissionRoute } from "./harness/sandbox.js";
+import { isProjectBriefEnabled } from "./harness/dispatch-context.js";
 import { finalizeRuntimeCancelledRun } from "./harness/runtime-events.js";
 import { cancelLocalMissionRun, cancelMissionRunViaPlugin, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
@@ -243,6 +244,20 @@ async function resolveRuntimeConfigRole(
   }
   const role = (extra ?? {}).role ?? missionOverrides?.role;
   return role === "orchestrator" ? "orchestrator" : "worker";
+}
+
+/**
+ * Whether a mission packet opts out of the project brief, so `mission dry-run`
+ * can print that the rendered prompt carries no Project facts section. A packet
+ * that cannot be loaded reports "not opted out"; the adapter's dry-run surfaces
+ * the load error itself.
+ */
+async function missionOptsOutOfProjectBrief(missionPath: string): Promise<boolean> {
+  try {
+    return !isProjectBriefEnabled(await loadMissionFile(missionPath));
+  } catch {
+    return false;
+  }
 }
 
 async function installRuntimeCancelledEventHandler(
@@ -2226,6 +2241,9 @@ missionCmd
     // Dry-run never blocks on a missing binding: it only shows where the run
     // would go before anything is spent.
     console.log(sandboxRouteLine(routing, opts.sandbox));
+    if (await missionOptsOutOfProjectBrief(routing.missionPath)) {
+      console.log("Project facts: off (context.project_brief: false)");
+    }
     if (templateAdoption) {
       const overridden = templateAdoption.description.overridden_by_mission;
       console.log(

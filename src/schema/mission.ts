@@ -216,6 +216,13 @@ const MissionInputSchema = z.object({
   runtime_config: RuntimeConfigSchema.optional(),
   context: z.object({
     repo_root: z.string().optional(),
+    /**
+     * Opt out of the project brief (`.harness/project-brief.md`): an explicit
+     * `false` suppresses the `## Project facts` section in the dispatch prompt.
+     * Absent (or any non-`false` value) keeps today's behaviour — the brief
+     * renders. An explicit `projectBrief` option from a caller still wins.
+     */
+    project_brief: z.boolean().optional(),
     read_first: z.array(z.string()).optional().default([]),
     source_links: z.array(z.string()).optional().default([]),
   }).optional().default({ read_first: [], source_links: [] }),
