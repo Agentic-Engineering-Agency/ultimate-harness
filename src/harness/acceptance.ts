@@ -460,6 +460,13 @@ export type AcceptanceCommandRunner = (command: string, args: string[], cwd: str
 /** Commit identity the harness uses when it commits worker work itself. */
 const HARNESS_COMMIT_EMAIL = "uh-team@example.com";
 /**
+ * The harness commits each worker at most once, under the repository's configured identity (the placeholder
+ * email only when none is set), so its commit is recognised by the exact subject it writes for that worker.
+ */
+function isHarnessWorkerSubject(workerId: string, subject: string): boolean {
+  return subject === `team(${workerId}): worker run` || subject === `team(${workerId}): salvaged worker run`;
+}
+/**
  * Ignored paths the harness itself owns: writes here are expected, so the
  * ignored-write scan never reports them. Everything else gitignored is judged
  * against the guard write roots like any other change.
@@ -665,9 +672,15 @@ async function invariantNoWorkerCommits(runRoot: string, missionRoot: string): P
   for (const worktree of worktrees) {
     const base = await worktreeBaseCommit(runRoot, worktree.path);
     if (!base) continue;
+    let harnessCommits = 0;
     for (const line of await gitLines(worktree.path, ["log", "--format=%h%x09%ae%x09%s", `${base}..HEAD`])) {
       const [sha, email, subject] = line.split("\t");
-      if (email !== HARNESS_COMMIT_EMAIL) offending.push(`${worktree.id} ${sha} ${email} ${subject}`);
+      if (email === HARNESS_COMMIT_EMAIL) continue;
+      if (harnessCommits === 0 && isHarnessWorkerSubject(worktree.id, subject ?? "")) {
+        harnessCommits += 1;
+        continue;
+      }
+      offending.push(`${worktree.id} ${sha} ${email} ${subject}`);
     }
   }
   return offending.length > 0 ? offending : true;

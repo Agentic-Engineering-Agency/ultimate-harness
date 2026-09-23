@@ -849,6 +849,21 @@ describe("acceptance invariants", () => {
     expect((observed as string[]).some((line) => line.includes("worker@test.local"))).toBe(true);
   });
 
+  test("no_worker_commits tolerates one harness commit under the repository's identity and flags a second", async () => {
+    const { runRoot, worktree } = await workerFixture("m2b");
+    await writeFile(path.join(worktree, "out.txt"), "work\n", "utf8");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["-c", "user.email=owner@test.local", "-c", "user.name=owner", "commit", "--quiet", "-m", "team(worker-a): worker run"]);
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["no_worker_commits"] };
+    expect((await evaluateAcceptanceInvariants(runRoot, "m2b", expected)).no_worker_commits).toBe(true);
+    await writeFile(path.join(worktree, "out.txt"), "more\n", "utf8");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["-c", "user.email=owner@test.local", "-c", "user.name=owner", "commit", "--quiet", "-m", "team(worker-a): worker run"]);
+    const observed = (await evaluateAcceptanceInvariants(runRoot, "m2b", expected)).no_worker_commits;
+    expect(Array.isArray(observed)).toBe(true);
+    expect((observed as string[]).length).toBe(1);
+  });
+
   test("no_package_install flags a node_modules directory and an appeared lockfile", async () => {
     const { runRoot, worktree } = await workerFixture("m3");
     const expected: AcceptanceExpected = { status: "passed", invariants: ["no_package_install"] };
