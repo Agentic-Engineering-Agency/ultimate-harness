@@ -18,6 +18,7 @@ import {
 } from "../schema/intervention.js";
 import type { RuntimeStopCode } from "../schema/runtime-control.js";
 import { redactSecrets } from "./run-digest.js";
+import { chainEntry, lastChainedHash, readJsonLines, verifyChainedLines, type ChainBreak } from "./hash-chain.js";
 
 /**
  * The intervention ledger — every moment a run needed correction.
@@ -125,11 +126,27 @@ export function buildIntervention(input: InterventionInput, options: { owner?: b
   return InterventionSchema.parse(candidate);
 }
 
-/** Append one already-validated record to the ledger. */
+/**
+ * Append one already-validated record to the ledger, chained to the previous
+ * entry. A ledger with no chained line yet (a legacy, pre-chain file) is
+ * anchored by this entry: it takes the genesis `prev_hash`, so the unchained
+ * lines before it are accepted as a legacy prefix and never rewritten.
+ */
 export async function appendIntervention(root: string, record: Intervention | InterventionStatusChange): Promise<void> {
   const file = interventionsPath(root);
+  const lines = readJsonLines(file);
+  const chained = chainEntry(lastChainedHash(lines), record as unknown as Record<string, unknown>);
   await mkdir(path.dirname(file), { recursive: true });
-  await appendFile(file, `${JSON.stringify(record)}\n`, "utf8");
+  await appendFile(file, `${JSON.stringify(chained)}\n`, "utf8");
+}
+
+/**
+ * The first break in the intervention ledger chain, or undefined when it is
+ * intact. Unchained lines before the first chained (anchor) entry are a
+ * tolerated legacy prefix; every chained line must link to the one before it.
+ */
+export function verifyLedgerChain(root: string): ChainBreak | undefined {
+  return verifyChainedLines(readJsonLines(interventionsPath(root)), { allowLegacyPrefix: true });
 }
 
 /** Build, validate, and append a new intervention. Throws on invalid input. */

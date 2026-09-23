@@ -21,7 +21,7 @@ import {
   IndependentReviewAssessmentSchema,
   IndependentReviewRequestSchema,
 } from "../src/schema/independent-review.js";
-import { landWorkerBranches, ReviewGateError, type LandCommandRunner, type LandOptions } from "../src/harness/land.js";
+import { landWorkerBranches, ReviewGateError, verifyLandDecisionChain, type LandCommandRunner, type LandOptions } from "../src/harness/land.js";
 import { defaultGitOps } from "../src/harness/team-run.js";
 
 const execFileP = promisify(execFile);
@@ -153,7 +153,8 @@ type SetupOptions = {
 async function setup(options: SetupOptions = {}): Promise<{ worktree: string; messageFile: string; missionId: string; reviewId: string }> {
   await initRepo(ROOT);
   await makeWorkerBranch(ROOT, "work", options.diffFiles ?? { "feature.txt": "feature\n" }, "feat: add feature");
-  const worktree = join(WORK, "wt-work");
+  // Worker worktrees live inside the owning project's .harness, as team runs create them.
+  const worktree = join(ROOT, ".harness", "missions", "team-a", "team", "workers", "wt-work");
   await gitQuiet(ROOT, ["worktree", "add", "-q", worktree, "work"]);
   const missionId = options.missionId ?? "mission-a";
   const reviewId = options.reviewId ?? "review-a";
@@ -250,9 +251,12 @@ describe("uh land", () => {
       reason: "reviewed by hand; accepted",
       review_ids: [reviewId],
     });
-    // The decision file is the only harness state left behind.
+    // The decision file and its chained index are the only harness state left behind.
     const landDir = join(ROOT, ".harness", "land");
-    expect(await readdir(landDir)).toHaveLength(1);
+    const entries = (await readdir(landDir)).sort();
+    expect(entries).toHaveLength(2);
+    expect(entries).toContain("decisions.ndjson");
+    expect(verifyLandDecisionChain(ROOT)).toBeUndefined();
   });
 
   test("a forbidden pattern in the diff restores the target byte-for-byte", async () => {
@@ -324,6 +328,30 @@ describe("uh land", () => {
 
     // No explicit review root: it must resolve to the main checkout on its own.
     const result = await runLand({ messageFile, reviewRoot: undefined });
+
+    expect(result.status).toBe("landed");
+  });
+
+  test("reads reviews from the project that owns the worker worktree, not the checkout git's common dir points at", async () => {
+    await initRepo(ROOT);
+    await makeWorkerBranch(ROOT, "work", { "feature.txt": "feature\n" }, "feat: add feature");
+    // The uh project is itself a linked worktree of ROOT, as when a project is checked out beside another.
+    const project = join(WORK, "project");
+    await gitQuiet(ROOT, ["worktree", "add", "-q", "-b", "target", project, "main"]);
+    const worktree = join(project, ".harness", "missions", "team-a", "team", "workers", "wt-work");
+    await gitQuiet(ROOT, ["worktree", "add", "-q", worktree, "work"]);
+    await writeVerification(worktree, "mission-a", "passed");
+    await writeCollectedReview(project, {
+      reviewId: "review-a",
+      missionId: "mission-a",
+      changedPath: "feature.txt",
+      changedSha256: sha256(await git(ROOT, ["show", "work:feature.txt"])),
+      verdicts: ["supported"],
+    });
+    const messageFile = join(WORK, "message.txt");
+    await writeFile(messageFile, "feat: land work\n", "utf-8");
+
+    const result = await runLand({ root: project, onto: "target", messageFile, reviewRoot: undefined });
 
     expect(result.status).toBe("landed");
   });

@@ -16,6 +16,7 @@ import { collectIndependentReview } from "./independent-review.js";
 import { recordAcceptanceDecision } from "./decision-receipts.js";
 import { readLatestPointer } from "./run-id.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
+import { recordVerificationPass } from "./hive.js";
 import type { SystemOneCriterion } from "./typesafe.js";
 import { isDeepStrictEqual } from "node:util";
 
@@ -410,6 +411,9 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   if (!validation.valid || validation.schema_version !== "uh.verification-result.v0") {
     throw new Error(`Generated verification failed validation: ${validation.errors.join("; ")}`);
   }
+
+  // The hive records a passed verification as a controller fact; best-effort, never fails verify.
+  if (status === "passed") recordVerificationPass(effectiveRoot, { missionId, verificationPath, missionName: mission.name });
 
   await appendMissionEvent(eventsPath, {
     type: "verification.finished",

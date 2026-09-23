@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { ToolGuardPolicy } from "../schema/runtime-control.js";
 import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
+import { harnessHiveDir } from "./hive-root.js";
 
 export type ToolGuardClass =
   | "write_outside" | "git_mutation" | "delete_outside" | "kill_or_format"
@@ -19,6 +20,8 @@ export type ToolGuardLogLine = {
 const SUFFIX = " Do not retry this by another route; record it in your final message and continue with the rest of the task.";
 export const SHELL_TOOLS = new Set(["bash", "shell", "shell_command", "powershell", "pwsh", "cmd", "run_command"]);
 export const WRITE_TOOLS = new Set(["write_file", "edit_file", "notebook_edit", "multi_edit", "write", "edit", "create_file", "apply_patch", "delete_file", "remove", "move_file"]);
+/** File-reading tools whose only allowed route to the hive is `uh hive show`. */
+export const READ_TOOLS = new Set(["read_file", "read", "view", "notebook_read", "open_file", "read_multiple_files", "get_file", "cat"]);
 const DELETE_TOOLS = new Set(["delete_file", "remove"]);
 /** Native tools that start another agent inside the runtime. Judged by tool name only. */
 export const AGENT_TOOLS = new Set(["task", "agent", "subagent", "spawn_agent", "dispatch_agent", "delegate"]);
@@ -526,6 +529,21 @@ function protectedRoot(value: string, root: string, roots: string[]): string | u
 }
 const HARNESS_STATE_SEGMENTS = [".harness", ".commandcode", ".omp", ".pi"];
 
+/**
+ * True when a target path is the resolved hive directory or a record inside it.
+ * The hive is the main checkout's `.harness/hive` (resolved from a worktree
+ * through git's common dir): a `.harness` path in a worker's own scratch
+ * project is not this path and stays allowed.
+ */
+function hiveTarget(value: string, workerRoot: string, hiveRoot: string): boolean {
+  const candidate = normalized(value, workerRoot);
+  const base = normalized(hiveRoot, workerRoot);
+  return candidate === base || candidate.startsWith(`${base}/`);
+}
+
+const HIVE_TAMPER_DETAIL = "The hive (.harness/hive) is controller-only; only uh land, uh queue and uh verify may write it.";
+const HIVE_READ_DETAIL = "Read the hive with uh hive show.";
+
 function pathSegments(value: string): string[] {
   return value.replaceAll("\\", "/").split("/").filter(Boolean).map(segment => segment.toLowerCase());
 }
@@ -553,7 +571,7 @@ function tamperTarget(target: ShellTarget, workerRoot: string): boolean {
   return false;
 }
 
-function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = ""): ToolGuardDecision {
+function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = "", detail = ""): ToolGuardDecision {
   const roots = policy.write_roots.join(", ");
   const text = className === "write_outside" ? `CONTRACT: write only under ${roots}. Put the file under ${policy.write_roots[0]} instead.`
     : className === "git_mutation" ? "CONTRACT: no git mutations; the harness commits for you. Use read-only git (status, diff, log) or skip it."
@@ -565,7 +583,8 @@ function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = "")
     : className === "virtual_device" ? "CONTRACT: virtual devices are not available in this run."
     : className === "guard_tamper" ? "CONTRACT: the harness policy and its state are not yours to change."
     : `CONTRACT: ${target || "path"} belongs to the harness and is read-only.`;
-  return { deny: { class: className, target: target || undefined, reason: text + SUFFIX } };
+  const tail = detail.length > 0 ? ` ${detail}` : "";
+  return { deny: { class: className, target: target || undefined, reason: text + tail + SUFFIX } };
 }
 function gitMutation(command: string): boolean {
   const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g)?.map(token => token.replace(/^['"]|['"]$/g, "")) ?? [];
@@ -627,6 +646,7 @@ export function decideToolCall(
   const args = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   const lowerTool = toolName.toLowerCase();
   const protectedPaths = [...DEFAULT_PROTECTED_PATHS, ...(policy as ToolGuardPolicy & { protected_paths?: string[] }).protected_paths ?? []];
+  const hiveRoot = harnessHiveDir(workerRoot);
   const explicitDirectory = ["cwd", "workdir", "directory"].map(key => args[key]).find(
     value => typeof value === "string" && value,
   ) as string | undefined;
@@ -641,6 +661,7 @@ export function decideToolCall(
     }, workerRoot, new Map());
     const candidate = target.resolved ?? target.value;
     if (virtualDeviceTarget(directTarget)) return reason("virtual_device", policy, directTarget);
+    if (hiveTarget(candidate, workerRoot, hiveRoot)) return reason("guard_tamper", policy, directTarget, HIVE_TAMPER_DETAIL);
     if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, directTarget);
     const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);
@@ -648,6 +669,16 @@ export function decideToolCall(
       return reason(DELETE_TOOLS.has(lowerTool) ? "delete_outside" : "write_outside", policy, directTarget);
     }
     if (!DELETE_TOOLS.has(lowerTool) && !inside(candidate, workerRoot, policy.write_roots)) return reason("write_outside", policy, directTarget);
+  }
+  if (READ_TOOLS.has(lowerTool) && directTarget) {
+    const target = shellTarget(directTarget, {
+      current: explicitDirectory ? staticDirectory(explicitDirectory, workerRoot, workerRoot, new Map()) : normalized(workerRoot, workerRoot),
+      unknown: false,
+      stack: [],
+    }, workerRoot, new Map());
+    if (hiveTarget(target.resolved ?? target.value, workerRoot, hiveRoot)) {
+      return reason("protected_root", policy, directTarget, HIVE_READ_DETAIL);
+    }
   }
   if (AGENT_TOOLS.has(lowerTool) && policy.agent_clients.length && !policy.allow_native_subagents) return reason("agent_client", policy);
   if (!SHELL_TOOLS.has(lowerTool)) return {};
@@ -668,6 +699,7 @@ export function decideToolCall(
     if (target.ignored) continue;
     const candidate = target.resolved ?? target.value;
     if (virtualDeviceTarget(target.value)) return reason("virtual_device", policy, target.value);
+    if (hiveTarget(candidate, workerRoot, hiveRoot)) return reason("guard_tamper", policy, target.value, HIVE_TAMPER_DETAIL);
     if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, target.value);
     const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);
@@ -678,6 +710,7 @@ export function decideToolCall(
     if (target.ignored) continue;
     const candidate = target.resolved ?? target.value;
     if (virtualDeviceTarget(target.value)) return reason("virtual_device", policy, target.value);
+    if (hiveTarget(candidate, workerRoot, hiveRoot)) return reason("guard_tamper", policy, target.value, HIVE_TAMPER_DETAIL);
     if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, target.value);
     const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);

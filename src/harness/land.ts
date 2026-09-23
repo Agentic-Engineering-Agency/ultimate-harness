@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +10,9 @@ import {
 } from "../schema/independent-review.js";
 import { LandSchema } from "../schema/project.js";
 import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
+import { assertHiveChainsIntact, recordLandCommit } from "./hive.js";
+import { harnessOwnerRoot } from "./hive-root.js";
+import { chainEntry, lastChainedHash, readJsonLines, sha256Hex, verifyChainedLines, type ChainBreak } from "./hash-chain.js";
 import { projectYaml } from "./paths.js";
 
 const execFileP = promisify(execFile);
@@ -149,20 +151,27 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   const root = path.resolve(options.root);
   const git = options.git ?? defaultLandGitRunner;
   const runCommand = options.runCommand ?? defaultLandCommandRunner;
+  // Hive integrity is a precondition: a broken hive facts or ledger chain means
+  // the shared state every agent trusts cannot be extended, so land refuses.
+  try {
+    assertHiveChainsIntact(root);
+  } catch (error) {
+    throw new LandError("hive", `refusing to land on a broken hive chain: ${(error as Error).message}`);
+  }
   const config = await readLandConfig(root);
   const checks = config.checks ?? DEFAULT_LAND_CHECKS;
   const forbiddenPatterns = config.forbiddenPatterns ?? DEFAULT_FORBIDDEN_PATTERNS;
   const buildCommand = config.build ?? DEFAULT_LAND_BUILD;
 
   // ---- Step 1: gates (no git mutation happens here) ----------------------
-  // `uh mission review-collect` writes the collected assessment in the main
-  // checkout — next to the review's review-request.json — not in the worker
-  // worktree. Resolve that checkout from the target worktree's shared git
-  // directory so a review is read from where it is actually written.
+  // `uh mission review-collect` writes the collected assessment in the project
+  // that owns the worker worktrees (next to the review's review-request.json),
+  // not in the worker worktree. Worker worktrees live inside that project's
+  // `.harness`, so the project is resolved from their paths.
+  const worktrees = await listWorktrees(git, root);
   const reviewRoot = options.reviewRoot !== undefined
     ? path.resolve(options.reviewRoot)
-    : await resolveMainCheckout(git, root);
-  const worktrees = await listWorktrees(git, root);
+    : resolveOwningProject(worktrees, options.workerBranches);
   const reviews = await collectReviews(reviewRoot);
   let reviewAccepted = false;
   const acceptedReviewIds: string[] = [];
@@ -294,6 +303,13 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     await restoreTarget(git, root, previousHead);
     throw err;
   }
+
+  // Best-effort: a hive error never fails the land.
+  recordLandCommit(root, {
+    commit: commitId,
+    branches: [...options.workerBranches],
+    messageFile: path.resolve(options.messageFile),
+  });
 
   return {
     status: "landed",
@@ -504,19 +520,21 @@ async function collectArtifacts(root: string, fileName: string): Promise<string[
 }
 
 /**
- * The main checkout that owns the worker worktrees: the parent of the shared
- * git directory the target worktree points at.
+ * The project that owns the worker branches' retained worktrees: the parent of
+ * the `.harness` directory they live in. Branches owned by different projects,
+ * or a missing worktree, are refused; `--review-root` names the project instead.
  */
-async function resolveMainCheckout(git: LandGitRunner, root: string): Promise<string> {
-  const result = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], root);
-  if (result.exitCode !== 0) {
-    throw new LandError("gates", `cannot resolve the main checkout from ${root}: ${reason(result)}`);
+function resolveOwningProject(worktrees: readonly Worktree[], branches: readonly string[]): string {
+  const owners = new Set<string>();
+  for (const branch of branches) {
+    const worktree = worktrees.find((entry) => entry.branch === branch);
+    if (!worktree) throw new LandError("gates", `no retained worktree found for worker branch ${branch}`);
+    owners.add(harnessOwnerRoot(worktree.path));
   }
-  const commonDir = result.stdout.trim();
-  if (commonDir.length === 0) {
-    throw new LandError("gates", `cannot resolve the main checkout from ${root}: empty git-common-dir`);
+  if (owners.size !== 1) {
+    throw new LandError("gates", `worker branches belong to ${owners.size} projects (${[...owners].join(", ")}); pass --review-root`);
   }
-  return path.dirname(path.resolve(commonDir));
+  return [...owners][0]!;
 }
 
 /**
@@ -548,13 +566,35 @@ async function collectReviews(reviewRoot: string): Promise<CollectedReview[]> {
   return reviews;
 }
 
-function sha256Hex(bytes: string): string {
-  return createHash("sha256").update(bytes, "utf-8").digest("hex");
-}
-
 async function restoreTarget(git: LandGitRunner, root: string, previousHead: string): Promise<void> {
   await git(["cherry-pick", "--abort"], root);
   await git(["reset", "--hard", previousHead], root);
+}
+
+/** The chained index of land decision receipts, under `.harness/land/`. */
+export function landDecisionsPath(root: string): string {
+  return path.join(path.resolve(root), ".harness", "land", "decisions.ndjson");
+}
+
+/**
+ * Append one chained entry to the land decision index: the receipt file and its
+ * content hash, linked to the entry before it. The index is itself a chain, so
+ * a rewritten or removed receipt is detectable.
+ */
+export async function appendLandDecisionIndex(root: string, entry: { file: string; sha256: string }): Promise<void> {
+  const indexFile = landDecisionsPath(root);
+  await mkdir(path.dirname(indexFile), { recursive: true });
+  const chained = chainEntry(lastChainedHash(readJsonLines(indexFile)), {
+    at: new Date().toISOString(),
+    file: path.relative(path.resolve(root), entry.file).replaceAll("\\", "/"),
+    sha256: entry.sha256,
+  });
+  await appendFile(indexFile, `${JSON.stringify(chained)}\n`, "utf-8");
+}
+
+/** The first break in the land decision index chain, or undefined when intact. */
+export function verifyLandDecisionChain(root: string): ChainBreak | undefined {
+  return verifyChainedLines(readJsonLines(landDecisionsPath(root)));
 }
 
 async function writeLandDecision(
@@ -565,7 +605,9 @@ async function writeLandDecision(
   await mkdir(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const file = path.join(dir, `${stamp}-decision.json`);
-  await writeFile(file, `${JSON.stringify({ ...decision, created_at: new Date().toISOString() }, null, 2)}\n`, "utf-8");
+  const content = `${JSON.stringify({ ...decision, created_at: new Date().toISOString() }, null, 2)}\n`;
+  await writeFile(file, content, "utf-8");
+  await appendLandDecisionIndex(root, { file, sha256: sha256Hex(content) });
   return file;
 }
 

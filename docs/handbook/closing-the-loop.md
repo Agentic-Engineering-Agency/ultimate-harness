@@ -3,7 +3,7 @@
 Three commands take the operator out of the steps between "a worker finished" and "its work is on the target
 branch": operator post-checks grade a run with checks the agent never sees, `uh queue` launches missions in order
 under an orchestrator cap, and `uh land` puts verified, reviewed worker branches on a target branch or leaves the
-target exactly as it was.
+target exactly as it was. The hive records what those commands prove, so every later agent starts from it.
 
 ## Operator post-checks
 
@@ -86,9 +86,8 @@ It refuses before touching anything unless every branch passes both gates:
 2. **Reviewed.** A collected independent review names the branch's team mission (read from
    `uh/team/<team>/<role>`), matches its request digest, captured the same file hashes as the branch tip, and
    contradicts no claim. Binding is to the team, not the individual worker; a review of one worker of a team can
-   satisfy the gate for another. Reviews are read from `--review-root` when given, otherwise from the checkout git's
-   common directory belongs to; when the project is itself a linked worktree that is the wrong checkout, so pass
-   `--review-root <project>` (see [known issues](../known-issues.md)).
+   satisfy the gate for another. Reviews are read from `--review-root` when given, otherwise from the project that
+   owns the worker worktrees: the parent of the `.harness` directory they live in.
    `--accept-review <reason>` overrides only this gate and writes the reason, branches and review ids to
    `.harness/land/<timestamp>-decision.json`.
 
@@ -121,3 +120,30 @@ land:
 
 Team workers commit under the same rule: the repository's configured `user.name` and `user.email`, falling back to
 `uh team worker <uh-team@example.com>` only when the repository has none.
+
+## The hive
+
+`.harness/hive` is the shared blackboard of a project: open items (`items.yaml`), proven facts (`facts.ndjson`) and
+agent claims (`claims.ndjson`). It belongs to the project that owns the worker, the parent of the outermost `.harness`
+directory in a worktree's path, so every worker of a project reads the same hive and a project that is itself a linked
+git worktree keeps its own.
+
+```bash
+uh hive import open-items.md   # seed items from a markdown checklist: '- [ ] A8: title', '[x]' means done
+uh hive show                   # items and facts; --json for machines
+uh hive verify                 # facts chain, intervention ledger chain and land decision index
+```
+
+- **Only the controller writes facts.** `uh land`, `uh queue` and `uh verify` append a fact after a successful land,
+  a passed queue entry or a passed verification, and mark any item they name as done. Each fact cites controller
+  evidence (a run record, a verification result, a collected review or a commit) by hash; a fact whose hash does not
+  match its evidence is refused. Agent statements go to `claims.ndjson`, never to facts.
+- **Tamper-evident.** Facts, the intervention ledger and the land decision index are hash-chained; `uh hive verify`
+  reports the first broken line, and `uh land` and `uh queue` refuse to proceed on a broken chain. Unchained ledger
+  lines written before the chain existed are kept as a legacy prefix.
+- **Guarded.** Any agent write, edit or delete of the hive is a `guard_tamper` stop in the Command Code hook, the
+  Claude Code hook and the oh-my-pi extension, and direct reads are denied in favour of `uh hive show`. A `.harness/hive`
+  inside a worker's own scratch project is not the project's hive and stays allowed.
+- **Injected as data.** Only facts whose chain is intact and whose evidence still hashes to its recorded value reach a
+  worker's prompt, selected by the item ids and paths the packet names, bounded in size, and rendered as a block
+  labelled as data, not instructions, with every field escaped.
