@@ -44,3 +44,6 @@ __pycache__/
 /.harness/sandboxes/
 dist.next/
 dist.old/
+
+# Throwaway marker written by the examples/missions/hello-uh walkthrough.
+HELLO-UH.txt
