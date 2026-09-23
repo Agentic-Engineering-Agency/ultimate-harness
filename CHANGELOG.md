@@ -51,6 +51,17 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Headless pseudoconsole execution on Windows: workers spawn attached to a headless pseudoconsole so inherited descendant processes do not create visible terminal windows.
 - Shadow loop watchdog: supervision monitors live native events and computes deterministic loop signals, recording advisory decision receipts when repetition or alternating thresholds are crossed.
 - Acceptance runner invariants: registry entries can declare invariants (such as untouched protected paths, no worker commits, no package installs, and consistent guard logs) judged against recorded run evidence.
+- `uh queue run <queue.yaml>` launches missions in file order once their `after` entries have passed, at most `--max-orchestrators` (default 2) at a time, and holds a launch while free memory cannot cover one more run above the admission reserve. Entries settle from their run records through the `uh wait` path (an orphaned run fails with reason `orphaned`), state is written atomically to `.harness/queue/<queue-id>/state.json`, a restarted queue resumes from it without relaunching, dependants of a failed entry are skipped, and each settle sends one notification. `uh queue status <id>` prints the state.
+- `uh land --worker-branch <b>... --onto <branch> --message-file <f>` lands verified worker branches from the target's worktree. It refuses unless each branch has a passed `uh verify` result in its retained worktree and a collected review in the main checkout that names the branch's mission, matches its request digest, captured the branch tip's file hashes and contradicts no claim (`--accept-review <reason>` overrides only the review gate and writes a decision under `.harness/land/`). It cherry-picks without committing, runs the project's checks, scans the staged diff and message for forbidden attribution patterns, commits with the repository's configured identity, runs the build and fast-forwards each `--fast-forward` checkout; any failure after the gates restores the target's recorded HEAD. Checks, patterns and build are configurable under `land` in `.harness/project.yaml`.
+- `uh mission run --post-checks <file>` runs operator checks the agent never sees after the runtime settles, in the run's working root with `UH_MISSION_ID`, `UH_RUN_ID`, `UH_RUN_DIR` and `UH_ROOT` set. The file path and commands never reach the prompt, the runtime's environment or argv, or any artifact under the project root; `runtime-result.yaml` records only names and outcomes, and a failed, timed-out or unrunnable check fails the run with exit code 1.
+- Notifications: settled runs, teams and alerts reach configured command or webhook sinks (presets for hermes send, apprise, ntfy and a Windows toast). Nothing is sent until a sink is configured; deliveries are asynchronous, at most once per event, run and sink, logged, and never delay settlement. `uh notify detect`, `list` and `test`.
+- `uh acceptance rebind` revalidates old evidence without rerunning a model. Registry entries declare the files each probe asserts, evidence records an input digest over those files plus runtime and model, and freshness compares digests instead of commits, naming the inputs that changed.
+- `context.project_brief: false` keeps the Project facts section out of a mission's prompt; `uh mission dry-run` prints `Project facts: off`. `.harness/project-brief.md` is otherwise rendered once into every worker prompt, capped at 4,000 characters.
+- A team worker may name a session template, which supplies its limits, recovery, `worker_rules` and, when the worker omits one, its adapter. An unknown template fails the team before any worker starts.
+- oh-my-pi `runtime_config.tools` passes an allowlist to omp as `--tools=<list>`, so a read-only mission can withhold tools such as `eval`.
+- ACP `runtime_config.mcp_servers` passes stdio and http MCP servers to `session/new`, and `runtime_config.env` drops exact names or `PREFIX*` patterns and then sets values before spawn. MCP env and header values go only on the wire. Windows npm shims resolve the same way for check and run.
+- `uh ps` marks a run whose current tool call has produced no output for five minutes with `STALLED tool=<name> <minutes>m`.
+- `uh report` and the run digest count turns, tools, written files and tokens for Claude Code and oh-my-pi runs as for Command Code, and report context size at the first, fifth and last request, single-call turns, re-reads, tool output by kind, and model versus tool time.
 
 ### Changed
 
@@ -69,6 +80,9 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Orchestrator missions can run observation and run-control commands (`ps`, `report`, `steer`, `resume`, `kill`, `experiment`) as controller commands while agent CLIs remain denied.
 - Team missions support an explicit `unknown_cost: "admit" | "block"` resource policy, allowing completed workers with unpriced runtimes to proceed to later waves without blocking when `admit` is set.
 - Session templates drive team worker dispatch, adopting worker overrides, limits, recovery rules, and budget tiers across wave executions.
+- Team workers commit with the repository's configured `user.name` and `user.email`, falling back to `uh team worker` only when none is set.
+- Teams admit another worker only when measured free memory, minus reservations for workers still starting, covers the worker's need; a reservation ends when the worker reports running or after 60 seconds.
+- Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
 
@@ -102,6 +116,16 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Supervisor matches tool-guard log evidence to runtime events by call id before falling back to call count.
 - Review capture retrieves a worker's final message from team run records and captures all modified files.
 - Build compilation outputs to a staging directory before atomically swapping into `dist/`, avoiding inconsistent builds on compilation errors.
+- Command Code 1.62.1 exits with an uncaught `write EOF` after a single large tool result (upstream CommandCodeAI/command-code#859). Its guard hook now denies a `read_file` with no limit, or a limit above 600 lines, on any file larger than 40,000 bytes, with a reason telling the model to read in windows; the denial is logged with class `read_window`.
+- ACP runs routed into a sandbox persisted no records; they now write to the project's mission directory while the agent works and diffs are captured in the sandbox.
+- An acceptance entry whose mission left no run record passed when nothing mismatched; it now fails with reason `no_verdict`, a setup or run error records `runner_error` evidence and the campaign continues, every campaign ends with a SUMMARY, and `uh acceptance run` exits 1 when any capability failed.
+- System One never returns a verdict over zero judged criteria, computes confidence over criterion answers only, and receives failed or blocked required checks as deterministic failures.
+- `review-collect` blocks a pass only on required evidence (a contradicted claim, a failed required check or acceptance entry, an error finding) and records an inconsistent pass as needs-attention instead of throwing.
+- `uh mission check` checks an independent review packet from its bound review sandbox, and names the sandbox command when none exists, instead of failing.
+- Team worktrees run git with `core.longpaths=true`, refuse with a clear message when the longest tracked path cannot fit under Windows' 260-character limit, and keep git's stderr in setup errors.
+- The build resolves `tsc` from the project instead of `npx`, restores the previous build when the swap fails, and restores a lone `dist.old` left by an interrupted build.
+- The experience store groups each model under one canonical key while keeping the reported model and provider on each record.
+- The `no_worker_commits` acceptance invariant recognised the harness's commit only by the placeholder email, so once workers committed under the repository's identity every correct run would have been flagged. It now accepts one commit per worker with the exact subject the harness writes, plus any placeholder-identity commit.
 
 ## [0.11.0] — 2026-09-21
 

@@ -57,6 +57,12 @@ Both captures are always present in the request, so a gap is never confused with
 
 `review-collect` preserves the reviewer's stated reasons on the assessment — per-source `findings` (severity, detail, evidence) and a per-claim `claims` summary (claim text, verdict, and the claim's evidence source) — and, after the assessment JSON, prints a short summary of contradicted claims and warning/error findings, so a needs-attention or needs-remediation recommendation carries its cause.
 
+### What blocks a pass
+
+`review-collect` blocks a pass only on required evidence: a contradicted claim, a failed required check or acceptance entry, or an error finding. An unverified extra claim does not block. A pass that is inconsistent with its evidence is recorded as `needs-attention` with the reason instead of throwing, so every collected review is recorded.
+
+`uh mission check` checks a packet produced by `review-prepare` as it will run: from its bound review sandbox when one exists, and otherwise it says the packet runs in its review sandbox and names the command. The binding's runtime and model are checked against `--runtime`.
+
 ## What it proves
 
 - The recommendation is evidence-backed and advisory: a recorded acceptance decision with `human_acceptance_required: true`.

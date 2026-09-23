@@ -30,7 +30,18 @@ end-to-end acceptance.
 - **Mid-run steering:** `uh steer` messages active runs by requesting the controller
   to stop with `steered` and resume with the message injected without consuming
   restart budgets; `uh note` and `uh ledger` track intervention records.
-  Status: **shipped**.
+  Steering an orchestrator stops its session and leaves the workers it launched
+  orphaned; steer an orchestrator only between its steps until that is fixed.
+  Status: **shipped, with that defect open**.
+- **Queued launches:** `uh queue run` launches missions in order under an
+  orchestrator cap and a free-memory floor, settles each from its run record,
+  and resumes from `.harness/queue/<id>/state.json` after a crash.
+  Status: **shipped; first live queue pending**.
+- **Gated landing:** `uh land` lands verified, reviewed worker branches as one
+  commit after the full checks, an attribution scan and the build, or restores
+  the target exactly. Status: **shipped; first live land pending**.
+- **Hidden grading:** `uh mission run --post-checks` runs operator checks the
+  agent never sees and fails the run when one fails. Status: **shipped**.
 - **Coordinator context:** limit inherited tools, integrations and task context
   according to explicit policy. Measure total consumption across coordinator,
   workers and retries; prompt length alone is not a sufficient measure.

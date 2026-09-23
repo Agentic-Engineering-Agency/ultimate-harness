@@ -92,3 +92,24 @@ Overrides are strict-validated for runtimes with registered schemas, so typoed k
 | Key | Runtimes | Purpose |
 | --- | --- | --- |
 | `honcho_memory` | `oh-my-pi`, `codex`, `pi`, `hermes` | Per-mission Honcho opt-out (boolean). Omitted/`true` keeps Honcho memory on (when configured); `false` skips all Honcho enrich/record activity and the `honcho_search` / `honcho_remember` tools for that mission. See the [Honcho runbook](runbooks/honcho-memory.md). |
+| `tools` | `oh-my-pi` | Allowlist of omp tool names passed as `--tools=<list>`; at least one entry, no duplicates. Omit to keep omp's default tool set. |
+| `mcp_servers` | `acp` | stdio or http MCP servers passed to `session/new` in the ACP v1 shape. Env and header values go only on the wire. See [acp-setup.md](runbooks/acp-setup.md). |
+| `env` | `acp` | `drop` (exact names or `PREFIX*` patterns, case-insensitive on Windows) then `set` (name to value) applied to the server's environment before spawn. |
+| `role` | `command-code`, `claude-code` | `orchestrator` arms the guard with controller commands and lets the mission run in the project root without `--no-sandbox`; its writes stay inside its declared write roots. |
+
+## Project `land` block
+
+`uh land` reads an optional `land` block from `.harness/project.yaml`. Each absent field keeps its default: checks `bun run typecheck` and `bun run test`, the build `bun run build`, and the forbidden patterns `co-authored-by`, `anthropic`, `claude-session`, `generated with` and the robot emoji, matched case-insensitively against the staged diff and the commit message. See [closing-the-loop.md](handbook/closing-the-loop.md).
+
+```yaml
+land:
+  checks:
+    - name: typecheck
+      command: bun run typecheck
+  forbidden_patterns: [co-authored-by]
+  build: bun run build
+```
+
+## Mission `context.project_brief`
+
+`.harness/project-brief.md` is rendered once into every worker prompt as Project facts, capped at 4,000 characters. A mission sets `context.project_brief: false` to leave it out, for example a read-only review whose task differs from a code worker's; `uh mission dry-run` then prints `Project facts: off (context.project_brief: false)`.

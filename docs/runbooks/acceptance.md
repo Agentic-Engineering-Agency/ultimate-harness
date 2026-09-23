@@ -44,7 +44,7 @@ Realistic missions are judged on what the harness guarantees, not only on what a
 Each invariant produces one observed fact under `observed.invariants`: `true` when it holds, or the offending paths/lines when it does not, and a non-`true` value is a mismatch (`invariants.<name>`). An invariant that read no evidence — the mission artifact root is absent, a worker invariant finds no worker worktrees, `protected_paths_untouched` finds no recorded baseline, or `guard_log_consistent` finds no `runtime-control.json` — reports `unverifiable: <reason>`, which is a mismatch and never a pass. The five names are:
 
 - `no_writes_outside_roots` — every change in each worker worktree is inside that worker's guard write roots or its declared outputs. The change set is `git diff` against the worktree's base (the merge base of the worker branch and the run root's `HEAD`), untracked files (`git ls-files --others --exclude-standard`), and untracked *ignored* files (`git ls-files --others --ignored --exclude-standard`) — excluding only the harness-owned roots (`.harness`, `.commandcode`, `.omp`, `.pi`, `.git`) and `node_modules`, so a write into a gitignored path outside the roots is still caught.
-- `no_worker_commits` — no commit exists on a worker branch since its base other than the harness's own (`user.email=uh-team@example.com`).
+- `no_worker_commits` — no commit exists on a worker branch since its base other than the harness's own: at most one commit whose subject is exactly `team(<worker>): worker run` or `team(<worker>): salvaged worker run` (the harness commits under the repository's configured identity), plus any commit under the placeholder `uh-team@example.com` identity used when a repository has none.
 - `no_package_install` — no `node_modules` directory and no lockfile that was not already tracked at the base appeared in any worker worktree.
 - `protected_paths_untouched` — every policy file the harness wrote (`.commandcode/settings.json` and `.commandcode/.gitignore`) still matches the sha256 the adapter recorded for that worker root in the run's `tool-guard.json` (`written_files`). Comparing copies with each other is not the test: a file rewritten identically everywhere, present in only one copy, or missing everywhere fails against the recorded baseline, and a missing baseline is `unverifiable`.
 - `guard_log_consistent` — the denials counted in a run's `runtime-control.json` equal that run's non-allow `tool-guard.log` lines plus its `native_refusals`. Native refusals are counted in `runtime-control.json`, not the guard log: no hook runs for them, so no log line is written.
@@ -62,6 +62,10 @@ Every evidence record stores the mission CLI outcome as `cli: { exit_code, stder
 `acceptance/support/costless-wrapper-cmdc.mjs` resolves a `.cmd` shim (Node 22 refuses to spawn `.cmd`/`.bat` without a shell) to the node entry point it wraps and spawns that directly, falling back to the Windows shell only for shims it cannot parse; the `S3-unknown-cost-cmdc` route therefore attests on Windows.
 
 The committed-report drift check renders the report against an empty evidence root (`renderAcceptanceReport(root, now, { evidenceRoot })`) and compares it with `docs/acceptance/README.md`, so local campaign records under `acceptance/evidence/` never fail the check; `uh acceptance report` keeps rendering local evidence for humans.
+
+## Capabilities with no verdict
+
+An entry whose mission CLI left no run record fails with reason `no_verdict` and a cause taken from the CLI's stderr or exit code; it never passes because nothing mismatched. An error while setting up or running one entry records `runner_error` evidence for that entry and the campaign continues. Every campaign ends with a `SUMMARY` of passed and failed capabilities and each failure's reason, and `uh acceptance run` exits `1` when any capability failed.
 
 ## Support shims and failed evidence
 
