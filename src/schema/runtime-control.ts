@@ -96,6 +96,13 @@ export const TeamResourceLimitsSchema = z.object({
   max_parallel: z.number().int().positive().default(4),
   worker_memory_mb: z.number().int().positive().optional(),
   reserve_memory_mb: z.number().int().nonnegative().default(1024),
+  /**
+   * How long a wave may wait for memory headroom (polling every 10 s) before
+   * the team is blocked with the current admission reason. Defaults to 20
+   * minutes so a team started alongside another can wait for it to settle
+   * instead of failing immediately.
+   */
+  admission_timeout_ms: z.number().int().positive().default(20 * 60 * 1000),
   max_cost_usd: z.number().positive().optional(),
   worker_cost_reservation_usd: z.number().positive().optional(),
   /**

@@ -1,4 +1,4 @@
-import { mapResourceWaves, workerConcurrency } from "./runtime-resources.js";
+import { mapResourceWaves, resolveTeamResources, workerConcurrency, type ResolvedTeamResources } from "./runtime-resources.js";
 import { DEFAULT_PROTECTED_PATHS, RuntimeControlSchema, type RuntimeLimits, type TeamResourceLimits } from "../schema/runtime-control.js";
 import { resolveWorkerAdapter, type TeamWorker } from "../schema/mission.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
@@ -407,6 +407,16 @@ export interface RunTeamMissionOptions {
    * host.
    */
   platform?: NodeJS.Platform;
+  /**
+   * Injected free-memory reading for worker admission. Defaults to
+   * `os.freemem`; tests pass a fixed reading so admission never depends on the
+   * host's real free memory.
+   */
+  availableBytes?: () => number;
+  /** Injected clock for admission waiting. Defaults to `Date.now`. */
+  now?: () => number;
+  /** Injected sleep for admission waiting. Defaults to a real timer. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface WorkerOutcome {
@@ -1265,6 +1275,14 @@ export async function runTeamMission(
   if (workerMemory && (process.platform !== "win32" || plan.workers.some(worker => !["oh-my-pi", "command-code", "claude-code"].includes(worker.adapter)))) {
     throw new Error("A worker memory cap requires the native Windows Job runner (oh-my-pi, command-code, or claude-code); refusing unenforced execution");
   }
+  // Resolve the per-worker memory the team is admitted against. An undeclared
+  // cap is filled from this project's recorded run peaks (or the 700 MB
+  // fallback); the resolved values are reported in the integration report.
+  const resources = await resolveTeamResources(
+    root,
+    plan.workers.map((worker) => worker.adapter),
+    mission.team.resources ?? {},
+  );
   const gitOps = options.gitOps ?? defaultGitOps;
   const baseRef = options.baseRef ?? "HEAD";
   // Resolve the base ref to a commit id ONCE, before any worker starts, so every
@@ -1401,7 +1419,8 @@ export async function runTeamMission(
   const longestTracked = platform === "win32" && gitOps.longestTrackedPath
     ? await gitOps.longestTrackedPath(root, worktreeBase).catch(() => "")
     : "";
-  const workerOutcomes: WorkerOutcome[] = await mapResourceWaves(plan.workers, mission.team.resources ?? {}, async (wp): Promise<WorkerOutcome> => {
+  const admissionWaits: string[] = [];
+  const workerOutcomes: WorkerOutcome[] = await mapResourceWaves(plan.workers, resources.limits, async (wp): Promise<WorkerOutcome> => {
     const slot: { plan: WorkerPlan; setupError?: Error } = { plan: wp };
     const setup = setupQueue.then(async () => {
       const context = workerContexts.get(wp.id)!;
@@ -1659,6 +1678,13 @@ export async function runTeamMission(
       canonicalState.admission_notes = [...admissionNotes];
       await persistState();
     },
+    root,
+    onWait: async (note) => {
+      admissionWaits.push(note);
+    },
+    ...(options.availableBytes !== undefined ? { availableBytes: options.availableBytes } : {}),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
   });
 
   // ------------------------------------------------------------------- leader
@@ -1723,6 +1749,8 @@ export async function runTeamMission(
     integrationReportPath: plan.integrationReportPath,
     admissionNotes,
     setupNotes,
+    admissionWaits,
+    resources,
   });
 
   // ------------------------------------------------------------- verification
@@ -2211,6 +2239,17 @@ interface WriteReportArgs {
   integrationReportPath: string;
   admissionNotes: string[];
   setupNotes: string[];
+  admissionWaits: string[];
+  resources: ResolvedTeamResources;
+}
+
+function describeWorkerMemorySource(resources: ResolvedTeamResources): string {
+  if (resources.worker_memory_source === "declared") return "declared by the team";
+  if (resources.worker_memory_source === "recorded_median") {
+    const runs = resources.worker_memory_sample_runs;
+    return `median of ${runs} recorded run peak${runs === 1 ? "" : "s"}`;
+  }
+  return "fallback (no recorded run peaks for this runtime)";
 }
 
 async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
@@ -2222,11 +2261,15 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
   lines.push(`- Leader branch: \`${args.plan.leader.branch}\``);
   lines.push(`- Workers: ${args.plan.workers.length}`);
   for (const note of args.setupNotes) lines.push(`- Notice: ${note}`);
+  lines.push(`- Worker memory admission: ${args.resources.worker_memory_mb} MB per worker (${describeWorkerMemorySource(args.resources)})`);
+  lines.push(`- Memory reserve: ${args.resources.reserve_memory_mb} MB`);
+  lines.push(`- Admission timeout: ${Math.round(args.resources.admission_timeout_ms / 60_000)} min`);
   if (!args.leaderReady) {
     lines.push("");
     lines.push(`> **Leader setup failed:** ${args.leaderError ?? "unknown error"}`);
   }
   for (const note of args.admissionNotes) lines.push(`- Cost admission: ${note}`);
+  for (const wait of args.admissionWaits) lines.push(`- Admission wait: ${wait}`);
   lines.push("");
   lines.push("## Workers");
   lines.push("");

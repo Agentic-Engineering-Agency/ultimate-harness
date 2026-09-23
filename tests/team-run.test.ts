@@ -16,7 +16,7 @@ import { promisify } from "node:util";
 import {
   checkWorktreePathLength,
   planTeamRun,
-  runTeamMission,
+  runTeamMission as runTeamMissionRaw,
   WINDOWS_MAX_PATH,
   type GitOps,
   type MergeOutcome,
@@ -78,6 +78,21 @@ beforeEach(async () => {
 afterEach(async () => {
   if (ROOT) await rm(ROOT, { recursive: true, force: true });
 });
+
+/**
+ * Every team run in this file admits workers with ample injected memory, so
+ * admission never reads the host's real free memory. A test that needs a
+ * specific reading passes its own `availableBytes`.
+ */
+const AMPLE_MEMORY_BYTES = 256 * 1024 * 1024 * 1024;
+
+function runTeamMission(
+  mission: TeamMission,
+  root: string,
+  options: Parameters<typeof runTeamMissionRaw>[2],
+): ReturnType<typeof runTeamMissionRaw> {
+  return runTeamMissionRaw(mission, root, { availableBytes: () => AMPLE_MEMORY_BYTES, ...options });
+}
 
 /* ---------------------------------------------------------------- planning  */
 
