@@ -39,6 +39,30 @@ config:
 * `server_args` (string[], default: `[]`): Command line arguments passed to the ACP server.
 * `protocol_version` (integer, default: `1`): ACP protocol version (v1).
 * `timeout_ms` (integer, default: `600000`): Per-request timeout in milliseconds.
+* `mcp_servers` (array, default: `[]`): MCP servers advertised to the agent in `session/new`. Each entry is either a stdio server (`{ name, command, args?, env? }`) or an HTTP server (`{ type: "http", name, url, headers? }`). UH maps these to the ACP v1 wire shape and never writes server `env` or `headers` values into any artifact.
+* `env` (object, default: `{ set: {}, drop: [] }`): Environment policy for the agent process. `drop` removes exact variable names or `NAME_PREFIX*` patterns from a copy of `process.env`; `set` then adds/replaces values, so `set` wins over `drop`. Names compare case-insensitively on Windows. Values are never written into any artifact.
+
+```yaml
+config:
+  server_command: prime-agent
+  server_args: ["--mode", "acp"]
+  mcp_servers:
+    - name: files
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem"]
+      env:
+        FS_ROOT: .
+    - type: http
+      name: remote
+      url: https://example.test/mcp
+      headers:
+        Authorization: "Bearer <token>"
+  env:
+    set:
+      DO_NOT_TRACK: "1"
+    drop:
+      - "ORCA_*"
+```
 
 ---
 
