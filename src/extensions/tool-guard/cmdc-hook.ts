@@ -7,7 +7,16 @@ import { runToolGuard, toolGuardFailClosedReason } from "./core.js";
  * stdout. A denial is always the same shape; an allowed call writes nothing.
  * The top-level handler denies on any error so an uncaught throw can never be
  * mistaken for a non-blocking hook failure.
+ *
+ * Command Code 1.62.1 exits without a terminal result when a `read_file`
+ * returns a whole file of roughly 107K characters, so this wrapper is the only
+ * one that opts into the read-window rule: a `read_file` of a file over 40000
+ * bytes with no line window is denied and told to read in windows of at most
+ * 600 lines.
  */
+
+/** The whole-file read this runtime cannot survive, denied in favour of windows. */
+const READ_WINDOW = { maxBytes: 40000, maxLines: 600 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -43,6 +52,7 @@ async function main(): Promise<void> {
   const verdict = await runToolGuard({
     policyPath: process.env.UH_TOOL_GUARD_POLICY,
     logPath: process.env.UH_TOOL_GUARD_LOG,
+    readWindow: READ_WINDOW,
     call: {
       tool: typeof request?.tool_name === "string" ? request.tool_name : "",
       input: request?.tool_input,
