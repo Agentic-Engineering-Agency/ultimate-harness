@@ -64,6 +64,128 @@ import type { SessionTemplate } from "../schema/session-template.js";
 const execFileP = promisify(execFile);
 
 /* -------------------------------------------------------------------------- */
+/* Windows long paths                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Windows' classic (non-`\\?\`) path ceiling. A team worktree path plus the
+ * longest tracked path under it must stay below it unless git's
+ * `core.longpaths` lifts the limit; 260 is the hard MAX_PATH, so 259 is the
+ * last total that works without it.
+ */
+export const WINDOWS_MAX_PATH = 260;
+
+/** Cap on how much git stderr one failure message carries. */
+const GIT_STDERR_LIMIT = 2000;
+
+/** Trim whitespace and cap an error body so a runaway stderr cannot flood a report. */
+function trimForMessage(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= GIT_STDERR_LIMIT) return trimmed;
+  const head = Math.floor(GIT_STDERR_LIMIT / 2);
+  return `${trimmed.slice(0, head)}\n…\n${trimmed.slice(trimmed.length - (GIT_STDERR_LIMIT - head))}`;
+}
+
+/** Read the stderr an exec-style git failure carries, as a string. */
+function stderrOf(err: unknown): string {
+  const candidate = (err as { stderr?: unknown } | null)?.stderr;
+  if (typeof candidate === "string") return candidate;
+  if (candidate && typeof (candidate as { toString(): string }).toString === "function") {
+    return (candidate as { toString(): string }).toString();
+  }
+  return "";
+}
+
+/**
+ * Render a git failure with its stderr preserved. `child_process` keeps git's
+ * stderr on the error object, but its `message` may hold only
+ * "Command failed: git ..." — dropping that stderr is exactly how a failing
+ * path name is lost. Both runGit (which already embeds stderr) and a plain
+ * exec error (stderr only on the property) route through here.
+ */
+function formatGitError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const stderr = trimForMessage(stderrOf(err));
+  if (stderr.length > 0 && !message.includes(stderr)) {
+    return `${message} — ${stderr}`;
+  }
+  return message;
+}
+
+/** `git -c core.longpaths=true <args>` — every team-run git call lifts MAX_PATH. */
+function gitCommand(args: readonly string[]): string[] {
+  return ["-c", "core.longpaths=true", ...args];
+}
+
+/** Run git with the long-path prefix; on failure throw with git's stderr attached. */
+async function runGit(args: readonly string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+  try {
+    // A generous buffer: `ls-tree -r` lists every path in the repository, which
+    // can exceed the 1 MiB default on a large repo and would otherwise abort the
+    // preflight silently.
+    return await execFileP("git", gitCommand(args), { cwd, maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    throw new Error(`git ${args[0] ?? ""} failed: ${formatGitError(err)}`);
+  }
+}
+
+interface LongPathState {
+  /** True when long paths are usable, or unnecessary on this platform. */
+  ok: boolean;
+  /** One-line integration-report notice when UH changed the repository config. */
+  note: string | null;
+}
+
+/**
+ * On Windows, make sure git can address paths past MAX_PATH before any worktree
+ * is created. If the repository's effective `core.longpaths` is not true, set
+ * it in the repository's LOCAL config and return a notice for the report;
+ * otherwise long paths are already usable. On other platforms (no MAX_PATH
+ * ceiling) this is a no-op. `ok` is false only when the config could not be set.
+ */
+async function prepareLongPaths(args: {
+  gitOps: GitOps;
+  root: string;
+  platform: NodeJS.Platform;
+}): Promise<LongPathState> {
+  if (args.platform !== "win32") return { ok: true, note: null };
+  const { gitOps, root } = args;
+  if (gitOps.longPathsEnabled && await gitOps.longPathsEnabled(root)) return { ok: true, note: null };
+  if (!gitOps.enableLongPaths) return { ok: false, note: null };
+  try {
+    await gitOps.enableLongPaths(root);
+    return {
+      ok: true,
+      note: `UH enabled git \`core.longpaths=true\` in this repository's local config because team worktree paths can exceed the Windows ${WINDOWS_MAX_PATH}-character limit`,
+    };
+  } catch {
+    return { ok: false, note: null };
+  }
+}
+
+/**
+ * Preflight a single worktree path against the Windows MAX_PATH ceiling. The
+ * total is the worktree path length plus the longest tracked path at the base
+ * ref (the deepest file the checkout must write). When it exceeds 259 and long
+ * paths could not be enabled, return a message naming both lengths so the
+ * worker fails clearly instead of surfacing git's opaque worktree error.
+ */
+export function checkWorktreePathLength(args: {
+  label: string;
+  worktreePath: string;
+  longestTrackedPath: string;
+  longPathsOk: boolean;
+  platform: NodeJS.Platform;
+}): string | null {
+  if (args.platform !== "win32" || args.longPathsOk) return null;
+  const worktreeLength = args.worktreePath.length;
+  const trackedLength = args.longestTrackedPath.length;
+  const total = worktreeLength + trackedLength;
+  if (total <= WINDOWS_MAX_PATH - 1) return null;
+  return `${args.label} worktree path is ${worktreeLength} characters and the longest tracked path at the base ref is ${trackedLength} characters (${total} total), over the Windows ${WINDOWS_MAX_PATH}-character limit, and git core.longpaths could not be enabled`;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Public types                                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -220,6 +342,21 @@ export interface GitOps {
    * existing test doubles stay valid; when absent, salvage cannot be evaluated.
    */
   dirtyPaths?: (cwd: string) => Promise<string[]>;
+  /**
+   * True when the repository's effective `core.longpaths` is already `true`.
+   * Optional so existing test doubles stay valid; absent means "unknown", and
+   * on Windows the preflight then treats long paths as unavailable unless
+   * `enableLongPaths` succeeds.
+   */
+  longPathsEnabled?: (root: string) => Promise<boolean>;
+  /** Set `core.longpaths true` in the repository's LOCAL config. */
+  enableLongPaths?: (root: string) => Promise<void>;
+  /**
+   * The longest tracked path (by character length) at `ref`, or "" when the ref
+   * has no tracked paths. Used by the Windows preflight so a MAX_PATH overflow
+   * fails with both lengths named. Optional so test doubles stay valid.
+   */
+  longestTrackedPath?: (root: string, ref: string) => Promise<string>;
 }
 
 export interface MergeOutcome {
@@ -264,6 +401,12 @@ export interface RunTeamMissionOptions {
    * worker dispatch (UH-72 contract).
    */
   strategy?: LeaderStrategy;
+  /**
+   * Host platform the run should assume. Defaults to `process.platform`; tests
+   * override it to exercise the Windows long-path config and preflight on any
+   * host.
+   */
+  platform?: NodeJS.Platform;
 }
 
 export interface WorkerOutcome {
@@ -597,7 +740,7 @@ export const defaultGitOps: GitOps = {
     // controller, or a removable/network volume that is briefly unmounted)
     // cannot delete this worktree's administrative entry behind our back. No
     // run id is in scope here, so the branch name is the lock identifier.
-    await execFileP("git", ["worktree", "add", "--lock", "--reason", `uh:${branch}`, "-b", branch, worktreePath, baseRef], { cwd: root });
+    await runGit(["worktree", "add", "--lock", "--reason", `uh:${branch}`, "-b", branch, worktreePath, baseRef], root);
   },
   async removeWorktree(root, worktreePath) {
     // A locked worktree refuses `remove` until it is unlocked; an already
@@ -610,26 +753,26 @@ export const defaultGitOps: GitOps = {
     // registration; if git still refuses we leave the orphan for
     // `git worktree list` to surface.
     try {
-      await execFileP("git", ["worktree", "unlock", worktreePath], { cwd: root });
+      await runGit(["worktree", "unlock", worktreePath], root);
     } catch { /* tolerated: not locked, or already unregistered */ }
     try {
-      await execFileP("git", ["worktree", "remove", "--force", worktreePath], { cwd: root });
+      await runGit(["worktree", "remove", "--force", worktreePath], root);
     } catch { /* best-effort; orphans surface via `git worktree list` */ }
   },
   async merge(cwd, branch) {
     try {
-      const { stdout } = await execFileP("git", [
+      const { stdout } = await runGit([
         "-c", "user.email=uh-team@example.com",
         "-c", "user.name=uh team leader",
         "merge", "--no-edit", branch,
-      ], { cwd });
+      ], cwd);
       return { conflicted: false, conflictPaths: [], note: stdout.trim().split("\n").slice(0, 1).join("") };
     } catch (err) {
       // Detect conflict by checking MERGE_HEAD via rev-parse (works in
       // both regular repos and linked worktrees, where `.git` is a file).
       let gitDirPath = "";
       try {
-        const { stdout } = await execFileP("git", ["rev-parse", "--git-path", "MERGE_HEAD"], { cwd });
+        const { stdout } = await runGit(["rev-parse", "--git-path", "MERGE_HEAD"], cwd);
         gitDirPath = stdout.trim();
       } catch { /* ignore */ }
       const resolved = gitDirPath
@@ -646,18 +789,18 @@ export const defaultGitOps: GitOps = {
           conflicted: false,
           failed: true,
           conflictPaths: [],
-          note: `merge failed: ${(err as Error).message}`,
+          note: `merge failed: ${formatGitError(err)}`,
         };
       }
-      const { stdout } = await execFileP("git", ["diff", "--name-only", "--diff-filter=U"], { cwd });
+      const { stdout } = await runGit(["diff", "--name-only", "--diff-filter=U"], cwd);
       const paths = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-      try { await execFileP("git", ["merge", "--abort"], { cwd }); } catch { /* tolerated */ }
+      try { await runGit(["merge", "--abort"], cwd); } catch { /* tolerated */ }
       return { conflicted: true, conflictPaths: paths, note: `merge conflict on ${paths.length} path(s)` };
     }
   },
   async diffFiles(root, baseRef, branch) {
     try {
-      const { stdout } = await execFileP("git", ["diff", "--name-only", `${baseRef}...${branch}`], { cwd: root });
+      const { stdout } = await runGit(["diff", "--name-only", `${baseRef}...${branch}`], root);
       return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
     } catch {
       return [];
@@ -665,30 +808,30 @@ export const defaultGitOps: GitOps = {
   },
   async deleteBranch(root, branch) {
     try {
-      await execFileP("git", ["branch", "-D", branch], { cwd: root });
+      await runGit(["branch", "-D", branch], root);
     } catch { /* best-effort */ }
     // `git branch -D` deletes the ref but leaves `branch.<name>` in the config,
     // so the base record would outlive its branch (and confuse a later review,
     // or a same-named branch recreated by a relaunch). Drop the section too.
     try {
-      await execFileP("git", ["config", "--remove-section", `branch.${branch}`], { cwd: root });
+      await runGit(["config", "--remove-section", `branch.${branch}`], root);
     } catch { /* best-effort: no section, or no config at all */ }
   },
   async resolveCommit(root, ref) {
-    const { stdout } = await execFileP("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: root });
+    const { stdout } = await runGit(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], root);
     const commit = stdout.trim();
     if (commit.length === 0) throw new Error(`Cannot resolve base ref "${ref}" to a commit`);
     return commit;
   },
   async setBranchBase(root, branch, commit) {
-    await execFileP("git", ["config", `branch.${branch}.base`, commit], { cwd: root });
+    await runGit(["config", `branch.${branch}.base`, commit], root);
   },
   async renameBranch(root, from, to) {
-    await execFileP("git", ["branch", "-m", from, to], { cwd: root });
+    await runGit(["branch", "-m", from, to], root);
   },
   async branchExists(root, branch) {
     try {
-      await execFileP("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: root });
+      await runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], root);
       return true;
     } catch {
       return false;
@@ -708,36 +851,36 @@ export const defaultGitOps: GitOps = {
     // mis-stage on some git builds. Otherwise the whole worktree is staged
     // minus the protected roots, so a harness-owned file is never staged.
     if (stagePaths === undefined) {
-      await execFileP("git", ["add", "-A", "--", ".", ...COMMIT_PROTECTED_EXCLUDES], { cwd });
+      await runGit(["add", "-A", "--", ".", ...COMMIT_PROTECTED_EXCLUDES], cwd);
     } else {
       const stagePathspecs = stagePaths.map((entry) => `:(literal)${entry}`);
       if (stagePathspecs.length > 0) {
-        await execFileP("git", ["add", "-A", "--", ...stagePathspecs], { cwd });
+        await runGit(["add", "-A", "--", ...stagePathspecs], cwd);
       }
       // Declared outputs under an ignored directory need `-f`: a plain `git add`
       // refuses them. Only declared outputs reach `forcePaths`, so an ignored
       // stray never gets staged alongside them.
       const forcePathspecs = (forcePaths ?? []).map((entry) => `:(literal)${entry}`);
       if (forcePathspecs.length > 0) {
-        await execFileP("git", ["add", "-f", "-A", "--", ...forcePathspecs], { cwd });
+        await runGit(["add", "-f", "-A", "--", ...forcePathspecs], cwd);
       }
     }
     // Any residual out-of-root or protected change stays in the worktree
     // unstaged (the worktree is discarded or retained as evidence), so gate the
     // commit on the INDEX being non-empty rather than on the worktree being clean.
-    const { stdout } = await execFileP("git", ["diff", "--cached", "--name-only"], { cwd });
+    const { stdout } = await runGit(["diff", "--cached", "--name-only"], cwd);
     if (stdout.trim().length === 0) return;
-    await execFileP("git", [
+    await runGit([
       "-c", "user.email=uh-team@example.com",
       "-c", "user.name=uh team worker",
       "commit", "-m", message,
-    ], { cwd });
+    ], cwd);
   },
   async dirtyPaths(cwd) {
     // `--porcelain` keeps the output stable across git versions and locales.
     // Untracked files are included so a worker that only created new files is
     // still seen as having produced work.
-    const { stdout } = await execFileP("git", ["status", "--porcelain", "--untracked-files=all"], { cwd });
+    const { stdout } = await runGit(["status", "--porcelain", "--untracked-files=all"], cwd);
     return stdout
       .split("\n")
       .map((line) => line.replace(/\r$/, ""))
@@ -749,6 +892,34 @@ export const defaultGitOps: GitOps = {
       .map((entry) => entry.replace(/^"(.*)"$/, "$1"))
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0);
+  },
+  async longPathsEnabled(root) {
+    // Read WITHOUT the `-c core.longpaths=true` prefix every other call carries:
+    // that override would be echoed back and mask an unset value. `--bool`
+    // normalizes "true"/"1"/"yes"; an unset key exits non-zero, which we read as
+    // "not enabled".
+    try {
+      const { stdout } = await execFileP("git", ["config", "--bool", "core.longpaths"], { cwd: root });
+      return stdout.trim() === "true";
+    } catch {
+      return false;
+    }
+  },
+  async enableLongPaths(root) {
+    // LOCAL config: the setting is per-checkout state, never a global change to
+    // the operator's git.
+    await runGit(["config", "--local", "core.longpaths", "true"], root);
+  },
+  async longestTrackedPath(root, ref) {
+    // The deepest tracked blob at the base commit is the longest file path the
+    // worktree checkout must materialize. `-z` keeps names with odd characters
+    // intact; `ls-tree` is index-independent so it reads exactly `ref`.
+    const { stdout } = await runGit(["ls-tree", "-r", "-z", "--name-only", ref], root);
+    let longest = "";
+    for (const entry of stdout.split("\0")) {
+      if (entry.length > longest.length) longest = entry;
+    }
+    return longest;
   },
 };
 
@@ -1220,12 +1391,30 @@ export async function runTeamMission(
   let setupQueue = Promise.resolve();
   const launchedWorkers = new Set<string>();
   const admissionNotes: string[] = [];
+  // Windows MAX_PATH handling, before any worktree is created: enable
+  // `core.longpaths` in this repository's local config when it is not already
+  // on (noted in the report), and resolve the base ref's longest tracked path
+  // once so each worktree preflight can name both lengths if it fails.
+  const platform = options.platform ?? process.platform;
+  const longPaths = await prepareLongPaths({ gitOps, root, platform });
+  const setupNotes: string[] = longPaths.note ? [longPaths.note] : [];
+  const longestTracked = platform === "win32" && gitOps.longestTrackedPath
+    ? await gitOps.longestTrackedPath(root, worktreeBase).catch(() => "")
+    : "";
   const workerOutcomes: WorkerOutcome[] = await mapResourceWaves(plan.workers, mission.team.resources ?? {}, async (wp): Promise<WorkerOutcome> => {
     const slot: { plan: WorkerPlan; setupError?: Error } = { plan: wp };
     const setup = setupQueue.then(async () => {
       const context = workerContexts.get(wp.id)!;
       const workerMission = workerMissionPackets.get(wp.id);
       const workerMissionId = workerMission?.id ?? mission.id;
+      const preflight = checkWorktreePathLength({
+        label: `worker ${wp.id}`,
+        worktreePath: wp.worktreePath,
+        longestTrackedPath: longestTracked,
+        longPathsOk: longPaths.ok,
+        platform,
+      });
+      if (preflight) throw new Error(preflight);
       await seedCanonicalWorkerScope(canonicalMissionDir, context.artifactRoot, mission.id);
       await gitOps.addWorktree(root, wp.branch, wp.worktreePath, worktreeBase);
       if (baseCommit !== undefined && gitOps.setBranchBase) {
@@ -1262,7 +1451,7 @@ export async function runTeamMission(
         plan: slot.plan,
         exitCode: 1,
         status: "error" as const,
-        errorMessage: `worktree setup failed: ${slot.setupError.message}`,
+        errorMessage: `worktree setup failed: ${formatGitError(slot.setupError)}`,
         filesTouched: [],
         finalSentinel: "",
         merge: null,
@@ -1412,7 +1601,7 @@ export async function runTeamMission(
         try {
           await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths, forcePaths);
         } catch (err) {
-          commitErr = err instanceof Error ? err.message : String(err);
+          commitErr = formatGitError(err);
         }
       }
       return {
@@ -1440,7 +1629,7 @@ export async function runTeamMission(
         plan: slot.plan,
         exitCode: 1,
         status: "error" as const,
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: formatGitError(err),
         filesTouched: [],
         finalSentinel: "",
         merge: null,
@@ -1475,7 +1664,14 @@ export async function runTeamMission(
   // ------------------------------------------------------------------- leader
   canonicalState.leader.status = "integrating";
   await persistState();
-  const leaderError = await safeAddWorktree(gitOps, root, plan.leader, worktreeBase);
+  const leaderPreflight = checkWorktreePathLength({
+    label: "leader",
+    worktreePath: plan.leader.worktreePath,
+    longestTrackedPath: longestTracked,
+    longPathsOk: longPaths.ok,
+    platform,
+  });
+  const leaderError = leaderPreflight ?? await safeAddWorktree(gitOps, root, plan.leader, worktreeBase);
   const leaderReady = leaderError === null;
   if (leaderReady) {
     if (baseCommit !== undefined && gitOps.setBranchBase) {
@@ -1526,6 +1722,7 @@ export async function runTeamMission(
     leaderError,
     integrationReportPath: plan.integrationReportPath,
     admissionNotes,
+    setupNotes,
   });
 
   // ------------------------------------------------------------- verification
@@ -1639,7 +1836,7 @@ async function safeAddWorktree(gitOps: GitOps, root: string, leader: LeaderPlan,
     await gitOps.addWorktree(root, leader.branch, leader.worktreePath, baseRef);
     return null;
   } catch (err) {
-    return err instanceof Error ? err.message : String(err);
+    return formatGitError(err);
   }
 }
 
@@ -1787,7 +1984,7 @@ function updateIndexSkipWorktree(worktreePath: string, files: readonly string[])
   return new Promise((resolve, reject) => {
     const child = execFile(
       "git",
-      ["update-index", "--skip-worktree", "-z", "--stdin"],
+      gitCommand(["update-index", "--skip-worktree", "-z", "--stdin"]),
       { cwd: worktreePath },
       (error) => (error ? reject(error) : resolve()),
     );
@@ -1809,7 +2006,7 @@ async function markProtectedPathsSkipWorktree(worktreePath: string): Promise<voi
     if (protectedPath === ".git") continue;
     let listing: string;
     try {
-      ({ stdout: listing } = await execFileP("git", ["ls-files", "-z", "--", protectedPath], { cwd: worktreePath }));
+      ({ stdout: listing } = await execFileP("git", gitCommand(["ls-files", "-z", "--", protectedPath]), { cwd: worktreePath }));
     } catch {
       continue; // not a git worktree, or no index yet
     }
@@ -2013,6 +2210,7 @@ interface WriteReportArgs {
   leaderError: string | null;
   integrationReportPath: string;
   admissionNotes: string[];
+  setupNotes: string[];
 }
 
 async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
@@ -2023,6 +2221,7 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
   lines.push(`- Leader strategy: \`${args.plan.leader.strategy}\``);
   lines.push(`- Leader branch: \`${args.plan.leader.branch}\``);
   lines.push(`- Workers: ${args.plan.workers.length}`);
+  for (const note of args.setupNotes) lines.push(`- Notice: ${note}`);
   if (!args.leaderReady) {
     lines.push("");
     lines.push(`> **Leader setup failed:** ${args.leaderError ?? "unknown error"}`);
