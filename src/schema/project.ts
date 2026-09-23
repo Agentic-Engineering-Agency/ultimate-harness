@@ -75,6 +75,8 @@ export const NotificationPresetSinkSchema = z.object({
   urls: z.array(z.string().min(1)).min(1).optional(),
   server: z.string().min(1).optional(),
   topic: z.string().min(1).optional(),
+  /** windows-toast only: the registered AppUserModelID the toast is raised under. */
+  app_id: z.string().min(1).optional(),
 }).strict();
 export type NotificationPresetSink = z.infer<typeof NotificationPresetSinkSchema>;
 

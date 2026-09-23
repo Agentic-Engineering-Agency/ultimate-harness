@@ -27,6 +27,9 @@ session and not re-checked at this commit. A fix removes its entry in the same c
 |---|---|
 | `uh steer` on an orchestrator stops its session and leaves the workers it launched orphaned; they stop mid-work without committing. Steer an orchestrator only between its steps. | Confirmed (an orchestrator steered mid-wave orphaned a worker at turn 42). |
 | Real settled runs have not produced deliveries to configured notification sinks; `uh notify test` delivers. | Reported. |
+| A Windows toast sent through the `windows-toast` preset is reported as a handoff: PowerShell accepted it, but whether Windows displays it (registered app id, notification settings) cannot be confirmed by UH and has not been checked by eye since the app id changed. | Confirmed (by design, unverified live). |
+| `--root` on `uh notify detect`, `list` and `test` has no CLI test. | Confirmed. |
+| The toast and notification-report change was recovered from a worker stopped before it finished and was not independently reviewed. | Confirmed. |
 | `uh ps` turn counts for Claude Code (distinct assistant message ids) and ACP (agent activity until a tool call completes) are tested on recorded streams only; the ACP rule is a heuristic that has not been checked against a live run. | Confirmed. |
 | Supervision now counts Claude Code turns, so `limits.max_turns` can stop a Claude Code run where it previously never counted; not yet observed on a live run. | Confirmed (behaviour change). |
 | When neither the run's control file nor its digest has a turn count, `uh ps` reads the run's whole `events.ndjson` to count turns, which is slow for very long runs. | Confirmed in `src/harness/live-runs.ts`. |

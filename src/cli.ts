@@ -3606,13 +3606,16 @@ const notifyCmd = program
 notifyCmd
   .command("detect")
   .description("Report which preset tools are installed and print a ready-to-paste config for each")
+  .option("--root <path>", "Root directory (default: cwd)")
   .option("--json", "Emit the detection report as JSON")
-  .action(async (opts: { json?: boolean }) => {
+  .action(async (opts: { root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
     try {
-      const { detectPresets } = await import("./harness/notifications.js");
+      const { detectPresets, userNotificationsFile } = await import("./harness/notifications.js");
+      const { projectYaml } = await import("./harness/paths.js");
       const detections = await detectPresets();
       if (opts.json) {
-        console.log(JSON.stringify({ schema_version: "uh.notify.detect.v0", presets: detections }, null, 2));
+        console.log(JSON.stringify({ schema_version: "uh.notify.detect.v0", root, presets: detections }, null, 2));
         return;
       }
       for (const detection of detections) {
@@ -3625,7 +3628,8 @@ notifyCmd
         return;
       }
       console.log("");
-      console.log("Add any of these under notifications.sinks in .harness/project.yaml:");
+      console.log(`Add any of these under notifications.sinks in ${projectYaml(root)},`);
+      console.log(`or under a top-level sinks list in ${userNotificationsFile()}:`);
       console.log("notifications:");
       console.log("  sinks:");
       for (const detection of found) {
@@ -3672,7 +3676,7 @@ notifyCmd
   .action(async (opts: { sink?: string; root?: string; json?: boolean }) => {
     const root = resolveRoot(opts.root);
     try {
-      const { buildTestEvent, dispatchEvent, loadNotificationConfig } = await import("./harness/notifications.js");
+      const { buildTestEvent, dispatchEvent, loadNotificationConfig, reportAttempt } = await import("./harness/notifications.js");
       const sinks = await loadNotificationConfig(root);
       if (sinks.length === 0) {
         console.error("No notification sinks configured; nothing to test.");
@@ -3691,8 +3695,8 @@ notifyCmd
         console.log("No sinks matched.");
       } else {
         for (const attempt of attempts) {
-          const detail = attempt.detail ? ` — ${attempt.detail}` : "";
-          console.log(`[${attempt.outcome.toUpperCase()}] ${attempt.sink} (${attempt.transport})${detail}`);
+          const report = reportAttempt(attempt);
+          console.log(`[${report.tag}] ${attempt.sink} (${attempt.transport}): ${report.message}`);
         }
       }
       if (attempts.some((attempt) => attempt.outcome !== "ok")) process.exit(1);
