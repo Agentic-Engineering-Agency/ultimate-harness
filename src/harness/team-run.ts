@@ -880,9 +880,21 @@ export const defaultGitOps: GitOps = {
     // commit on the INDEX being non-empty rather than on the worktree being clean.
     const { stdout } = await runGit(["diff", "--cached", "--name-only"], cwd);
     if (stdout.trim().length === 0) return;
+    // A8: commit under the repository's configured identity (author and
+    // committer alike), falling back to the harness literal only when the
+    // repository has no identity configured.
+    const readConfig = async (key: string): Promise<string | undefined> => {
+      try {
+        const configured = await runGit(["config", key], cwd);
+        const value = configured.stdout.trim();
+        return value.length > 0 ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    };
     await runGit([
-      "-c", "user.email=uh-team@example.com",
-      "-c", "user.name=uh team worker",
+      "-c", `user.email=${(await readConfig("user.email")) ?? "uh-team@example.com"}`,
+      "-c", `user.name=${(await readConfig("user.name")) ?? "uh team worker"}`,
       "commit", "-m", message,
     ], cwd);
   },

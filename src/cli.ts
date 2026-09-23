@@ -41,6 +41,7 @@ import { adoptSessionTemplate, type SessionTemplateAdoption } from "./harness/se
 import { writeArtifactFile } from "./adapters/_artifact-context.js";
 import { parseScaffoldLang, scaffoldTestsFromSpec } from "./harness/test-scaffold.js";
 import { assertValidRunId, generateRunId } from "./harness/run-id.js";
+import { landWorkerBranches } from "./harness/land.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -1446,6 +1447,34 @@ program
 function collectRepeatedOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
+
+// uh land
+program
+  .command("land")
+  .description("Gated cherry-pick of verified worker branches into the target worktree")
+  .requiredOption("--worker-branch <branch>", "Worker branch to land; repeatable", collectRepeatedOption, [])
+  .requiredOption("--onto <branch>", "Target branch the worker commits land on")
+  .requiredOption("--message-file <path>", "File holding the commit message")
+  .option("--accept-review <reason>", "Accept a failing independent review and record the reason")
+  .option("--fast-forward <path>", "Checkout to fast-forward to the target; repeatable", collectRepeatedOption, [])
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { workerBranch: string[]; onto: string; messageFile: string; acceptReview?: string; fastForward: string[]; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const summary = await landWorkerBranches({
+        root,
+        workerBranches: opts.workerBranch,
+        onto: opts.onto,
+        messageFile: opts.messageFile,
+        acceptReview: opts.acceptReview,
+        fastForward: opts.fastForward,
+      });
+      console.log(JSON.stringify(summary));
+    } catch (err) {
+      console.error(`[BLOCKED] ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
 
 // uh promote
 program
