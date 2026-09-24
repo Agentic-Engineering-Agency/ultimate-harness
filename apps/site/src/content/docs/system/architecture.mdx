@@ -1,0 +1,128 @@
+---
+title: Architecture map
+description: The layers of UH, which module owns what, and how a command travels from the CLI to a runtime and back to disk.
+---
+
+UH is layered so that each layer only talks to the one below it, and **everything that persists goes through a Zod schema**. The rule from `AGENTS.md`: the CLI dispatches, `src/harness/` owns lifecycle behavior, `src/schema/` owns persisted contracts, `src/adapters/` owns runtime-specific execution.
+
+<figure class="diagram">
+<svg viewBox="0 0 820 600" role="img" aria-labelledby="arch-title arch-desc" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:var(--sl-font-system, system-ui, sans-serif)">
+  <title id="arch-title">Ultimate Harness layers</title>
+  <desc id="arch-desc">Surfaces call the CLI; the CLI dispatches to harness modules; harness modules run adapters through the execution core; everything persists to .harness via schemas.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--sl-color-gray-3)" />
+    </marker>
+  </defs>
+  <style>{`
+    .band { fill: var(--sl-color-gray-6); stroke: var(--sl-color-gray-5); }
+    .box { fill: var(--sl-color-bg); stroke: var(--sl-color-gray-4); }
+    .accent { fill: var(--sl-color-accent-low); stroke: var(--sl-color-accent); }
+    .label { fill: var(--sl-color-gray-2); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+    .t { fill: var(--sl-color-white); font-size: 13px; }
+    .s { fill: var(--sl-color-gray-3); font-size: 11px; }
+    .line { stroke: var(--sl-color-gray-3); stroke-width: 1.4; fill: none; }
+  `}</style>
+
+  <rect class="band" x="10" y="10" width="800" height="86" rx="10" />
+  <text class="label" x="24" y="32">Surfaces</text>
+  <rect class="accent" x="24" y="42" width="170" height="42" rx="6" /><text class="t" x="36" y="61">uh CLI</text><text class="s" x="36" y="76">src/cli.ts (Commander)</text>
+  <rect class="box" x="214" y="42" width="180" height="42" rx="6" /><text class="t" x="226" y="61">TUI Mission Control</text><text class="s" x="226" y="76">src/tui, OpenTUI/Solid, Bun</text>
+  <rect class="box" x="414" y="42" width="190" height="42" rx="6" /><text class="t" x="426" y="61">Hermes dashboard plugin</text><text class="s" x="426" y="76">apps/hermes-plugin → uh CLI</text>
+  <rect class="box" x="624" y="42" width="172" height="42" rx="6" /><text class="t" x="636" y="61">MCP server (v0.11)</text><text class="s" x="636" y="76">uh mcp serve, read-only</text>
+
+  <rect class="band" x="10" y="112" width="800" height="150" rx="10" />
+  <text class="label" x="24" y="134">Harness · src/harness</text>
+  <rect class="box" x="24" y="144" width="186" height="106" rx="6" /><text class="t" x="36" y="164">Lifecycle</text><text class="s" x="36" y="182">init · propose · mission-check/put</text><text class="s" x="36" y="198">auto-route · capabilities · fleet</text><text class="s" x="36" y="214">sandbox · verify · typesafe judge</text><text class="s" x="36" y="230">review · promote · land</text>
+  <rect class="box" x="222" y="144" width="186" height="106" rx="6" /><text class="t" x="234" y="164">Run control (v0.11)</text><text class="s" x="234" y="182">live-runs → uh ps</text><text class="s" x="234" y="198">wait · steer/resume · kill</text><text class="s" x="234" y="214">report · mission-cancel</text><text class="s" x="234" y="230">run-digest · interventions</text>
+  <rect class="box" x="420" y="144" width="186" height="106" rx="6" /><text class="t" x="432" y="164">Teams and coordination</text><text class="s" x="432" y="182">team-run · runtime-resources</text><text class="s" x="432" y="198">queue · hive · ledger</text><text class="s" x="432" y="214">notifications · land</text><text class="s" x="432" y="230">session templates</text>
+  <rect class="box" x="618" y="144" width="178" height="106" rx="6" /><text class="t" x="630" y="164">Observability</text><text class="s" x="630" y="182">delivery-observatory</text><text class="s" x="630" y="198">experience-store · compare</text><text class="s" x="630" y="214">otel-export · accounting</text><text class="s" x="630" y="230">telemetry (opt-in)</text>
+
+  <rect class="band" x="10" y="278" width="800" height="118" rx="10" />
+  <text class="label" x="24" y="300">Execution core</text>
+  <rect class="accent" x="24" y="310" width="150" height="72" rx="6" /><text class="t" x="36" y="330">runtime-recovery</text><text class="s" x="36" y="348">resume · steer</text><text class="s" x="36" y="364">deadline grace</text>
+  <rect class="box" x="194" y="310" width="160" height="72" rx="6" /><text class="t" x="206" y="330">runtime-process</text><text class="s" x="206" y="348">spawn · heartbeat</text><text class="s" x="206" y="364">job object · memory cap</text>
+  <rect class="box" x="374" y="310" width="160" height="72" rx="6" /><text class="t" x="386" y="330">RuntimeSupervision</text><text class="s" x="386" y="348">limits · stop codes</text><text class="s" x="386" y="364">route attestation</text>
+  <rect class="box" x="554" y="310" width="120" height="72" rx="6" /><text class="t" x="566" y="330">Tool guard</text><text class="s" x="566" y="348">hook in runtime</text><text class="s" x="566" y="364">fails closed</text>
+  <rect class="box" x="690" y="310" width="106" height="72" rx="6" /><text class="t" x="702" y="330">Settlement</text><text class="s" x="702" y="348">diff · cost</text><text class="s" x="702" y="364">UH_RESULT</text>
+
+  <rect class="band" x="10" y="412" width="800" height="86" rx="10" />
+  <text class="label" x="24" y="434">Adapters · src/adapters</text>
+  <rect class="box" x="24" y="444" width="330" height="42" rx="6" /><text class="t" x="36" y="463">CLI runtimes</text><text class="s" x="36" y="478">oh-my-pi · command-code · claude-code · codex · hermes · pi</text>
+  <rect class="box" x="374" y="444" width="160" height="42" rx="6" /><text class="t" x="386" y="463">Protocol</text><text class="s" x="386" y="478">acp (JSON-RPC stdio)</text>
+  <rect class="box" x="554" y="444" width="242" height="42" rx="6" /><text class="t" x="566" y="463">HTTP APIs</text><text class="s" x="566" y="478">hermes-proxy · openrouter · anthropic</text>
+
+  <rect class="band" x="10" y="514" width="800" height="76" rx="10" />
+  <text class="label" x="24" y="536">Contracts and state</text>
+  <rect class="accent" x="24" y="544" width="370" height="36" rx="6" /><text class="t" x="36" y="567">src/schema · Zod, uh.*.v0 version ids</text>
+  <rect class="accent" x="414" y="544" width="382" height="36" rx="6" /><text class="t" x="426" y="567">.harness/ · YAML + NDJSON on disk, no daemon</text>
+  <path class="line" d="M394 562 H410" marker-end="url(#arrow)" />
+
+  <path class="line" d="M109 84 V110" marker-end="url(#arrow)" />
+  <path class="line" d="M304 84 C304 100 150 96 140 110" marker-end="url(#arrow)" />
+  <path class="line" d="M509 84 C509 102 170 94 160 110" marker-end="url(#arrow)" />
+  <path class="line" d="M160 250 V308" marker-end="url(#arrow)" />
+  <path class="line" d="M174 346 H192" marker-end="url(#arrow)" />
+  <path class="line" d="M274 382 V442" marker-end="url(#arrow)" />
+  <path class="line" d="M354 346 H372" marker-end="url(#arrow)" />
+  <path class="line" d="M534 346 H552" marker-end="url(#arrow)" />
+  <path class="line" d="M674 346 H688" marker-end="url(#arrow)" />
+</svg>
+<figcaption>The TUI and plugin read <code>.harness/</code> through the same CLI-safe primitives; they never define contracts of their own.</figcaption>
+</figure>
+
+For a generated, file-by-file view of the same structure, see the [Code map](/codemap/) and the [interactive explorer](/explorer/).
+
+## Who owns what
+
+| Area | Owner | Key entry points |
+|---|---|---|
+| Command parsing | `src/cli.ts` | `RUNTIME_WIRINGS` maps each runtime id to `{dryRun, run, surfaceBlocked}`; most actions lazy-load their harness module with `await import(...)` |
+| Persisted contracts | `src/schema/*.ts` | `MissionSchema`, `ProjectSchema`, `AdapterSchema`, `RuntimeResultSchema`, `ToolGuardPolicySchema`, ... |
+| Lifecycle | `src/harness/` (about 100 modules on v0.11) | `initializeHarness`, `proposeMission`, `checkMissionPackets`, `verifyMission`, `promoteMission`, `landWorkerBranches` |
+| Runtime execution | `src/adapters/<runtime>.ts` | each registers with `runtimeRegistry` and exports `check*`, `plan*Run`, `dryRun*`, `run*` |
+| Capability manifests | `src/adapters/capabilities/*.ts` | `uh.adapter-capabilities.v0`: cost class, context window, sandbox support, tool surface |
+| Guard hooks | `src/extensions/tool-guard/` | compiled to `dist/extensions/tool-guard/*.js`, snapshotted per content into a user cache before a run |
+| Memory | `src/extensions/honcho-memory/` | optional Honcho memory for codex, hermes, oh-my-pi and pi |
+| TUI | `src/tui/` | run from source by Bun: `bun --preload @opentui/solid/preload src/tui/index.tsx` |
+| Library API | `src/index.ts` | exports only init, status, validate, verify, promote, paths and registry |
+| Build | `scripts/build.mjs` (v0.11) | builds into `dist.next`, swaps it into `dist`, keeps `dist.old`, so a failed build never leaves a broken CLI |
+
+## A command's path, end to end
+
+Take `uh mission run .harness/missions/m1/mission.yaml --runtime oh-my-pi`:
+
+1. **CLI.** Commander parses the flags; `src/cli.ts` loads the mission file through `MissionSchema` (a typo fails here, naming the field).
+2. **Admission.** Template adoption, routing, capability and requirement preflight, sandbox routing and fleet admission run in order ([lifecycle, step 3](/system/lifecycle/#3-run)).
+3. **Recovery wrapper.** `runWithRuntimeRecovery` owns resume, steer and deadline grace, and calls the oh-my-pi adapter.
+4. **Adapter.** `src/adapters/oh-my-pi.ts` allocates `runs/<run-id>/`, claims a live-run entry at the project root, builds the dispatch context (mission, workflow, project brief, verified hive facts), renders the prompt with the final-message sentinel, writes `tool-guard.json`, installs the guard hook snapshot, **arms** the guard with two synthetic probes, writes a per-run `omp-overlay.yml` that pins every OMP model role to the assigned model, and spawns `omp --print --mode json`.
+5. **Execution core.** `runRuntimeProcess` streams native events to `RuntimeSupervision` (limits, stop codes, route attestation), the run digest builder, the loop watchdog (shadow mode) and the intervention ledger. Inside the runtime, every tool call hits the guard hook, which fails closed.
+6. **Settlement.** On exit, the control file and result are reconciled, the diff is captured, cost is resolved against `.harness/prices.yaml`, the live-run entry settles, notifications fire, and the CLI prints `UH_RESULT`.
+
+## Design rules that shape the code
+
+- **Filesystem first, daemon never.** Coordination between processes (live runs, steer requests, cancellation, the hive) is done with files and atomic renames, retried on Windows where open handles block renames.
+- **Fail closed.** The guard hook denies on any internal error; arming failure stops the run before spawn; an unknown model is refused; an unknown cost stays unknown instead of becoming zero.
+- **Deterministic before semantic.** Model judgment (routing Level 1, System One verification) only ever chooses among options that deterministic code already allowed, and cannot overturn a deterministic failure.
+- **Evidence over claims.** Hive facts must cite evidence and are hash-chained; land decisions and interventions are hash-chained; acceptance evidence is bound to an input digest.
+
+## Where the complexity is
+
+The 20 largest files on the v0.11 line, which is also where the refactoring budget should go first:
+
+| File | Lines | Note |
+|---|---|---|
+| `src/cli.ts` | 3,709 | Should be a thin dispatcher. See [debt](/release/debt/). |
+| `src/harness/team-run.ts` | 2,407 | Planning, git, salvage, integration and verdict in one file |
+| `apps/hermes-plugin/dashboard/plugin_api.py` | 1,907 | FastAPI router for the dashboard |
+| `src/harness/acceptance.ts` | 1,685 | Acceptance campaign runner and report |
+| `src/adapters/oh-my-pi.ts` | 1,439 | Most complete adapter: guard, overlay, resume |
+| `src/adapters/openrouter.ts`, `hermes-proxy.ts`, `anthropic.ts` | about 1,000 each | Three near-parallel HTTP adapters that could share one client |
+| `src/harness/run-digest.ts` | 1,038 | Live run digest |
+| `src/tui/dashboard.tsx` | 1,001 | TUI main view |
+| `src/harness/notifications.ts` | 991 | Sinks and presets |
+| `src/adapters/pi.ts`, `hermes.ts`, `codex.ts`, `acp.ts` | 800 to 920 each | |
+| `src/harness/live-runs.ts`, `kill.ts` | about 840 each | Run registry and kill proof |
+| `src/harness/runtime-supervision.ts`, `verify.ts` | about 750 each | |
+
+`src/` is about 53,000 lines on the v0.11 line, with 147 test files.

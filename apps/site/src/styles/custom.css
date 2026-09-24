@@ -1,0 +1,23 @@
+/* Teal accent to match the UH mark. Starlight derives the rest. */
+:root {
+  --sl-color-accent-low: #083c38;
+  --sl-color-accent: #14b8a6;
+  --sl-color-accent-high: #ccfbf1;
+}
+:root[data-theme='light'] {
+  --sl-color-accent-low: #ccfbf1;
+  --sl-color-accent: #0f766e;
+  --sl-color-accent-high: #134e4a;
+}
+/* Wide tables (registers, PR matrices) scroll instead of squeezing. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+}
+.sl-markdown-content figure.diagram {
+  margin: 1.5rem 0;
+}
+.sl-markdown-content figure.diagram img {
+  width: 100%;
+  height: auto;
+}
