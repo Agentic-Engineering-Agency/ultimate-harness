@@ -6,9 +6,11 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 
 ## [Unreleased]
 
-Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been published.
+Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been published. 0.10.0 was prepared on `dev` in June 2026 but never tagged: it is skipped, and its changes (UH-138, UH-139 and the spec-stale fix below) ship in 0.11.0.
 
 ### Added
+- Capability checks warn by default (UH-138). A mission `capabilities:` tag the resolved adapter does not declare prints one `[WARN]` line per tag and the run proceeds; `--strict` on `uh mission dry-run`, `run` and `run-all` turns each mismatch into an error. `--force` bypasses the check with a `[WARN]` line naming the runtime. `runtime_requirements` stay hard preconditions and are never relaxed.
+- Runnable `examples/missions/hello-uh` walkthrough and a no-dependency documentation dead-link checker (`bun run docs:check-links`, run in CI) over `docs/` (UH-139).
 - Native ACP (Agent-Client Protocol) v1 adapter: `acp` runtime supporting headless agent orchestration via standard JSON-RPC 2.0 over stdio with run-id integrity, strict `uh.runtime-result.v0` validation, wire-conformance error mapping, bidirectional permission request handling (`session/request_permission`), timeout and cancellation signal threading, and 17 regression tests.
 - Progressive semantic routing: `chooseSemanticRoute` in `src/harness/auto-route.ts` combining Level 0 deterministic eligibility (runtime_requirements, capabilities, fleet, and `decision_policy.allowed_runtimes`) with Level 1 TypeSafe System One (JEV) classification. Evaluates task cognitive complexity and selects the optimal adapter and model from candidate options with calibrated confidence, writing `uh.decision-receipt.v0` receipts.
 - Mission `decision_policy` schema: `DecisionPolicySchema` in `src/schema/mission.ts` allowing missions to specify `enabled`, `min_confidence`, `allowed_runtimes`, `allowed_models`, `require_provider_for_route`, `require_provider_for_retry`, `escalation_model`, and `fallback_model`.
@@ -110,6 +112,8 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 
 ### Fixed
 
+- Tool Guard treated every `/`-prefixed argument as a `cmd.exe` switch. On Linux and macOS, `cp x /etc/y` and `mv x ~/.bashrc` were allowed because the destination was skipped, and `rm -rf` of an absolute path inside the worker root was denied as an untargeted `delete_outside` before the hive and tamper checks. `/x` tokens are now switches only for `cmd.exe` verbs.
+- `spec-stale` drift treats `specs/` as the cross-cutting spec root (specs moved out of `docs/specs/`), so implementation changes with a matching `specs/` update are no longer flagged.
 - Tool Guard judges agent clients by executable position instead of a whole-command text match. `codex.cmd`, `omp.exe`, path-qualified binaries, the PowerShell call operator, `env`/`xargs`/`pnpm dlx` launchers, `bash -c` bodies and command substitutions are denied; `grep -r omp src` and `cat docs/codex.md` are no longer false denials that consumed a worker's denial budget.
 - Workers can no longer start paid runtimes through UH itself (`uh mission run`, `run-all`, `run-team`, `uh acceptance run`, or `node dist/cli.js ...`). Read-only UH commands stay available, and the Claude Code orchestrator role keeps its controller-command allowance.
 - A runtime that resolves helper or sub-agent models from operator-global settings could spend on a route other than the assigned one, because only the top-level session was pinned and attested. Roles are now pinned per run and delegated routes are attested.
@@ -216,7 +220,7 @@ Milestone **"Memory & adapter matrix"** ([Linear UH-131 / UH-136 / UH-137](https
 
 - The native Anthropic adapter ships **experimental**: registered and routable, but not yet graduated to `active`. Graduation follows a live-smoke promotion record like the other adapters.
 - The telemetry primitive is **unwired** — no events are emitted yet. It exists as the opt-in seam; instrumentation lands in the [UH-135](https://linear.app/agenticengineering-agency/issue/UH-135) follow-up. UH still ships no telemetry by default.
-- **Deferred to v0.10.0+**: capability-declaration enforcement (manifest/mission `capabilities:` binding, warn + `--strict`); the telemetry instrumentation follow-up (UH-135).
+- **Deferred to v0.10.0+** (0.10.0 was later skipped; both shipped with 0.11.0): capability-declaration enforcement (manifest/mission `capabilities:` binding, warn + `--strict`); the telemetry instrumentation follow-up (UH-135).
 
 ## [0.8.0] — 2026-05-25
 
