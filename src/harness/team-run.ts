@@ -1,8 +1,9 @@
 import { mapResourceWaves, workerConcurrency } from "./runtime-resources.js";
 import { DEFAULT_PROTECTED_PATHS, RuntimeControlSchema, type RuntimeLimits, type TeamResourceLimits } from "../schema/runtime-control.js";
-import type { TeamWorker } from "../schema/mission.js";
+import { resolveWorkerAdapter, type TeamWorker } from "../schema/mission.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
+import { captureReplace } from "./interventions.js";
 /**
  * UH-72 — Team mission runtime.
  *
@@ -57,6 +58,10 @@ import { assertSafeMissionId, assertWithinRoot, fileExists, isPathWithin } from 
 import { removeWorktreeLinks } from "./worktree-links.js";
 import { listLiveRuns, registerLiveRun } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
+import { elapsedMs, notifyTeamSettled } from "./notifications.js";
+import { getSessionTemplate } from "./session-templates.js";
+import { appendWorkerRules } from "./session-template-adoption.js";
+import type { SessionTemplate } from "../schema/session-template.js";
 const execFileP = promisify(execFile);
 
 /* -------------------------------------------------------------------------- */
@@ -66,7 +71,7 @@ const execFileP = promisify(execFile);
 export type LeaderStrategy = "merge" | "cherry-pick" | "rebase";
 
 export type { TeamWorker } from "../schema/mission.js";
-type TeamWorkerSpec = Omit<TeamWorker, "adapter"> & { adapter: string };
+type TeamWorkerSpec = Omit<TeamWorker, "adapter"> & { adapter?: string };
 
 export interface TeamLeader {
   /** Adapter id the leader dispatches against. */
@@ -469,7 +474,7 @@ export interface TeamRunResult {
 export function planTeamRun(
   mission: TeamMission,
   root: string,
-  options: { strategy?: LeaderStrategy } = {},
+  options: { strategy?: LeaderStrategy; templates?: ReadonlyMap<string, SessionTemplate> } = {},
 ): TeamPlan {
   assertSafeMissionId(mission.id);
   if (!mission.team || !Array.isArray(mission.team.workers) || mission.team.workers.length === 0) {
@@ -494,8 +499,15 @@ export function planTeamRun(
     if (!isSafeSegment(spec.role)) {
       throw new Error(`Team worker role must be a safe identifier, got: ${spec.role}`);
     }
-    if (!isSafeSegment(spec.adapter)) {
-      throw new Error(`Team worker adapter must be a safe identifier, got: ${spec.adapter}`);
+    // The effective adapter is resolved once here: the worker's explicit
+    // adapter wins, otherwise the adapter of the session template it adopts.
+    const template = spec.template ? options.templates?.get(spec.template) : undefined;
+    const adapter = resolveWorkerAdapter(spec, template);
+    if (adapter === undefined) {
+      throw new Error(`Team worker ${spec.role} must declare an adapter or a template that supplies one`);
+    }
+    if (!isSafeSegment(adapter)) {
+      throw new Error(`Team worker adapter must be a safe identifier, got: ${adapter}`);
     }
     const count = spec.count ?? 1;
     if (!Number.isInteger(count) || count <= 0) {
@@ -506,7 +518,7 @@ export function planTeamRun(
       const worktreePath = path.join(workersRoot, id);
       workers.push({
         role: spec.role,
-        adapter: spec.adapter,
+        adapter,
         index: i,
         id,
         worktreePath,
@@ -832,6 +844,7 @@ function resolveWorkerContract(
   canonicalPacket: Record<string, unknown>,
   spec: TeamWorkerSpec,
   basePacket: Record<string, unknown> = canonicalPacket,
+  template?: SessionTemplate,
 ): WorkerContract {
   const baseObjective = typeof basePacket.objective === "string" ? basePacket.objective : "";
   const parentObjective = typeof canonicalPacket.objective === "string" ? canonicalPacket.objective : "";
@@ -843,27 +856,52 @@ function resolveWorkerContract(
   const baseOverrides = objectRecord(basePacket.runtime_config_overrides);
   const parentOverrides = objectRecord(canonicalPacket.runtime_config_overrides);
   const workerOverrides = spec.runtime_config_overrides ?? {};
-  const runtimeConfigOverrides = { ...parentOverrides, ...baseOverrides, ...workerOverrides };
-  if (spec.limits) {
-    runtimeConfigOverrides.limits = {
-      ...objectRecord(parentOverrides.limits),
-      ...objectRecord(baseOverrides.limits),
-      ...spec.limits,
-    };
+  // The template is the least specific source: the parent packet, the worker's
+  // own packet, and the worker spec each override it key by key.
+  const runtimeConfigOverrides = {
+    ...(template?.runtime_config_overrides ?? {}),
+    ...parentOverrides,
+    ...baseOverrides,
+    ...workerOverrides,
+  };
+  const mergedLimits = {
+    ...(template?.limits ?? {}),
+    ...objectRecord(parentOverrides.limits),
+    ...objectRecord(baseOverrides.limits),
+    ...(spec.limits ?? {}),
+  };
+  if (Object.keys(mergedLimits).length > 0) {
+    runtimeConfigOverrides.limits = mergedLimits;
+  }
+  const mergedRecovery = {
+    ...(template?.recovery ?? {}),
+    ...objectRecord(parentOverrides.recovery),
+    ...objectRecord(baseOverrides.recovery),
+  };
+  if (Object.keys(mergedRecovery).length > 0) {
+    runtimeConfigOverrides.recovery = mergedRecovery;
   }
   const expectedOutputs = spec.expected_outputs ?? (
     basePacket.expected_outputs && typeof basePacket.expected_outputs === "object"
       ? basePacket.expected_outputs as WorkerContract["expected_outputs"]
       : undefined
   );
-  const constraints = Array.isArray(basePacket.constraints)
+  const baseConstraints = Array.isArray(basePacket.constraints)
     ? basePacket.constraints.filter((item): item is string => typeof item === "string")
-    : undefined;
+    : [];
+  // Worker rules land after the worker's own constraints, the same order the
+  // prompt renders: mission guidance first, then the template's.
+  const constraints = appendWorkerRules(baseConstraints, template?.worker_rules ?? []);
+  // `memory_mb` is a team-resource concern, not a runtime limit; the canonical
+  // contract's strict limits schema rejects it, so keep it out of `limits` (it
+  // still rides in `runtime_config_overrides.limits` for the runtime packet).
+  const contractLimits: Record<string, unknown> = { ...mergedLimits };
+  delete contractLimits.memory_mb;
   return {
     ...(objective ? { objective } : {}),
-    ...(constraints && constraints.length > 0 ? { constraints } : {}),
+    ...(constraints.length > 0 ? { constraints } : {}),
     ...(Object.keys(runtimeConfigOverrides).length > 0 ? { runtime_config_overrides: runtimeConfigOverrides } : {}),
-    ...(spec.limits ? { limits: spec.limits } : {}),
+    ...(Object.keys(contractLimits).length > 0 ? { limits: contractLimits } : {}),
     ...(expectedOutputs ? { expected_outputs: expectedOutputs } : {}),
     ...(spec.seed !== undefined ? { seed: spec.seed } : {}),
   };
@@ -1049,7 +1087,16 @@ export async function runTeamMission(
   root: string,
   options: RunTeamMissionOptions,
 ): Promise<TeamRunResult> {
-  const plan = planTeamRun(mission, root, { strategy: options.strategy });
+  // Resolve every worker's session template BEFORE planning or dispatch, so an
+  // unknown template id fails the whole team up front instead of after a
+  // worker's worktree exists. Each id is loaded once and reused by every worker
+  // that names it.
+  const workerTemplates = new Map<string, SessionTemplate>();
+  for (const spec of mission.team.workers) {
+    if (spec.template === undefined || workerTemplates.has(spec.template)) continue;
+    workerTemplates.set(spec.template, await getSessionTemplate(root, spec.template));
+  }
+  const plan = planTeamRun(mission, root, { strategy: options.strategy, templates: workerTemplates });
   workerConcurrency(plan.workers.length, mission.team.resources);
   const workerMemory = mission.team.resources?.worker_memory_mb;
   if (workerMemory && (process.platform !== "win32" || plan.workers.some(worker => !["oh-my-pi", "command-code", "claude-code"].includes(worker.adapter)))) {
@@ -1114,8 +1161,12 @@ export async function runTeamMission(
       const artifactRoot = workerArtifactRoot(plan.teamRoot, worker.id, parentRunId);
       const workerSpec = worker.spec ?? { role: worker.role, adapter: worker.adapter as TeamWorker["adapter"] };
       const workerMission = workerMissionPackets.get(worker.id);
-      const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet);
+      const template = workerSpec.template ? workerTemplates.get(workerSpec.template) : undefined;
+      const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet, template);
+      // The runtime receives the same limits the contract adopted: template
+      // defaults first, then the worker's own limits, then the memory cap.
       const limits = {
+        ...(template?.limits ?? {}),
         ...(workerSpec.limits ?? {}),
         ...(workerMemory ? { memory_mb: workerMemory } : {}),
       };
@@ -1190,7 +1241,8 @@ export async function runTeamMission(
       }
       await seedMissionPacket(canonicalMissionDir, wp.worktreePath, mission.id);
       const workerSpec = wp.spec ?? { role: wp.role, adapter: wp.adapter as TeamWorker["adapter"] };
-      const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet);
+      const template = workerSpec.template ? workerTemplates.get(workerSpec.template) : undefined;
+      const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet, template);
       const sourceBytes = workerMission?.bytes ?? canonicalBytes;
       const derivedBytes = await writeDerivedMissionPacket(sourceBytes, wp.worktreePath, workerMissionId, contract);
       if (workerMission) {
@@ -1568,6 +1620,14 @@ export async function runTeamMission(
     await gitOps.deleteBranch(root, plan.leader.branch);
   }
 
+  notifyTeamSettled(root, {
+    run_id: parentRunId,
+    mission: mission.id,
+    status: overallStatus,
+    duration_ms: elapsedMs(startedAt, canonicalState.finished_at ?? undefined),
+    files_written: workerOutcomes.reduce((total, worker) => total + worker.filesTouched.length, 0),
+  });
+
   return {
     missionId: mission.id,
     plan,
@@ -1874,6 +1934,7 @@ async function guardTeamRelaunch(args: {
   }
   if (args.replace) {
     await archiveTeamRun(args.gitOps, args.root, args.plan);
+    await captureReplace(args.root, { missionId: args.missionId });
     return;
   }
   const retained = [...preexisting.branches, ...preexisting.worktrees];

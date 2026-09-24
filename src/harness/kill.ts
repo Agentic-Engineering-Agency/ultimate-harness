@@ -20,9 +20,11 @@ import {
 } from "./live-runs.js";
 import { cancelLocalMissionRun, runRootForRecord, type MissionCancelResult } from "./mission-cancel.js";
 import { reconcileRuntimeSettlement } from "./runtime-settlement.js";
+import { elapsedMs, notifyRunOrphaned, notifyRunSettled } from "./notifications.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { assertSafeMissionId } from "./mission.js";
 import { assertValidRunId } from "./run-id.js";
+import { captureKill } from "./interventions.js";
 
 /** Cancellation-target resolution, re-exported so `uh kill` owns one surface. */
 export { runRootForRecord } from "./mission-cancel.js";
@@ -427,6 +429,16 @@ async function settleOrphanedRun(
     stop_code: "controller_lost",
     settled_at: new Date(context.now).toISOString(),
   });
+  notifyRunOrphaned(context.projectRoot, {
+    run_id: record.run_id,
+    mission: record.mission_id,
+    runtime: record.runtime,
+    ...(record.model !== undefined ? { model: record.model } : {}),
+    status: "failed",
+    stop_code: "controller_lost",
+    duration_ms: elapsedMs(record.started_at, new Date(context.now).toISOString()),
+    run_dir: path.dirname(path.resolve(context.projectRoot, record.control_path)),
+  });
   return {
     ...entry,
     outcome: "orphan_settled",
@@ -576,6 +588,16 @@ async function settleRecordAfterStop(
     status: "cancelled",
     stop_code: "cancelled",
     settled_at: new Date(context.now).toISOString(),
+  });
+  notifyRunSettled(context.projectRoot, {
+    run_id: record.run_id,
+    mission: record.mission_id,
+    runtime: record.runtime,
+    ...(record.model !== undefined ? { model: record.model } : {}),
+    status: "cancelled",
+    stop_code: "cancelled",
+    duration_ms: elapsedMs(record.started_at, new Date(context.now).toISOString()),
+    run_dir: path.dirname(path.resolve(context.projectRoot, record.control_path)),
   });
   return {
     ...entry,
@@ -769,6 +791,14 @@ export async function killRuns(projectRoot: string, options: KillOptions = {}): 
       teamMarks.push(await markTeamStateCancelled(root, options.teamId, runId, now));
     }
   }
+
+  await captureKill(root, entries.map((entry) => ({
+    run_id: entry.run_id,
+    mission_id: entry.mission_id,
+    outcome: entry.outcome,
+    ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
+    ...(entry.team?.mission_id !== undefined ? { team_id: entry.team.mission_id } : {}),
+  })));
 
   return buildReport(root, new Date(now).toISOString(), entries, teamMarks);
 }

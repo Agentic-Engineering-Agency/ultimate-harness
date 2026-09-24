@@ -83,8 +83,32 @@ const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/
 export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi", "command-code", "claude-code", "acp"] as const;
 const AdapterIdSchema = z.enum(TEAM_ADAPTER_IDS);
 
+/** Session-template id referencing `.harness/templates/<id>.yaml`. */
+const WorkerTemplateIdSchema = z
+  .string()
+  .min(1, { message: "template id must not be empty" })
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, {
+    message: "template id must start with [a-zA-Z0-9] and use only [a-zA-Z0-9._-]",
+  })
+  .refine((id) => id !== "." && id !== "..", {
+    message: "template id must not be '.' or '..'",
+  });
+
 export const TeamWorkerSchema = z.object({
-  adapter: AdapterIdSchema,
+  /**
+   * Runtime the worker dispatches against. Optional only when `template` is
+   * set: the worker then adopts the template's adapter. An explicit adapter
+   * always wins over the template's. A worker with neither fails validation.
+   */
+  adapter: AdapterIdSchema.optional(),
+  /**
+   * Optional session template the worker adopts. The worker's contract takes
+   * the template's `adapter`, `runtime_config_overrides`, `limits`, `recovery`,
+   * and `worker_rules` as defaults; the worker spec and the worker's own packet
+   * win over the template. An unknown template id fails the team before any
+   * worker starts.
+   */
+  template: WorkerTemplateIdSchema.optional(),
   role: z.string().min(1),
   mission_id: z.string().min(1).optional(),
   count: z.number().int().positive().optional().default(1),
@@ -104,9 +128,30 @@ export const TeamWorkerSchema = z.object({
     files: z.array(z.string().min(1)),
   }).strict().optional(),
   seed: z.number().int().nonnegative().optional(),
-}).strict();
+}).strict().superRefine((worker, ctx) => {
+  if (worker.adapter === undefined && worker.template === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      message: "team worker requires an adapter, or a template that supplies one",
+      path: ["adapter"],
+    });
+  }
+});
 
 export type TeamWorker = z.input<typeof TeamWorkerSchema>;
+
+/**
+ * Effective adapter for a team worker: its explicit adapter wins, otherwise the
+ * adapter of the session template it adopts. Returns `undefined` when neither
+ * supplies one — a combination the worker schema rejects, so callers that have
+ * resolved the template may treat a defined result as the worker's runtime.
+ */
+export function resolveWorkerAdapter(
+  worker: { adapter?: string | undefined; template?: string | undefined },
+  template?: { adapter?: string | undefined } | undefined,
+): string | undefined {
+  return worker.adapter ?? template?.adapter;
+}
 
 const TeamLeaderSchema = z.object({
   adapter: AdapterIdSchema,

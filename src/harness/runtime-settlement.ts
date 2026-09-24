@@ -9,6 +9,7 @@ import { assertSafeMissionId } from "./mission.js";
 import { appendRunsIndexEntry, assertValidRunId, mirrorRuntimeResultToLatest, writeLatestPointer } from "./run-id.js";
 import { withArtifactTransaction, writeAtomicArtifact } from "./artifact-transaction.js";
 import { settleLiveRun } from "./live-runs.js";
+import { elapsedMs, notifyRunSettled } from "./notifications.js";
 
 /** Reconcile a guardian's confirmed owner-loss receipt; never infer termination from a stale heartbeat. */
 export async function reconcileRuntimeSettlement(root: string, missionId: string, runId: string): Promise<boolean> {
@@ -61,6 +62,15 @@ export async function reconcileRuntimeSettlement(root: string, missionId: string
       stop_code: "controller_lost",
       settled_at: new Date().toISOString(),
     }).catch(() => undefined);
+    notifyRunSettled(root, {
+      run_id: runId,
+      mission: missionId,
+      runtime: control.runtime,
+      status: "failed",
+      stop_code: "controller_lost",
+      duration_ms: elapsedMs(control.started_at, control.heartbeat_at),
+      run_dir: path.dirname(controlPath),
+    });
   }
   return settled;
 }

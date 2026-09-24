@@ -1,6 +1,13 @@
-import { appendFile, readFile } from "node:fs/promises";
-import { ToolGuardArtifactSchema, type ToolGuardArtifact } from "../../schema/runtime-control.js";
-import { decideToolCall, toolTargetForLog } from "../../harness/tool-guard.js";
+import { runToolGuard, toolGuardFailClosedReason } from "./core.js";
+
+/**
+ * Claude Code `PreToolUse` wrapper around the shared guard core.
+ *
+ * Claude Code feeds one JSON request on stdin and reads a JSON decision on
+ * stdout. An allowed call writes nothing (the tool runs); a denial carries the
+ * `permissionDecision: "deny"` response. The top-level handler denies on any
+ * error so a broken hook can never let a call through.
+ */
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -8,70 +15,47 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function deny(reason: string): void {
   process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: reason,
-    },
+    hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason },
   }));
 }
 
-async function main(): Promise<void> {
-  const policyPath = process.env.UH_TOOL_GUARD_POLICY;
-  const logPath = process.env.UH_TOOL_GUARD_LOG;
-  if (!policyPath || !logPath) {
-    deny("UH Claude Code guard policy is not configured; refusing the tool call");
-    return;
+function callIdOf(request: Record<string, unknown> | undefined): string | undefined {
+  for (const key of ["tool_use_id", "tool_call_id", "toolCallId"]) {
+    const value = request?.[key];
+    if (typeof value === "string" && value) return value;
   }
+  return undefined;
+}
 
-  let policy: ToolGuardArtifact;
-  try {
-    policy = ToolGuardArtifactSchema.parse(JSON.parse(await readFile(policyPath, "utf8")));
-  } catch {
-    deny("UH Claude Code guard policy could not be loaded; refusing the tool call");
-    return;
-  }
-
-  const input = record(JSON.parse(await new Promise<string>((resolve, reject) => {
-    let body = "";
+async function readRequest(): Promise<Record<string, unknown> | undefined> {
+  const body = await new Promise<string>((resolve, reject) => {
+    let text = "";
     process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk: string) => { body += chunk; });
-    process.stdin.on("end", () => resolve(body));
+    process.stdin.on("data", (chunk: string) => { text += chunk; });
+    process.stdin.on("end", () => resolve(text));
     process.stdin.on("error", reject);
-  })));
-  if (!input) {
-    deny("UH Claude Code guard received invalid hook input; refusing the tool call");
-    return;
-  }
-
-  const toolName = typeof input.tool_name === "string" ? input.tool_name : "unknown";
-  const callId = typeof input.tool_use_id === "string"
-    ? input.tool_use_id
-    : typeof input.tool_call_id === "string"
-      ? input.tool_call_id
-      : typeof input.toolCallId === "string"
-        ? input.toolCallId
-        : undefined;
-  const decision = decideToolCall(
-    policy,
-    toolName,
-    input.tool_input,
-    policy.worker_root,
-    { allowControllerCommands: policy.controller_commands === true },
-  );
-  const logEntry = decision.deny
-    ? { ts: new Date().toISOString(), call_id: callId, tool: toolName, target: decision.deny.target ?? toolTargetForLog(toolName, input.tool_input), class: decision.deny.class, reason: decision.deny.reason }
-    : { ts: new Date().toISOString(), call_id: callId, tool: toolName, target: toolTargetForLog(toolName, input.tool_input), class: "allow" };
+  });
   try {
-    await appendFile(logPath, JSON.stringify(logEntry) + "\n", "utf8");
+    return record(JSON.parse(body));
   } catch {
-    deny("UH Claude Code guard audit log could not be written; refusing the tool call");
-    return;
+    return undefined;
   }
-  if (decision.deny) deny(decision.deny.reason);
+}
 
+async function main(): Promise<void> {
+  const request = await readRequest();
+  const verdict = await runToolGuard({
+    policyPath: process.env.UH_TOOL_GUARD_POLICY,
+    logPath: process.env.UH_TOOL_GUARD_LOG,
+    call: {
+      tool: typeof request?.tool_name === "string" ? request.tool_name : "",
+      input: request?.tool_input,
+      callId: callIdOf(request),
+    },
+  });
+  if (verdict.decision === "deny") deny(verdict.reason ?? "UH tool guard denied the tool call");
 }
 
 void main().catch((error) => {
-  deny(`UH Claude Code guard failed closed: ${error instanceof Error ? error.message : String(error)}`);
+  deny(toolGuardFailClosedReason(error));
 });

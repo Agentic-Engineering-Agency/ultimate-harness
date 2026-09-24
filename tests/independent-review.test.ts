@@ -13,6 +13,7 @@ import { IndependentReviewAssessmentSchema, IndependentReviewRequestSchema, Inde
 import { createSandbox, listSandboxes } from "../src/harness/sandbox.js";
 import { runCommandCode, planCommandCodeRun } from "../src/adapters/command-code.js";
 import { verifyMission } from "../src/harness/verify.js";
+import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "uh-independent-review-"));
@@ -35,7 +36,7 @@ beforeEach(async () => {
   snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-independent-review-snapshot-"));
   const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "cmdc-hook.js");
   await mkdir(path.dirname(hook), { recursive: true });
-  await writeFile(hook, "export default function () {}\n");
+  await writeGuardHookFixture(hook);
   previousDist = process.env.UH_HARNESS_DIST;
   previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
   process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");

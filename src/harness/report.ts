@@ -20,7 +20,14 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import { RuntimeSessionSchema } from "../schema/artifacts.js";
-import type { RunDigest, RunDigestCurrentActivity, RunDigestDenial, RunDigestUsage } from "../schema/run-digest.js";
+import type {
+  RunDigest,
+  RunDigestCurrentActivity,
+  RunDigestDenial,
+  RunDigestEfficiency,
+  RunDigestLongRunningTool,
+  RunDigestUsage,
+} from "../schema/run-digest.js";
 import {
   defaultProcessLister,
   discoverRuns,
@@ -97,10 +104,13 @@ export interface RunReport {
   cost_source?: "reported" | "estimated";
   cost_unknown_reason?: string;
   activity: { source: string; window: number; calls: ReportActivityCall[] };
-  loop_signals: DeterministicLoopSignals;
+  /** The deterministic signals, plus the stalled calls a digest reports (`long_running_tools`). */
+  loop_signals: DeterministicLoopSignals & { long_running_tools?: RunDigestLongRunningTool[] };
   files_written: string[];
   /** Present only for a run that carries a digest: what the run is doing now. */
   current_activity?: RunDigestCurrentActivity;
+  /** The measured efficiency block; present only for a digest-backed report. */
+  efficiency?: RunDigestEfficiency;
   last_assistant_text?: string;
 }
 
@@ -359,6 +369,7 @@ function reportFromDigest(context: ReportContext, digest: RunDigest): RunReport 
     loop_signals: digest.loop_signals,
     files_written: digest.files_written.files,
     current_activity: digest.current_activity,
+    efficiency: digest.efficiency,
     ...(digest.last_assistant_text !== undefined ? { last_assistant_text: digest.last_assistant_text } : {}),
   };
 }
@@ -467,6 +478,36 @@ function formatCurrentActivity(activity: RunDigestCurrentActivity): string {
   return `current activity: ${activity.kind} since ${since}`;
 }
 
+/**
+ * The efficiency block in a few lines. A field the runtime did not measure is
+ * simply not printed (never rendered as `0`).
+ */
+function formatEfficiency(efficiency: RunDigestEfficiency | undefined): string[] {
+  if (efficiency === undefined) return [];
+  const lines: string[] = [];
+  const context: string[] = [];
+  if (efficiency.context_tokens_first !== undefined) context.push(`first=${grouped(efficiency.context_tokens_first)}`);
+  if (efficiency.context_tokens_after_five !== undefined) context.push(`after5=${grouped(efficiency.context_tokens_after_five)}`);
+  if (efficiency.context_tokens_last !== undefined) context.push(`last=${grouped(efficiency.context_tokens_last)}`);
+  if (context.length > 0) lines.push(`efficiency: context ${context.join(" ")}`);
+
+  const measured: string[] = [];
+  if (efficiency.single_tool_turn_share !== undefined) {
+    measured.push(`single-tool turns=${(efficiency.single_tool_turn_share * 100).toFixed(1)}%`);
+  }
+  if (efficiency.read_calls !== undefined) measured.push(`reads=${efficiency.read_calls} re-reads=${efficiency.re_read_calls ?? 0}`);
+  if (efficiency.model_time_ms !== undefined || efficiency.tool_time_ms !== undefined) {
+    measured.push(`model=${formatDuration(efficiency.model_time_ms)} tool=${formatDuration(efficiency.tool_time_ms)}`);
+  }
+  if (measured.length > 0) lines.push(`efficiency: ${measured.join("  ")}`);
+
+  if (efficiency.tool_output_bytes !== undefined) {
+    const bytes = efficiency.tool_output_bytes;
+    lines.push(`efficiency: tool output bytes read=${grouped(bytes.read)} write=${grouped(bytes.write)} shell=${grouped(bytes.shell)} other=${grouped(bytes.other)}`);
+  }
+  return lines;
+}
+
 /** A compact, human-readable rendering. Contains no absolute path. */
 export function formatRunReport(report: RunReport): string {
   const route = report.model !== undefined ? `${report.runtime}/${report.model}` : report.runtime;
@@ -490,7 +531,13 @@ export function formatRunReport(report: RunReport): string {
 
   if (report.current_activity !== undefined) lines.push(formatCurrentActivity(report.current_activity));
 
+  for (const line of formatEfficiency(report.efficiency)) lines.push(line);
+
   lines.push(`loop signals: identical_repeats=${report.loop_signals.identical_repeats} alternating_pairs=${report.loop_signals.alternating_pairs} distinct_targets=${report.loop_signals.distinct_targets}`);
+  const stalled = report.loop_signals.long_running_tools ?? [];
+  if (stalled.length > 0) {
+    lines.push(`long-running tools: ${stalled.map((call) => `${call.tool} ${call.target} (${call.minutes}m)`).join(", ")}`);
+  }
 
   lines.push(`activity (${report.activity.source}, last ${report.activity.calls.length}):`);
   if (report.activity.calls.length === 0) lines.push("  (none)");

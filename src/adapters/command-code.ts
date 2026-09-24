@@ -22,6 +22,7 @@ import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides
 import { generateRunId, appendRunsIndexEntry, writeLatestPointer, mirrorRuntimeResultToLatest } from "../harness/run-id.js";
 import { runRuntimeProcess, type RuntimeProcessInput, type RuntimeProcessOutput } from "../harness/runtime-process.js";
 import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
+import { armGuard, guardArmStopReceipt, GUARD_ARM_LOG_NAME, type GuardArmingFailure, type GuardArmingInput, type GuardArmingResult } from "../harness/guard-arming.js";
 import { nativeRuntimeCompleted, nativeRuntimeEvent, nativeRuntimeRoute, nativeTerminalBudgetCap, nativeTerminalStopReason, runtimeRouteMismatch, runtimeTerminalFailure } from "../harness/runtime-supervision.js";
 import { settleNativeCap, reconcileNativeCapSettlement } from "../harness/runtime-settlement.js";
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
@@ -178,6 +179,8 @@ export async function dryRunCommandCode(root: string, missionPath: string, optio
 export interface CommandCodeRunOptions {
   runner?: (input: RuntimeProcessInput) => Promise<RuntimeProcessOutput>;
   collectDiff?: (cwd: string) => Promise<{ patch: string; errors?: string[] }>;
+  /** Pre-launch guard arming seam; defaults to the real arming check. */
+  armGuard?: (input: GuardArmingInput) => Promise<GuardArmingResult>;
   runId?: string;
   artifactRoot?: string;
   timeoutMs?: number;
@@ -204,6 +207,7 @@ export async function runCommandCode(root: string, missionPath: string, options:
   await writeLatestPointer(canonical, plan.mission.id, { schema_version: "uh.latest-run.v0", run_id: runId, started_at: startedAt, status: "running" });
   await appendMissionEvent(artifacts, { event: "runtime.started", runtime: "command-code", mission_id: plan.mission.id, run_id: runId, timestamp: startedAt });
   let guardEnv: NodeJS.ProcessEnv | undefined;
+  let guardArmFailure: GuardArmingFailure | undefined;
   if (plan.guard) {
     const effectiveLimits = { ...plan.config.limits, ...options.limits };
     const protectedPaths = effectiveLimits.protected_paths ?? DEFAULT_PROTECTED_PATHS;
@@ -248,6 +252,13 @@ export async function runCommandCode(root: string, missionPath: string, options:
     });
     await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
+    const arming = await (options.armGuard ?? armGuard)({
+      runtime: "command-code",
+      policyPath,
+      logPath: path.join(artifacts.runDir, GUARD_ARM_LOG_NAME),
+      hookCommand: [process.execPath, hookPath],
+    });
+    if (!arming.ok) guardArmFailure = arming;
   }
   let partial = "";
   const events: Record<string, unknown>[] = [];
@@ -264,7 +275,10 @@ export async function runCommandCode(root: string, missionPath: string, options:
     }
   };
   let output: RuntimeProcessOutput;
-  try {
+  if (guardArmFailure) {
+    await writeArtifactFile(artifacts.missionDir, path.join(artifacts.runDir, "runtime-control.json"), JSON.stringify(guardArmStopReceipt({ missionId: plan.mission.id, runId, runtime: "command-code", reason: guardArmFailure.reason }), null, 2));
+    output = { stdout: "", stderr: "", exitCode: 1, timedOut: false, spawnError: guardArmFailure.reason, supervisionStopCode: "policy" };
+  } else try {
     output = await (options.runner ?? runRuntimeProcess)({ command: plan.command, args: plan.args, cwd: root,
       stdin: plan.prompt,
       env: guardEnv,

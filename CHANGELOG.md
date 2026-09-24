@@ -45,6 +45,16 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Settlement conflict records: when `runtime-result.yaml` and the runtime-control receipt disagree on the terminal status, a `settlement_conflict` record is appended. A confirmed settlement outranks the result (status rewritten, exit codes annotated or forced); an unconfirmed receipt never rewrites a result.
 - Injectable supervision clock: `runRuntimeProcess` accepts a clock and poll scheduler, so supervision and recovery tests advance stall, startup and timeout budgets deterministically instead of waiting on wall time.
 - Capability inventory: `docs/verification/capability-inventory.md` maps every CLI capability to its implementation, tests and acceptance id, classifies each row, and lists the rows most dangerous to leave unproven.
+- `uh mission check` validates a mission packet and its runtime overrides without launching a runtime, verifying write roots against expected outputs and Change-only paths, checking `read_first` paths, and testing grounding claims against file contents.
+- `uh mission put` validates and installs mission packets into `.harness/missions/<id>/mission.yaml` atomically with audit event logging, refusing overwrite without `--replace` or while a run is live.
+- `uh wait` blocks without polling until matched runs settle or are orphaned by watching the live-run registry, accepting a run id, unique prefix, `--mission`, or `--team`.
+- `uh note` records manual interventions on the intervention ledger at `.harness/ledger/interventions.ndjson` with cause, qualifier, and source attribution.
+- `uh ledger` inspects and manages the append-only intervention ledger (`list`, `summary`, `land`, `confirm`, `import`), tracking corrections and their countermeasures across runs.
+- Intervention ledger (`uh.intervention.v0`): append-only NDJSON ledger recording corrections triggered by steers, kills, worker replacements, non-passing reviews, and supervisor stops, with automated secret redaction.
+- Live run digest (`uh.run-digest.v0`): supervision periodically projects active run progress to disk, enabling `uh report` to report live tool activity, denials, written files, loop signals, and assistant text without invoking a model.
+- Headless pseudoconsole execution on Windows: workers spawn attached to a headless pseudoconsole so inherited descendant processes do not create visible terminal windows.
+- Shadow loop watchdog: supervision monitors live native events and computes deterministic loop signals, recording advisory decision receipts when repetition or alternating thresholds are crossed.
+- Acceptance runner invariants: registry entries can declare invariants (such as untouched protected paths, no worker commits, no package installs, and consistent guard logs) judged against recorded run evidence.
 
 ### Changed
 
@@ -56,6 +66,13 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - System One judgments ask one bounded yes/no question per criterion that has no deterministic result plus a fixed battery about the report itself, compose the three-verdict outcome in code with named thresholds, and record the answering model, latency and usage in the receipt. Requests time out and retry 429 and 529 with backoff, and the requested model can be pinned.
 - Verification hands System One only facts the harness established: criteria with a check command carry their deterministic result and are never sent, the others carry their description, tamper comes from the policy stop code, and deterministic failures still dominate.
 - Dispatch prompts render every list section explicitly: an empty Read First, Expected Artifacts, Verification Checks, Constraints or Acceptance Criteria section says `none, add nothing` instead of being omitted.
+- `uh mission run-team` worktrees record their base commit in git config and team state, hide harness-owned files from worker git status, accept `--base-ref` to set the base ref, and refuse relaunching when worktrees remain unless `--replace` is provided to archive previous branches.
+- Worker prompts reach runtimes via standard input or file instead of argv payloads, allowing prompts exceeding Windows command-line limits to launch under the guardian Job Object and memory caps.
+- Guard arming verifies hook execution before allowing unguarded tool use, arming the guard once matching evidence is recorded and stopping with `policy` if tools run without hook coverage.
+- `uh report` renders efficiently from the atomically updated `uh.run-digest.v0` projection instead of repeatedly rescanning full event logs, reading only the tail of `events.ndjson` unless `--full` is specified.
+- Orchestrator missions can run observation and run-control commands (`ps`, `report`, `steer`, `resume`, `kill`, `experiment`) as controller commands while agent CLIs remain denied.
+- Team missions support an explicit `unknown_cost: "admit" | "block"` resource policy, allowing completed workers with unpriced runtimes to proceed to later waves without blocking when `admit` is set.
+- Session templates drive team worker dispatch, adopting worker overrides, limits, recovery rules, and budget tiers across wave executions.
 
 ### Fixed
 
@@ -83,6 +100,16 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Every acceptance evidence record stores the mission CLI outcome (`exit_code` with stdout and stderr tails); a run that produced no observed status keeps that fact visible instead of fabricating `failed`, and its FAIL line carries the first stderr line.
 - The acceptance costless wrapper resolves a `.cmd` shim to the Node entry point it wraps and spawns that directly, falling back to the Windows shell only for shims it cannot parse, so the unknown-cost route attests on Windows.
 - The committed acceptance report drift check renders against an empty evidence root, so local campaign records never fail the check; `uh acceptance report` keeps rendering local evidence for humans.
+- Guard hooks derive applied policies from the complete artifact and schema, preventing extra artifact metadata from breaking hook execution or dropping policy fields.
+- Tool Guard resolves shell environment variable references in write and deletion targets, stopping attempts to mutate `UH_TOOL_GUARD_POLICY` or `UH_TOOL_GUARD_LOG` as `guard_tamper`, and categorizes `xd://` virtual device URIs under the `virtual_device` class.
+- Team worker and salvage commits obey declared write roots and outputs, keeping files outside write roots unstaged and recording them in worker state and integration reports.
+- Team workers stage declared outputs even when located under gitignored directories.
+- Sandboxes index lock release verifies owner pid and nonce, preventing concurrent sandbox creation from clobbering registrations.
+- Steer requests are tracked and handled by the controlling process that owns the run, avoiding dropped steer messages or unrecorded preparation failures.
+- Native tool refusals without hook invocation are tracked as native refusals rather than treating the guard as disarmed.
+- Supervisor matches tool-guard log evidence to runtime events by call id before falling back to call count.
+- Review capture retrieves a worker's final message from team run records and captures all modified files.
+- Build compilation outputs to a staging directory before atomically swapping into `dist/`, avoiding inconsistent builds on compilation errors.
 
 ## [0.11.0] — 2026-09-21
 

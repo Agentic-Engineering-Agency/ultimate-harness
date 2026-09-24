@@ -1628,3 +1628,179 @@ describe("runTeamMission — team worktree lifecycle", () => {
     })).rejects.toThrow(liveRunId);
   });
 });
+
+/* ---------------------------------------------- worker session templates  */
+
+describe("runTeamMission — worker session templates", () => {
+  const passingVerifier = async (): Promise<VerifyMissionLike> => ({
+    status: "passed", path: "/fake/verification.yaml", checks_total: 1, checks_passed: 1,
+    checks_failed: 0, checks_blocked: 0, acceptance_total: 0, acceptance_passed: 0,
+    acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+  });
+
+  async function writeWorkerTemplate(): Promise<void> {
+    const templatesDir = join(ROOT, ".harness", "templates");
+    await mkdir(templatesDir, { recursive: true });
+    await writeFile(join(templatesDir, "omp-worker.yaml"), [
+      "schema_version: uh.session-template.v0",
+      "id: omp-worker",
+      "title: OMP worker",
+      "tier: balanced",
+      "adapter: oh-my-pi",
+      "limits:",
+      "  max_turns: 260",
+      "worker_rules:",
+      "  - This runtime works in many small turns.",
+    ].join("\n") + "\n", "utf-8");
+  }
+
+  async function readTeamState(runId: string): Promise<{
+    workers: Array<{
+      adapter: string;
+      mission_id?: string;
+      contract?: { limits?: { max_turns?: number }; constraints?: string[] };
+    }>;
+  }> {
+    return JSON.parse(
+      await readFile(join(ROOT, ".harness", "missions", "team-mission", "runs", runId, "team-state.json"), "utf-8"),
+    );
+  }
+
+  beforeEach(async () => {
+    await seedMissionPacket(ROOT, "team-mission");
+  });
+
+  test("a worker with a template adopts the template's max_turns and worker rules", async () => {
+    await writeWorkerTemplate();
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const packets: Record<string, Record<string, unknown>> = {};
+    const baseRunner = makeRunner({ writes: { backend: { files: { "src/a.ts": "a\n" } } } }, repo);
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "oh-my-pi", template: "omp-worker" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        packets[basename(workerRoot)] = parseYaml(await readFile(missionPath, "utf-8")) as Record<string, unknown>;
+        return baseRunner(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].adapter).toBe("oh-my-pi");
+    expect(state.workers[0].contract?.limits?.max_turns).toBe(260);
+    expect(state.workers[0].contract?.constraints).toContain("This runtime works in many small turns.");
+
+    // The derived packet the runtime actually received carries both the
+    // template's limit and its worker rule.
+    expect(packets.backend.runtime_config_overrides).toMatchObject({ limits: { max_turns: 260 } });
+    expect(packets.backend.constraints).toContain("This runtime works in many small turns.");
+  });
+
+  test("a worker packet that states a limit wins over the template", async () => {
+    await writeWorkerTemplate();
+    const workerMissionDir = join(ROOT, ".harness", "missions", "omp-special");
+    await mkdir(workerMissionDir, { recursive: true });
+    await writeFile(join(workerMissionDir, "mission.yaml"), [
+      "schema_version: uh.mission.v0",
+      "id: omp-special",
+      "title: OMP special",
+      "workflow_profile: staged",
+      "objective: do the special work",
+      "runtime_config_overrides:",
+      "  limits:",
+      "    max_turns: 160",
+    ].join("\n") + "\n", "utf-8");
+
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const packets: Record<string, Record<string, unknown>> = {};
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "oh-my-pi", template: "omp-worker", mission_id: "omp-special" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        packets[basename(workerRoot)] = parseYaml(await readFile(missionPath, "utf-8")) as Record<string, unknown>;
+        return makeRunner({ writes: {} }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].mission_id).toBe("omp-special");
+    expect(state.workers[0].contract?.limits?.max_turns).toBe(160);
+    const derivedOverrides = packets.backend.runtime_config_overrides as { limits?: { max_turns?: number } };
+    expect(derivedOverrides.limits?.max_turns).toBe(160);
+  });
+
+  test("an unknown template id fails the team before any worker starts", async () => {
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const dispatched: string[] = [];
+
+    await expect(runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", template: "does-not-exist" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        dispatched.push(basename(workerRoot));
+        return makeRunner({ writes: {} }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+    })).rejects.toThrow(/session template not found/i);
+
+    expect(dispatched).toEqual([]);
+    expect(repo.branches.has("uh/team/team-mission/backend")).toBe(false);
+  });
+
+  test("a worker with only a template runs on the template's adapter", async () => {
+    await writeWorkerTemplate();
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const dispatchedAdapters: string[] = [];
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", template: "omp-worker" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        dispatchedAdapters.push(adapter);
+        return makeRunner({ writes: { backend: { files: { "src/a.ts": "a\n" } } } }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(dispatchedAdapters).toEqual(["oh-my-pi"]);
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].adapter).toBe("oh-my-pi");
+    expect(state.workers[0].contract?.limits?.max_turns).toBe(260);
+  });
+
+  test("an explicit worker adapter beats the template's adapter", async () => {
+    await writeWorkerTemplate();
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const dispatchedAdapters: string[] = [];
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", template: "omp-worker" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        dispatchedAdapters.push(adapter);
+        return makeRunner({ writes: { backend: { files: { "src/a.ts": "a\n" } } } }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(dispatchedAdapters).toEqual(["hermes"]);
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].adapter).toBe("hermes");
+  });
+});
