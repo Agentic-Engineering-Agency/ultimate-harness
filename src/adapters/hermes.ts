@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { resolveRuntimeCommand } from "../harness/runtime-command.js";
+import { runRuntimeProcess } from "../harness/runtime-process.js";
 import { readFile, appendFile } from "node:fs/promises";
 import {
   type MissionArtifactContext,
@@ -14,6 +15,7 @@ import {
 } from "./_artifact-context.js";
 import { parse, stringify } from "yaml";
 import path from "node:path";
+import { relativeArtifactPath } from "../harness/artifact-paths.js";
 import { AdapterDocument, AdapterConfigSchema, registerRuntimeConfigSchema } from "../schema/adapter.js";
 import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
@@ -231,7 +233,8 @@ async function runHermesCliCheck(command: string): Promise<AdapterCheckResult> {
 
   let versionOutput: string;
   try {
-    const { stdout } = await execFileP(command, ["--version"]);
+    const executable = await resolveRuntimeCommand(command, ["--version"]);
+    const { stdout } = await execFileP(executable.command, executable.args);
     versionOutput = stdout.trim();
   } catch {
     result.errors.push(
@@ -256,7 +259,8 @@ async function runHermesCliCheck(command: string): Promise<AdapterCheckResult> {
   }
 
   try {
-    await execFileP(command, ["status"]);
+    const executable = await resolveRuntimeCommand(command, ["status"]);
+    await execFileP(executable.command, executable.args);
   } catch {
     result.errors.push("hermes status failed; may need initial setup (hermes setup or hermes model)");
   }
@@ -303,9 +307,9 @@ export async function checkHermes(root?: string): Promise<CheckResult> {
   return runHermesCliCheck("hermes");
 }
 
-export async function dryRunHermes(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunHermes(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planHermesRun(root, missionPath);
+    const plan = await planHermesRun(root, missionPath, options);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
@@ -437,48 +441,14 @@ export async function planHermesRun(root: string, missionPath: string, options: 
   };
 }
 
-/**
- * Default runner. Streams stdout/stderr from a spawned child, applies a
- * SIGKILL on timeout, and never throws — failures surface as `spawnError` or
- * `timedOut` on the returned record so the adapter can translate them into a
- * `failed` runtime-result with explicit errors.
- */
-export const defaultHermesRunner: HermesRunner = (input) => {
-  return new Promise((resolve) => {
-    const child = spawn(input.command, input.args, {
-      cwd: input.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    let timer: NodeJS.Timeout | undefined;
-
-    const finalize = (exitCode: number, spawnError?: string): void => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode, timedOut, spawnError });
-    };
-
-    if (typeof input.timeoutMs === "number" && input.timeoutMs > 0) {
-      timer = setTimeout(() => {
-        timedOut = true;
-        try { child.kill("SIGKILL"); } catch { /* child already exited */ }
-      }, input.timeoutMs);
-    }
-
-    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on("close", (code: number | null) => {
-      finalize(timedOut ? 1 : code ?? 1);
-    });
-    child.on("error", (err: Error) => {
-      finalize(1, err.message);
-    });
-  });
+/** Reuse UH's owned process tree, bounded capture and timeout settlement. */
+export const defaultHermesRunner: HermesRunner = async (input) => {
+  try {
+    return await runRuntimeProcess(input);
+  } catch (error) {
+    return { stdout: "", stderr: "", exitCode: 1, timedOut: false,
+      spawnError: error instanceof Error ? error.message : String(error) };
+  }
 };
 
 /**
@@ -733,10 +703,10 @@ export async function collectHermesSession(
       started_at: startedAt,
       finished_at: finishedAt,
       exit_code: exitCode,
-      prompt_path: path.relative(root, artifacts.promptPath),
-      stdout_path: path.relative(root, artifacts.stdoutPath),
-      stderr_path: path.relative(root, artifacts.stderrPath),
-      diff_path: path.relative(root, artifacts.diffPath),
+      prompt_path: relativeArtifactPath(root, artifacts.promptPath),
+      stdout_path: relativeArtifactPath(root, artifacts.stdoutPath),
+      stderr_path: relativeArtifactPath(root, artifacts.stderrPath),
+      diff_path: relativeArtifactPath(root, artifacts.diffPath),
       errors,
     };
     result = validateRuntimeResult(draft);

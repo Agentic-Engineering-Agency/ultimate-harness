@@ -217,8 +217,9 @@ describe("uh propose --from CLI", () => {
   test("creates mission from spec via CLI", async () => {
     const missionPath = join(testRoot, ".harness", "missions", "UH-107", "mission.yaml");
     const { stdout, stderr } = await execFileP(
-      join(process.cwd(), "node_modules", ".bin", "tsx"),
+      process.execPath,
       [
+        "--import", "tsx",
         "src/cli.ts",
         "propose",
         "--from", "feature.spec.md",

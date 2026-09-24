@@ -1,0 +1,16 @@
+{"type":"run_start","timestamp":"2026-01-01T00:00:01.000Z"}
+{"type":"turn_start","turnNumber":1,"timestamp":"2026-01-01T00:00:02.000Z"}
+{"type":"message_start","timestamp":"2026-01-01T00:00:03.000Z"}
+{"type":"model_request_start","model":"deepseek/deepseek-v4.1-flash","timestamp":"2026-01-01T00:00:04.000Z"}
+{"type":"model_request_end","model":"deepseek/deepseek-v4.1-flash","stopReason":"tool_calls","timestamp":"2026-01-01T00:00:05.000Z"}
+{"type":"message_end","timestamp":"2026-01-01T00:00:06.000Z"}
+{"type":"tool_queued","toolCallId":"call-1","toolName":"shell_command","input":{"command":"node -e x","cwd":"/outside/path"},"timestamp":"2026-01-01T00:00:07.000Z"}
+{"type":"tool_running","toolCallId":"call-1","toolName":"shell_command","timestamp":"2026-01-01T00:00:08.000Z"}
+{"type":"tool_completed","toolCallId":"call-1","toolName":"shell_command","deferred":false,"result":[{"type":"text","text":"x"}],"timestamp":"2026-01-01T00:00:09.000Z"}
+{"type":"turn_end","turnNumber":1,"timestamp":"2026-01-01T00:00:10.000Z"}
+{"type":"turn_start","turnNumber":2,"timestamp":"2026-01-01T00:00:11.000Z"}
+{"type":"message_start","timestamp":"2026-01-01T00:00:12.000Z"}
+{"type":"model_request_start","model":"deepseek/deepseek-v4.1-flash","timestamp":"2026-01-01T00:00:13.000Z"}
+{"type":"model_request_end","model":"deepseek/deepseek-v4.1-flash","stopReason":"end_turn","timestamp":"2026-01-01T00:00:14.000Z"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"```uh-runtime-final-message\ncompleted just before the cap\n```"}]},"timestamp":"2026-01-01T00:00:15.000Z"}
+{"type":"result","is_error":true,"subtype":"error_max_turns","num_turns":2,"stopReason":"max_turns","result":"x","finalText":"```uh-runtime-final-message\ncompleted just before the cap\n```","event":"command-code.result","timestamp":"2026-01-01T00:00:16.000Z"}

@@ -35,7 +35,17 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and seven wir
 | `hermes-proxy` | active | HTTP client targeting a local `hermes proxy` instance (Hermes Agent ≥ 0.14.0). Officially sanctioned OAuth-backed subscription routing — replaces the OMP stealth path. See [`docs/architecture/adapter-hermes-proxy.md`](./docs/architecture/adapter-hermes-proxy.md) and [`docs/runbooks/hermes-proxy-setup.md`](./docs/runbooks/hermes-proxy-setup.md). |
 | `openrouter` | active | OpenAI-compat HTTP client for [openrouter.ai](https://openrouter.ai) — the cheapest pay-per-token routing target. API key via `OPENROUTER_API_KEY` (never the manifest); a missing key makes `uh adapter check openrouter` degrade gracefully. See [`docs/runbooks/openrouter-setup.md`](./docs/runbooks/openrouter-setup.md). |
 | `pi` | active | Drives the vanilla `pi` agent CLI (`pi --print --mode json --no-session`) — the base CLI that oh-my-pi extends. `config.cli_command` overridable. See [`docs/runbooks/pi-setup.md`](./docs/runbooks/pi-setup.md). |
-| `anthropic` | experimental | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY` (env-only, never the manifest); a missing key makes `uh adapter check anthropic` degrade gracefully. Shipped v0.9.0 (#214); graduation to `active` pending live-smoke. |
+| `anthropic` | active | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY`. |
+| `command-code` | active | Command Code native execution with persistent sessions, process trees, and Tool Guard supervision. |
+| `claude-code` | active | Claude Code adapter with structured event capture and saved-session recovery. |
+| `acp` | active | Agent-Client Protocol (ACP) v1 runner for headless agent orchestration via standard JSON-RPC 2.0 over stdio. See [`docs/runbooks/acp-setup.md`](./docs/runbooks/acp-setup.md). |
+
+Unreleased development (v0.11.0) includes native `command-code` and `claude-code`
+adapters, runtime supervision and recovery improvements, platform neutrality fixes,
+and semantic evaluation during verification and independent review. These changes
+are an intermediate milestone towards 1.0. See [Changelog](./CHANGELOG.md),
+[runtime limitations](./docs/runtime-targets.md), and the
+[1.0 roadmap](./docs/ROADMAP.md#10--integrated-execution-lifecycle).
 
 Cross-cutting protocols every adapter participates in:
 
@@ -63,6 +73,7 @@ Start with the [quickstart](./docs/quickstart.md), the [configuration guide](./d
 - [Runtime adapter contract](./docs/architecture/runtime-adapter-contract.md) — includes the UH-28 sentinel protocol
 - [Mission packet schema](./docs/architecture/mission-packet-schema.md)
 - [Verification and promotion lifecycle](./docs/architecture/verification-and-promotion.md)
+- [Progressive decisions](./docs/architecture/progressive-decisions.md) — implemented semantic evaluation, authority boundaries, and proposed policy flows.
 - [Telar governance and UH Run Control boundary](./docs/architecture/telar-integration.md)
 
 Runbooks:
@@ -110,7 +121,7 @@ uh validate --all-missions
 # Render the runtime invocation without launching.
 uh mission dry-run .harness/missions/m1-example/mission.yaml --runtime hermes
 
-# Execute the mission. --runtime accepts: hermes | codex | hermes-proxy | openrouter | pi | oh-my-pi | anthropic.
+# Execute the mission using an installed adapter; see `uh mission run --help` for supported runtimes.
 uh mission run .harness/missions/m1-example/mission.yaml --runtime hermes
 
 # Run the mission's declared verification checks.

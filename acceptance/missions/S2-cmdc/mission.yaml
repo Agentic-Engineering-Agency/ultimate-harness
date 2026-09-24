@@ -1,0 +1,36 @@
+schema_version: uh.mission.v0
+id: s2-cmdc-acceptance
+title: Resource wave accounting
+workflow_profile: bugfix-contained
+objective: Create the three accounting marker files under out/.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved
+shape: team
+team:
+  resources: { max_parallel: 2, max_cost_usd: 10, worker_cost_reservation_usd: 1 }
+  workers:
+    - adapter: command-code
+      role: worker-a
+      objective: Create out/worker-a.txt containing exactly the single line worker-a, then stop.
+      runtime_config_overrides: { permission_mode: yolo }
+      limits: { max_turns: 12 }
+    - adapter: command-code
+      role: worker-b
+      objective: Create out/worker-b.txt containing exactly the single line worker-b, then stop.
+      runtime_config_overrides: { permission_mode: yolo }
+      limits: { max_turns: 12 }
+    - adapter: command-code
+      role: worker-c
+      objective: Create out/worker-c.txt containing exactly the single line worker-c, then stop.
+      runtime_config_overrides: { permission_mode: yolo }
+      limits: { max_turns: 12 }
+  leader: { adapter: command-code }

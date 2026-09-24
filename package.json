@@ -1,6 +1,6 @@
 {
   "name": "@agenticengineeringagency/ultimate-harness",
-  "version": "0.9.0",
+  "version": "0.11.0",
   "description": "Runtime-agnostic software-development harness for agentic engineering work.",
   "type": "module",
   "bin": {
@@ -39,6 +39,7 @@
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.tests.json --noEmit",
+    "landscape:verify": "node scripts/landscape/verify-register.mjs",
     "tui-spike": "bun bin/uh-tui-spike.tsx",
     "clean": "rm -rf dist",
     "publish:dry-run": "bun publish --dry-run",

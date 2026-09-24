@@ -1,12 +1,114 @@
 # Ultimate Harness — Roadmap
 
-Last updated: 2026-05-29. Source of truth for issue state is [Linear](https://linear.app/agenticengineering-agency/team/UH/active) (the canonical UH team); GitHub mirrors via the native 2-way integration. This file is a human-readable index.
+Source of truth for issue state is [Linear](https://linear.app/agenticengineering-agency/team/UH/active); GitHub mirrors through the native integration. This document describes release objectives and unresolved engineering work. Implemented changes are recorded in the [changelog](../CHANGELOG.md).
 
 ## Now
 
+### 1.0 — Integrated execution lifecycle
+
+**In development; not release-ready.** Existing adapter, supervision, recovery,
+resource admission, verification, and review implementations must work together
+under failure. Passing isolated tests or adding an adapter does not establish
+end-to-end acceptance.
+
+#### Mission authoring and coordination
+
+- **Complete packet persistence:** `src/harness/propose.ts` constructs a subset of
+  the mission schema. The supported coordinator path must persist validated guard,
+  runtime override, recovery, shape, and team contracts without allowing workers
+  to write protected `.harness` state.
+- **Prerequisite admission:** dispatch must consume valid required outputs, not
+  merely observe that prerequisite processes exited. Missing or invalid reports
+  must prevent dependent paid execution.
+- **Automatic monitoring and reconnect:** status and Observatory queries exist;
+  unattended controller-loss detection, reconnection, and duplicate-controller
+  prevention require integrated acceptance.
+- **Mid-run steering:** cancellation and saved-session recovery exist, but do not
+  provide a message channel to an active worker.
+- **Coordinator context:** limit inherited tools, integrations and task context
+  according to explicit policy. Measure total consumption across coordinator,
+  workers and retries; prompt length alone is not a sufficient measure.
+
+#### Runtime reliability and accounting
+
+- Resolve Claude context-suffix model identity without weakening route checks.
+  Case and provider-prefix variants are reconciled; suffix variants are not.
+- Distinguish native permission refusal from UH hook denial. A hook allow does not
+  bypass native permissions; compound shell commands may still be refused.
+- Validate Claude coordinator isolation against inherited settings, memory, skills
+  and caller-supplied CLI arguments. Tool/MCP flags alone are not full isolation.
+- Replace repeated scans of accumulated Claude events with bounded incremental
+  accounting; verify missing starts, duplicate envelopes, truncation and interrupted
+  messages. Unobserved totals and unattributed model usage must remain unknown.
+- Define explicit consumption/context policy. Live usage fields currently report
+  measurements; they do not enforce token or context budgets.
+- Complete live team accounting and test stale run-index/control combinations in
+  the Observatory. Verify actual presentation, not only projected JSON.
+- Add stop-reason cost attribution without confusing runtime estimates with bills.
+- Derive per-worker memory limits from declared subprocess requirements where
+  supported, while retaining pre-launch refusal on unsupported platforms.
+
+#### Governed decisions
+
+Current JEV integration covers verification and independent-review collection.
+The [progressive-decision specification](./architecture/progressive-decisions.md)
+also describes routing, scope-change and retry/stop flows that are not implemented.
+
+- Add validated mission decision policy and enforce confidence/provider requirements.
+- Bound provider requests independently of subprocess deadlines.
+- Validate the entire response envelope, including disabled-provider discrimination;
+  distinguish transport failure, invalid JSON and malformed typed answers.
+- Hash submitted evidence before consumer mutation; bound provider metadata and
+  account for judgment usage without persisting raw prompts or responses.
+- Define privacy and evidence-sufficiency rules for criterion descriptions and
+  compact summaries. A judgment cannot establish facts omitted from its input.
+- Keep deterministic failure and human authority dominant. Receipt status alone
+  must not be treated as authorization for promotion, wider scope or new spend.
+
+#### Review, protection and output contracts
+
+- Extend independent review beyond one runtime/model per packet where multiple
+  reviewers or model-family independence are required.
+- Reconcile promotion policies with verified approver authority; a nonempty
+  `approved_by` string is not authenticated identity.
+- Complete credential scoping, isolated worker homes, deny-read protections and
+  preflight verification. Tool flags are not an operating-system security boundary.
+- Extend declared-output checks beyond nonempty files, JSON and configured markers
+  where secret detection or undeclared-output policy is required.
+- Define consistent completion semantics across runtime results and worker reports.
+  Partial artifacts must remain distinguishable from complete deliverables.
+- Improve liveness diagnosis using pending tool-call structure as well as heartbeat
+  freshness; an open terminal or recent event is not proof of forward progress.
+
+#### Release acceptance
+
+Exercise the connected paths below with explicit failure and recovery criteria.
+Keep reproducible definitions in the repository and execution artifacts in private
+local or CI storage. Do not ship local session history as release evidence.
+
+| Area | Required behavior |
+|---|---|
+| Planning | Research → specification → file/check plan → complete validated mission → sandbox and prompt hydration. |
+| Dispatch | Preflight and exact route → guarded execution → streamed artifacts → required-output validation; failure prevents dependent dispatch. |
+| Supervision | Startup, wall, stall, turn, denial, repetition and output limits preserve distinct causes and settle the owned process tree. |
+| Recovery | Cancellation targets one attempt; controller loss reconciles authoritative settlement; eligible saved-session resume retains work; deadline grace remains explicitly incomplete. |
+| Teams | Per-worker contracts, resource-bounded waves, isolated worktrees, integration and verification; unknown cost blocks further paid admission. |
+| Verification | Executable checks, output/TDD gates, hash-bound independent review, manual dispositions and promotion policy preserve deterministic failures and human authority. |
+| Decisions | Typed recommendations are consumed only within deterministic policy, with explicit unavailable, malformed and uncertain outcomes. |
+| Observation | Fresh, stale, unknown, failed and completed states remain distinct across native processes, teams, accounting, UI and reconnect. |
+| Comparison | Cross-adapter execution retains divergences and failures instead of treating unlike native behavior as equivalent. |
+| Platforms | Windows guardian, POSIX cleanup, sandbox backends, TUI and plugin boundaries are verified independently; unsupported behavior fails explicitly. |
+
+The acceptance registry is a mechanism-level subset, not the full release scope.
+Fixture checks do not establish live model behavior, and stale results do not
+establish the current revision. See [acceptance procedures](./runbooks/acceptance.md)
+and [verification](./verification/checks.md).
+
+The default no-evidence report is a registry view, not a portable evidence bundle.
+
 **v0.9.0 (current release, "Memory & adapter matrix" — [Linear UH-131 / UH-136 / UH-137](https://linear.app/agenticengineering-agency/team/UH/active); GitHub PRs #204–#206 / #214 / #215 / #216):** bundles everything merged to `dev` since v0.8.0. Ships a **native Anthropic adapter** (`anthropic`, `status: experimental`, #214) — the official, ToS-clean pay-per-token Messages-API path (`ANTHROPIC_API_KEY` env-only, blocked classification, graceful no-key checker, optional live-smoke CI job); **Honcho memory operations** (#215) — `honcho_search` / `honcho_remember` harness-side ops + per-mission `runtime_config.honcho_memory` opt-out on every Honcho-aware adapter; **team-run dogfood fixes** (#216) — UH-127 `passed_partial` verdict (no more false BLOCKED), UH-128 per-worker artifact-bleed fix, UH-129 `integration_report_path` default under `.harness/missions/<id>/team/`, UH-130 constraints-advisory warning; and **Phase-0 DX hardening** (#204–#206) — real `uh --version` from `package.json`, an opt-in PostHog telemetry primitive (unwired; UH-135 follow-up), adoption docs, a curated npm `files:` allowlist, and CI plugin gates. Will be published as `@agenticengineeringagency/ultimate-harness@0.9.0` on npm `latest` (tagged `v0.9.0` + `plugin-v0.9.0` on `main` via the dev→main release PR). See [`CHANGELOG.md`](../CHANGELOG.md) `[0.9.0]`.
 
-Epics 2–5 plus **Epics 6–8** (live SSE tail + cancel, adapter capability routing + cost, SDD hardening) shipped and were **released as v0.6.0** — published to npm as `@agenticengineeringagency/ultimate-harness@0.6.0`. v0.6.0 also corrected two v0.5.0 gaps: the auto-router `uh mission run --auto` (UH-101, claimed shipped but never built) and `runtime.usage` token capture (which the cost features assumed). The Epics 6–8 execution spec is [`docs/specs/epics-6-7-8.md`](./specs/epics-6-7-8.md); per-slice detail is in the [CHANGELOG](../CHANGELOG.md) `[0.6.0]`. **v0.7.0:** OpenRouter adapter ([#134]), **vanilla `pi` adapter ([#135], shipped active)**, sandbox backend abstraction + `directory` backend ([#136]) and a `container` stub ([#137]), verify-then-promote auto-trigger ([#139]), capability-match enforcement ([#138], already shipped), and a shared adapter-artifact-helper refactor ([#133]). **v0.8.0:** OpenSandbox-gated `container` execution backend ([#155]/[#157]) with ADR + runbook ([#154]), and `oh-my-pi` graduated to active ([#156]); published as `@agenticengineeringagency/ultimate-harness@0.8.0`. **v0.9.0 (current release, see Now above):** native `anthropic` adapter (experimental, [#214]), Honcho memory operations + opt-out ([#215]), team-run dogfood fixes ([#216]), and Phase-0 DX hardening ([#204]–[#206]). **Issue tracking:** [Linear](https://linear.app/agenticengineering-agency/team/UH/active) is the canonical source of truth for the UH team; GitHub issues mirror Linear via the native 2-way integration (per-issue auto-creation + state/title/body sync). Cite Linear IDs (UH-NNN) in commits, PRs, and docs — the GitHub mirror picks up the back-link automatically. The v0.5.0/v0.6.0 epic records (UH-92..UH-111) and the v0.7.0/v0.8.0 milestone slices (UH-112..UH-125) were backfilled to Linear post-workspace-upgrade so the history matches the CHANGELOG.
+Epics 2–5 plus **Epics 6–8** (live SSE tail + cancel, adapter capability routing + cost, SDD hardening) shipped and were **released as v0.6.0** — published to npm as `@agenticengineeringagency/ultimate-harness@0.6.0`. v0.6.0 also corrected two v0.5.0 gaps: the auto-router `uh mission run --auto` (UH-101, claimed shipped but never built) and `runtime.usage` token capture (which the cost features assumed). The Epics 6–8 execution spec is [`specs/epics-6-7-8.md`](../specs/epics-6-7-8.md); per-slice detail is in the [CHANGELOG](../CHANGELOG.md) `[0.6.0]`. **v0.7.0:** OpenRouter adapter ([#134]), **vanilla `pi` adapter ([#135], shipped active)**, sandbox backend abstraction + `directory` backend ([#136]) and a `container` stub ([#137]), verify-then-promote auto-trigger ([#139]), capability-match enforcement ([#138], already shipped), and a shared adapter-artifact-helper refactor ([#133]). **v0.8.0:** OpenSandbox-gated `container` execution backend ([#155]/[#157]) with ADR + runbook ([#154]), and `oh-my-pi` graduated to active ([#156]); published as `@agenticengineeringagency/ultimate-harness@0.8.0`. **v0.9.0 (current release, see Now above):** native `anthropic` adapter (experimental, [#214]), Honcho memory operations + opt-out ([#215]), team-run dogfood fixes ([#216]), and Phase-0 DX hardening ([#204]–[#206]). **Issue tracking:** [Linear](https://linear.app/agenticengineering-agency/team/UH/active) is the canonical source of truth for the UH team; GitHub issues mirror Linear via the native 2-way integration (per-issue auto-creation + state/title/body sync). Cite Linear IDs (UH-NNN) in commits, PRs, and docs — the GitHub mirror picks up the back-link automatically. The v0.5.0/v0.6.0 epic records (UH-92..UH-111) and the v0.7.0/v0.8.0 milestone slices (UH-112..UH-125) were backfilled to Linear post-workspace-upgrade so the history matches the CHANGELOG.
 
 ### Epic 5 — Hermes Dashboard plugin v2: multi-run history + replay + observability ([UH-84](https://linear.app/agenticengineering-agency/issue/UH-84))
 

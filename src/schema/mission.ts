@@ -1,5 +1,8 @@
+import path from "node:path";
+import { TeamResourceLimitsSchema, RuntimeLimitsSchema, ToolGuardFieldsSchema, resolveToolGuardPolicy, type ToolGuardPolicy, DEFAULT_PROTECTED_PATHS } from "./runtime-control.js";
 import { z } from "zod";
 import { CostClassSchema } from "./adapter-capabilities.js";
+import { IndependentReviewBindingSchema } from "./independent-review.js";
 
 const IssueSchema = z.object({
   source: z.string(),
@@ -16,6 +19,7 @@ const IssueRefSchema = z.object({
 const ExpectedArtifactSchema = z.object({
   path: z.string(),
   type: z.string().optional(),
+  completion_marker: z.string().trim().min(1).regex(/^[^\r\n]+$/).optional(),
 });
 
 const AcceptanceCriterionSchema = z.object({
@@ -55,14 +59,33 @@ const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/
  * adapter modules. Keep in sync with `RUNTIME_WIRINGS` in `src/cli.ts` and the
  * adapter manifests under `.harness/adapters/`.
  */
-export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi"] as const;
+export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi", "command-code", "claude-code", "acp"] as const;
 const AdapterIdSchema = z.enum(TEAM_ADAPTER_IDS);
 
-const TeamWorkerSchema = z.object({
+export const TeamWorkerSchema = z.object({
   adapter: AdapterIdSchema,
   role: z.string().min(1),
+  mission_id: z.string().min(1).optional(),
   count: z.number().int().positive().optional().default(1),
+  objective: z.string().min(1).optional(),
+  runtime_config_overrides: z.record(z.string(), z.unknown()).optional(),
+  limits: z.preprocess((value, ctx) => {
+    if (value && typeof value === "object" && "memory_mb" in value) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Per-worker memory is governed by team.resources.worker_memory_mb",
+      });
+    }
+    return value;
+  }, RuntimeLimitsSchema.omit({ memory_mb: true })).optional(),
+  guard: ToolGuardFieldsSchema.optional(),
+  expected_outputs: z.object({
+    files: z.array(z.string().min(1)),
+  }).strict().optional(),
+  seed: z.number().int().nonnegative().optional(),
 }).strict();
+
+export type TeamWorker = z.input<typeof TeamWorkerSchema>;
 
 const TeamLeaderSchema = z.object({
   adapter: AdapterIdSchema,
@@ -72,6 +95,7 @@ const TeamLeaderSchema = z.object({
 const TeamShapeSchema = z.object({
   workers: z.array(TeamWorkerSchema).min(1, { message: "team.workers must contain at least one worker" }),
   leader: TeamLeaderSchema,
+  resources: TeamResourceLimitsSchema.optional(),
 }).strict();
 
 
@@ -89,6 +113,23 @@ export const RuntimeRequirementsSchema = z.object({
   needs_fs_write: z.boolean().default(true),
   min_context_tokens: z.number().int().positive().optional(),
   max_cost_class: CostClassSchema.default("premium"),
+}).strict();
+
+/**
+ * Optional governed-decision policy. Additive and strict: a legacy mission that
+ * omits it keeps its purely deterministic behavior. `allowed_runtimes` narrows
+ * deterministic adapter eligibility; `allowed_models` is the only model set a
+ * JEV (TypeSafe System One) recommendation may be applied from.
+ */
+export const DecisionPolicySchema = z.object({
+  enabled: z.boolean().default(false),
+  min_confidence: z.number().min(0).max(1).default(0.7),
+  allowed_runtimes: z.array(AdapterIdSchema).optional().default([]),
+  allowed_models: z.array(z.string().min(1)).optional().default([]),
+  require_provider_for_route: z.boolean().default(false),
+  require_provider_for_retry: z.boolean().default(false),
+  escalation_model: z.string().min(1).optional(),
+  fallback_model: z.string().min(1).optional(),
 }).strict();
 
 const MissionInputSchema = z.object({
@@ -119,7 +160,8 @@ const MissionInputSchema = z.object({
   tdd: TddOptionsSchema.optional(),
   capabilities: z.array(CapabilitySchema).optional().default([]),
   runtime_requirements: RuntimeRequirementsSchema.optional(),
-
+  decision_policy: DecisionPolicySchema.optional(),
+  guard: ToolGuardFieldsSchema.optional(),
   // Backward-compatible fields.
   name: z.string().min(1).optional(),
   description: z.string().optional(),
@@ -146,6 +188,7 @@ const MissionInputSchema = z.object({
     max_iterations: z.number().int().positive().optional(),
   }).optional().default({ checks: [], required_checks: [], review_gates: [] }),
   runtime_config_overrides: z.record(z.string(), z.unknown()).optional().default({}),
+  independent_review: IndependentReviewBindingSchema.optional(),
 
   // UH-71 team shape + UH-75 design companion.
   shape: z.enum(["single", "team"]).optional().default("single"),
@@ -172,6 +215,22 @@ const MissionInputSchema = z.object({
     }
     seen.add(ac.id);
   }
+  const declaredOutputs = [
+    ...mission.expected_outputs.files.map((pathValue, index) => ({ pathValue, path: ["expected_outputs", "files", index] as (string | number)[] })),
+    ...(mission.expected_artifacts ?? []).map((artifact, index) => ({ pathValue: artifact.path, path: ["expected_artifacts", index, "path"] as (string | number)[] })),
+  ];
+  for (const output of declaredOutputs) {
+    const normalized = path.posix.normalize(output.pathValue.trim().replaceAll("\\", "/")).replace(/^\.\/+/, "");
+    const protectedOutput = DEFAULT_PROTECTED_PATHS.some((root) =>
+      normalized === root || normalized.startsWith(`${root}/`));
+    if (protectedOutput) {
+      ctx.addIssue({
+        code: "custom",
+        message: `Expected output cannot target protected runtime path "${output.pathValue}"; workers must write permitted outputs and the trusted controller owns .harness persistence`,
+        path: output.path,
+      });
+    }
+  }
   if (mission.shape === "team") {
     if (!mission.team) {
       ctx.addIssue({
@@ -196,6 +255,10 @@ const MissionInputSchema = z.object({
   }
 }).transform((mission) => ({
   ...mission,
+  guard: mission.guard === undefined ? undefined : resolveToolGuardPolicy(
+    mission.guard,
+    mission.runtime_requirements?.needs_network ?? false,
+  ),
   name: mission.name ?? mission.title ?? "",
   description: mission.description ?? mission.objective,
   issues: mission.issues ?? mission.issue_refs.map((issue): { source: string; reference: string; url?: string } => ({
@@ -204,7 +267,7 @@ const MissionInputSchema = z.object({
     url: issue.url,
   })),
   read_first: mission.read_first ?? mission.context.read_first,
-  expected_artifacts: mission.expected_artifacts ?? mission.expected_outputs.files.map((path): { path: string; type?: string } => ({ path })),
+  expected_artifacts: mission.expected_artifacts ?? mission.expected_outputs.files.map((path): z.infer<typeof ExpectedArtifactSchema> => ({ path })),
   sandbox: {
     backend: mission.sandbox.backend,
     promotion_policy: mission.sandbox.promotion_policy,
@@ -236,6 +299,8 @@ export type MissionDocument = z.infer<typeof MissionSchema>;
 export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>;
 export type TddOptions = z.infer<typeof TddOptionsSchema>;
 export type RuntimeRequirements = z.infer<typeof RuntimeRequirementsSchema>;
+export type DecisionPolicy = z.infer<typeof DecisionPolicySchema>;
+export type ResolvedToolGuardPolicy = ToolGuardPolicy;
 export const TDD_DEFAULT_TEST_PATHS = DEFAULT_TEST_PATHS;
 export const TDD_DEFAULT_SOURCE_PATHS = DEFAULT_SOURCE_PATHS;
 

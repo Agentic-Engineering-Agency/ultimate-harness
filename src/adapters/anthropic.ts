@@ -9,11 +9,12 @@ import {
 } from "./_artifact-context.js";
 import { parse, stringify } from "yaml";
 import path from "node:path";
+import { relativeArtifactPath } from "../harness/artifact-paths.js";
 import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.js";
 import { MissionDocument, validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
 import { auditLog, workflowsDir } from "../harness/paths.js";
-import { buildUsageEvent, estimateUsage, usageFromAnthropic } from "../harness/usage.js";
+import { buildUsageEvent, usageFromAnthropic } from "../harness/usage.js";
 import {
   appendRunsIndexEntry,
   generateRunId,
@@ -609,9 +610,9 @@ export const defaultDiffCollector: DiffCollector = async (cwd) => {
 
 // ---------- orchestrator ----------
 
-export async function dryRunAnthropic(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunAnthropic(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planAnthropicRun(root, missionPath);
+    const plan = await planAnthropicRun(root, missionPath, options);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
@@ -849,6 +850,7 @@ export async function collectAnthropicSession(
       });
     }
 
+    const apiUsage = usageFromAnthropic(runnerResult.usage, runnerResult.usageModel);
     const draft: RuntimeResultDocument = {
       schema_version: "uh.runtime-result.v0",
       mission_id: plan.mission.id,
@@ -857,11 +859,13 @@ export async function collectAnthropicSession(
       started_at: startedAt,
       finished_at: finishedAt,
       exit_code: exitCode,
-      prompt_path: path.relative(root, artifacts.promptPath),
-      stdout_path: path.relative(root, artifacts.stdoutPath),
-      stderr_path: path.relative(root, artifacts.stderrPath),
-      diff_path: path.relative(root, artifacts.diffPath),
+      prompt_path: relativeArtifactPath(root, artifacts.promptPath),
+      stdout_path: relativeArtifactPath(root, artifacts.stdoutPath),
+      stderr_path: relativeArtifactPath(root, artifacts.stderrPath),
+      diff_path: relativeArtifactPath(root, artifacts.diffPath),
       errors,
+      ...(apiUsage ? { usage: apiUsage } : {}),
+      ...(runnerResult.usageModel ? { model: runnerResult.usageModel } : {}),
     };
     result = validateRuntimeResult(draft);
     await writeArtifactFile(artifacts.missionDir, artifacts.runtimeResultPath, stringify(result));
@@ -875,13 +879,12 @@ export async function collectAnthropicSession(
       exitCode === 0 ? "succeeded" : "failed",
     );
 
-    const apiUsage =
-      usageFromAnthropic(runnerResult.usage, runnerResult.usageModel) ??
-      estimateUsage(plan.prompt, sentinel);
-    await appendMissionEvent(
-      artifacts,
-      buildUsageEvent("anthropic", plan.mission.id, apiUsage, finishedAt),
-    );
+    if (apiUsage) {
+      await appendMissionEvent(
+        artifacts,
+        buildUsageEvent("anthropic", plan.mission.id, apiUsage, finishedAt),
+      );
+    }
   } catch (err) {
     const message = (err as Error).message;
     const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";

@@ -22,3 +22,23 @@ __pycache__/
 # Local Claude Code settings (shared skills are committed; local settings are not)
 .claude/settings.local.json
 /.omp/skills
+
+# Local handoff backups and generated campaign output, never publication inputs.
+/.local-only/
+/out/
+/.harness/audit/
+/.harness/live-runs/
+/acceptance/evidence/
+/docs/architecture/evidence/
+# Missions are local execution state by default. Existing tracked templates stay
+# tracked; deliberately add future reusable templates with an explicit exception.
+/.harness/missions/*
+
+# Locally generated duplicate GitNexus skills; canonical nested skills are tracked.
+/.claude/skills/gitnexus-cli/
+/.claude/skills/gitnexus-debugging/
+/.claude/skills/gitnexus-exploring/
+/.claude/skills/gitnexus-guide/
+/.claude/skills/gitnexus-impact-analysis/
+/.claude/skills/gitnexus-refactoring/
+/.harness/sandboxes/

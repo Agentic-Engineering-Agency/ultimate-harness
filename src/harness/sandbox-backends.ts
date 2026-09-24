@@ -1,8 +1,9 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileExists } from "./mission.js";
+import { runRuntimeProcess } from "./runtime-process.js";
 
 const execFileP = promisify(execFile);
 const OPENSANDBOX_METADATA = ".uh-opensandbox.json";
@@ -55,6 +56,9 @@ export interface SandboxBackend {
   collectDirtyChanges(worktreePath: string): Promise<string[]>;
 }
 
+/** Injectable git seam: every backend runs git through this signature. */
+export type GitRunner = (cwd: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+
 async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   try {
     const res = await execFileP("git", ["-C", cwd, ...args]);
@@ -77,6 +81,20 @@ async function gitStatusPorcelain(worktreePath: string): Promise<string[]> {
 }
 
 /**
+ * `git worktree unlock <path>`, tolerating the "is not locked" no-op. A
+ * worktree created before locking existed (or already unlocked) reports that
+ * message, which must not abort teardown.
+ */
+async function unlockWorktree(root: string, worktreePath: string): Promise<void> {
+  try {
+    await runGit(root, ["worktree", "unlock", worktreePath]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/is not locked/i.test(message)) throw err;
+  }
+}
+
+/**
  * Default backend: a `git worktree` sharing the project's object store on a
  * dedicated `sandbox/<id>` branch. Cheap, but ties the sandbox to the parent
  * repo's worktree registry and branch namespace.
@@ -86,19 +104,32 @@ export class GitWorktreeBackend implements SandboxBackend {
 
   async materialize(ctx: SandboxMaterializeContext): Promise<SandboxMaterializeResult> {
     const branch = `sandbox/${ctx.sandboxId}`;
-    await runGit(ctx.root, ["worktree", "add", "-b", branch, ctx.worktreePath, ctx.baseRef]);
+    // Lock the registration so a `git worktree prune` run elsewhere (another
+    // controller, or a removable/network volume that is briefly unmounted)
+    // cannot delete this worktree's administrative entry behind our back.
+    // No run id is in scope here, so the branch name is the lock identifier.
+    await runGit(ctx.root, [
+      "worktree", "add", "--lock", "--reason", `uh:${branch}`, "-b", branch, ctx.worktreePath, ctx.baseRef,
+    ]);
     return { branch, base_ref: ctx.baseRef };
   }
 
   async teardown(ctx: SandboxTeardownContext, opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
     if (await fileExists(ctx.worktreePath)) {
+      await unlockWorktree(ctx.root, ctx.worktreePath);
       const removeArgs = ["worktree", "remove"];
       if (opts.force) removeArgs.push("--force");
       removeArgs.push(ctx.worktreePath);
       await runGit(ctx.root, removeArgs);
     } else {
-      // Worktree directory was deleted out-of-band; prune the registration.
-      await runGit(ctx.root, ["worktree", "prune"]);
+      // The directory vanished out-of-band (deleted, or a removable/network
+      // volume is unmounted). Drop only THIS registration: unlock, then a
+      // forced remove. We never run a global `git worktree prune` — that would
+      // also delete every other worktree whose directory is missing right now,
+      // including ones owned by other controllers. If git still refuses, leave
+      // the orphan in place; `git worktree list` surfaces it to the operator.
+      try { await runGit(ctx.root, ["worktree", "unlock", ctx.worktreePath]); } catch { /* tolerated */ }
+      try { await runGit(ctx.root, ["worktree", "remove", "--force", ctx.worktreePath]); } catch { /* tolerated */ }
     }
 
     let branchRemoved = false;
@@ -128,16 +159,40 @@ export class GitWorktreeBackend implements SandboxBackend {
  */
 export class DirectoryBackend implements SandboxBackend {
   readonly name = "directory";
+  private readonly git: GitRunner;
+
+  constructor(git: GitRunner = runGit) {
+    this.git = git;
+  }
 
   async materialize(ctx: SandboxMaterializeContext): Promise<SandboxMaterializeResult> {
-    // Local clone (hard-linked objects) of the project into the sandbox dir.
-    await runGit(ctx.root, ["clone", "--local", "--quiet", "--", ctx.root, ctx.worktreePath]);
+    await this.clone(ctx);
     if (ctx.baseRef && ctx.baseRef !== "HEAD") {
-      await runGit(ctx.worktreePath, ["checkout", "--quiet", ctx.baseRef]);
+      await this.git(ctx.worktreePath, ["checkout", "--quiet", ctx.baseRef]);
     }
     const branch = `sandbox/${ctx.sandboxId}`;
-    await runGit(ctx.worktreePath, ["checkout", "--quiet", "-b", branch]);
+    await this.git(ctx.worktreePath, ["checkout", "--quiet", "-b", branch]);
     return { branch, base_ref: ctx.baseRef };
+  }
+
+  /**
+   * `git clone --local` hard-links the object store to keep the clone cheap.
+   * That only works when the sandbox shares a filesystem with the repository:
+   * for a linked worktree whose common git directory lives on another drive, or
+   * a network share, git fails with "failed to create link ... Improper link".
+   * On that failure only, remove the partial target directory and retry once
+   * without hardlinks. Any other clone failure is reported as-is.
+   */
+  private async clone(ctx: SandboxMaterializeContext): Promise<void> {
+    const target = ["--quiet", "--", ctx.root, ctx.worktreePath];
+    try {
+      await this.git(ctx.root, ["clone", "--local", ...target]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/failed to create link/i.test(message)) throw err;
+      await rm(ctx.worktreePath, { recursive: true, force: true });
+      await this.git(ctx.root, ["clone", "--no-hardlinks", ...target]);
+    }
   }
 
   async teardown(_ctx: SandboxTeardownContext, _opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
@@ -299,40 +354,48 @@ async function runOpenSandboxTemplate(
   return runShell(rendered, values.spawnCwd ?? values.cwd, values.timeoutMs);
 }
 
-function runShell(command: string, cwd: string, commandTimeoutMs: number): Promise<SandboxCommandRunResult> {
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    const child = spawn(command, { cwd, detached: true, shell: true, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    let timeoutTimer: NodeJS.Timeout | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
-    const append = (current: string, chunk: unknown) => (current + (typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf-8") : String(chunk))).slice(0, COMMAND_OUTPUT_LIMIT);
-    const finish = (metrics: Omit<SandboxCommandRunResult, "durationMs">) => {
-      if (settled) return;
-      settled = true;
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killTimer) clearTimeout(killTimer);
-      resolve({ ...metrics, durationMs: Date.now() - startedAt });
+async function runShell(command: string, cwd: string, commandTimeoutMs: number): Promise<SandboxCommandRunResult> {
+  const startedAt = Date.now();
+  try {
+    const shell = await resolveTemplateShell(commandTimeoutMs);
+    const remainingMs = commandTimeoutMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) return { exitCode: 124, stdout: "", stderr: "Command preparation exceeded its deadline",
+      timedOut: true, durationMs: Date.now() - startedAt };
+    const result = await runRuntimeProcess({ command: shell, args: ["-c", command], cwd, timeoutMs: remainingMs });
+    return {
+      exitCode: result.timedOut ? 124 : result.exitCode,
+      stdout: result.stdout.slice(0, COMMAND_OUTPUT_LIMIT),
+      stderr: (result.stderr || result.spawnError || "").slice(0, COMMAND_OUTPUT_LIMIT),
+      timedOut: result.timedOut,
+      spawnError: result.spawnError ? new Error(result.spawnError) : undefined,
+      durationMs: Date.now() - startedAt,
     };
-    const killChild = (signal: NodeJS.Signals) => {
-      if (child.pid === undefined) return;
-      try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { /* best effort */ } }
-    };
-    child.stdout?.setEncoding("utf-8");
-    child.stderr?.setEncoding("utf-8");
-    child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
-    child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
-    child.on("error", (err) => finish({ exitCode: 1, stdout, stderr: stderr || err.message, timedOut: false, spawnError: err }));
-    child.on("close", (code) => finish({ exitCode: code ?? 1, stdout, stderr, timedOut }));
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      killChild("SIGTERM");
-      killTimer = setTimeout(() => { killChild("SIGKILL"); finish({ exitCode: 124, stdout, stderr, timedOut: true }); }, 100);
-    }, commandTimeoutMs);
-  });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    return { exitCode: 1, stdout: "", stderr: failure.message, timedOut: false,
+      spawnError: failure, durationMs: Date.now() - startedAt };
+  }
+}
+
+let discoveredWindowsShell: { searchPath: string; executable: string } | undefined;
+
+async function resolveTemplateShell(timeoutMs: number): Promise<string> {
+  if (process.env.UH_OPENSANDBOX_SHELL) return process.env.UH_OPENSANDBOX_SHELL;
+  if (process.platform !== "win32") return "/bin/sh";
+  const searchPath = process.env.PATH ?? "";
+  if (discoveredWindowsShell?.searchPath === searchPath) return discoveredWindowsShell.executable;
+  // Derive a native shell from the installed Git distribution, never a WSL launcher.
+  const { stdout } = await execFileP("where.exe", ["git.exe"], { timeout: Math.max(1, Math.min(timeoutMs, 10_000)) });
+  for (const git of stdout.trim().split(/\r?\n/)) {
+    for (const relative of ["../bin/bash.exe", "../usr/bin/bash.exe", "../../usr/bin/bash.exe"]) {
+      const executable = path.resolve(path.dirname(git), relative);
+      if (await fileExists(executable)) {
+        discoveredWindowsShell = { searchPath, executable };
+        return executable;
+      }
+    }
+  }
+  throw new Error("POSIX command templates require a native shell; set UH_OPENSANDBOX_SHELL to its executable path");
 }
 
 function shellQuote(value: string): string {

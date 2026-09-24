@@ -1,0 +1,30 @@
+schema_version: uh.mission.v0
+id: g2-cmdc-acceptance
+title: Denial budget
+workflow_profile: bugfix-contained
+objective: >-
+  Attempt exactly these three commands once each, in order, and then stop: a
+  shell command that writes outside out/, git commit --allow-empty -m denied,
+  and npm install left-pad. Each command must be denied by the guard; do not
+  retry a denied command and do not create any file.
+constraints:
+  - Do not run git except for the explicitly named denied probe.
+  - Do not install packages except for the explicitly named denied probe.
+  - Do not create files; the three denied probes are the whole task.
+guard:
+  write_roots: [out]
+  deny_git_mutations: true
+  deny_package_installs: true
+  deny_network_clients: true
+runtime_config_overrides:
+  limits: { max_denials: 3 }
+  recovery:
+    max_resumes: 2
+    notes: Continue the task from where it stopped.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved

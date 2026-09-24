@@ -1,7 +1,14 @@
-import { spawn } from "node:child_process";
+import { assertIndependentReviewExecution } from "../harness/independent-review-execution.js";
+import { prepareRuntimeResume, recoveryPrompt, persistRuntimeRecovery, type RuntimeResume } from "../harness/runtime-recovery.js";
+import { claimRuntimeAttempt } from "../harness/runtime-attempt.js";
+import { runRuntimeProcess, type RuntimeProcessInput } from "../harness/runtime-process.js";
+import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
+import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, RuntimeRouteSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode, type RuntimeRecoveryDeadline, type ToolGuardPolicy, DEFAULT_PROTECTED_PATHS, ToolGuardArtifactSchema } from "../schema/runtime-control.js";
+import { delegatedRouteMismatch, nativeRuntimeCompleted, nativeRuntimeRoute, runtimeRouteMismatch } from "../harness/runtime-supervision.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, appendFile } from "node:fs/promises";
+import { readFile, appendFile, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import {
   type MissionArtifactContext,
   getMissionArtifactContext,
@@ -13,13 +20,14 @@ import {
 } from "./_artifact-context.js";
 import { parse, stringify } from "yaml";
 import path from "node:path";
+import { relativeArtifactPath } from "../harness/artifact-paths.js";
 import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.js";
 import { z } from "zod";
 import { MissionDocument } from "../schema/mission.js";
 import { validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
 import { auditLog, workflowsDir } from "../harness/paths.js";
-import { buildUsageEvent, estimateUsage } from "../harness/usage.js";
+import { buildUsageEvent, isUsageNumber, type RuntimeUsage } from "../harness/usage.js";
 import {
   appendRunsIndexEntry,
   generateRunId,
@@ -82,6 +90,15 @@ export type OhMyPiRunPlan = {
   session_id_passthrough: boolean;
   errors: string[];
   mission: MissionDocument;
+  limits?: RuntimeLimits;
+  guard?: ToolGuardPolicy;
+  expectedRoute?: RuntimeRoute;
+  /** config.yml-style overlay written per run and passed with `--config`; outranks the operator's global OMP settings. */
+  runtimeOverlay: Record<string, unknown>;
+  reviewRequestSha256?: string;
+  resume?: RuntimeResume;
+  grace?: boolean;
+  deadline?: RuntimeRecoveryDeadline;
   /**
    * UH-137 — resolved Honcho opt-out for this mission. `false` when
    * `runtime_config.honcho_memory: false`; otherwise `true`. When `false`,
@@ -90,7 +107,6 @@ export type OhMyPiRunPlan = {
    */
   honchoMemoryEnabled: boolean;
 };
-
 /**
  * Input the adapter hands to a OhMyPi runner.
  *
@@ -99,12 +115,7 @@ export type OhMyPiRunPlan = {
  * return `timedOut: true` and a non-zero exit code. The default runner uses
  * `child_process.spawn`; tests inject deterministic stubs.
  */
-export interface OhMyPiRunnerInput {
-  command: string;
-  args: string[];
-  cwd: string;
-  timeoutMs?: number;
-}
+export interface OhMyPiRunnerInput extends RuntimeProcessInput {}
 
 /**
  * Output a OhMyPi runner returns to the adapter.
@@ -119,6 +130,12 @@ export interface OhMyPiRunnerOutput {
   exitCode: number;
   timedOut: boolean;
   spawnError?: string;
+  cancelled?: boolean;
+  sessionId?: string;
+  outputTruncated?: boolean;
+  nativeTerminal?: boolean;
+  nativeTerminalFailure?: string;
+  supervisionStopCode?: RuntimeStopCode;
 }
 
 export type OhMyPiRunner = (input: OhMyPiRunnerInput) => Promise<OhMyPiRunnerOutput>;
@@ -135,16 +152,21 @@ export interface PlanOhMyPiOptions {
   extraRuntimeConfigOverrides?: Record<string, unknown>;
   /** UH-82 — explicit per-run id; generated when absent. */
   runId?: string;
+  artifactRoot?: string;
 }
-
 export interface RunOhMyPiOptions {
   runner?: OhMyPiRunner;
   timeoutMs?: number;
+  limits?: RuntimeLimits;
   collectDiff?: DiffCollector;
-  /** UH-81 — forwarded into the planner so the merge happens before strict-parse. */
+  /** Canonical host root for persisted artifacts; execution remains rooted at `root`. */
+  artifactRoot?: string;
+  /** UH-81 — CLI-time overrides spread on top of mission.runtime_config_overrides. */
   extraRuntimeConfigOverrides?: Record<string, unknown>;
   /** Explicit per-run id; generated when absent. UH-82. */
   runId?: string;
+  /** Signal used by the CLI to stop the owned runtime process tree. */
+  cancellationSignal?: AbortSignal;
 }
 
 export interface RunOhMyPiResult {
@@ -155,7 +177,6 @@ export interface RunOhMyPiResult {
   /** UH-82 — id of the per-run artifact directory written. */
   runId: string;
 }
-
 export interface OhMyPiCollectInput {
   root: string;
   artifacts: MissionArtifactContext | null;
@@ -164,6 +185,7 @@ export interface OhMyPiCollectInput {
   finishedAt: string;
   runnerResult: OhMyPiRunnerOutput;
   diff: DiffCaptureResult;
+  eventsAlreadyPersisted?: boolean;
 }
 
 export interface OhMyPiCollectOutput {
@@ -229,6 +251,13 @@ export const OhMyPiRuntimeConfigSchema = z.object({
   allow_extensions: z.boolean().optional().default(false),
   allow_skills: z.boolean().optional().default(false),
   model: z.string().optional(),
+  resume_from_run: z.string().min(1).optional(),
+  recovery_notes: z.string().min(1).optional(),
+  recovery: RuntimeRecoveryPolicySchema.optional(),
+  recovery_grace: z.boolean().optional(),
+  resume_session: z.string().min(1).optional(),
+  timeout_ms: z.number().int().positive().optional(),
+  limits: RuntimeLimitsSchema.optional(),
   // UH-137: per-mission Honcho opt-out. Omitted/true -> Honcho memory enrich,
   // record, and the honcho_search/honcho_remember tools run when Honcho env is
   // configured. false -> all Honcho activity is skipped for this mission.
@@ -259,9 +288,9 @@ export async function checkOhMyPi(root?: string): Promise<CheckResult> {
   return runOhMyPiCliCheck("omp");
 }
 
-export async function dryRunOhMyPi(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunOhMyPi(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planOhMyPiRun(root, missionPath);
+    const plan = await planOhMyPiRun(root, missionPath, options);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
@@ -327,6 +356,11 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
   } catch (e) {
     throw new Error(`Mission runtime_config_overrides validation failed: ${(e as Error).message}`);
   }
+  if (runtimeConfig.resume_session && runtimeConfig.resume_from_run) throw new Error("Choose resume_session or resume_from_run, not both");
+  const resume = runtimeConfig.resume_from_run
+    ? await prepareRuntimeResume(options.artifactRoot ?? root, mission.id, runtimeConfig.resume_from_run, "oh-my-pi", runtimeConfig.recovery_notes ?? runtimeConfig.recovery?.notes ?? "")
+    : undefined;
+  const grace = runtimeConfig.recovery_grace === true || resume?.grace === true;
 
   let workflow: WorkflowDocument | undefined;
   const workflowPath = path.join(workflowsDir(root), `${mission.workflow_profile}.yaml`);
@@ -340,7 +374,7 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
 
   const config = adapter.config;
   const cliCommand = config?.cli_command ? config.cli_command : "omp";
-  const worktreeMode = config?.worktree_mode === true;
+  if (config?.worktree_mode) errors.push("OhMyPi worktree_mode is unsupported; use UH workspace isolation");
   if (config?.pass_session_id === true) {
     errors.push("OhMyPi assigns its own thread id; set pass_session_id: false");
   }
@@ -349,7 +383,13 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
   if (mode === "rpc-ui") {
     errors.push("oh-my-pi mode rpc-ui expects a TUI parent; use mode: json, text, or rpc for headless runs");
   }
-  const model = runtimeConfig.model && runtimeConfig.model.length > 0 ? runtimeConfig.model : undefined;
+  const model = runtimeConfig.model?.trim() || config?.default_model?.trim() || undefined;
+  const separator = model?.indexOf("/") ?? -1;
+  const expectedRoute = RuntimeRouteSchema.parse({
+    provider: separator > 0 ? model!.slice(0, separator) : config?.default_provider?.trim() || undefined,
+    model: separator > 0 ? model!.slice(separator + 1) : model,
+  });
+  if (mode === "text" && (expectedRoute.model || expectedRoute.provider)) errors.push("An assigned OMP route requires structured runtime output, not text mode");
   const thinking = runtimeConfig.thinking === "" ? undefined : runtimeConfig.thinking;
   const allowExtensions = runtimeConfig.allow_extensions;
   const allowSkills = runtimeConfig.allow_skills;
@@ -363,6 +403,11 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
   // for this mission (enrich here + record in runOhMyPi). Default ON; the
   // honcho-memory extension itself no-ops when Honcho env is not configured.
   const honchoMemoryEnabled = runtimeConfig.honcho_memory !== false;
+  const reviewRequestSha256 = await assertIndependentReviewExecution(root, missionPath, mission, {
+    canonicalRoot: options.artifactRoot ?? root, runtime: "oh-my-pi", model,
+    resumeSession: runtimeConfig.resume_session, resumeFromRun: runtimeConfig.resume_from_run,
+    memoryEnabled: honchoMemoryEnabled, extensionsEnabled: allowExtensions, skillsEnabled: allowSkills,
+  });
 
   const ctx = buildDispatchContext(mission, workflow);
   const basePrompt = renderPrompt(ctx);
@@ -370,17 +415,25 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     ? await loadHonchoMemoryBlock({ cwd: root, missionId: mission.id })
     : null;
   ctx.memoryBlock = memoryBlock ?? undefined;
-  const prompt = renderPrompt(ctx);
+  const prompt = renderPrompt(ctx) + (resume ? recoveryPrompt(resume) : "");
   const args = [
     "--print",
   ];
   if (model) {
     args.push("--model", model);
   }
+  if (expectedRoute.provider) args.push("--provider", expectedRoute.provider);
   if (thinking) {
     args.push("--thinking", thinking);
   }
-  args.push("--mode", mode, "--no-session");
+  args.push("--mode", mode);
+  if (mission.guard) {
+    args.push("-e", await snapshotGuardHook("extensions/tool-guard/omp.js"));
+  }
+  const resumeSession = resume?.sessionId ?? runtimeConfig.resume_session;
+  if (resumeSession) {
+    args.push("--resume", resumeSession);
+  }
   if (!allowExtensions) {
     args.push("--no-extensions");
   }
@@ -389,62 +442,53 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
   }
   args.push("--no-title", prompt);
 
+  const deadline = runtimeConfig.recovery?.on_deadline;
+  const limits: RuntimeLimits = {
+    ...runtimeConfig.limits,
+    ...(runtimeConfig.timeout_ms ? { timeout_ms: runtimeConfig.timeout_ms } : {}),
+    ...(grace && deadline ? { max_turns: deadline.grace_turns + 1, timeout_ms: deadline.grace_timeout_ms } : {}),
+  };
   return {
+    ...(mission.guard ? { guard: mission.guard } : {}),
     command: cliCommand,
     args,
     prompt,
     basePrompt,
-    worktree: worktreeMode,
+    worktree: false,
     session_id_passthrough: false,
     errors,
     mission,
+    limits,
+    resume,
+    grace,
+    deadline,
+    expectedRoute,
+    runtimeOverlay: ohMyPiRuntimeOverlay(model, mission.guard?.allow_native_subagents === true),
+    reviewRequestSha256,
     honchoMemoryEnabled,
   };
 }
 
+/** Roles OMP resolves on its own for sub-agents, summaries, commits and advice. */
+const OMP_MODEL_ROLES = ["default", "smol", "slow", "plan", "task", "commit", "advisor", "tiny", "vision", "designer"] as const;
+
 /**
- * Default runner. Streams stdout/stderr from a spawned child, applies a
- * SIGKILL on timeout, and never throws — failures surface as `spawnError` or
- * `timedOut` on the returned record so the adapter can translate them into a
- * `failed` runtime-result with explicit errors.
+ * OMP inherits the operator's global settings: eager delegation and role models
+ * that point at other providers. `--model` pins only the top-level session, so a
+ * sub-agent or helper role can spend on an unassigned route. The overlay pins
+ * every role to the assigned model and removes the native `task` tool unless
+ * the mission's guard allows native sub-agents.
  */
-export const defaultOhMyPiRunner: OhMyPiRunner = (input) => {
-  return new Promise((resolve) => {
-    const child = spawn(input.command, input.args, {
-      cwd: input.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+export function ohMyPiRuntimeOverlay(model: string | undefined, allowNativeSubagents: boolean): Record<string, unknown> {
+  return {
+    ...(model ? { modelRoles: Object.fromEntries(OMP_MODEL_ROLES.map(role => [role, model])) } : {}),
+    task: { eager: "default", maxRecursionDepth: allowNativeSubagents ? 1 : 0 },
+    advisor: { enabled: false },
+  };
+}
 
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    let timer: NodeJS.Timeout | undefined;
-
-    const finalize = (exitCode: number, spawnError?: string): void => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode, timedOut, spawnError });
-    };
-
-    if (typeof input.timeoutMs === "number" && input.timeoutMs > 0) {
-      timer = setTimeout(() => {
-        timedOut = true;
-        try { child.kill("SIGKILL"); } catch { /* child already exited */ }
-      }, input.timeoutMs);
-    }
-
-    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on("close", (code: number | null) => {
-      finalize(timedOut ? 1 : code ?? 1);
-    });
-    child.on("error", (err: Error) => {
-      finalize(1, err.message);
-    });
-  });
-};
+/** Shared UH process ownership and supervision; runtime parsing stays in this adapter. */
+export const defaultOhMyPiRunner: OhMyPiRunner = runRuntimeProcess;
 
 /**
  * Default diff collector. Delegates to `captureDiffWithUntracked`
@@ -469,51 +513,67 @@ export async function runOhMyPi(
   missionPath: string,
   options: RunOhMyPiOptions = {},
 ): Promise<RunOhMyPiResult> {
-  const plan = await planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides });
+  const plan = await planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides, artifactRoot: options.artifactRoot });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
 
   const runId = options.runId ?? generateRunId();
   const startedAt = new Date().toISOString();
-  const artifacts = await getMissionArtifactContext(root, missionPath, runId);
+  const artifactRoot = options.artifactRoot ?? root;
+  const artifactMissionPath = path.join(artifactRoot, ".harness", "missions", plan.mission.id, "mission.yaml");
+  const artifacts = await getMissionArtifactContext(artifactRoot, artifactMissionPath, runId);
+  if (artifacts) await claimRuntimeAttempt(artifacts);
+  const overlayDir = artifacts?.runDir ?? await mkdtemp(path.join(tmpdir(), "uh-omp-overlay-"));
+  const overlayPath = path.join(overlayDir, "omp-overlay.yml");
+  if (artifacts) await writeArtifactFile(artifacts.missionDir, overlayPath, stringify(plan.runtimeOverlay));
+  else await writeFile(overlayPath, stringify(plan.runtimeOverlay), "utf8");
+  const titleFlag = plan.args.lastIndexOf("--no-title");
+  plan.args.splice(titleFlag < 0 ? 0 : titleFlag, 0, "--config", overlayPath);
 
+  let initializationError: string | undefined;
   if (artifacts) {
-    await writeLatestPointer(root, plan.mission.id, {
-      schema_version: "uh.latest-run.v0",
-      run_id: runId,
-      started_at: startedAt,
-      status: "running",
-    });
-    await appendRunsIndexEntry(root, plan.mission.id, {
-      run_id: runId,
-      started_at: startedAt,
-      status: "running",
-      runtime: "oh-my-pi",
-    });
-    await persistPromptAndSession(artifacts, plan.prompt, {
-      schema_version: "uh.runtime-session.v0",
-      mission_id: plan.mission.id,
-      runtime: "oh-my-pi",
-      status: "running",
-      command: plan.command,
-      args: plan.args,
-      started_at: startedAt,
-    });
-    await appendMissionEvent(artifacts, {
-      event: "runtime.started",
-      timestamp: startedAt,
-      runtime: "oh-my-pi",
-      mission_id: plan.mission.id,
-      command: plan.command,
-      args: plan.args,
-      run_id: runId,
-    });
+    try {
+      if (plan.resume) await persistRuntimeRecovery(artifacts, plan.resume);
+      await writeLatestPointer(artifactRoot, plan.mission.id, {
+        schema_version: "uh.latest-run.v0",
+        run_id: runId,
+        started_at: startedAt,
+        status: "running",
+      });
+      await appendRunsIndexEntry(artifactRoot, plan.mission.id, {
+        run_id: runId,
+        started_at: startedAt,
+        status: "running",
+        runtime: "oh-my-pi",
+        replay_of: plan.resume?.sourceRunId,
+      });
+      await persistPromptAndSession(artifacts, plan.prompt, {
+        schema_version: "uh.runtime-session.v0",
+        mission_id: plan.mission.id,
+        runtime: "oh-my-pi",
+        status: "running",
+        command: plan.command,
+        args: plan.args,
+        started_at: startedAt,
+      });
+      await appendMissionEvent(artifacts, {
+        event: "runtime.started",
+        timestamp: startedAt,
+        runtime: "oh-my-pi",
+        mission_id: plan.mission.id,
+        command: plan.command,
+        args: plan.args,
+        run_id: runId,
+      });
+    } catch {
+      initializationError = "Initial artifact persistence failure";
+    }
   }
 
   // Audit event
   try {
-    const logPath = auditLog(root);
+    const auditPath = auditLog(artifactRoot);
     const auditEntry = JSON.stringify({
       event: "mission.run",
       timestamp: new Date().toISOString(),
@@ -523,39 +583,136 @@ export async function runOhMyPi(
       workflow: plan.mission.workflow_profile,
       run_id: runId,
     });
-    await appendFile(logPath, `${auditEntry}\n`, "utf-8");
+    await appendFile(auditPath, `${auditEntry}\n`, "utf-8");
   } catch {
     // audit failure shouldn't block run
   }
 
+  let guardEnv: NodeJS.ProcessEnv | undefined;
+  if (plan.guard && artifacts) {
+    const effectiveLimits = { ...plan.limits, ...options.limits };
+    const protectedPaths = effectiveLimits.protected_paths ?? DEFAULT_PROTECTED_PATHS;
+    const artifact = ToolGuardArtifactSchema.parse({
+      schema_version: "uh.tool-guard.v0",
+      ...plan.guard,
+      worker_root: root,
+      protected_paths: protectedPaths,
+    });
+    const policyPath = path.join(artifacts.runDir, "tool-guard.json");
+    const logPath = path.join(artifacts.runDir, "tool-guard.log");
+    await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
+    guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
+  }
+
   const runner = options.runner ?? defaultOhMyPiRunner;
+  let liveBuffer = "";
+  let liveEventPersisted = false;
+  let liveWrites = Promise.resolve();
+  const enqueueLiveChunk = (chunk: string): Promise<void> => {
+    if (!artifacts) return Promise.resolve();
+    liveBuffer += chunk;
+    const lines = liveBuffer.split(/\r?\n/);
+    liveBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let event: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+        event = parsed as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (typeof event.type !== "string") continue;
+      liveEventPersisted = true;
+      liveWrites = liveWrites.then(() => appendMissionEvent(artifacts, {
+        ...event,
+        event: `oh-my-pi.${event.type}`,
+      }));
+    }
+    return liveWrites;
+  };
   let runnerResult: OhMyPiRunnerOutput;
   let collection: OhMyPiCollectOutput;
   try {
-    runnerResult = await runner({
-      command: plan.command,
-      args: plan.args,
-      cwd: root,
-      timeoutMs: options.timeoutMs,
-    });
+    if (initializationError) {
+      runnerResult = {
+        stdout: "",
+        stderr: "",
+        exitCode: 1,
+        timedOut: false,
+        spawnError: initializationError,
+      };
+      collection = await collectOhMyPiSession({
+        root: artifactRoot,
+        artifacts,
+        plan,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        runnerResult,
+        diff: { patch: "" },
+        eventsAlreadyPersisted: false,
+      });
+    } else {
+      try {
+        runnerResult = await runner({
+          command: plan.command,
+          args: plan.args,
+          cwd: root,
+          env: guardEnv,
+          timeoutMs: options.timeoutMs,
+          limits: { ...plan.limits, ...options.limits },
+          onDeadline: plan.grace ? undefined : plan.deadline,
+          expectedRoute: plan.expectedRoute,
+          reviewRequestSha256: plan.reviewRequestSha256,
+          artifacts: artifacts ? {
+            directory: path.dirname(artifacts.stdoutPath),
+            missionId: plan.mission.id,
+            runId,
+            runtime: "oh-my-pi",
+          } : undefined,
+          onStdoutChunk: enqueueLiveChunk,
+          cancellationSignal: options.cancellationSignal,
+        });
+      } catch {
+        runnerResult = {
+          stdout: "",
+          stderr: "",
+          exitCode: 1,
+          timedOut: false,
+          spawnError: "Runtime runner or stream persistence failed",
+        };
+      }
+      const trailing = liveBuffer;
+      liveBuffer = "";
+      try {
+        if (trailing.trim().length > 0) await enqueueLiveChunk(`${trailing}\n`);
+        await liveWrites;
+      } catch {
+        if (!runnerResult.spawnError) {
+          runnerResult = { ...runnerResult, exitCode: 1, spawnError: "Stream callback failed" };
+        }
+      }
 
-    const collectDiff = options.collectDiff ?? defaultDiffCollector;
-    const diff = await collectDiff(root);
-    const finishedAt = new Date().toISOString();
-
-    collection = await collectOhMyPiSession({
-      root,
-      artifacts,
-      plan,
-      startedAt,
-      finishedAt,
-      runnerResult,
-      diff,
-    });
+      const collectDiff = options.collectDiff ?? defaultDiffCollector;
+      const diff = await collectDiff(root);
+      const finishedAt = new Date().toISOString();
+      collection = await collectOhMyPiSession({
+        root: artifactRoot,
+        artifacts,
+        plan,
+        startedAt,
+        finishedAt,
+        runnerResult,
+        diff,
+        eventsAlreadyPersisted: liveEventPersisted,
+      });
+    }
   } finally {
     if (artifacts) {
       try {
-        await mirrorRuntimeResultToLatest(root, plan.mission.id, runId);
+        await mirrorRuntimeResultToLatest(artifactRoot, plan.mission.id, runId);
       } catch {
         // best-effort.
       }
@@ -579,20 +736,28 @@ export async function runOhMyPi(
   if (artifacts) {
     const finishedAt = new Date().toISOString();
     const terminalStatus = deriveOmpRunStatus(collection.result, collection.exitCode);
-    await writeLatestPointer(root, plan.mission.id, {
-      schema_version: "uh.latest-run.v0",
-      run_id: runId,
-      started_at: startedAt,
-      finished_at: finishedAt,
-      status: terminalStatus,
-    });
-    await appendRunsIndexEntry(root, plan.mission.id, {
-      run_id: runId,
-      started_at: startedAt,
-      finished_at: finishedAt,
-      status: terminalStatus,
-      runtime: "oh-my-pi",
-    });
+    try {
+      await writeLatestPointer(artifactRoot, plan.mission.id, {
+        schema_version: "uh.latest-run.v0",
+        run_id: runId,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        status: terminalStatus,
+      });
+    } catch {
+      // Keep the terminal per-run result even when the mirror is unwritable.
+    }
+    try {
+      await appendRunsIndexEntry(artifactRoot, plan.mission.id, {
+        run_id: runId,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        status: terminalStatus,
+        runtime: "oh-my-pi",
+      });
+    } catch {
+      // Keep the terminal per-run result even when the index is unwritable.
+    }
   }
 
   return {
@@ -603,6 +768,7 @@ export async function runOhMyPi(
     runId,
   };
 }
+
 
 function deriveOmpRunStatus(
   result: RuntimeResultDocument | undefined,
@@ -632,16 +798,19 @@ function deriveOmpRunStatus(
 export async function collectOhMyPiSession(
   input: OhMyPiCollectInput,
 ): Promise<OhMyPiCollectOutput> {
-  const { artifacts, plan, runnerResult, diff, startedAt, finishedAt, root } = input;
+  const { artifacts, plan, runnerResult, diff, startedAt, finishedAt, root, eventsAlreadyPersisted } = input;
 
   const errors: string[] = [];
   let stderr = runnerResult.stderr;
   let exitCode = runnerResult.exitCode;
 
   if (runnerResult.spawnError) {
+    const safeSpawnError = runnerResult.spawnError.startsWith("Stream callback failed")
+      ? "Stream callback failed"
+      : runnerResult.spawnError;
     const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";
-    stderr = `${stderr}${separator}Spawn error: ${runnerResult.spawnError}`;
-    errors.push(`Spawn error: ${runnerResult.spawnError}`);
+    stderr = `${stderr}${separator}Spawn error: ${safeSpawnError}`;
+    errors.push(`Spawn error: ${safeSpawnError}`);
     if (exitCode === 0) exitCode = 1;
   }
   if (runnerResult.timedOut) {
@@ -652,15 +821,33 @@ export async function collectOhMyPiSession(
     errors.push(...diff.errors);
   }
 
-  const quotaError = detectOhMyPiQuotaError(runnerResult.stdout, stderr);
+  const parsedStream = parseOhMyPiOutput(runnerResult.stdout);
+  errors.push(...parsedStream.parseErrors);
+  const routeMismatch = parsedStream.events.some(event => runtimeRouteMismatch(nativeRuntimeRoute(event), plan.expectedRoute) || delegatedRouteMismatch(event, plan.expectedRoute) !== undefined);
+  if (routeMismatch) {
+    errors.push("Runtime reported a route outside the configured assignment");
+    if (exitCode === 0) exitCode = 1;
+  }
+  const quotaError = detectOhMyPiQuotaError(runnerResult.stdout, stderr, parsedStream.events);
   if (quotaError) {
     errors.push(quotaError);
   }
-
-  const parsedStream = parseOhMyPiOutput(runnerResult.stdout);
-  errors.push(...parsedStream.parseErrors);
-
-  // Prefer the UH-28 runtime-final-message sentinel over the heuristic
+  const nativeTerminalError = extractNativeTerminalFailure(parsedStream.events);
+  if (nativeTerminalError) {
+    errors.push(nativeTerminalError);
+  }
+  const reportedFacts = extractReportedFacts(parsedStream.events);
+  const routeUnverified = (plan.expectedRoute?.model !== undefined && reportedFacts.model === undefined) ||
+    (plan.expectedRoute?.provider !== undefined && reportedFacts.provider === undefined);
+  if (routeUnverified) {
+    errors.push("Runtime did not attest the configured route");
+    if (exitCode === 0) exitCode = 1;
+  }
+  if (runnerResult.outputTruncated) {
+    delete reportedFacts.usage;
+    delete reportedFacts.costUsd;
+    delete reportedFacts.costBasis;
+  }
   // (last assistant-like JSON entry). Scans the heuristic-extracted last
   // assistant text (which is the JSON-decoded content, with real newlines)
   // rather than the raw NDJSON stdout where newlines are JSON-escaped.
@@ -673,13 +860,31 @@ export async function collectOhMyPiSession(
     errors.push("oh-my-pi did not emit a final assistant message");
   }
 
+  const nativeCompleted = nativeRuntimeCompleted({
+    nativeTerminal: runnerResult.nativeTerminal === true,
+    nativeTerminalFailure: runnerResult.nativeTerminalFailure,
+    supervisionStopCode: runnerResult.supervisionStopCode,
+    finalMessage,
+    cancelled: runnerResult.cancelled,
+    timedOut: runnerResult.timedOut,
+    spawnError: runnerResult.spawnError,
+    errors,
+  });
   let status: RuntimeResultStatus;
-  if (runnerResult.spawnError) {
+  if (runnerResult.cancelled) {
+    status = "cancelled";
+  } else if (runnerResult.spawnError) {
     status = "failed";
   } else if (runnerResult.timedOut) {
     status = "failed";
+  } else if (routeMismatch || routeUnverified) {
+    status = "failed";
   } else if (quotaError) {
     status = "blocked";
+  } else if (nativeTerminalError) {
+    status = "failed";
+  } else if (nativeCompleted) {
+    status = "passed";
   } else if (exitCode !== 0) {
     status = "failed";
   } else if (finalMessageMissing) {
@@ -687,6 +892,11 @@ export async function collectOhMyPiSession(
   } else {
     status = "passed";
   }
+  const incomplete = plan.grace || runnerResult.supervisionStopCode === "deadline";
+  const incompleteReason = incomplete
+    ? (runnerResult.supervisionStopCode === "deadline" ? "Deadline grace budget exhausted" : "Original runtime budget exhausted; deliverable captured during grace")
+    : undefined;
+  if (status === "failed" && exitCode === 0) exitCode = 1;
 
   if (!artifacts) {
     return { exitCode, stderr, finalMessage };
@@ -694,20 +904,8 @@ export async function collectOhMyPiSession(
 
   let result: RuntimeResultDocument | undefined;
   try {
-    await writeArtifactFile(artifacts.missionDir, artifacts.stdoutPath, runnerResult.stdout);
-    await writeArtifactFile(artifacts.missionDir, artifacts.stderrPath, stderr);
-    await writeArtifactFile(artifacts.missionDir, artifacts.diffPath, diff.patch);
-    await persistFinalMessage(artifacts, finalMessage);
-    for (const event of parsedStream.events) {
-      if (typeof event.type === "string") {
-        await appendMissionEvent(artifacts, {
-          ...event,
-          event: `oh-my-pi.${event.type}`,
-        });
-      }
-    }
-
     const draft: RuntimeResultDocument = {
+      ...(incomplete ? { completion: "incomplete" as const, incomplete_reason: incompleteReason } : {}),
       schema_version: "uh.runtime-result.v0",
       mission_id: plan.mission.id,
       runtime: "oh-my-pi",
@@ -715,33 +913,80 @@ export async function collectOhMyPiSession(
       started_at: startedAt,
       finished_at: finishedAt,
       exit_code: exitCode,
-      prompt_path: path.relative(root, artifacts.promptPath),
-      stdout_path: path.relative(root, artifacts.stdoutPath),
-      stderr_path: path.relative(root, artifacts.stderrPath),
-      diff_path: path.relative(root, artifacts.diffPath),
+      ...(status === "passed" && exitCode !== 0 ? { exit_code_ignored_reason: "runtime exited non-zero after completed native terminal event" as const } : {}),
+      prompt_path: relativeArtifactPath(root, artifacts.promptPath),
+      stdout_path: relativeArtifactPath(root, artifacts.stdoutPath),
+      stderr_path: relativeArtifactPath(root, artifacts.stderrPath),
+      diff_path: relativeArtifactPath(root, artifacts.diffPath),
       errors,
+      ...(reportedFacts.provider ? { provider: reportedFacts.provider } : {}),
+      ...(reportedFacts.model ? { model: reportedFacts.model } : {}),
+      ...(reportedFacts.usage ? { usage: reportedFacts.usage } : {}),
+      ...(reportedFacts.costUsd !== undefined ? { cost_usd: reportedFacts.costUsd } : {}),
+      ...(reportedFacts.costBasis ? { cost_basis: reportedFacts.costBasis } : {}),
     };
     result = validateRuntimeResult(draft);
+    await writeArtifactFile(artifacts.missionDir, artifacts.stdoutPath, runnerResult.stdout);
+    await writeArtifactFile(artifacts.missionDir, artifacts.stderrPath, stderr);
+    await writeArtifactFile(artifacts.missionDir, artifacts.diffPath, diff.patch);
+    await persistFinalMessage(artifacts, finalMessage);
+    // Publish independently readable terminal artifacts before appending
+    // optional events. An unwritable events stream must not leave the run
+    // result or session in a running state.
     await writeArtifactFile(artifacts.missionDir, artifacts.runtimeResultPath, stringify(result));
-
     await persistFinalRuntimeSession(
       artifacts,
       plan,
       startedAt,
       finishedAt,
       exitCode,
-      exitCode === 0 ? "succeeded" : "failed",
+      status === "passed" ? "succeeded" : "failed",
+      reportedFacts,
     );
+    if (!eventsAlreadyPersisted) {
+      for (const event of parsedStream.events) {
+        if (typeof event.type === "string") {
+          await appendMissionEvent(artifacts, {
+            ...event,
+            event: `oh-my-pi.${event.type}`,
+          });
+        }
+      }
+    }
+    await appendMissionEvent(artifacts, {
+      event: "runtime.finished",
+      timestamp: finishedAt,
+      runtime: "oh-my-pi",
+      mission_id: plan.mission.id,
+      exit_code: exitCode,
+      status: status === "passed" ? "succeeded" : "failed",
+    });
 
-    await appendMissionEvent(
-      artifacts,
-      buildUsageEvent("oh-my-pi", plan.mission.id, estimateUsage(plan.prompt, finalMessage), finishedAt),
-    );
-  } catch (err) {
-    const message = (err as Error).message;
+    if (reportedFacts.usage) {
+      await appendMissionEvent(
+        artifacts,
+        buildUsageEvent("oh-my-pi", plan.mission.id, reportedFacts.usage, finishedAt),
+      );
+    }
+  } catch {
+    exitCode = exitCode === 0 ? 1 : exitCode;
+    const persistenceError = "Artifact persistence failure";
     const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";
-    stderr = `${stderr}${separator}Artifact persistence failure: ${message}`;
-    return { exitCode: exitCode === 0 ? 1 : exitCode, stderr, finalMessage };
+    stderr = `${stderr}${separator}${persistenceError}`;
+    if (result) {
+      result = { ...result, status: "failed", exit_code: exitCode, errors: [...result.errors, persistenceError] };
+      try {
+        await writeArtifactFile(artifacts.missionDir, artifacts.runtimeResultPath, stringify(result));
+      } catch {
+        // The failed result remains available to the caller if this file is also unwritable.
+      }
+      try {
+        await persistFinalRuntimeSession(artifacts, plan, startedAt, finishedAt, exitCode, "failed", reportedFacts);
+      } catch {
+        // Finalize the independent run index even when session persistence is unavailable.
+      }
+    }
+    return { exitCode, stderr, result, finalMessage };
   }
 
   return { exitCode, stderr, result, finalMessage };
@@ -761,8 +1006,8 @@ export function parseOhMyPiOutput(stdout: string): { events: Array<Record<string
       } else {
         parseErrors.push(`OhMyPi JSON line ${index + 1} is not an object`);
       }
-    } catch (err) {
-      parseErrors.push(`OhMyPi JSON line ${index + 1} parse error: ${(err as Error).message}`);
+    } catch {
+      parseErrors.push(`OhMyPi JSON parse error on line ${index + 1}`);
     }
   }
 
@@ -787,20 +1032,114 @@ export function parseOhMyPiOutput(stdout: string): { events: Array<Record<string
   };
 }
 
-export function detectOhMyPiQuotaError(stdout: string, stderr: string): string | null {
-  const combined = `${stdout}\n${stderr}`;
-  const pattern = /usage limit|rate limit|not authenticated|auth(orization)? required|please log in|quota|credit|401|403|api[- ]?key/i;
-  if (!pattern.test(combined)) {
-    return null;
+function nativeMessageRecords(event: Record<string, unknown>): Record<string, unknown>[] {
+  const records = [event];
+  if (event.message && typeof event.message === "object" && !Array.isArray(event.message)) {
+    records.push(event.message as Record<string, unknown>);
   }
-  const firstMatch = combined
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => pattern.test(line));
-  const detail = firstMatch && firstMatch.length > 0 ? `: ${firstMatch}` : "";
-  return `oh-my-pi auth or quota error${detail}`;
+  if (event.type === "agent_end" && Array.isArray(event.messages)) {
+    for (const message of event.messages) {
+      if (message && typeof message === "object" && !Array.isArray(message)) {
+        records.push(message as Record<string, unknown>);
+      }
+    }
+  }
+  return records;
+}
+function extractNativeTerminalFailure(events: Array<Record<string, unknown>>): string | null {
+  const isAuthOrQuotaStatus = (value: unknown): boolean =>
+    value === 401 || value === 403 || value === 429 || value === "401" || value === "403" || value === "429";
+  const isServerStatus = (value: unknown): boolean =>
+    (typeof value === "number" && value >= 500 && value <= 599)
+    || (typeof value === "string" && /^5\d\d$/.test(value));
+
+  for (const event of events) {
+    const eventType = typeof event.type === "string" ? event.type : "";
+    for (const candidate of nativeMessageRecords(event)) {
+      const stopReason = candidate.stopReason ?? candidate.stop_reason;
+      if (typeof stopReason === "string" && /^(error|aborted)$/i.test(stopReason)) {
+        return `oh-my-pi runtime reported terminal failure: ${stopReason.toLowerCase()}`;
+      }
+      const errorMessage = candidate.errorMessage ?? candidate.error_message;
+      if (typeof errorMessage === "string" && errorMessage.trim().length > 0) {
+        return "oh-my-pi runtime reported terminal failure";
+      }
+
+      const errorRecord = candidate.error && typeof candidate.error === "object" && !Array.isArray(candidate.error)
+        ? candidate.error as Record<string, unknown>
+        : undefined;
+      const nestedStatus = errorRecord?.status;
+      const nestedMessage = errorRecord?.message;
+      const genericEnvelope = /^(error|failure)$/i.test(eventType)
+        && (isServerStatus(nestedStatus)
+          || (typeof nestedMessage === "string" && nestedMessage.trim().length > 0)
+          || isServerStatus(candidate.status));
+      const typedNestedFailure = isServerStatus(nestedStatus)
+        && (typeof nestedMessage === "string" || /^(error|failure)$/i.test(eventType));
+      if ((genericEnvelope || typedNestedFailure) && !isAuthOrQuotaStatus(nestedStatus)) {
+        return "oh-my-pi runtime reported terminal failure";
+      }
+    }
+  }
+  return null;
 }
 
+export function detectOhMyPiQuotaError(
+  stdout: string,
+  stderr: string,
+  events: Array<Record<string, unknown>> = parseOhMyPiOutput(stdout).events,
+): string | null {
+  const classify = (text: string): string | null => {
+    if (/not authenticated|unauthorized|auth(?:entication|orization)? required|please log in|api[-_ ]?key|\b(?:401|403)\b/i.test(text)) {
+      return "oh-my-pi auth or quota error: API key authentication required";
+    }
+    if (/usage limit|rate limit|quota|credit|\b429\b/i.test(text)) {
+      return "oh-my-pi auth or quota error: quota or rate limit exceeded";
+    }
+    return null;
+  };
+
+  for (const line of stderr.split("\n")) {
+    const diagnostic = classify(line.trim());
+    if (diagnostic) return diagnostic;
+  }
+  for (const event of events) {
+    const type = typeof event.type === "string" ? event.type : "";
+    for (const candidate of nativeMessageRecords(event)) {
+      const errorRecord = candidate.error && typeof candidate.error === "object" && !Array.isArray(candidate.error)
+        ? candidate.error as Record<string, unknown>
+        : undefined;
+      const status = errorRecord?.status ?? candidate.status;
+      if (status === 401 || status === 403 || status === "401" || status === "403") {
+        return "oh-my-pi auth or quota error: API key authentication required";
+      }
+      if (status === 429 || status === "429") {
+        return "oh-my-pi auth or quota error: quota or rate limit exceeded";
+      }
+      const diagnostic = [
+        candidate.errorMessage,
+        candidate.error_message,
+        candidate.code,
+        errorRecord?.code,
+        errorRecord?.message,
+        /^(error|failure)$/i.test(type) && typeof candidate.message === "string" ? candidate.message : "",
+        typeof status === "string" ? status : "",
+        typeof candidate.error === "string" ? candidate.error : "",
+      ].filter((value): value is string => typeof value === "string").join(" ");
+      if (/error|failure|auth|quota/i.test(type) || diagnostic.length > 0) {
+        const classified = classify(diagnostic);
+        if (classified) return classified;
+      }
+    }
+  }
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("{")) continue;
+    const diagnostic = classify(trimmed);
+    if (diagnostic) return diagnostic;
+  }
+  return null;
+}
 function extractFinalMessage(events: Array<Record<string, unknown>>): string {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const extracted = extractAssistantText(events[index]);
@@ -812,6 +1151,12 @@ function extractFinalMessage(events: Array<Record<string, unknown>>): string {
 }
 
 function extractAssistantText(event: Record<string, unknown>): string {
+  const nestedMessage = event.message;
+  if (nestedMessage && typeof nestedMessage === "object" && !Array.isArray(nestedMessage)) {
+    const extracted = extractAssistantText(nestedMessage as Record<string, unknown>);
+    if (extracted.length > 0) return extracted;
+  }
+
   const role = event.role;
   const type = event.type;
   const isAssistantLike = role === "assistant" || type === "assistant" || type === "message" || type === "result";
@@ -861,8 +1206,121 @@ function extractStringBody(event: Record<string, unknown>): string {
   for (const key of ["content", "text", "message", "body", "output"]) {
     const value = event[key];
     if (typeof value === "string") return value;
+    if (Array.isArray(value)) {
+      const parts = value.flatMap((block) => {
+        if (!block || typeof block !== "object" || Array.isArray(block)) return [];
+        const candidate = (block as Record<string, unknown>).text;
+        const blockType = (block as Record<string, unknown>).type;
+        return typeof candidate === "string" && (blockType === undefined || blockType === "text")
+          ? [candidate]
+          : [];
+      });
+      if (parts.length > 0) return parts.join("");
+    }
   }
   return "";
+}
+
+type OmpReportedFacts = {
+  provider?: string;
+  model?: string;
+  usage?: RuntimeUsage;
+  costUsd?: number;
+  costBasis?: RuntimeUsage["cost_basis"];
+};
+
+function extractReportedFacts(events: Array<Record<string, unknown>>): OmpReportedFacts {
+  const facts: OmpReportedFacts = {};
+  const usage: RuntimeUsage = { source: "runtime" };
+  const seenUsageIds = new Set<string>();
+  const providers = new Set<string>();
+  const models = new Set<string>();
+  let usageSeen = false;
+  let assistantTurnCount = 0;
+  let inputComplete = true;
+  let outputComplete = true;
+  let totalComplete = true;
+  let cacheReadComplete = true;
+  let cacheWriteComplete = true;
+  let costComplete = true;
+  let inputTotal = 0;
+  let outputTotal = 0;
+  let totalTokens = 0;
+  let cacheReadTotal = 0;
+  let cacheWriteTotal = 0;
+  let costTotal = 0;
+  let lastIdlessMessageEndFingerprint: string | undefined;
+
+  for (const event of events) {
+    const message = event.message;
+    const messageRecord = message && typeof message === "object" && !Array.isArray(message)
+      ? message as Record<string, unknown>
+      : null;
+    const route = nativeRuntimeRoute(event);
+    if (route?.provider) providers.add(route.provider);
+    if (route?.model) models.add(route.model);
+    if (event.type !== "message_end" || !messageRecord || messageRecord.role !== "assistant") continue;
+    const usageId = [messageRecord.id, messageRecord.responseId, event.id, event.responseId]
+      .find((value): value is string => typeof value === "string" && value.length > 0);
+    if (usageId) {
+      if (seenUsageIds.has(usageId)) continue;
+      seenUsageIds.add(usageId);
+    } else {
+      const messageEndFingerprint = JSON.stringify([event.timestamp ?? null, messageRecord]);
+      if (messageEndFingerprint === lastIdlessMessageEndFingerprint) continue;
+      lastIdlessMessageEndFingerprint = messageEndFingerprint;
+    }
+    assistantTurnCount += 1;
+    const usageObject = messageRecord.usage;
+    if (!usageObject || typeof usageObject !== "object" || Array.isArray(usageObject)) {
+      inputComplete = false;
+      outputComplete = false;
+      totalComplete = false;
+      cacheReadComplete = false;
+      cacheWriteComplete = false;
+      costComplete = false;
+      continue;
+    }
+    const usageData = usageObject as Record<string, unknown>;
+    usageSeen = true;
+
+    if (isUsageNumber(usageData.input)) inputTotal += usageData.input;
+    else inputComplete = false;
+    if (isUsageNumber(usageData.output)) outputTotal += usageData.output;
+    else outputComplete = false;
+    if (isUsageNumber(usageData.totalTokens)) totalTokens += usageData.totalTokens;
+    else totalComplete = false;
+    if (isUsageNumber(usageData.cacheRead)) cacheReadTotal += usageData.cacheRead;
+    else cacheReadComplete = false;
+    if (isUsageNumber(usageData.cacheWrite)) cacheWriteTotal += usageData.cacheWrite;
+    else cacheWriteComplete = false;
+
+    const cost = usageData.cost;
+    if (cost && typeof cost === "object" && !Array.isArray(cost) && isUsageNumber((cost as Record<string, unknown>).total)) {
+      costTotal += (cost as Record<string, unknown>).total as number;
+    } else {
+      costComplete = false;
+    }
+  }
+
+  if (providers.size === 1) facts.provider = providers.values().next().value;
+  if (models.size === 1) facts.model = models.values().next().value;
+  if (!usageSeen || assistantTurnCount === 0) return facts;
+  if (inputComplete && isUsageNumber(inputTotal)) usage.input_tokens = inputTotal;
+  if (outputComplete && isUsageNumber(outputTotal)) usage.output_tokens = outputTotal;
+  if (totalComplete && isUsageNumber(totalTokens)) usage.total_tokens = totalTokens;
+  if (cacheReadComplete && isUsageNumber(cacheReadTotal)) usage.cache_read_tokens = cacheReadTotal;
+  if (cacheWriteComplete && isUsageNumber(cacheWriteTotal)) usage.cache_write_tokens = cacheWriteTotal;
+  if (facts.provider) usage.provider = facts.provider;
+  if (facts.model) usage.model = facts.model;
+  if (costComplete && isUsageNumber(costTotal)) {
+    facts.costUsd = costTotal;
+    usage.cost_usd = costTotal;
+    facts.costBasis = "runtime_estimate";
+    usage.cost_basis = "runtime_estimate";
+  }
+  facts.usage = usage;
+  return facts;
 }
 
 async function persistFinalMessage(
@@ -879,6 +1337,7 @@ async function persistFinalRuntimeSession(
   finishedAt: string,
   exitCode: number,
   sessionStatus: "succeeded" | "failed",
+  reportedFacts: OmpReportedFacts,
 ): Promise<void> {
   await persistPromptAndSession(artifacts, plan.prompt, {
     schema_version: "uh.runtime-session.v0",
@@ -890,13 +1349,10 @@ async function persistFinalRuntimeSession(
     exit_code: exitCode,
     started_at: startedAt,
     finished_at: finishedAt,
-  });
-  await appendMissionEvent(artifacts, {
-    event: "runtime.finished",
-    timestamp: finishedAt,
-    runtime: "oh-my-pi",
-    mission_id: plan.mission.id,
-    exit_code: exitCode,
-    status: sessionStatus,
+    ...(reportedFacts.provider ? { provider: reportedFacts.provider } : {}),
+    ...(reportedFacts.model ? { model: reportedFacts.model } : {}),
+    ...(reportedFacts.usage ? { usage: reportedFacts.usage } : {}),
+    ...(reportedFacts.costUsd !== undefined ? { cost_usd: reportedFacts.costUsd } : {}),
+    ...(reportedFacts.costBasis ? { cost_basis: reportedFacts.costBasis } : {}),
   });
 }

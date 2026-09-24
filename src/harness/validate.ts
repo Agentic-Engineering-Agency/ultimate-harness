@@ -14,6 +14,11 @@ import {
   validateSkillsIndex,
   validateVerificationResult,
 } from "../schema/artifacts.js";
+import { RuntimeControlSchema, RuntimeRecoveryRecordSchema, RuntimeCancelRequestSchema } from "../schema/runtime-control.js";
+import { CanonicalTeamStateSchema } from "../schema/team.js";
+import { LatestRunPointerSchema, RunsIndexSchema } from "../schema/runs.js";
+import { IndependentReviewRequestSchema, IndependentReviewReportSchema, IndependentReviewAssessmentSchema } from "../schema/independent-review.js";
+import { validateDecisionReceipt } from "../schema/decisions.js";
 
 const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.project.v0": validateProject,
@@ -26,6 +31,16 @@ const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.promotion.v0": validatePromotion,
   "uh.runtime-session.v0": validateRuntimeSession,
   "uh.runtime-result.v0": validateRuntimeResult,
+  "uh.runtime-control.v0": data => RuntimeControlSchema.parse(data),
+  "uh.runtime-recovery.v0": data => RuntimeRecoveryRecordSchema.parse(data),
+  "uh.runtime-cancel-request.v0": data => RuntimeCancelRequestSchema.parse(data),
+  "uh.team-run.v0": data => CanonicalTeamStateSchema.parse(data),
+  "uh.latest-run.v0": data => LatestRunPointerSchema.parse(data),
+  "uh.runs-index.v0": data => RunsIndexSchema.parse(data),
+  "uh.independent-review-request.v0": data => IndependentReviewRequestSchema.parse(data),
+  "uh.independent-review-report.v0": data => IndependentReviewReportSchema.parse(data),
+  "uh.independent-review-assessment.v0": data => IndependentReviewAssessmentSchema.parse(data),
+  "uh.decision-receipt.v0": validateDecisionReceipt,
 };
 
 export type ValidationResult = {

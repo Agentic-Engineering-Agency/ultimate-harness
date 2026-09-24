@@ -9,6 +9,7 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 ## Start here
 
 0. [Quickstart](./quickstart.md) — install, initialize, run, verify, and inspect a mission.
+- [Orchestrator guide](./orchestrator-guide.md) — mission lifecycle, team execution, observability, human decisions and CLI reference.
 1. [Configuration](./configuration.md) — project state, env vars, and runtime overrides.
 2. [Runtime targets](./runtime-targets.md) — supported runtimes and adapter boundaries.
 3. [Vision](./VISION.md) — what UH is, who it's for, and what we won't accept.
@@ -17,6 +18,8 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 6. [Architecture overview](./architecture/overview.md) — major components and boundaries.
 7. [Runtime adapter contract](./architecture/runtime-adapter-contract.md) — what every adapter implements.
 8. [Mission packet schema](./architecture/mission-packet-schema.md) — the portable work-request format.
+- [Native runtime events](./architecture/runtime-events.md) — adapter event contracts, supervision and accounting boundaries.
+- [Tool guard](./tool-guard.md) — path-only policy, enforcement seams, denial reasons, and artifacts.
 9. [Verification and promotion](./architecture/verification-and-promotion.md) — how sandbox work becomes canonical work.
 10. [BMAD agent map](./workflows/bmad-agent-map.md) — how BMAD-style roles map into Ultimate Harness.
 
@@ -31,7 +34,11 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 | `anthropic` | experimental | [Anthropic setup](./runbooks/anthropic-setup.md) — native pay-per-token Messages API (UH-136). |
 | `pi` | active | [Pi setup](./runbooks/pi-setup.md) |
 | `oh-my-pi` | active | [Anthropic via oh-my-pi](./runbooks/anthropic-via-omp.md) — covers the OMP routing path and its ToS posture. |
+| `command-code` | active | [Tool guard](./tool-guard.md), [Acceptance runbook](./runbooks/acceptance.md) |
+| `claude-code` | integration incomplete | [Runtime targets](./runtime-targets.md#claude-code-boundaries) — native CLI execution and current limitations. |
 
+- [Acceptance status](./acceptance/README.md) — generated view of the registry and locally available evidence; a clean checkout contains no execution history.
+- [Acceptance runbook](./runbooks/acceptance.md) — register, run, inspect, and regenerate acceptance evidence.
 For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 
 ## Documentation map
@@ -39,6 +46,7 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 ### Research
 
 - [Inspiration systems](./research/inspiration-systems.md)
+- [research/landscape-register.md](./research/landscape-register.md): dated, primary-source register of what existing systems do for each 1.0 build item, with per-row verification status and re-check triggers.
 - [Comparison matrix](./research/comparison-matrix.md)
 - [Adopt / reject / defer decisions](./research/adopt-reject-defer.md)
 
@@ -59,6 +67,7 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 - [Overview](./architecture/overview.md)
 - [Entities](./architecture/entities.md)
 - [Runtime adapter contract](./architecture/runtime-adapter-contract.md)
+- [Delegation and containment](./architecture/delegation-and-containment.md)
 - [Codex adapter design](./architecture/adapter-codex.md)
 - [Hermes proxy adapter design](./architecture/adapter-hermes-proxy.md)
 - [TUI architecture](./architecture/tui.md)
@@ -70,6 +79,7 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 - [AgentFS sandbox backend (design)](./architecture/sandbox-agentfs.md)
 - [Verification and promotion](./architecture/verification-and-promotion.md)
 - [SDD + TDD + cross-runtime QA](./architecture/sdd-tdd-qa.md)
+- [Progressive decisions](./architecture/progressive-decisions.md) — implemented semantic evaluation and proposed policy flows.
 - [Telar planning/governance and UH Run Control boundary](./architecture/telar-integration.md)
 
 ### Runbooks
@@ -82,6 +92,11 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 - [Using `uh tui`](./runbooks/using-the-tui.md)
 - [Honcho persistent memory](./runbooks/honcho-memory.md)
 - [Publishing](./runbooks/publishing.md)
+- [Resource-wave smoke](./runbooks/resource-wave-smoke.md)
+- [Worker-contract smoke](./runbooks/worker-contract-smoke.md)
+- [Tool-guard smoke](./runbooks/tool-guard-smoke.md)
+- [Supervisor-loop smoke](./runbooks/supervisor-loop-smoke.md)
+- [MCP server](./runbooks/mcp-server.md)
 
 ### Workflows
 

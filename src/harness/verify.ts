@@ -1,19 +1,45 @@
 import { access, appendFile, lstat, readFile, realpath, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { parse, stringify } from "yaml";
 import { validateMission, type MissionDocument } from "../schema/mission.js";
 import { validateVerificationResult, type VerificationResultDocument } from "../schema/artifacts.js";
+import { RuntimeControlSchema } from "../schema/runtime-control.js";
 import { promoteMission } from "./promote.js";
-import { harnessDir, missionsDir, projectYaml, sandboxesDir, sandboxesIndex } from "./paths.js";
+import { harnessDir, missionsDir, projectYaml } from "./paths.js";
 import { validateFile } from "./validate.js";
-import { SandboxesIndexSchema } from "../schema/artifacts.js";
 import { classifyDiff } from "./diff-classifier.js";
 import { runOpenSandboxCommand, type SandboxCommandRunResult } from "./sandbox-backends.js";
+import { findBoundSandbox } from "./sandbox.js";
+import { verifyExpectedArtifact } from "./output-verification.js";
+import { collectIndependentReview } from "./independent-review.js";
+import { recordAcceptanceDecision } from "./decision-receipts.js";
+import { readLatestPointer } from "./run-id.js";
+import { relativeArtifactPath } from "./artifact-paths.js";
+import type { SystemOneCriterion } from "./typesafe.js";
+import { isDeepStrictEqual } from "node:util";
 
 const SNIPPET_LIMIT = 800;
 const TIMEOUT_KILL_GRACE_MS = 100;
 export const DEFAULT_VERIFY_COMMAND_TIMEOUT_MS = 30_000;
+
+/**
+ * The harness-established facts a non-deterministic acceptance criterion may
+ * expose to System One: declared expected-output paths and statuses, and the
+ * names and statuses of the required checks. Never file contents, diff text,
+ * command output, absolute paths, or the mission prompt.
+ */
+type CriterionEvidence = {
+  expected_outputs: Array<{ path: string; status: string }>;
+  required_checks: Array<{ name: string; status: string }>;
+};
+
+/**
+ * The per-criterion projection `evaluateThreeVerdict` consumes. The shared
+ * `SystemOneCriterion` contract has no field for `evidence`, so this local
+ * intersection carries it without widening the shared contract.
+ */
+type ProjectedCriterion = SystemOneCriterion & { evidence?: CriterionEvidence };
 
 export type VerifyMissionOptions = {
   commandTimeoutMs?: number;
@@ -52,6 +78,7 @@ export type VerifyMissionResult = {
   /** Set when an auto-promote was attempted but failed (verification still passed). */
   promotion_error?: string;
 };
+
 
 export async function verifyMission(root: string, missionId: string, options: VerifyMissionOptions = {}): Promise<VerifyMissionResult> {
   assertSafeMissionId(missionId);
@@ -95,6 +122,14 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   if (mission.id !== missionId) {
     throw new Error(`Mission id mismatch: expected ${missionId}, got ${mission.id}`);
   }
+  const canonicalMissionPath = path.resolve(missionsDir(projectRoot), missionId, "mission.yaml");
+  const canonicalMission = effectiveRoot === projectRoot ? mission :
+    (await fileExists(canonicalMissionPath) ? await readMissionAtLocation(canonicalMissionPath) : undefined);
+  if (canonicalMission?.independent_review || mission.independent_review) {
+    if (!canonicalMission?.independent_review || !isDeepStrictEqual(canonicalMission, mission)) {
+      throw new Error("Independent review contract differs from its canonical mission");
+    }
+  }
 
   // UH-130: `constraints[]` is accepted on the mission packet but the harness
   // never enforces it — only `verification.required_checks[].command` and
@@ -111,6 +146,8 @@ export async function verifyMission(root: string, missionId: string, options: Ve
 
   const checks: VerificationResultDocument["checks"] = [];
   const findings: NonNullable<VerificationResultDocument["findings"]> = [];
+  const requiredCheckEvidence: Array<{ name: string; status: string }> = [];
+  const expectedOutputEvidence: Array<{ path: string; status: string }> = [];
   let executableChecks = 0;
 
   for (const check of mission.verification.required_checks) {
@@ -121,12 +158,14 @@ export async function verifyMission(root: string, missionId: string, options: Ve
         status: "blocked",
         notes: "no command configured",
       });
+      requiredCheckEvidence.push({ name: check.name, status: "blocked" });
       continue;
     }
 
     executableChecks += 1;
     const executed = await runCheck(effectiveRoot, check.name, check.command, commandTimeoutMs, sandboxRunner);
     checks.push(executed.check);
+    requiredCheckEvidence.push({ name: check.name, status: executed.check.status });
     if (executed.finding) {
       findings.push(executed.finding);
     }
@@ -190,6 +229,24 @@ export async function verifyMission(root: string, missionId: string, options: Ve
       duration_ms: metrics.durationMs,
       timed_out: metrics.timedOut,
     });
+  }
+
+  for (const expected of mission.expected_artifacts) {
+    const checked = await verifyExpectedArtifact(effectiveRoot, expected);
+    checks.push(checked);
+    executableChecks++;
+    expectedOutputEvidence.push({ path: relativeArtifactPath(effectiveRoot, path.resolve(effectiveRoot, expected.path)), status: checked.status });
+    if (checked.status !== "passed") findings.push({ severity: "error", message: `Required output failed verification: ${expected.path}` });
+  }
+  if (canonicalMission?.independent_review) {
+    executableChecks++;
+    try {
+      await collectIndependentReview(projectRoot, missionId);
+      checks.push({ name: "independent-review-evidence", type: "artifact", status: "passed", notes: "Advisory report validated; human acceptance remains required" });
+    } catch (error) {
+      checks.push({ name: "independent-review-evidence", type: "artifact", status: "failed", notes: (error as Error).message });
+      findings.push({ severity: "error", message: "Independent review provenance or evidence is invalid" });
+    }
   }
 
   // UH-55 TDD gate. When the mission opts in, classify the captured diff
@@ -262,13 +319,73 @@ export async function verifyMission(root: string, missionId: string, options: Ve
 
   const anyBlockingAcFailed = acceptanceResults.some((r) => r.severity === "block" && r.status === "failed");
   const anyBlockingAcUnverified = acceptanceResults.some((r) => r.severity === "block" && r.status === "blocked");
-  const status: VerificationResultDocument["status"] = anyBlockingAcFailed || checks.some((check) => check.status === "failed")
+  let status: VerificationResultDocument["status"] = anyBlockingAcFailed || checks.some((check) => check.status === "failed")
     ? "failed"
     : anyBlockingAcUnverified
       ? "blocked"
       : checks.length > 0 && checks.every((check) => check.status === "passed") && executableChecks > 0
         ? "passed"
         : "blocked";
+
+  // UH progressive decisions: hand System One one atomic entry per declared
+  // acceptance criterion. A criterion the harness already decided carries its
+  // deterministic status and is never asked of the provider; the rest carry
+  // only evidence the harness established. `tamper` is a deterministic fact,
+  // never a provider answer.
+  const acceptanceById = new Map(acceptanceResults.map((result) => [result.id, result]));
+  const criteria: ProjectedCriterion[] = mission.acceptance_criteria.map((ac) => {
+    const result = acceptanceById.get(ac.id);
+    if (ac.check_command) {
+      return {
+        id: ac.id,
+        status: result?.status === "passed" ? "passed" : "failed",
+        exit_code: result?.exit_code,
+        check_command: ac.check_command,
+      };
+    }
+    return {
+      id: ac.id,
+      description: ac.description,
+      ...(ac.severity ? { severity: ac.severity } : {}),
+      evidence: {
+        expected_outputs: expectedOutputEvidence,
+        required_checks: requiredCheckEvidence,
+      },
+    };
+  });
+  const tamper = await readRunControlPolicyStop(effectiveRoot, missionId);
+
+  await recordAcceptanceDecision({
+    missionDir, missionId, consumer: "verification", from: status,
+    state: {
+      contract: {
+        acceptance_criteria: acceptanceResults.map(result => ({
+          id: result.id, description: result.description, severity: result.severity,
+        })),
+        human_review_required: mission.verification.review_gates.length > 0,
+      },
+      outputs: {
+        status,
+        checks: checks.map(check => ({ type: check.type, status: check.status })),
+        acceptance_criteria: acceptanceResults.map(result => ({
+          id: result.id, status: result.status, exit_code: result.exit_code,
+        })),
+        findings: findings.map(finding => ({ severity: finding.severity })),
+      },
+      criteria,
+      tamper,
+    },
+    prompt: "Assess consistency of the verification disposition with the supplied check and acceptance summaries. Raw outputs and source diffs are not included; do not infer that unreported checks or scope protections passed.",
+    apply: gate => {
+      const blocked = gate.tamper || gate.verdict === "needs-remediation";
+      findings.push({
+        severity: blocked ? "error" : "warning",
+        message: `TypeSafe System One verdict: ${gate.verdict}${gate.tamper ? " (tamper detected)" : ""}`,
+      });
+      if (blocked) status = "failed";
+      return status;
+    },
+  });
 
   const artifact: VerificationResultDocument = validateVerificationResult({
     schema_version: "uh.verification-result.v0",
@@ -349,43 +466,6 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   };
 }
 
-export async function findBoundSandbox(
-  projectRoot: string,
-  missionId: string,
-): Promise<{ id: string; path: string; backend: string } | null> {
-  const indexPath = sandboxesIndex(projectRoot);
-  if (!(await fileExists(indexPath))) {
-    return null;
-  }
-  let raw: string;
-  try {
-    raw = await readFile(indexPath, "utf-8");
-  } catch {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = parse(raw);
-  } catch {
-    return null;
-  }
-  const result = SandboxesIndexSchema.safeParse(parsed);
-  if (!result.success) {
-    return null;
-  }
-  const sandboxesRoot = path.resolve(sandboxesDir(projectRoot));
-  const candidates = result.data.sandboxes
-    .filter((entry) => entry.mission_id === missionId && entry.status !== "discarded" && typeof entry.path === "string" && entry.path.length > 0)
-    .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
-  for (const candidate of candidates) {
-    if (!candidate.path) continue;
-    const abs = path.resolve(projectRoot, candidate.path);
-    if (!isPathWithin(abs, sandboxesRoot)) continue;
-    if (!(await fileExists(abs))) continue;
-    return { id: candidate.id, path: abs, backend: candidate.backend };
-  }
-  return null;
-}
 
 /**
  * UH-130: surface that mission `constraints[]` are advisory-only. The harness
@@ -415,6 +495,24 @@ async function readMissionAtLocation(missionPath: string): Promise<MissionDocume
   return validateMission(parse(await readFile(missionPath, "utf-8")));
 }
 
+/**
+ * Deterministic tamper fact for System One: the latest run control receipt
+ * stopped with the `policy` stop code (a Tool Guard, protected-path, or
+ * containment stop). No provider input contributes, and a missing or
+ * unreadable receipt is not tamper.
+ */
+async function readRunControlPolicyStop(root: string, missionId: string): Promise<boolean> {
+  const latest = await readLatestPointer(root, missionId);
+  if (!latest) return false;
+  try {
+    const controlPath = path.join(missionsDir(root), missionId, "runs", latest.run_id, "runtime-control.json");
+    const control = RuntimeControlSchema.parse(JSON.parse(await readFile(controlPath, "utf-8")));
+    return control.stop_code === "policy";
+  } catch {
+    return false;
+  }
+}
+
 type CommandRunMetrics = SandboxCommandRunResult;
 
 interface HostCommandRunMetrics {
@@ -431,7 +529,8 @@ async function runCommand(root: string, command: string, commandTimeoutMs: numbe
     const startedAt = Date.now();
     const child = spawn(command, {
       cwd: root,
-      detached: true,
+      detached: process.platform !== "win32",
+      windowsHide: true,
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -453,6 +552,18 @@ async function runCommand(root: string, command: string, commandTimeoutMs: numbe
     };
     const killChild = (signal: NodeJS.Signals) => {
       if (child.pid === undefined) return;
+      if (process.platform === "win32") {
+        try {
+          execFileSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          return;
+        } catch {
+          try { child.kill(signal); } catch { /* child already exited */ }
+          return;
+        }
+      }
       try { process.kill(-child.pid, signal); } catch {
         try { child.kill(signal); } catch { /* best effort */ }
       }

@@ -11,11 +11,12 @@ import {
 } from "./_artifact-context.js";
 import { parse, stringify } from "yaml";
 import path from "node:path";
+import { relativeArtifactPath } from "../harness/artifact-paths.js";
 import { AdapterDocument, registerRuntimeConfigSchema } from "../schema/adapter.js";
 import { MissionDocument, validateMission } from "../schema/mission.js";
 import { validateWorkflow, WorkflowDocument } from "../schema/workflow.js";
 import { auditLog, workflowsDir } from "../harness/paths.js";
-import { buildUsageEvent, estimateUsage, usageFromOpenAI } from "../harness/usage.js";
+import { buildUsageEvent, usageFromOpenAI } from "../harness/usage.js";
 import {
   appendRunsIndexEntry,
   generateRunId,
@@ -678,9 +679,9 @@ export const defaultDiffCollector: DiffCollector = async (cwd) => {
 
 // ---------- orchestrator ----------
 
-export async function dryRunHermesProxy(root: string, missionPath: string): Promise<DryRunResult> {
+export async function dryRunHermesProxy(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planHermesProxyRun(root, missionPath);
+    const plan = await planHermesProxyRun(root, missionPath, options);
     const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
@@ -917,6 +918,7 @@ export async function collectHermesProxySession(
       });
     }
 
+    const proxyUsage = usageFromOpenAI(runnerResult.usage, runnerResult.usageModel);
     const draft: RuntimeResultDocument = {
       schema_version: "uh.runtime-result.v0",
       mission_id: plan.mission.id,
@@ -925,11 +927,13 @@ export async function collectHermesProxySession(
       started_at: startedAt,
       finished_at: finishedAt,
       exit_code: exitCode,
-      prompt_path: path.relative(root, artifacts.promptPath),
-      stdout_path: path.relative(root, artifacts.stdoutPath),
-      stderr_path: path.relative(root, artifacts.stderrPath),
-      diff_path: path.relative(root, artifacts.diffPath),
+      prompt_path: relativeArtifactPath(root, artifacts.promptPath),
+      stdout_path: relativeArtifactPath(root, artifacts.stdoutPath),
+      stderr_path: relativeArtifactPath(root, artifacts.stderrPath),
+      diff_path: relativeArtifactPath(root, artifacts.diffPath),
       errors,
+      ...(proxyUsage ? { usage: proxyUsage } : {}),
+      ...(runnerResult.usageModel ? { model: runnerResult.usageModel } : {}),
     };
     result = validateRuntimeResult(draft);
     await writeArtifactFile(artifacts.missionDir, artifacts.runtimeResultPath, stringify(result));
@@ -943,13 +947,12 @@ export async function collectHermesProxySession(
       exitCode === 0 ? "succeeded" : "failed",
     );
 
-    const proxyUsage =
-      usageFromOpenAI(runnerResult.usage, runnerResult.usageModel) ??
-      estimateUsage(plan.prompt, sentinel);
-    await appendMissionEvent(
-      artifacts,
-      buildUsageEvent("hermes-proxy", plan.mission.id, proxyUsage, finishedAt),
-    );
+    if (proxyUsage) {
+      await appendMissionEvent(
+        artifacts,
+        buildUsageEvent("hermes-proxy", plan.mission.id, proxyUsage, finishedAt),
+      );
+    }
   } catch (err) {
     const message = (err as Error).message;
     const separator = stderr && !stderr.endsWith("\n") ? "\n" : "";

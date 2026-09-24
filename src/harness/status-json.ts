@@ -4,12 +4,16 @@ import { parse } from "yaml";
 import { adaptersDir, missionsDir } from "./paths.js";
 import { detectAll } from "./validate/drift/registry.js";
 import { RuntimeResultSchema, type RuntimeResultDocument } from "../schema/artifacts.js";
+import { acceptanceStatus } from "./acceptance.js";
+import { liveRunCounts } from "./live-runs.js";
 
 /**
  * UH-78 LLM-less status query mode. Produces a stable JSON document for
  * external consumers (Hermes Dashboard plugin, scripts). MUST NOT spawn any
  * subprocesses — every field is read from disk so warm-state stays sub-30ms
- * on fixtures with 50 missions.
+ * on fixtures with 50 missions. The one exception is `live_runs`: when the
+ * project-root live-run registry is non-empty, liveness is resolved with the
+ * native process lister (and never when there is nothing live to check).
  */
 export const STATUS_JSON_SCHEMA = "uh.status.v0";
 
@@ -37,6 +41,21 @@ export type StatusJsonMission = {
   finished_at: string;
 };
 
+export type StatusJsonAcceptance = {
+  proven: number;
+  stale: number;
+  failed: number;
+  unproven: number;
+  failed_ids: string[];
+  unproven_ids: string[];
+};
+
+/** Live-run registry counts, from the same function as `uh ps`. */
+export type StatusJsonLiveRuns = {
+  total: number;
+  orphaned: number;
+};
+
 export type StatusJsonDocument = {
   schema_version: typeof STATUS_JSON_SCHEMA;
   generated_at: string;
@@ -52,6 +71,8 @@ export type StatusJsonDocument = {
     kinds_with_issues: number;
     issues_total: number;
   };
+  acceptance: StatusJsonAcceptance;
+  live_runs: StatusJsonLiveRuns;
 };
 
 export type GetStatusJsonOptions = {
@@ -79,6 +100,18 @@ export async function getStatusJson(
   const drift = await detectAll(root);
   const kindsWithIssues = new Set(drift.map((i) => i.kind)).size;
   const recentRunsLimit = options.recentRunsLimit ?? DEFAULT_RECENT_RUNS_LIMIT;
+  let acceptance: StatusJsonAcceptance = { proven: 0, stale: 0, failed: 0, unproven: 0, failed_ids: [], unproven_ids: [] };
+  try {
+    const summary = await acceptanceStatus(root);
+    acceptance = {
+      ...summary.counts,
+      failed_ids: summary.failed,
+      unproven_ids: summary.unproven,
+    };
+  } catch {
+    // Projects created before acceptance evidence may not have a registry.
+  }
+  const liveRuns = await liveRunCounts(root);
   return {
     schema_version: STATUS_JSON_SCHEMA,
     generated_at: options.now ?? new Date().toISOString(),
@@ -88,6 +121,8 @@ export async function getStatusJson(
     missions: { total: missions.total, by_status: missions.byStatus },
     recent_runs: missions.recentRuns.slice(0, recentRunsLimit),
     drift: { kinds_with_issues: kindsWithIssues, issues_total: drift.length },
+    acceptance,
+    live_runs: liveRuns,
   };
 }
 

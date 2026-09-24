@@ -1,5 +1,6 @@
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { relativeArtifactPath } from "./artifact-paths.js";
 import { parse, stringify } from "yaml";
 import {
   SandboxesIndexSchema,
@@ -68,7 +69,6 @@ export async function createSandbox(
 ): Promise<SandboxRecord> {
   assertSafeSandboxId(opts.id);
   assertSafeMissionId(opts.missionId);
-  await requireSandboxesIndex(root);
 
   const sandboxesRoot = path.resolve(sandboxesDir(root));
   await rejectSymlinkIfExists(sandboxesRoot, "Sandboxes directory");
@@ -130,7 +130,7 @@ export async function createSandbox(
     mission_id: opts.missionId,
     backend: backend.name,
     branch: materialized.branch,
-    path: toForwardSlash(path.relative(root, worktreePath)),
+    path: relativeArtifactPath(root, worktreePath),
     base_ref: materialized.base_ref,
     status: "created",
     created_at: now,
@@ -145,7 +145,6 @@ export async function createSandbox(
 }
 
 export async function listSandboxes(root: string): Promise<SandboxIndexEntry[]> {
-  await requireSandboxesIndex(root);
   const index = await readIndex(root);
   return [...index.sandboxes];
 }
@@ -155,7 +154,6 @@ export async function getSandboxStatus(
   id: string,
 ): Promise<SandboxStatusInfo> {
   assertSafeSandboxId(id);
-  await requireSandboxesIndex(root);
   const index = await readIndex(root);
   const entry = index.sandboxes.find((s) => s.id === id);
   if (!entry) {
@@ -183,7 +181,6 @@ export async function discardSandbox(
   opts: DiscardSandboxOptions = {},
 ): Promise<DiscardSandboxResult> {
   assertSafeSandboxId(id);
-  await requireSandboxesIndex(root);
   const index = await readIndex(root);
   const entryIndex = index.sandboxes.findIndex((s) => s.id === id);
   if (entryIndex === -1) {
@@ -231,18 +228,19 @@ export async function discardSandbox(
   };
 }
 
-async function requireSandboxesIndex(root: string): Promise<void> {
+/**
+ * Read the sandboxes index. A missing file is an empty registry: the index is
+ * runtime state that every run rewrites, so a project may stop tracking it and a
+ * fresh clone must still work — `create` writes a new valid index on demand. A
+ * present-but-invalid index is never treated as empty: it fails loudly and is
+ * never overwritten, so a corrupt registry cannot be silently discarded.
+ */
+async function readIndex(root: string): Promise<SandboxesIndexDocument> {
   const indexPath = sandboxesIndex(root);
   await rejectSymlinkIfExists(indexPath, "Sandboxes index");
   if (!(await fileExists(indexPath))) {
-    throw new Error(
-      `Sandboxes index missing: ${indexPath}. Run 'uh init' first.`,
-    );
+    return { schema_version: "uh.sandboxes-index.v0", sandboxes: [] };
   }
-}
-
-async function readIndex(root: string): Promise<SandboxesIndexDocument> {
-  const indexPath = sandboxesIndex(root);
   const raw = await readFile(indexPath, "utf-8");
   let parsed: unknown;
   try {
@@ -266,6 +264,7 @@ async function writeIndex(
   doc: SandboxesIndexDocument,
 ): Promise<void> {
   const indexPath = sandboxesIndex(root);
+  await mkdir(path.dirname(indexPath), { recursive: true });
   await writeFile(indexPath, stringify(doc), "utf-8");
 }
 
@@ -313,8 +312,78 @@ function toIndexEntry(record: SandboxRecord): SandboxIndexEntry {
   };
 }
 
-function toForwardSlash(p: string): string {
-  return p.split(path.sep).join("/");
+export type SandboxMissionRoute = {
+  effectiveRoot: string;
+  missionPath: string;
+  sandbox?: { id: string; path: string; backend: string };
+  /**
+   * Mission id read from the mission file while routing. Present whenever
+   * routing was attempted (`--no-sandbox` skips the read), so callers can
+   * name the mission in a refusal without parsing the file a second time.
+   */
+  missionId?: string;
+  error?: string;
+};
+
+
+export async function findBoundSandbox(
+  projectRoot: string,
+  missionId: string,
+): Promise<{ id: string; path: string; backend: string } | null> {
+  const indexPath = sandboxesIndex(projectRoot);
+  if (!(await fileExists(indexPath))) return null;
+  const index = await readIndex(projectRoot);
+  const sandboxesRoot = path.resolve(sandboxesDir(projectRoot));
+  const candidates = index.sandboxes
+    .filter((entry) => entry.mission_id === missionId && entry.status !== "discarded" && typeof entry.path === "string" && entry.path.length > 0)
+    .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
+  for (const candidate of candidates) {
+    const resolved = path.resolve(projectRoot, candidate.path ?? "");
+    if (!isPathWithin(resolved, sandboxesRoot)) continue;
+    if (!(await fileExists(resolved))) continue;
+    return { id: candidate.id, path: resolved, backend: candidate.backend };
+  }
+  return null;
 }
+
+export async function resolveSandboxMissionRoot(
+  root: string,
+  missionPath: string,
+  useSandbox: boolean,
+): Promise<SandboxMissionRoute> {
+  if (!useSandbox) return { effectiveRoot: root, missionPath };
+  let missionId: string;
+  try {
+    const parsed = parse(await readFile(missionPath, "utf-8"));
+    if (!parsed || typeof parsed !== "object" || typeof parsed.id !== "string" || parsed.id.length === 0) {
+      return { effectiveRoot: root, missionPath, error: "Cannot route mission without a valid mission id; refusing host-root execution." };
+    }
+    missionId = parsed.id;
+  } catch {
+    return { effectiveRoot: root, missionPath, error: "Cannot read mission for sandbox routing; refusing host-root execution." };
+  }
+  const sandbox = await findBoundSandbox(root, missionId);
+  if (!sandbox) {
+    const indexPath = sandboxesIndex(root);
+    if (!(await fileExists(indexPath))) return { effectiveRoot: root, missionPath, missionId };
+    let index: SandboxesIndexDocument;
+    try {
+      index = await readIndex(root);
+    } catch {
+      return { effectiveRoot: root, missionPath, missionId, error: "Sandbox registry is invalid; refusing host-root fallback." };
+    }
+    const hasInvalidBinding = index.sandboxes.some((entry) => entry.mission_id === missionId && entry.status !== "discarded");
+    return hasInvalidBinding
+      ? { effectiveRoot: root, missionPath, missionId, error: `Sandbox binding for mission ${missionId} is invalid; refusing host-root fallback.` }
+      : { effectiveRoot: root, missionPath, missionId };
+  }
+  return {
+    effectiveRoot: sandbox.path,
+    missionPath: path.join(sandbox.path, ".harness", "missions", missionId, "mission.yaml"),
+    sandbox,
+    missionId,
+  };
+}
+
 
 export type { SandboxStatus };

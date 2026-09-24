@@ -53,10 +53,10 @@ export function evaluateAdapterEligibility(
 
   if (
     requirements.min_context_tokens !== undefined &&
-    adapterCaps.max_context_tokens < requirements.min_context_tokens
+    (adapterCaps.max_context_tokens === null || adapterCaps.max_context_tokens < requirements.min_context_tokens)
   ) {
     exclusionReasons.push(
-      `min_context_tokens (${requirements.min_context_tokens} > ${adapterCaps.max_context_tokens})`,
+      `min_context_tokens (${requirements.min_context_tokens} > ${adapterCaps.max_context_tokens ?? "unknown runtime model limit"})`,
     );
   }
 

@@ -1,0 +1,16 @@
+schema_version: uh.mission.v0
+id: r5-deep-path-acceptance
+title: Deep workspace path
+workflow_profile: bugfix-contained
+objective: Create out/deep-path.txt containing exactly the single line deep, then stop.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved

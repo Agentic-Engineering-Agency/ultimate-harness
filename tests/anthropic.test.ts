@@ -1,6 +1,8 @@
-import { test, expect, describe, beforeEach, afterEach } from "vitest";
+import { test, expect, describe, beforeEach, afterEach, afterAll } from "vitest";
 import * as http from "node:http";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AnthropicRuntimeConfigSchema,
@@ -86,12 +88,12 @@ describe("anthropic schema", () => {
 });
 
 describe("usageFromAnthropic", () => {
-  test("maps input_tokens/output_tokens to RuntimeUsage", () => {
-    const usage = usageFromAnthropic({ input_tokens: 100, output_tokens: 42 }, "claude-sonnet-4-6");
+  test("includes explicitly reported cache usage in total token accounting", () => {
+    const usage = usageFromAnthropic({ input_tokens: 100, output_tokens: 42, cache_read_input_tokens: 50, cache_creation_input_tokens: 10 }, "claude-sonnet-4-6");
     expect(usage).not.toBeNull();
     expect(usage!.input_tokens).toBe(100);
     expect(usage!.output_tokens).toBe(42);
-    expect(usage!.total_tokens).toBe(142);
+    expect(usage!.total_tokens).toBe(202);
     expect(usage!.source).toBe("runtime");
     expect(usage!.model).toBe("claude-sonnet-4-6");
   });
@@ -177,7 +179,10 @@ describe("anthropic runtime checker", () => {
   });
 });
 
-const TEST_ROOT = "/tmp/uh-test-anthropic";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-anthropic-"));
+afterAll(async () => {
+  await rm(TEST_ROOT, { recursive: true, force: true });
+});
 
 async function setupHarness(): Promise<{ missionPath: string }> {
   await rm(TEST_ROOT, { recursive: true, force: true });
