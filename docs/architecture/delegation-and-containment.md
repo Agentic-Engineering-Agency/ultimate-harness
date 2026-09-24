@@ -114,6 +114,10 @@ strict because losing them loses evidence.
   unlocked before removal. The harness never runs a global `git worktree prune`,
   because it deletes the registration of any worktree whose directory is missing
   at that moment, including ones owned by another controller.
+- Before removing a worktree, the harness deletes every link and junction inside
+  it without following them. Git for Windows' `git worktree remove` recurses into
+  a junction and deletes its target, so a `node_modules` junction would otherwise
+  empty the checkout it points at.
 - `uh mission run` refuses to run in the project root unless `--no-sandbox` is
   explicit. A lost sandbox registration must not turn into edits of the live tree.
 - A worker's commit contains only the worker's own work. Protected roots are

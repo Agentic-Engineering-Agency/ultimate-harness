@@ -12,7 +12,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -207,7 +207,8 @@ async function fileExists(filePath: string): Promise<boolean> {
 
 beforeEach(async () => {
   ROOT = await mkdtemp(join(tmpdir(), "uh-land-repo-"));
-  WORK = await mkdtemp(join(tmpdir(), "uh-land-work-"));
+  // Real path: git reports worktree paths resolved (macOS /private/var).
+  WORK = await realpath(await mkdtemp(join(tmpdir(), "uh-land-work-")));
 });
 
 afterEach(async () => {
@@ -306,6 +307,64 @@ describe("uh land", () => {
     expect((await git(ROOT, ["log", "-1", "--format=%an|%ae|%cn|%ce"])).trim())
       .toBe(`${IDENTITY.name}|${IDENTITY.email}|${IDENTITY.name}|${IDENTITY.email}`);
     expect((await git(ROOT, ["log", "-1", "--format=%s"])).trim()).toBe("feat: land worker");
+  });
+
+  test("a successful land removes the landed worker's worktree and keeps its branch", async () => {
+    const { messageFile, worktree } = await setup();
+
+    const result = await runLand({ messageFile });
+
+    expect(result.removed_worktrees).toEqual([worktree]);
+    expect(await fileExists(worktree)).toBe(false);
+    expect(await git(ROOT, ["worktree", "list", "--porcelain"])).not.toContain("wt-work");
+    expect((await git(ROOT, ["branch", "--list", "work"])).trim()).toContain("work");
+  });
+
+  test("--keep-worktrees keeps the landed worker's worktree", async () => {
+    const { messageFile, worktree } = await setup();
+
+    const result = await runLand({ messageFile, keepWorktrees: true });
+
+    expect(result.removed_worktrees).toEqual([]);
+    expect(await fileExists(worktree)).toBe(true);
+  });
+
+  test("a refused land keeps the worker's worktree", async () => {
+    const { messageFile, worktree } = await setup();
+
+    await expect(runLand({ messageFile, runCommand: fakeRunner(["bun run test"]) })).rejects.toThrow();
+
+    expect(await fileExists(worktree)).toBe(true);
+  });
+
+  test("a team's leader worktree goes once none of its worker worktrees remain", async () => {
+    await initRepo(ROOT);
+    await makeWorkerBranch(ROOT, "uh/team/t1/backend", { "backend.txt": "b\n" }, "feat: backend");
+    await makeWorkerBranch(ROOT, "uh/team/t1/frontend", { "frontend.txt": "f\n" }, "feat: frontend");
+    await gitQuiet(ROOT, ["branch", "uh/team/t1/leader", "main"]);
+    const backend = join(WORK, "backend");
+    const frontend = join(WORK, "frontend");
+    const leader = join(WORK, "leader");
+    for (const [branch, dir] of [["uh/team/t1/backend", backend], ["uh/team/t1/frontend", frontend], ["uh/team/t1/leader", leader]]) {
+      await gitQuiet(ROOT, ["worktree", "add", "-q", dir, branch]);
+    }
+    for (const [dir, id] of [[backend, "backend"], [frontend, "frontend"]]) {
+      await writeVerification(dir, id, "passed");
+      await writeCollectedReview(ROOT, {
+        reviewId: `review-${id}`, missionId: id, changedPath: `${id}.txt`,
+        changedSha256: sha256(await git(ROOT, ["show", `uh/team/t1/${id}:${id}.txt`])), verdicts: ["supported"],
+      });
+    }
+    const messageFile = join(WORK, "message.txt");
+    await writeFile(messageFile, "feat: land team\n", "utf-8");
+
+    const first = await runLand({ messageFile, workerBranches: ["uh/team/t1/backend"] });
+    expect(first.removed_worktrees).toEqual([backend]);
+    expect(await fileExists(leader)).toBe(true);
+
+    const second = await runLand({ messageFile, workerBranches: ["uh/team/t1/frontend"] });
+    expect(second.removed_worktrees).toEqual([frontend, leader]);
+    expect(await fileExists(leader)).toBe(false);
   });
 
   test("fast-forwards a second checkout to the landed target", async () => {

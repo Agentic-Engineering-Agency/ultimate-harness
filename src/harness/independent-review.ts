@@ -20,7 +20,7 @@ import { assertSafeMissionId, isPathWithin, requireInitializedProject, requireWo
 import { proposeMission } from "./propose.js";
 import { readLatestPointer } from "./run-id.js";
 import { resolveTeamWorkerArtifactRoot } from "./team-run.js";
-import { resolveSandboxMissionRoot } from "./sandbox.js";
+import { discardSandbox, resolveSandboxMissionRoot } from "./sandbox.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
 import { recordAcceptanceDecision } from "./decision-receipts.js";
@@ -509,4 +509,30 @@ export async function collectIndependentReview(root: string, missionId: string) 
   await assertWritableArtifact(missionDir, assessmentPath);
   await writeAtomicArtifact(assessmentPath, JSON.stringify(assessment, null, 2));
   return assessment;
+}
+
+/**
+ * Discard a collected review's workspace. Once the assessment is written in
+ * the project, the sandbox the reviewer ran in has no further use; keeping it
+ * leaves one worktree per review behind. The reviewer's raw report is copied
+ * beside the assessment first, as `review-report.json`. Returns the discarded
+ * sandbox id, or undefined when no sandbox is bound to the review.
+ */
+export async function retireIndependentReviewWorkspace(root: string, missionId: string): Promise<string | undefined> {
+  assertSafeMissionId(missionId);
+  root = await realpath(root);
+  const missionDir = path.join(root, ".harness", "missions", missionId);
+  const missionPath = path.join(missionDir, "mission.yaml");
+  const binding = (await loadMissionFile(missionPath)).independent_review;
+  if (!binding) throw new Error("Mission is not an independent review packet");
+  const route = await resolveSandboxMissionRoot(root, missionPath, true);
+  if (route.error) throw new Error(route.error);
+  if (!route.sandbox) return undefined;
+  const sandboxReport = path.resolve(route.effectiveRoot, binding.report_path);
+  if (!isPathWithin(sandboxReport, route.effectiveRoot)) throw new Error("Review report path escapes its workspace");
+  const keptReport = path.join(missionDir, "review-report.json");
+  await assertWritableArtifact(missionDir, keptReport);
+  await writeAtomicArtifact(keptReport, await readFile(sandboxReport, "utf8"));
+  await discardSandbox(root, route.sandbox.id, { force: true });
+  return route.sandbox.id;
 }
