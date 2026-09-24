@@ -7,7 +7,7 @@ import { spawnSync, type ChildProcess } from "node:child_process";
 import type { EventEmitter as NodeEventEmitter } from "node:events";
 import { AcceptanceEvidenceSchema, AcceptanceRegistrySchema } from "../src/schema/acceptance.js";
 import { validateMission } from "../src/schema/mission.js";
-import { applyTeamMissionOverrides, classifyAcceptance, collectFacts, compareAcceptanceFacts, loadAcceptanceRegistry, renderAcceptanceReport, runAcceptance, wrapperMechanismUnavailable } from "../src/harness/acceptance.js";
+import { applyTeamMissionOverrides, classifyAcceptance, collectFacts, compareAcceptanceFacts, computeAcceptanceInputDigest, loadAcceptanceRegistry, rebindAcceptanceEvidence, renderAcceptanceReport, runAcceptance, wrapperMechanismUnavailable } from "../src/harness/acceptance.js";
 
 const expected = { status: "passed", required_records: { denials: 3 } } as const;
 
@@ -48,12 +48,12 @@ describe("acceptance evidence", () => {
     ).map((mismatch) => mismatch.field)).toEqual(["guardian_receipt", "path_style"]);
   });
 
-  test("classifies freshness and commit coherence", () => {
+  test("classifies freshness and commit coherence", async () => {
     const now = new Date("2026-09-15T00:00:00.000Z");
-    expect(classifyAcceptance({ outcome: "passed", checked_at: "2026-09-14T23:00:00.000Z", harness_commit: "abc" }, 30, now, "abc")).toBe("proven");
-    expect(classifyAcceptance({ outcome: "passed", checked_at: "2026-09-14T23:00:00.000Z", harness_commit: "old" }, 30, now, "abc")).toBe("stale");
-    expect(classifyAcceptance({ outcome: "failed", checked_at: "2026-09-14T23:00:00.000Z", harness_commit: "abc" }, 30, now, "abc")).toBe("failed");
-    expect(classifyAcceptance(null, 30, now, "abc")).toBe("unproven");
+    expect((await classifyAcceptance({ outcome: "passed", checked_at: "2026-09-14T23:00:00.000Z", harness_commit: "abc" }, 30, now, "abc")).state).toBe("proven");
+    expect((await classifyAcceptance({ outcome: "passed", checked_at: "2026-09-14T23:00:00.000Z", harness_commit: "old" }, 30, now, "abc")).state).toBe("stale");
+    expect((await classifyAcceptance({ outcome: "failed", checked_at: "2026-09-14T23:00:00.000Z", harness_commit: "abc" }, 30, now, "abc")).state).toBe("failed");
+    expect((await classifyAcceptance(null, 30, now, "abc")).state).toBe("unproven");
   });
   test("renders evidence links relative to the generated report and omits absent evidence links", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "acceptance-report-"));
@@ -198,6 +198,180 @@ describe("acceptance evidence", () => {
   });
 });
 
+describe("acceptance input freshness", () => {
+  const identity = { runtime: "command-code", model: "qwen/qwen3.8-flash" };
+
+  function git(cwd: string, args: string[]): string {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+    return result.stdout;
+  }
+  function initRepo(root: string): void {
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "core.autocrlf", "false"]);
+    git(root, ["config", "user.name", "Acceptance Test"]);
+    git(root, ["config", "user.email", "acceptance@test.local"]);
+  }
+  function commitAll(root: string, message: string): string {
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "--quiet", "-m", message]);
+    return git(root, ["rev-parse", "HEAD"]).trim();
+  }
+  function legacyEvidence(overrides: Record<string, unknown>): Record<string, unknown> {
+    return {
+      schema_version: "uh.acceptance-evidence.v0",
+      capability: "C1-cmdc",
+      outcome: "passed",
+      checked_at: new Date().toISOString(),
+      harness_commit: "unknown",
+      runtime: "command-code",
+      provider: "command-code",
+      model: "qwen/qwen3.8-flash",
+      cost_usd: "unknown",
+      workspace: "T:/tmp/run",
+      run_ids: [],
+      mission_id: "c1-cmdc-acceptance",
+      expected: { status: "passed" },
+      observed: { status: "passed" },
+      fact_sources: {},
+      mismatches: [],
+      artifact_root: "T:/tmp/run/.harness",
+      ...overrides,
+    };
+  }
+  async function writeRebindFixture(root: string): Promise<void> {
+    await mkdir(path.join(root, "acceptance", "missions", "C1-cmdc"), { recursive: true });
+    await mkdir(path.join(root, "src", "harness"), { recursive: true });
+    await writeFile(path.join(root, "acceptance", "missions", "C1-cmdc", "mission.yaml"), "id: c1-cmdc-acceptance\n", "utf8");
+    await writeFile(path.join(root, "src", "harness", "team-run.ts"), "export const run = 1;\n", "utf8");
+    await writeFile(path.join(root, "acceptance", "registry.yaml"), [
+      "schema_version: uh.acceptance-registry.v0",
+      "entries:",
+      "  C1-cmdc:",
+      "    title: Per-worker contracts",
+      "    capability: C1",
+      "    mission: missions/C1-cmdc/mission.yaml",
+      "    shape: single",
+      "    runtime: command-code",
+      "    model: qwen/qwen3.8-flash",
+      "    inputs: [src/harness/team-run.ts, acceptance/missions/C1-cmdc/**]",
+      "    expected: { status: passed }",
+      "",
+    ].join("\n"), "utf8");
+  }
+
+  test("input digest is stable for identical inputs and changes with content or identity", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-digest-"));
+    await mkdir(path.join(root, "src", "harness"), { recursive: true });
+    await writeFile(path.join(root, "src", "harness", "a.ts"), "export const a = 1;\n", "utf8");
+    initRepo(root);
+    commitAll(root, "seed");
+    const inputs = ["src/**"];
+    const first = await computeAcceptanceInputDigest(root, inputs, identity);
+    const second = await computeAcceptanceInputDigest(root, inputs, identity);
+    expect(first.digest).toBe(second.digest);
+    expect(first.resolved).toBe(1);
+    expect(first.files).toEqual(["src/harness/a.ts"]);
+    await writeFile(path.join(root, "src", "harness", "a.ts"), "export const a = 2;\n", "utf8");
+    const changed = await computeAcceptanceInputDigest(root, inputs, identity);
+    expect(changed.digest).not.toBe(first.digest);
+    const otherRuntime = await computeAcceptanceInputDigest(root, inputs, { ...identity, runtime: "oh-my-pi" });
+    expect(otherRuntime.digest).not.toBe(changed.digest);
+  });
+
+  test("a change outside the inputs keeps evidence proven while a change inside makes it stale with the file named", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-inside-"));
+    await mkdir(path.join(root, "src", "harness"), { recursive: true });
+    await mkdir(path.join(root, "docs"), { recursive: true });
+    await writeFile(path.join(root, "src", "harness", "guarded.ts"), "export const guarded = 1;\n", "utf8");
+    await writeFile(path.join(root, "docs", "notes.md"), "# Notes\n", "utf8");
+    initRepo(root);
+    const baseCommit = commitAll(root, "seed");
+    const inputs = ["src/harness/**"];
+    const digest = await computeAcceptanceInputDigest(root, inputs, identity);
+    const evidence = {
+      outcome: "passed" as const,
+      checked_at: new Date().toISOString(),
+      harness_commit: baseCommit,
+      input_digest: digest.digest,
+      runtime: identity.runtime,
+      model: identity.model,
+    };
+    const now = new Date();
+    expect((await classifyAcceptance(evidence, 30, now, baseCommit, { root, inputs })).state).toBe("proven");
+    await writeFile(path.join(root, "docs", "notes.md"), "# Notes changed\n", "utf8");
+    expect((await classifyAcceptance(evidence, 30, now, baseCommit, { root, inputs })).state).toBe("proven");
+    await writeFile(path.join(root, "src", "harness", "guarded.ts"), "export const guarded = 2;\n", "utf8");
+    const stale = await classifyAcceptance(evidence, 30, now, baseCommit, { root, inputs });
+    expect(stale.state).toBe("stale");
+    expect(stale.reasons).toContain("src/harness/guarded.ts");
+  });
+
+  test("legacy evidence without an input digest keeps the commit rule", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-legacy-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "a.ts"), "export const a = 1;\n", "utf8");
+    initRepo(root);
+    const baseCommit = commitAll(root, "seed");
+    const now = new Date();
+    const legacy = { outcome: "passed" as const, checked_at: now.toISOString(), harness_commit: baseCommit };
+    await writeFile(path.join(root, "src", "a.ts"), "export const a = 2;\n", "utf8");
+    expect((await classifyAcceptance(legacy, 30, now, baseCommit, { root, inputs: ["src/**"] })).state).toBe("proven");
+    expect((await classifyAcceptance(legacy, 30, now, "different-commit", { root, inputs: ["src/**"] })).state).toBe("stale");
+  });
+
+  test("rebind revalidates unchanged legacy evidence against a two-commit repository", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-rebind-"));
+    await writeRebindFixture(root);
+    initRepo(root);
+    const baseCommit = commitAll(root, "seed inputs");
+    await writeFile(path.join(root, "src", "harness", "other.ts"), "export const other = 1;\n", "utf8");
+    commitAll(root, "change outside the inputs");
+    const evidenceDir = path.join(root, "acceptance", "evidence", "C1-cmdc");
+    await mkdir(evidenceDir, { recursive: true });
+    await writeFile(path.join(evidenceDir, "latest.json"), JSON.stringify(legacyEvidence({ harness_commit: baseCommit })) + "\n", "utf8");
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((line?: unknown) => { logs.push(String(line)); });
+    let outcomes: Awaited<ReturnType<typeof rebindAcceptanceEvidence>>;
+    try {
+      outcomes = await rebindAcceptanceEvidence(root);
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].outcome).toBe("rebound");
+    const rebound = JSON.parse(await readFile(path.join(evidenceDir, "latest.json"), "utf8")) as { input_digest?: string; inputs_resolved?: number; rebound_from_commit?: string };
+    expect(rebound.input_digest).toBeTypeOf("string");
+    expect(rebound.inputs_resolved).toBe(2);
+    expect(rebound.rebound_from_commit).toBe(baseCommit);
+    expect(logs.some((line) => line.startsWith("rebound C1-cmdc"))).toBe(true);
+  });
+
+  test("rebind reports changed inputs instead of revalidating", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "acceptance-rebind-changed-"));
+    await writeRebindFixture(root);
+    initRepo(root);
+    const baseCommit = commitAll(root, "seed inputs");
+    await writeFile(path.join(root, "src", "harness", "team-run.ts"), "export const run = 2;\n", "utf8");
+    commitAll(root, "change inside the inputs");
+    const evidenceDir = path.join(root, "acceptance", "evidence", "C1-cmdc");
+    await mkdir(evidenceDir, { recursive: true });
+    await writeFile(path.join(evidenceDir, "latest.json"), JSON.stringify(legacyEvidence({ harness_commit: baseCommit })) + "\n", "utf8");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let outcomes: Awaited<ReturnType<typeof rebindAcceptanceEvidence>>;
+    try {
+      outcomes = await rebindAcceptanceEvidence(root);
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].outcome).toBe("changed");
+    expect(outcomes[0].changed).toContain("src/harness/team-run.ts");
+    const unchanged = JSON.parse(await readFile(path.join(evidenceDir, "latest.json"), "utf8")) as { input_digest?: string };
+    expect(unchanged.input_digest).toBeUndefined();
+  });
+});
+
 describe("command-code fleet registry entries", () => {
   test("every oh-my-pi entry has a -cmdc command-code sibling with identical capability and expectations", async () => {
     const registry = await loadAcceptanceRegistry(process.cwd());
@@ -210,14 +384,18 @@ describe("command-code fleet registry entries", () => {
       expect(sibling.model).toBe("qwen/qwen3.8-flash");
       expect(sibling.capability).toBe(registry.entries[id].capability);
       expect(sibling.expected).toEqual(registry.entries[id].expected);
-      expect(sibling.real_mission).toBe(registry.entries[id].real_mission);
+      if (id === "S3-budget-exhausted") {
+        expect(sibling.real_mission, "budget exhaustion needs a known cost this fleet does not report").toBe("not_applicable");
+      } else {
+        expect(sibling.real_mission).toBe(registry.entries[id].real_mission);
+      }
     }
     for (const [id, entry] of Object.entries(registry.entries)) {
       if (!id.endsWith("-cmdc")) continue;
       expect(registry.entries[id.slice(0, -"-cmdc".length)], `${id} must mirror a registry entry`).toBeDefined();
-      if (id === "R10-stall-cmdc") {
-        expect(entry.real_mission).toBe("not_applicable");
-        expect(entry.reason).toMatch(/print mode/);
+      if (entry.real_mission === "not_applicable") {
+        expect(entry.reason.length, `${id} must say why it is fixture-only`).toBeGreaterThan(0);
+        if (id === "R10-stall-cmdc") expect(entry.reason).toMatch(/print mode/);
       } else {
         expect(entry.real_mission).toBe("real");
         await expect(access(path.join(process.cwd(), "acceptance", entry.mission))).resolves.toBeUndefined();

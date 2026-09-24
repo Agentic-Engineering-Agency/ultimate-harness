@@ -5,7 +5,7 @@ import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
 export type ToolGuardClass =
   | "write_outside" | "git_mutation" | "delete_outside" | "kill_or_format"
   | "package_install" | "network_client" | "agent_client" | "protected_root"
-  | "guard_tamper" | "containment_escape";
+  | "guard_tamper" | "containment_escape" | "virtual_device";
 export type ToolGuardDecision = { deny?: { reason: string; class: ToolGuardClass; target?: string } };
 
 const SUFFIX = " Do not retry this by another route; record it in your final message and continue with the rest of the task.";
@@ -16,6 +16,11 @@ const DELETE_TOOLS = new Set(["delete_file", "remove"]);
 export const AGENT_TOOLS = new Set(["task", "agent", "subagent", "spawn_agent", "dispatch_agent", "delegate"]);
 const DEL_VERBS = new Set(["remove-item", "ri", "rm", "rmdir", "rd", "del", "erase"]);
 const COPY_VERBS = new Set(["copy", "cp", "move", "mv", "xcopy", "robocopy", "copy-item", "move-item", "cpi", "mi"]);
+/** cmd.exe verbs whose `/x` tokens are switches. POSIX `rm`, `cp` and `mv` never take them, so `/etc/x` stays a path. */
+const CMD_SWITCH_VERBS = new Set(["rmdir", "rd", "del", "erase", "copy", "move", "xcopy", "robocopy"]);
+function isSwitch(verb: string, token: string): boolean {
+  return token.startsWith("-") || (CMD_SWITCH_VERBS.has(verb) && /^\/[a-z?][a-z0-9]*(?::[^/\\]*)?$/i.test(token));
+}
 const NULL_TARGETS = new Set(["nul", "null", "/dev/null", "$null", "&1", "&2", "con", "prn"]);
 const VALUE_FLAGS = new Set(["-erroraction", "-warningaction", "-filter", "-include", "-exclude", "-encoding", "-confirm", "-ea", "-wa", "-value", "-inputobject", "-variable"]);
 
@@ -206,16 +211,44 @@ function containmentEscapeInvoked(command: string, depth = 0): boolean {
 type DirectoryState = { current?: string; unknown: boolean; stack: Array<{ current?: string; unknown: boolean }> };
 type ShellTarget = { value: string; resolved?: string; ignored?: boolean };
 
+const GUARD_ENV_NAMES = new Set(["UH_TOOL_GUARD_POLICY", "UH_TOOL_GUARD_LOG"]);
+
+/** The configured value of a guard-owned environment variable, when it is set. */
+function guardEnvValue(name: string): string | undefined {
+  const upper = name.toUpperCase();
+  if (!GUARD_ENV_NAMES.has(upper)) return undefined;
+  const value = process.env[upper];
+  return value ? value : undefined;
+}
+
+/**
+ * The value a bare guard-environment reference resolves to: `$env:NAME`,
+ * `$NAME`, or `%NAME%` for the two names the guard owns. Any other
+ * environment reference stays unresolved.
+ */
+function guardEnvReference(value: string): string | undefined {
+  const clean = value.trim().replace(/^['"]|['"]$/g, "");
+  const match = clean.match(/^(?:\$env:|\$)([A-Za-z_]\w*)$/) ?? clean.match(/^%([A-Za-z_]\w*)%$/);
+  return match ? guardEnvValue(match[1]) : undefined;
+}
+
 function assignments(command: string): Map<string, string> {
   const result = new Map<string, string>();
   const addLiteral = (name: string, value: string): void => {
     const clean = value.trim().replace(/^['"]|['"]$/g, "");
-    if (!clean || clean.startsWith("$") || clean.startsWith("%") || clean.startsWith("~") || clean.includes("`") || clean.includes("$(")) return;
+    if (!clean) return;
+    const environment = guardEnvReference(clean);
+    if (environment !== undefined) { result.set(name.toLowerCase(), environment); return; }
+    if (clean.startsWith("$") || clean.startsWith("%") || clean.startsWith("~") || clean.includes("`") || clean.includes("$(")) return;
     result.set(name.toLowerCase(), clean);
   };
   for (const match of command.matchAll(/\$(\w+)\s*=\s*['"]([^'"]+)['"]/g)) addLiteral(match[1], match[2]);
   for (const match of command.matchAll(/\$(\w+)\s*=\s*([^;&|]+)/g)) addLiteral(match[1], match[2]);
   for (const match of command.matchAll(/\bset\s+(\w+)=([^\s&;]+)/gi)) addLiteral(match[1], match[2]);
+  for (const match of command.matchAll(/(?:^|[^\w])(\w+)\s*=\s*(\$env:\w+|\$\w+|%\w+%)/g)) {
+    const environment = guardEnvReference(match[2]);
+    if (environment !== undefined) result.set(match[1].toLowerCase(), environment);
+  }
   return result;
 }
 function resolveToken(value: string, vars: Map<string, string>): string | undefined {
@@ -223,13 +256,18 @@ function resolveToken(value: string, vars: Map<string, string>): string | undefi
   if (!clean || clean === "-" || clean.startsWith("~") || clean.includes("$(") || clean.includes("`")) return undefined;
   const windowsVariable = clean.match(/^%(\w+)%((?:.*))$/);
   if (windowsVariable) {
-    const base = vars.get(windowsVariable[1].toLowerCase());
+    const base = guardEnvValue(windowsVariable[1]) ?? vars.get(windowsVariable[1].toLowerCase());
     return base === undefined ? undefined : `${base}${windowsVariable[2]}`;
   }
   if (/%[^%]+%/.test(clean)) return undefined;
+  const environmentReference = clean.match(/^\$env:(\w+)\b(.*)$/i);
+  if (environmentReference) {
+    const base = guardEnvValue(environmentReference[1]);
+    return base === undefined ? undefined : `${base}${environmentReference[2]}`;
+  }
   const match = clean.match(/^\$(\w+)\b(.*)$/);
   if (!match) return clean;
-  const base = vars.get(match[1].toLowerCase());
+  const base = vars.get(match[1].toLowerCase()) ?? guardEnvValue(match[1]);
   return base === undefined ? undefined : `${base}${match[2]}`;
 }
 
@@ -335,7 +373,7 @@ function collectShellTargets(command: string, initialDirectory: string | undefin
         for (const target of redirectionTargets(segment)) writes.push(shellTarget(target, state, workerRoot, vars));
         const verb = ts[0].toLowerCase();
         if (COPY_VERBS.has(verb)) {
-          const positional = ts.slice(1).filter(token => !token.startsWith("-") && !token.startsWith("/"));
+          const positional = ts.slice(1).filter(token => !isSwitch(verb, token));
           let destination = positional.at(-1);
           const destinationFlag = ts.findIndex(token => token.toLowerCase() === "-destination");
           if (destinationFlag >= 0) destination = ts[destinationFlag + 1];
@@ -369,7 +407,7 @@ function collectShellTargets(command: string, initialDirectory: string | undefin
             const token = ts[index], low = token.toLowerCase();
             if ((low === "-path" || low === "-literalpath") && ts[index + 1]) { args.push(...ts[++index].split(",")); continue; }
             if (VALUE_FLAGS.has(low) || VALUE_FLAGS.has(low.split(":")[0])) { if (!token.includes(":")) index += 1; continue; }
-            if (token.startsWith("-") || token.startsWith("/")) continue;
+            if (isSwitch(verb, token)) continue;
             args.push(...token.split(","));
           }
           if (!args.length && separator === "|" && previous) {
@@ -479,6 +517,11 @@ function pathSegments(value: string): string[] {
   return value.replaceAll("\\", "/").split("/").filter(Boolean).map(segment => segment.toLowerCase());
 }
 
+/** A target whose URI scheme is `xd:`, an OMP virtual device that has no filesystem path. */
+function virtualDeviceTarget(value: string): boolean {
+  return /^xd:/i.test(value.trim().replace(/^['"]|['"]$/g, ""));
+}
+
 function tamperTarget(target: ShellTarget, workerRoot: string): boolean {
   const candidate = target.resolved ?? target.value;
   const configured = [process.env.UH_TOOL_GUARD_POLICY, process.env.UH_TOOL_GUARD_LOG].filter(
@@ -506,6 +549,7 @@ function reason(className: ToolGuardClass, policy: ToolGuardPolicy, target = "")
     : className === "agent_client" ? "CONTRACT: no sub-agents. Workers do not start agents, agent CLIs or harness runs. Do the work yourself; if part of it exceeds your scope, end with ESCALATE: <what your orchestrator should delegate>."
     : className === "network_client" ? "CONTRACT: no network or agent clients. Everything you need is on disk; if it is not, end with BLOCKED: <what is missing>."
     : className === "containment_escape" ? "CONTRACT: no launches outside the supervised process tree. Run the work in the foreground of this run instead."
+    : className === "virtual_device" ? "CONTRACT: virtual devices are not available in this run."
     : className === "guard_tamper" ? "CONTRACT: the harness policy and its state are not yours to change."
     : `CONTRACT: ${target || "path"} belongs to the harness and is read-only.`;
   return { deny: { class: className, target: target || undefined, reason: text + SUFFIX } };
@@ -571,6 +615,7 @@ export function decideToolCall(
       stack: [],
     }, workerRoot, new Map());
     const candidate = target.resolved ?? target.value;
+    if (virtualDeviceTarget(directTarget)) return reason("virtual_device", policy, directTarget);
     if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, directTarget);
     const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);
@@ -597,6 +642,7 @@ export function decideToolCall(
   for (const target of deletes.targets) {
     if (target.ignored) continue;
     const candidate = target.resolved ?? target.value;
+    if (virtualDeviceTarget(target.value)) return reason("virtual_device", policy, target.value);
     if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, target.value);
     const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);
@@ -606,6 +652,7 @@ export function decideToolCall(
   for (const target of writeTargets(command, initialDirectory, workerRoot)) {
     if (target.ignored) continue;
     const candidate = target.resolved ?? target.value;
+    if (virtualDeviceTarget(target.value)) return reason("virtual_device", policy, target.value);
     if (tamperTarget(target, workerRoot)) return reason("guard_tamper", policy, target.value);
     const protectedPath = protectedRoot(candidate, workerRoot, protectedPaths);
     if (protectedPath) return reason("protected_root", policy, protectedPath);

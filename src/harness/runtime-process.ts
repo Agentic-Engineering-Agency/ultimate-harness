@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { renameWithRetry, writeAtomicArtifact } from "./artifact-transaction.js";
 import { RuntimeCancelRequestSchema, RuntimeControlSchema, RuntimeLimitsSchema, RuntimeRouteSchema, WindowsJobResultSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode } from "../schema/runtime-control.js";
 import { RuntimeSupervision } from "./runtime-supervision.js";
+import { createLoopWatchdog, resolveLoopWatchdogMode, type LoopWatchdog } from "./loop-watchdog.js";
 import { resolveRuntimeCommand } from "./runtime-command.js";
 import type { RuntimeUsage } from "./usage.js";
 
@@ -194,6 +195,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       stop_code: stopCode ?? supervisor.stopCode ?? (cancelled ? "cancelled" : supervisor.terminalFailure ? "runtime_error" : undefined),
       ready_at: supervisor.readyAt === undefined ? undefined : new Date(supervisor.readyAt).toISOString(),
       session_id: supervisor.sessionId, turns: supervisor.turns, denials: supervisor.denials,
+      native_refusals: supervisor.nativeRefusals,
       expected_route: expectedRoute,
       review_request_sha256: input.reviewRequestSha256,
       guardian: guardianInfo,
@@ -225,6 +227,30 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
   }
   if (limits.memory_mb && process.platform !== "win32") {
     throw new Error("A committed process-tree memory cap requires the Windows Job backend; no unenforced fallback is permitted");
+  }
+  // Shadow loop watchdog: a pure observer of the same native events supervision
+  // already consumes. Its mode comes from the mission (`runtime_config.loop_watchdog`)
+  // and every failure below is swallowed, so it can never fail the run.
+  let watchdog: LoopWatchdog | undefined;
+  if (scope) {
+    try {
+      const missionDir = path.dirname(path.dirname(scope.directory));
+      const mode = await resolveLoopWatchdogMode(path.join(missionDir, "mission.yaml"));
+      if (mode === "shadow") {
+        watchdog = createLoopWatchdog({
+          source: scope.runtime === "command-code" ? "command-code" : "oh-my-pi",
+          workingDirectory: input.cwd,
+          missionDir,
+          missionId: scope.missionId,
+          runId: scope.runId,
+          appendEvent: async (event) => {
+            await appendFile(path.join(scope.directory, "events.ndjson"), `${JSON.stringify(event)}\n`, "utf-8");
+          },
+        });
+      }
+    } catch {
+      watchdog = undefined;
+    }
   }
   const executable = await resolveRuntimeCommand(input.command, input.args, input.env);
   const temporaryJobDirectory = process.platform === "win32" && !scope ? await mkdtemp(path.join(tmpdir(), "uh-job-")) : undefined;
@@ -297,9 +323,18 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       });
       return writes;
     };
+    const nativeEvents: unknown[] = [];
+    let watchdogWork: Promise<void> = Promise.resolve();
     const observe = (line: string): void => {
       try {
-        const reason = supervisor.observe(JSON.parse(line), now());
+        const parsed = JSON.parse(line);
+        nativeEvents.push(parsed);
+        if (watchdog) {
+          const active = watchdog;
+          // Chained and swallowed: a shadow evaluation never blocks or fails the run.
+          watchdogWork = watchdogWork.then(() => active.observe(nativeEvents)).catch(() => {});
+        }
+        const reason = supervisor.observe(parsed, now());
         if (reason) stop(reason, supervisor.stopCode);
       } catch { /* Preserve malformed and partial bytes; the adapter classifies them. */ }
     };
@@ -363,6 +398,8 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         await activePoll;
         await writes;
         await stopWrite;
+        // Let any pending shadow evaluation settle before the run resolves.
+        await watchdogWork;
         if (process.platform === "win32") {
           try {
             const job = WindowsJobResultSchema.parse(JSON.parse((await readFile(path.join(jobDirectory!, "windows-job-result.json"), "utf8")).replace(/^\uFEFF/, "")));

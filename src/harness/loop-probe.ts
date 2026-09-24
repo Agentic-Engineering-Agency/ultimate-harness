@@ -2,8 +2,10 @@
 // Shadow-only loop probe. Nothing here decides, stops, promotes or gates work,
 // and no code path consumes its answer. See docs/architecture/runtime-events.md
 // for the native event shapes this projects.
+import { nativeToolFailure } from "./native-tool-result.js";
 import {
   evaluateSystemOne,
+  type EvaluateSystemOneOptions,
   type NoulQuestion,
   type Question,
   type SystemOneResult,
@@ -88,7 +90,12 @@ export type EvaluateLoopProbeOptions = {
   configured?: boolean;
   fetch?: typeof globalThis.fetch;
   delay?: (ms: number) => Promise<void>;
+  /** Injectable System One call; tests substitute it so no request is ever sent. */
+  provider?: LoopProbeProvider;
 };
+
+/** The System One call `evaluateLoopProbe` makes, exposed so a caller may substitute it. */
+export type LoopProbeProvider = (options: EvaluateSystemOneOptions) => Promise<SystemOneResult>;
 
 const READ_TOOLS = new Set(["read_file", "read", "view", "cat", "head", "tail", "glob", "grep", "search", "list_dir", "read_directory", "ls"]);
 const WRITE_TOOLS = new Set(["write_file", "edit_file", "write", "edit", "apply_patch", "patch", "create_file", "str_replace", "multi_edit", "notebook_edit", "search_replace"]);
@@ -282,15 +289,24 @@ function exitCodeOf(source: Event | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/**
+ * Whether a completed call failed, and in which way. Command Code reports a shell
+ * failure only inside an array-form text result that opens with `Exit code: <n>`,
+ * carrying no error or exit field, so the shared native parser decides the
+ * verdict here too: supervision and the probe read one runtime's results the
+ * same way. The probe then splits that verdict further into a denial and into
+ * `nonzero_exit` versus `tool_error`, which the parser does not distinguish.
+ */
 function projectStatus(end: Event): { ok: boolean; error_class: ErrorClass } {
   const result = record(end.result);
   const denied = containsDenialText(end) || end.denied === true || end.is_denied === true;
   if (denied) return { ok: false, error_class: "denied" };
-  const exitCode = exitCodeOf(result) ?? exitCodeOf(end);
+  const native = nativeToolFailure(end);
+  const exitCode = native.exit_code ?? exitCodeOf(result) ?? exitCodeOf(end);
   const isError = end.isError === true || result?.isError === true || result?.is_error === true ||
     end.error === true || (typeof end.error === "object" && end.error !== null);
   if (exitCode !== undefined && exitCode !== 0) return { ok: false, error_class: "nonzero_exit" };
-  if (isError) return { ok: false, error_class: "tool_error" };
+  if (native.failed || isError) return { ok: false, error_class: "tool_error" };
   if (result?.ok === false || result?.success === false) return { ok: false, error_class: "tool_error" };
   return { ok: true, error_class: "none" };
 }
@@ -475,7 +491,7 @@ export async function evaluateLoopProbe(
   }
 
   const questions = loopProbeQuestions() as Record<string, Question>;
-  const response = await evaluateSystemOne({
+  const response = await (options.provider ?? evaluateSystemOne)({
     state: serializeLoopProbeState(window),
     questions,
     model: options.model,

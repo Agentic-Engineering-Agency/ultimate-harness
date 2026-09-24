@@ -67,6 +67,13 @@ export const TeamResourceLimitsSchema = z.object({
   reserve_memory_mb: z.number().int().nonnegative().default(1024),
   max_cost_usd: z.number().positive().optional(),
   worker_cost_reservation_usd: z.number().positive().optional(),
+  /**
+   * What an unknown completed worker cost does to the next wave. `block` is the
+   * default: unknown cost is never treated as zero. `admit` lets the next wave
+   * proceed for fleets that cannot report price (for example Command Code) while
+   * every such wave records an explicit admission note.
+   */
+  unknown_cost: z.enum(["block", "admit"]).default("block"),
 }).strict().superRefine((limits, ctx) => {
   if ((limits.max_cost_usd === undefined) !== (limits.worker_cost_reservation_usd === undefined)) {
     ctx.addIssue({ code: "custom", message: "Cost admission requires both max_cost_usd and worker_cost_reservation_usd" });
@@ -121,6 +128,8 @@ export const RuntimeControlSchema = z.object({
   guard_armed: z.boolean().optional(),
   turns: z.number().int().nonnegative(),
   denials: z.number().int().nonnegative(),
+  /** Calls the runtime denied natively without invoking the guard hook; also counted in `denials`. */
+  native_refusals: z.number().int().nonnegative().optional(),
   inflight_tools: z.number().int().nonnegative(),
   usage: RuntimeUsageSchema.optional(),
   settlement_confirmed: z.boolean().optional(),
