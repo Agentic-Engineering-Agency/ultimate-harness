@@ -64,6 +64,10 @@ the operator's settings are not known to UH; delegated-route attestation is the 
 those. Behavior verified against oh-my-pi source at commit `3ed46dc`
 (`config/settings.ts` merge precedence, `task/types.ts` `canSpawnAtDepth`).
 
+`runtime_config.tools`, a list of omp tool names, is passed as `--tools=<comma list>` right after `--mode`,
+so a read-only mission can withhold tools such as `eval` and `python`, which bypass the guard's path checks. The list
+needs at least one entry, no duplicates and names from a restricted character set; without it the argv is unchanged.
+
 ### Prime Agent (untested, incomplete)
 
 [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) was evaluated in September 2026 as an orchestrator

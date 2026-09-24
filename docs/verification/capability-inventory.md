@@ -179,3 +179,31 @@ except `R10-stall` (`fixture_only`).
 8. `uh verify` + promotion gate — the mechanism that decides whether work is acceptable and promoted has never run against a live mission result.
 9. `uh acceptance run` — the evidence mechanism itself; because it has never executed a live capability, all 20 registry entries are unproven by construction.
 10. Live adapter dispatch for `oh-my-pi` / `codex` / `hermes` — no adapter runner has completed a real run in this checkout, so per-runtime behaviour is inferred only from injected-runner tests.
+
+## 5. Capabilities added since this inventory
+
+Sections 1 to 4 predate the unreleased 0.11.0 line and were not regenerated. The rows below list what was added
+since, with the class rules of section 1. "Operational use" is not acceptance evidence: it records whether the
+capability has been exercised in this project's own work (local run records, not present in a clean checkout), so a
+row can be used daily and still be `unit-only`. [Known issues](../known-issues.md) lists every open defect.
+
+| capability | where implemented | unit tests | operational use | class | notes |
+|---|---|---|---|---|---|
+| `uh ps` (+ stalled-tool segment) | src/harness/live-runs.ts | tests/live-runs.test.ts | daily | unit-only | Claude Code and ACP runs show `turns=0` (known issue). |
+| `uh wait` | src/harness/wait.ts | tests/cli-wait.test.ts | daily | unit-only | Once returned `orphaned` for a passed run (known issue). |
+| `uh kill` | src/harness/kill.ts | tests/kill.test.ts | daily, including `--orphans` | unit-only | |
+| `uh steer` | src/harness/steer.ts | tests/steer-resume.test.ts | used | unit-only | Steering an orchestrator orphans its workers (known issue). |
+| `uh report` / run digest | src/harness/report.ts, src/harness/run-digest.ts | tests/report.test.ts; tests/run-digest.test.ts | rarely | unit-only | |
+| `uh mission check` / `uh mission put` | src/harness/mission-check.ts, src/harness/mission-put.ts | tests/mission-check.test.ts; tests/mission-put.test.ts | daily | unit-only | A team packet needs its worker packets in the same `put`. |
+| `uh mission run --post-checks` | src/harness/post-checks.ts | tests/post-checks.test.ts | used as a hidden grader | unit-only | Failed runs correctly when the hidden check failed. |
+| `uh queue` | src/harness/queue.ts | tests/queue.test.ts | none | unit-only | Fake launchers only. |
+| `uh land` | src/harness/land.ts | tests/land.test.ts | first live use refused | unit-only | Review root is wrong when the project is a linked worktree (known issue). |
+| `uh notify` | src/harness/notifications.ts | tests/notifications.test.ts | test deliveries only | unit-only | Real settled runs have not delivered (known issue). |
+| `uh note` / `uh ledger` | src/harness/interventions.ts | tests/interventions.test.ts | little | unit-only | |
+| Team memory admission | src/harness/runtime-resources.ts | tests/memory-admission.test.ts | every team run | unit-only | Reservation release by controller pid is an open hypothesis. |
+| Command Code read windows | src/extensions/tool-guard/core.ts, cmdc-hook.ts | tests/cmdc-read-window.test.ts; tests/cmdc-hook.test.ts | every Command Code run | unit-only | Mitigates upstream #859 for reads only. |
+| ACP `mcp_servers`, `env`, sandbox records | src/adapters/acp.ts | tests/acp.test.ts; tests/acp-sandbox-artifacts.test.ts | one live review over opencode | unit-only | |
+| oh-my-pi `runtime_config.tools` | src/adapters/oh-my-pi.ts | tests/oh-my-pi.test.ts | none | unit-only | |
+| `context.project_brief` | src/harness/dispatch-context.ts | tests/dispatch-context.test.ts | every worker prompt | unit-only | |
+| `uh mcp serve` | src/harness/mcp-server.ts | tests/mcp-server.test.ts; tests/cli-mcp.test.ts | none from a real client | unit-only | |
+| Shared hive (`uh hive`) | not in this branch | — | — | — | Finished on a separate branch (known issue). |

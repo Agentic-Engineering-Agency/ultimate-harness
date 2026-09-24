@@ -25,7 +25,7 @@ The goal is to combine proven patterns from specification-driven development, ag
 
 ## Current status
 
-UH ships an end-to-end CLI with a schema-backed artifact lifecycle and seven wired adapters: `hermes`, `codex`, `hermes-proxy`, `openrouter`, `pi`, `oh-my-pi` (all active) plus a native `anthropic` adapter (experimental, v0.9.0). Sandboxes support `git-worktree` (default) and `directory` backends, plus a `container` execution-isolation backend gated through OpenSandbox (v0.8.0). Latest release: **v0.9.0** on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness). See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
+UH ships an end-to-end CLI with a schema-backed artifact lifecycle and ten runtime adapters (table below). Sandboxes support `git-worktree` (default) and `directory` backends, plus a `container` execution-isolation backend gated through OpenSandbox (v0.8.0). The latest version on [npm](https://www.npmjs.com/package/@agenticengineeringagency/ultimate-harness) is **v0.9.0**; the `0.11.0` line described here is not published yet. See [`docs/ROADMAP.md`](./docs/ROADMAP.md) for status, [`CHANGELOG.md`](./CHANGELOG.md) for release notes, and [`docs/known-issues.md`](./docs/known-issues.md) for open defects and unproven claims.
 
 | Adapter | Status | Notes |
 |---|---|---|
@@ -37,15 +37,37 @@ UH ships an end-to-end CLI with a schema-backed artifact lifecycle and seven wir
 | `pi` | active | Drives the vanilla `pi` agent CLI (`pi --print --mode json --no-session`) — the base CLI that oh-my-pi extends. `config.cli_command` overridable. See [`docs/runbooks/pi-setup.md`](./docs/runbooks/pi-setup.md). |
 | `anthropic` | active | Native pay-per-token Anthropic Messages API — the official, ToS-clean alternative to the OMP stealth path. API key via `ANTHROPIC_API_KEY`. |
 | `command-code` | active | Command Code native execution with persistent sessions, process trees, and Tool Guard supervision. |
-| `claude-code` | active | Claude Code adapter with structured event capture and saved-session recovery. |
+| `claude-code` | integration incomplete | Claude Code adapter with structured event capture and saved-session recovery; used for orchestrator missions. See [runtime targets](./docs/runtime-targets.md#claude-code-boundaries) for current limitations. |
 | `acp` | active | Agent-Client Protocol (ACP) v1 runner for headless agent orchestration via standard JSON-RPC 2.0 over stdio. See [`docs/runbooks/acp-setup.md`](./docs/runbooks/acp-setup.md). |
 
-Unreleased development (v0.11.0) includes native `command-code` and `claude-code`
-adapters, runtime supervision and recovery improvements, platform neutrality fixes,
-and semantic evaluation during verification and independent review. These changes
-are an intermediate milestone towards 1.0. See [Changelog](./CHANGELOG.md),
-[runtime limitations](./docs/runtime-targets.md), and the
-[1.0 roadmap](./docs/ROADMAP.md#10--integrated-execution-lifecycle).
+The unpublished `0.11.0` line adds native `command-code` and `claude-code` adapters,
+runtime supervision and recovery improvements, platform neutrality fixes, semantic
+evaluation during verification and independent review, and the run-control and
+delivery-loop commands below.
+See [Changelog](./CHANGELOG.md), [runtime limitations](./docs/runtime-targets.md),
+and the [roadmap](./docs/ROADMAP.md).
+
+## Operating runs
+
+Every command below reads or writes records under `.harness/`; none needs a model.
+
+| Need | Command | Guide |
+|---|---|---|
+| See what is running, per run: mission, runtime and model, liveness, turns, denials, last tool, stalled tools | `uh ps` | [run control](./docs/handbook/run-control.md) |
+| Block until runs settle, without polling | `uh wait <run-id>` / `--mission` / `--team` | [run control](./docs/handbook/run-control.md) |
+| What a run is doing or did: tools, files written, denials, loop signals, efficiency | `uh report <run-id>` | [run control runbook](./docs/runbooks/run-control.md) |
+| Redirect or stop a run | `uh steer <run-id> <message>`, `uh kill`, `uh mission cancel` | [run control](./docs/handbook/run-control.md) |
+| Fan a mission out to workers in their own worktrees | `uh mission run-team <id>` | [slices and teams](./docs/handbook/slices-and-teams.md) |
+| Validate and install mission packets | `uh mission check`, `uh mission put` | [packet rules](./docs/handbook/packet-rules.md) |
+| Independent review of finished work | `uh mission review-prepare` / `review-collect` | [review round trip](./docs/handbook/review-round-trip.md) |
+| Grade a run with checks the agent never sees | `uh mission run --post-checks <file>` | [closing the loop](./docs/handbook/closing-the-loop.md) |
+| Launch missions in order under an orchestrator cap | `uh queue run <queue.yaml>` | [closing the loop](./docs/handbook/closing-the-loop.md) |
+| Land verified, reviewed worker branches or leave the target untouched | `uh land` | [closing the loop](./docs/handbook/closing-the-loop.md) |
+| Be told when runs settle | `uh notify` | [notifications](./docs/handbook/notifications.md) |
+| Record corrections and their countermeasures | `uh note`, `uh ledger` | [intervention ledger](./docs/handbook/intervention-ledger.md) |
+| Read the run store from an MCP client | `uh mcp serve` | [MCP server](./docs/runbooks/mcp-server.md) |
+
+The [operator handbook](./docs/handbook/README.md) walks the whole loop.
 
 Cross-cutting protocols every adapter participates in:
 
@@ -59,8 +81,11 @@ Cross-cutting protocols every adapter participates in:
 Start with the [quickstart](./docs/quickstart.md), the [configuration guide](./docs/configuration.md), the [vision](./docs/VISION.md), the [documentation home](./docs/README.md), and the [roadmap](./docs/ROADMAP.md). Direct links:
 
 - [Quickstart](./docs/quickstart.md)
+- [Operator handbook](./docs/handbook/README.md)
+- [Known issues](./docs/known-issues.md)
 - [Configuration](./docs/configuration.md)
 - [Runtime targets](./docs/runtime-targets.md)
+- [Tool guard](./docs/tool-guard.md)
 - [TUI architecture](./docs/architecture/tui.md)
 - [Plugin development](./docs/plugin-development.md)
 - [Optional telemetry](./docs/telemetry.md)
@@ -87,6 +112,11 @@ Runbooks:
 - [Container sandbox / OpenSandbox smoke](./docs/runbooks/container-sandbox.md)
 - [Publishing](./docs/runbooks/publishing.md)
 - [Honcho persistent memory (oh-my-pi)](./docs/runbooks/honcho-memory.md)
+- [Run control](./docs/runbooks/run-control.md)
+- [Independent review](./docs/runbooks/independent-review.md)
+- [Acceptance](./docs/runbooks/acceptance.md)
+- [ACP setup](./docs/runbooks/acp-setup.md)
+- [MCP server](./docs/runbooks/mcp-server.md)
 
 ## Install
 
@@ -108,7 +138,7 @@ bun run build
 # Initialize .harness/ project state.
 uh init
 
-# Confirm a runtime is available (active: hermes, codex, hermes-proxy, openrouter, pi, oh-my-pi).
+# Confirm a runtime is available (see the adapter table above).
 uh adapter check hermes
 
 # Create and validate a mission packet.

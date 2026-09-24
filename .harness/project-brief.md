@@ -1,5 +1,5 @@
 - ESM TypeScript run with bun. Build: `node scripts/build.mjs`. Typecheck: `bun run typecheck` (tsc -p tsconfig.tests.json --noEmit).
 - Tests are vitest: tests/**/*.test.ts, setup tests/setup.ts, 30 s test timeout. Run one file with `bunx vitest run <file>`. You do not need to read package.json, tsconfig*.json, vitest.config.ts or tests/setup.ts.
-- Large files (read by line range, never whole): src/cli.ts (~3,200 lines), src/harness/team-run.ts (~1,800), src/harness/acceptance.ts (~1,600), tests/team-run.test.ts (~1,500). Locate a symbol with grep, then read about 150 lines around it.
-- Run test and build commands without pipes (no | tail, | head, | grep); their output reaches you directly.
+- Large files (read by line range, never whole): src/cli.ts (~3,600 lines), src/harness/team-run.ts (~2,400), src/harness/acceptance.ts (~1,700), tests/team-run.test.ts (~1,900). Locate a symbol with grep, then read about 150 lines around it.
+- Run the test files your task names, one command per file set; never the full suite, whose output is too large for a single tool result. Their output reaches you directly, so do not pipe it.
 - Code search: a GitNexus index exists at the project root (`node <project root>/.gitnexus/run.cjs impact <symbol> --direction upstream --repo <project root>`).
