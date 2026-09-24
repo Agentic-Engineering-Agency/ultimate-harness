@@ -22,7 +22,7 @@ Decided by the owner on 2026-09-23.
 | D4 | Publish 0.10.0 separately, or fold it into 0.11.0? | **Skip 0.10.0.** Its work is folded into 0.11.0 and the changelog says 0.10.0 was never published. | Done with D1 |
 | D5 | Keep the old docs domain or move? | **Retire the old site.** `apps/docs` and `deploy-docs.yml` are removed in PR #250; `uh.agenticengineering.lat` redirects to `uh.agenticeng.app`. | Done in #250; redirect deploys after the old Worker is removed |
 
-Also decided: **turn off the Codex review bot** on the repository (see [Branch and PR audit](/release/branches/#codex-review-bot)), and **land stack fixes on the bottom layer (#240)**, never directly on `main`.
+Also decided: **keep the Codex review bot on** (reversed on 2026-09-24; it needs code-review credits to review the stack, see [Branch and PR audit](/release/branches/#codex-review-bot)), and **land stack fixes on the bottom layer (#240)**, never directly on `main`.
 
 ## Stack status
 
@@ -66,7 +66,7 @@ Also in Phase 0:
 
 1. **Done:** the #240 sandbox concurrency race is fixed by serializing `git worktree add` per repository.
 2. **Move the `land.ts` fix** that rides in the docs PR #246 into #245, where the rest of `uh land` lives. The GitNexus change in #246 stays (decision D2).
-3. **Get a human review on every layer.** None of #239 to #249 has one, and the Codex bot, now being turned off, only posted usage-limit notices. Review #243 (shared guard core), #245 (`uh land` moves branches) and #247 (hive) first.
+3. **Get a human review on every layer.** None of #239 to #249 has one. The Codex bot stays on but only posted usage-limit notices on these PRs; with code-review credits enabled, re-request its review on each layer as well. Review #243 (shared guard core), #245 (`uh land` moves branches) and #247 (hive) first.
 
 ## Phase 1: fold v0.10.0 into 0.11.0
 
