@@ -15,14 +15,34 @@ import { runCommandCode, planCommandCodeRun } from "../src/adapters/command-code
 import { verifyMission } from "../src/harness/verify.js";
 import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
-async function fixture() {
+async function fixture(options: { requiredChecks?: Array<{ name: string }> } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "uh-independent-review-"));
   await initializeHarness(root);
   await addAdapter(root, "command-code");
   await writeFile(path.join(root, "answer.txt"), "42");
   await proposeMission(root, { id: "source", title: "Answer", objective: "Produce answer 42", workflow: "research-docs",
-    expectedOutputs: ["answer.txt"], completionCriteria: ["Answer equals 42"] });
+    expectedOutputs: ["answer.txt"], completionCriteria: ["Answer equals 42"],
+    ...(options.requiredChecks ? { requiredChecks: options.requiredChecks } : {}) });
   return root;
+}
+
+/** The shape of the report the reviewer fixture writes, for focused mutations in tests. */
+type EditableReviewReport = {
+  sources: Array<{
+    verdict: string;
+    claims_checked: Array<{ claim: string; source: string; observed: string; verdict: string }>;
+    acceptance: Array<{ id: string; status: string; evidence: string }>;
+    checks: Array<{ id: string; status: string; evidence: string }>;
+    findings: Array<{ severity: string; detail: string; evidence: string }>;
+  }>;
+};
+
+/** Rewrite the report the reviewer produced, the way a reviewer might have recorded it. */
+async function editReviewReport(workspace: { path: string }, mutate: (report: EditableReviewReport) => void) {
+  const reportPath = path.join(workspace.path, "out", "review-report.json");
+  const report = JSON.parse(await readFile(reportPath, "utf8")) as EditableReviewReport;
+  mutate(report);
+  await writeFile(reportPath, JSON.stringify(report));
 }
 
 // The guard hook is published into a content-addressed cache from the build
@@ -454,6 +474,135 @@ test("a review cannot pass omitted criteria or missing and empty required output
     expect(await readFile(prepared.requestPath, "utf8")).toBe(originalPacket);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+/**
+ * A request and report pair for validate-level tests: one source with one
+ * acceptance criterion and one required check, both backed by captured inputs.
+ */
+function reviewFixtures() {
+  const request = IndependentReviewRequestSchema.parse({
+    schema_version: "uh.independent-review-request.v0", review_id: "review",
+    sources: [{ mission_id: "source", source_root: "/tmp/source",
+      files: [{ kind: "contract", state: "present", original_path: "/tmp/source/mission.yaml",
+        snapshot_path: ".harness/missions/review/inputs/source/contract.yaml", sha256: "a".repeat(64) }],
+      reference_paths: [],
+      acceptance: [{ id: "ac-1", description: "Answer equals 42" }],
+      checks: [{ id: "check-1", description: "the suite passes" }] }],
+  });
+  const report = (overrides: Record<string, unknown> = {}) => IndependentReviewReportSchema.parse({
+    schema_version: "uh.independent-review-report.v0", request_sha256: "b".repeat(64),
+    sources: [{ mission_id: "source",
+      claims_checked: [{ claim: "Answer equals 42", source: "answer.txt", observed: "42", verdict: "supported" }],
+      acceptance: [{ id: "ac-1", status: "passed", evidence: "answer.txt reads 42" }],
+      checks: [{ id: "check-1", status: "passed", evidence: "suite output" }],
+      findings: [], verdict: "pass", reason: "Evidence supports a pass", ...overrides }],
+  });
+  return { request, report };
+}
+
+test("an unverified claim that no required entry covers does not block a pass and stays in the report", () => {
+  const { request, report } = reviewFixtures();
+  const recorded = report({ claims_checked: [
+    { claim: "Answer equals 42", source: "answer.txt", observed: "42", verdict: "supported" },
+    { claim: "The full suite passed with 128 tests", source: "worker final message", observed: "128 tests", verdict: "unverified" },
+  ] });
+  expect(validateIndependentReviewReport(request, recorded)).toBe("pass");
+  expect(recorded.sources[0].verdict).toBe("pass");
+  expect(recorded.sources[0].claims_checked).toHaveLength(2);
+  expect(recorded.sources[0].findings).toEqual([]);
+});
+
+test("a contradicted claim lowers a pass to needs-attention with a stated reason", () => {
+  const { request, report } = reviewFixtures();
+  const recorded = report({ claims_checked: [
+    { claim: "Answer equals 42", source: "answer.txt", observed: "0", verdict: "contradicted" }] });
+  expect(validateIndependentReviewReport(request, recorded)).toBe("needs-attention");
+  expect(recorded.sources[0].verdict).toBe("needs-attention");
+  expect(recorded.sources[0].findings).toContainEqual(expect.objectContaining({ severity: "error",
+    detail: expect.stringContaining('contradicted claim "Answer equals 42"') }));
+  expect(recorded.sources[0].findings.some(finding => finding.detail.includes("lowered to needs-attention"))).toBe(true);
+});
+
+test("a required entry that did not pass or an error finding lowers a pass to needs-attention", () => {
+  const { request, report } = reviewFixtures();
+  const failedCheck = report({ checks: [{ id: "check-1", status: "failed", evidence: "one test failed" }] });
+  expect(validateIndependentReviewReport(request, failedCheck)).toBe("needs-attention");
+  expect(failedCheck.sources[0].findings[0].detail).toContain("required check check-1 is failed, not passed");
+
+  const blockedAcceptance = report({ acceptance: [{ id: "ac-1", status: "blocked", evidence: "no evidence" }] });
+  expect(validateIndependentReviewReport(request, blockedAcceptance)).toBe("needs-attention");
+  expect(blockedAcceptance.sources[0].findings[0].detail).toContain("acceptance criterion ac-1 is blocked, not passed");
+
+  const errorFinding = report({ findings: [{ severity: "error", detail: "the worker's claim is unproven", evidence: "final message" }] });
+  expect(validateIndependentReviewReport(request, errorFinding)).toBe("needs-attention");
+  expect(errorFinding.sources[0].findings.some(finding => finding.detail.includes("lowered to needs-attention"))).toBe(true);
+});
+
+test("missing inputs still require needs-remediation and never lower quietly", () => {
+  const { request, report } = reviewFixtures();
+  const missingRequest = IndependentReviewRequestSchema.parse({
+    ...request,
+    sources: [{ ...request.sources[0], files: [
+      { kind: "contract", state: "present", original_path: "/tmp/source/mission.yaml",
+        snapshot_path: ".harness/missions/review/inputs/source/contract.yaml", sha256: "a".repeat(64) },
+      { kind: "output", state: "missing", original_path: "answer.txt" },
+    ] }],
+  });
+  expect(() => validateIndependentReviewReport(missingRequest, report())).toThrow("Missing or invalid review inputs require needs-remediation");
+  const remediated = report({ verdict: "needs-remediation", reason: "the required output is missing" });
+  expect(validateIndependentReviewReport(missingRequest, remediated)).toBe("needs-remediation");
+});
+
+test("a collected review keeps an unverified extra claim and records a pass", async () => {
+  const root = await fixture();
+  try {
+    const { workspace } = await executeFixture(root);
+    await editReviewReport(workspace, report => {
+      report.sources[0].claims_checked.push({ claim: "The full suite passed with 128 tests",
+        source: "worker final message", observed: "128 tests", verdict: "unverified" });
+    });
+    const assessment = await collectIndependentReview(root, "review");
+    expect(assessment.recommendation).toBe("pass");
+    expect(assessment.claims).toContainEqual(expect.objectContaining({
+      source: "source", claim: "The full suite passed with 128 tests", verdict: "unverified" }));
+    const written = JSON.parse(await readFile(path.join(root, ".harness", "missions", "review", "review-assessment.json"), "utf8"));
+    expect(written.recommendation).toBe("pass");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test("a pass contradicted by a claim is recorded as needs-attention naming the source", async () => {
+  const root = await fixture();
+  try {
+    await writeFile(path.join(root, "answer.txt"), "0");
+    const { workspace } = await executeFixture(root);
+    await editReviewReport(workspace, report => {
+      report.sources[0].verdict = "pass";
+      report.sources[0].acceptance.forEach(entry => { entry.status = "passed"; });
+      report.sources[0].checks.forEach(entry => { entry.status = "passed"; });
+      report.sources[0].findings = [];
+    });
+    const assessment = await collectIndependentReview(root, "review");
+    expect(assessment.recommendation).toBe("needs-attention");
+    expect(assessment.findings).toContainEqual(expect.objectContaining({ source: "source", severity: "error",
+      detail: expect.stringContaining('contradicted claim "Answer equals 42"') }));
+    const written = JSON.parse(await readFile(path.join(root, ".harness", "missions", "review", "review-assessment.json"), "utf8"));
+    expect(written.recommendation).toBe("needs-attention");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test("a pass with a failed required check is recorded as needs-attention", async () => {
+  const root = await fixture({ requiredChecks: [{ name: "answer-exists" }, { name: "answer-is-42" }] });
+  try {
+    const { workspace } = await executeFixture(root);
+    await editReviewReport(workspace, report => {
+      report.sources[0].checks[0].status = "failed";
+    });
+    const assessment = await collectIndependentReview(root, "review");
+    expect(assessment.recommendation).toBe("needs-attention");
+    expect(assessment.findings).toContainEqual(expect.objectContaining({ source: "source", severity: "error",
+      detail: expect.stringContaining("required check check-1 is failed, not passed") }));
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 30_000);
 
 test("a review packet pins exact ids for a source with no acceptance criteria", async () => {
   const root = await fixture();

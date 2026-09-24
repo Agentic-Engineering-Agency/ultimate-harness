@@ -203,6 +203,20 @@ export const RuntimeResultVerdictSchema = z.object({
   }
 });
 
+/**
+ * Operator post-check outcome recorded on a runtime result.
+ *
+ * Names and outcomes only: never the command, the checks-file path, or the
+ * check's output. `exit_code` is null when the check timed out or could not be
+ * spawned at all.
+ */
+export const PostCheckResultSchema = z.object({
+  name: z.string().min(1),
+  passed: z.boolean(),
+  exit_code: z.number().int().nullable(),
+  duration_ms: z.number().int().nonnegative(),
+}).strict();
+
 export const RuntimeResultSchema = z.object({
   schema_version: z.literal("uh.runtime-result.v0"),
   mission_id: z.string().min(1),
@@ -226,6 +240,7 @@ export const RuntimeResultSchema = z.object({
   cost_usd: z.number().nonnegative().optional(),
   cost_basis: RuntimeCostBasisSchema.optional(),
   verdict: RuntimeResultVerdictSchema.optional(),
+  post_checks: z.array(PostCheckResultSchema).optional(),
 }).strict();
 
 export type SkillsIndexDocument = z.infer<typeof SkillsIndexSchema>;
@@ -238,6 +253,7 @@ export type RuntimeSessionDocument = z.infer<typeof RuntimeSessionSchema>;
 export type RuntimeSessionStatus = z.infer<typeof RuntimeSessionStatusSchema>;
 export type RuntimeResultStatus = z.infer<typeof RuntimeResultStatusSchema>;
 export type RuntimeResultDocument = z.infer<typeof RuntimeResultSchema>;
+export type PostCheckResult = z.infer<typeof PostCheckResultSchema>;
 export type VerdictValue = z.infer<typeof VerdictValueSchema>;
 export type VerdictRecordedBy = z.infer<typeof VerdictRecordedBySchema>;
 export type RuntimeResultVerdict = z.infer<typeof RuntimeResultVerdictSchema>;

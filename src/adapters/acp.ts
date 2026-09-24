@@ -19,6 +19,8 @@ import {
   AcpJsonRpcNotificationSchema,
   AcpJsonRpcResponseSchema,
   type AcpRuntimeConfig,
+  type AcpEnvPolicy,
+  type AcpMcpServer,
   type AcpInitializeResult,
   type AcpSessionNewResult,
   type AcpSessionPromptResult,
@@ -396,6 +398,69 @@ function mapAcpUsage(source: unknown, model?: string): RuntimeUsage | undefined 
 }
 
 /**
+ * Apply the runtime's environment policy to a copy of `baseEnv`: drop exact
+ * names and `NAME_PREFIX*` matches first, then layer `set` on top so explicit
+ * values always win. Names compare case-insensitively on Windows. Values are
+ * never written to artifacts.
+ */
+export function applyAcpEnvPolicy(baseEnv: NodeJS.ProcessEnv, policy: AcpEnvPolicy): NodeJS.ProcessEnv {
+  const caseInsensitive = process.platform === "win32";
+  const normalize = (name: string): string => (caseInsensitive ? name.toLowerCase() : name);
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+  const dropWhere = (predicate: (key: string) => boolean): void => {
+    for (const key of Object.keys(env)) if (predicate(key)) delete env[key];
+  };
+  for (const entry of policy.drop) {
+    if (entry.endsWith("*")) {
+      const prefix = normalize(entry.slice(0, -1));
+      dropWhere((key) => normalize(key).startsWith(prefix));
+    } else {
+      const exact = normalize(entry);
+      dropWhere((key) => normalize(key) === exact);
+    }
+  }
+  for (const [key, value] of Object.entries(policy.set)) env[key] = value;
+  return env;
+}
+
+/**
+ * Resolve the launch command, args and environment that both `checkAcp` and
+ * `runAcp` use: apply the env policy, then let `resolveRuntimeCommand` expand a
+ * Windows npm shim (e.g. `prime-agent.cmd`) into `node` plus the script.
+ */
+async function resolveAcpLaunchCommand(
+  command: string,
+  args: string[],
+  baseEnv: NodeJS.ProcessEnv,
+  policy: AcpEnvPolicy,
+  resolveCommand: typeof resolveRuntimeCommand = resolveRuntimeCommand,
+): Promise<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> {
+  const env = applyAcpEnvPolicy(baseEnv, policy);
+  const resolved = await resolveCommand(command, args, env);
+  return { command: resolved.command, args: resolved.args, env };
+}
+
+/** Map configured MCP servers to the ACP v1 `session/new` wire shape. */
+function mcpServersForSessionNew(servers: AcpMcpServer[]): Record<string, unknown>[] {
+  return servers.map((server) => {
+    if ("type" in server) {
+      return {
+        type: "http" as const,
+        name: server.name,
+        url: server.url,
+        headers: Object.entries(server.headers).map(([name, value]) => ({ name, value })),
+      };
+    }
+    return {
+      name: server.name,
+      command: server.command,
+      args: server.args,
+      env: Object.entries(server.env).map(([name, value]) => ({ name, value })),
+    };
+  });
+}
+
+/**
  * Probe the configured ACP agent binary. A protocol version alone is not
  * evidence the server is installed, so unlike a schema-only check this actually
  * executes the command with `--version`.
@@ -409,8 +474,8 @@ export async function checkAcp(manifest?: { config?: { cli_command?: string; run
   }
   const command = manifest?.config?.cli_command || config.server_command;
   try {
-    const resolved = await resolveRuntimeCommand(command, [...config.server_args, "--version"], process.env);
-    const result = await execFileAsync(resolved.command, resolved.args, { timeout: 15_000, windowsHide: true });
+    const launch = await resolveAcpLaunchCommand(command, [...config.server_args, "--version"], process.env, config.env);
+    const result = await execFileAsync(launch.command, launch.args, { timeout: 15_000, windowsHide: true, env: launch.env });
     return { runtime: "acp", found: true, version: (result.stdout || result.stderr).trim(), errors: [] };
   } catch (error) {
     return {
@@ -482,6 +547,8 @@ export interface AcpRunOptions {
   extraRuntimeConfigOverrides?: Record<string, unknown>;
   collectDiff?: (cwd: string) => Promise<{ patch: string; errors?: string[] }>;
   clientFactory?: (command: string, args: string[], cwd: string, options: AcpClientOptions) => AcpClient;
+  /** Overrides command resolution (shim expansion) so tests can observe the call. */
+  resolveCommand?: typeof resolveRuntimeCommand;
 }
 
 export interface AcpRunResult {
@@ -496,7 +563,18 @@ export async function runAcp(root: string, missionPath: string, options: AcpRunO
   const plan = await planAcpRun(root, missionPath, options);
   const runId = options.runId ?? generateRunId();
   const canonical = options.artifactRoot ?? root;
-  const artifacts = await getMissionArtifactContext(canonical, missionPath, runId);
+  // Under sandbox routing the mission file lives in the sandbox worktree while
+  // the artifacts belong to the canonical project root. Resolve the packet from
+  // the planned mission id (the way oh-my-pi does) so a routed run still
+  // persists. An un-routed run (no artifactRoot, or one equal to root) keeps
+  // using the mission path, so a mission outside any harness tree stays
+  // artifact-free. `missionPath`/`root` still drive planning, session/new cwd
+  // and diff capture, so the agent keeps working in the sandbox.
+  const routed = options.artifactRoot !== undefined && path.resolve(options.artifactRoot) !== path.resolve(root);
+  const artifactMissionPath = routed
+    ? path.join(canonical, ".harness", "missions", plan.mission.id, "mission.yaml")
+    : missionPath;
+  const artifacts = await getMissionArtifactContext(canonical, artifactMissionPath, runId);
   if (artifacts) await claimRuntimeAttempt(artifacts);
 
   const timeoutMs = options.timeoutMs ?? plan.config.timeout_ms;
@@ -553,14 +631,7 @@ export async function runAcp(root: string, missionPath: string, options: AcpRunO
     },
   };
 
-  const client = options.clientFactory
-    ? options.clientFactory(plan.command, plan.args, root, clientOptions)
-    : new AcpClient(plan.command, plan.args, root, process.env, clientOptions);
-  if (options.clientFactory) {
-    // Factory-provided clients still need the handlers the adapter installed.
-    client.onNotification(clientOptions.onNotification!);
-    client.onServerRequest(clientOptions.onServerRequest ?? (() => undefined));
-  }
+  let client: AcpClient | null = null;
 
   let status: RuntimeResultStatus = "failed";
   let promptResult: AcpSessionPromptResult | null = null;
@@ -568,6 +639,22 @@ export async function runAcp(root: string, missionPath: string, options: AcpRunO
   let cancelled = false;
 
   try {
+    const launch = await resolveAcpLaunchCommand(
+      plan.command,
+      plan.args,
+      process.env,
+      plan.config.env,
+      options.resolveCommand ?? resolveRuntimeCommand,
+    );
+    client = options.clientFactory
+      ? options.clientFactory(launch.command, launch.args, root, clientOptions)
+      : new AcpClient(launch.command, launch.args, root, launch.env, clientOptions);
+    if (options.clientFactory) {
+      // Factory-provided clients still need the handlers the adapter installed.
+      client.onNotification(clientOptions.onNotification!);
+      client.onServerRequest(clientOptions.onServerRequest ?? (() => undefined));
+    }
+
     await client.start();
 
     const initResult = AcpInitializeResultSchema.parse(
@@ -586,7 +673,10 @@ export async function runAcp(root: string, missionPath: string, options: AcpRunO
     }
 
     const sessionResult = AcpSessionNewResultSchema.parse(
-      await client.request<AcpSessionNewResult>("session/new", { cwd: root, mcpServers: [] }),
+      await client.request<AcpSessionNewResult>("session/new", {
+        cwd: root,
+        mcpServers: mcpServersForSessionNew(plan.config.mcp_servers),
+      }),
     );
 
     promptResult = AcpSessionPromptResultSchema.parse(
@@ -605,7 +695,7 @@ export async function runAcp(root: string, missionPath: string, options: AcpRunO
       status = "failed";
     }
   } finally {
-    await client.stop();
+    if (client) await client.stop();
     await eventWrites;
   }
 

@@ -372,4 +372,74 @@ describe("project facts and template worker rules", () => {
     expect(prompt).toContain("project brief truncated");
     expect(prompt.split("## Project facts").length - 1).toBe(1);
   });
+
+  test("a mission with no context.project_brief still renders the brief from the root", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "uh-brief-default-"));
+    try {
+      await mkdir(path.join(dir, ".harness"), { recursive: true });
+      await writeFile(path.join(dir, ".harness", "project-brief.md"), "Default facts.\n", "utf-8");
+      const ctx = buildDispatchContext(FIXTURE_MISSION, undefined, {
+        root: dir,
+        finalMessageInstruction: FINAL_INSTRUCTION,
+      });
+      expect(ctx.projectFacts).toBe("Default facts.");
+      expect(renderPrompt(ctx)).toContain("## Project facts\nDefault facts.");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("context.project_brief false renders no Project facts section", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "uh-brief-off-"));
+    try {
+      await mkdir(path.join(dir, ".harness"), { recursive: true });
+      await writeFile(path.join(dir, ".harness", "project-brief.md"), "Repo facts from disk.\n", "utf-8");
+      const optedOut = validateMission({
+        schema_version: "uh.mission.v0",
+        id: "m-brief-off",
+        title: "Brief off",
+        workflow_profile: "research-docs",
+        objective: "Read everything without the brief's reading rules.",
+        context: { project_brief: false },
+      });
+      const ctx = buildDispatchContext(optedOut, undefined, {
+        root: dir,
+        finalMessageInstruction: FINAL_INSTRUCTION,
+      });
+      expect(ctx.projectFacts).toBeUndefined();
+      expect(renderPrompt(ctx)).not.toContain("## Project facts");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an explicit projectBrief overrides context.project_brief: false", () => {
+    const optedOut = validateMission({
+      schema_version: "uh.mission.v0",
+      id: "m-brief-off",
+      title: "Brief off",
+      workflow_profile: "research-docs",
+      objective: "Keep a caller-supplied brief.",
+      context: { project_brief: false },
+    });
+    const ctx = buildDispatchContext(optedOut, undefined, {
+      finalMessageInstruction: FINAL_INSTRUCTION,
+      projectBrief: "Caller-supplied facts.",
+    });
+    expect(ctx.projectFacts).toBe("Caller-supplied facts.");
+    expect(renderPrompt(ctx)).toContain("## Project facts\nCaller-supplied facts.\n\n");
+  });
+
+  test("the mission schema accepts project_brief true, false and absent", () => {
+    const base = {
+      schema_version: "uh.mission.v0",
+      id: "m-brief",
+      title: "Brief",
+      workflow_profile: "research-docs",
+      objective: "Exercise the project_brief switch.",
+    };
+    expect(validateMission({ ...base, context: { project_brief: true } }).context.project_brief).toBe(true);
+    expect(validateMission({ ...base, context: { project_brief: false } }).context.project_brief).toBe(false);
+    expect(validateMission({ ...base }).context.project_brief).toBeUndefined();
+  });
 });

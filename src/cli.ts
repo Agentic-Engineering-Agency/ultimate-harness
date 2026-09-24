@@ -33,6 +33,7 @@ import { forecastCost } from "./harness/cost-forecast.js";
 import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
 import { COST_CLASSES } from "./schema/adapter-capabilities.js";
 import { resolveSandboxMissionRoot, type SandboxMissionRoute } from "./harness/sandbox.js";
+import { isProjectBriefEnabled } from "./harness/dispatch-context.js";
 import { finalizeRuntimeCancelledRun } from "./harness/runtime-events.js";
 import { cancelLocalMissionRun, cancelMissionRunViaPlugin, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
@@ -55,6 +56,7 @@ import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 import { installTelemetryHooks } from "./harness/telemetry.js";
 import { projectDeliveryObservatory } from "./harness/delivery-observatory/project.js";
 import { acceptanceStatus, rebindAcceptanceEvidence, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
+import { loadPostChecks, postCheckExitCode, runPostChecks, type PostCheckEntry } from "./harness/post-checks.js";
 
 import {
   createSandbox,
@@ -209,15 +211,54 @@ async function evaluateSemanticRoute(options: {
 /**
  * The `Sandbox:` line that `mission run` and `mission dry-run` print, so the
  * routing decision is always visible. `useSandbox` is whether sandbox routing
- * was requested (i.e. `--no-sandbox` was absent).
+ * was requested (i.e. `--no-sandbox` was absent). `orchestratorRootRun` is the
+ * accepted root execution for an orchestrator mission: it runs in the project
+ * root without `--no-sandbox`, with writes limited to its guard's write roots.
  */
-function sandboxRouteLine(routing: SandboxMissionRoute, useSandbox: boolean): string {
+function sandboxRouteLine(routing: SandboxMissionRoute, useSandbox: boolean, orchestratorRootRun = false): string {
   if (routing.sandbox) {
     return `Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`;
   }
-  return useSandbox
-    ? "Sandbox: none (project root)"
-    : "Sandbox: none (project root, --no-sandbox)";
+  if (!useSandbox) {
+    return "Sandbox: none (project root, --no-sandbox)";
+  }
+  return orchestratorRootRun
+    ? "Sandbox: none (orchestrator in the project root; writes limited to its guard's write roots)"
+    : "Sandbox: none (project root)";
+}
+
+/**
+ * The runtime-config role a `mission run` resolves to for this mission: the
+ * mission's own `runtime_config_overrides` sit under the template and CLI
+ * overrides the run is about to pass. Only claude-code and command-code declare
+ * `role`, and only `orchestrator` changes the sandbox decision.
+ */
+async function resolveRuntimeConfigRole(
+  missionPath: string,
+  extra: Record<string, unknown> | undefined,
+): Promise<"worker" | "orchestrator"> {
+  let missionOverrides: Record<string, unknown> | undefined;
+  try {
+    missionOverrides = (await loadMissionFile(missionPath)).runtime_config_overrides;
+  } catch {
+    missionOverrides = undefined;
+  }
+  const role = (extra ?? {}).role ?? missionOverrides?.role;
+  return role === "orchestrator" ? "orchestrator" : "worker";
+}
+
+/**
+ * Whether a mission packet opts out of the project brief, so `mission dry-run`
+ * can print that the rendered prompt carries no Project facts section. A packet
+ * that cannot be loaded reports "not opted out"; the adapter's dry-run surfaces
+ * the load error itself.
+ */
+async function missionOptsOutOfProjectBrief(missionPath: string): Promise<boolean> {
+  try {
+    return !isProjectBriefEnabled(await loadMissionFile(missionPath));
+  } catch {
+    return false;
+  }
 }
 
 async function installRuntimeCancelledEventHandler(
@@ -715,13 +756,14 @@ acceptanceCmd
       return;
     }
     try {
-      await runAcceptance(resolveRoot(opts.root), {
+      const results = await runAcceptance(resolveRoot(opts.root), {
         workspace: opts.workspace,
         runtime: opts.runtime,
         model: opts.model,
         keep: opts.keep,
         capabilities: capability ? [capability] : undefined,
       });
+      if (results.some((result) => result.outcome === "failed")) process.exitCode = 1;
     } catch (error) {
       console.error(`[FAIL] acceptance run: ${(error as Error).message}`);
       process.exit(1);
@@ -2212,6 +2254,9 @@ missionCmd
     // Dry-run never blocks on a missing binding: it only shows where the run
     // would go before anything is spent.
     console.log(sandboxRouteLine(routing, opts.sandbox));
+    if (await missionOptsOutOfProjectBrief(routing.missionPath)) {
+      console.log("Project facts: off (context.project_brief: false)");
+    }
     if (templateAdoption) {
       const overridden = templateAdoption.description.overridden_by_mission;
       console.log(
@@ -2254,8 +2299,9 @@ missionCmd
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
   .option("--quiet", "Do not print the runtime's stdout or stderr")
+  .option("--post-checks <file>", "YAML or JSON list of operator checks run after the runtime settles; the agent never sees them")
   .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean; strict?: boolean }) => {
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean; postChecks?: string; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -2356,10 +2402,31 @@ missionCmd
       process.exit(exitCodeForRun("blocked"));
       return;
     }
+    // An orchestrator is meant to drive `uh` from the project root, and its
+    // guard confines its writes to its declared write roots, so it runs in the
+    // project root without --no-sandbox. Every other mission still needs an
+    // explicit --no-sandbox: a guarded worker running in the project root edits
+    // the operator's live working tree. An orchestrator's guard and write roots
+    // are validated by the adapter's existing planning checks, not duplicated
+    // here; an orchestrator without a guard, or whose write roots cover the
+    // repository, is still refused.
+    let orchestratorRootRun = false;
     if (opts.sandbox && !routing.sandbox) {
-      // A guarded worker running in the project root edits the operator's live
-      // working tree, so root execution is only reachable through an explicit
-      // --no-sandbox. Refuse before any run directory or process exists.
+      let cliOverrides: Record<string, unknown> | undefined;
+      if (opts.runtimeConfigOverrides !== undefined) {
+        try {
+          cliOverrides = parseRuntimeConfigOverridesJson(opts.runtimeConfigOverrides);
+        } catch {
+          // The run path re-parses and reports a malformed override below.
+        }
+      }
+      orchestratorRootRun = (await resolveRuntimeConfigRole(
+        routing.missionPath,
+        { ...templateAdoption?.runtimeConfigOverrides, ...cliOverrides },
+      )) === "orchestrator";
+    }
+    if (opts.sandbox && !routing.sandbox && !orchestratorRootRun) {
+      // Refuse before any run directory or process exists.
       const blockedMissionId = routing.missionId ?? "unknown";
       console.error(`[BLOCKED] mission ${blockedMissionId} has no bound sandbox; create one with "uh sandbox create <sandbox-id> --mission ${blockedMissionId}" or pass --no-sandbox to run in the project root`);
       const blockedRunId = opts.runId ?? generateRunId();
@@ -2409,15 +2476,34 @@ missionCmd
       process.exit(exitCodeForRun("blocked"));
       return;
     }
+    // Operator post-checks are read and validated at launch, before any run
+    // directory or runtime process exists. The path resolves against the
+    // process cwd; a missing or malformed file blocks the run. Neither the
+    // path nor any command is echoed, persisted, or handed to the runtime.
+    let postChecks: PostCheckEntry[] | undefined;
+    let postChecksPath: string | undefined;
+    if (opts.postChecks !== undefined) {
+      try {
+        postChecksPath = path.resolve(opts.postChecks);
+        postChecks = await loadPostChecks(postChecksPath);
+      } catch {
+        console.error("[BLOCKED] post-checks file is missing or invalid");
+        process.exit(exitCodeForRun("blocked"));
+        return;
+      }
+    }
     console.log(`Running mission: ${filePath}`);
     console.log(`Runtime: ${runtime}`);
     if (opts.runId) {
       console.log(`Run id: ${opts.runId}`);
     }
-    console.log(sandboxRouteLine(routing, opts.sandbox));
+    console.log(sandboxRouteLine(routing, opts.sandbox, orchestratorRootRun));
     if (extraRuntimeConfigOverrides) {
       const keys = Object.keys(extraRuntimeConfigOverrides);
       console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
+    }
+    if (postChecks) {
+      console.log(`Post-checks: ${postChecks.length}`);
     }
     const runId = opts.runId ?? generateRunId();
     console.log("");
@@ -2514,7 +2600,44 @@ missionCmd
     }
 
     const finalStopCode = controlStopCode ?? resultYamlStopCode;
-    const runExitCode = exitCodeForRun(status, finalStopCode);
+
+    // Operator post-checks run after the runtime settles, whatever its status,
+    // and after the CLI status is derived. They read the run's events.ndjson
+    // via UH_RUN_DIR; a failed, timed-out or unrunnable check makes the run
+    // failed and its exit code uses exitCodeForRun("failed").
+    let postChecksFailed = false;
+    if (postChecks && postChecks.length > 0 && postChecksPath) {
+      try {
+        const post = await runPostChecks({
+          checks: postChecks,
+          checksFile: postChecksPath,
+          missionId,
+          runId: finalRunId,
+          runDir,
+          root: path.resolve(root),
+          cwd: routing.effectiveRoot,
+        });
+        if (post.errors.length > 0) {
+          status = "failed";
+          postChecksFailed = true;
+          for (const e of post.errors) {
+            console.log(`[FAIL] ${e}`);
+          }
+        }
+      } catch {
+        // Last guard: the runner settles its own failures, but if it still
+        // throws the run fails cleanly rather than aborting unsettled, so
+        // UH_RESULT is printed and the exit code is exitCodeForRun("failed").
+        status = "failed";
+        postChecksFailed = true;
+        console.log("[FAIL] post-check runner failed");
+      }
+    }
+
+    // A failed post-check settles the run as failed: the exit code is
+    // exitCodeForRun("failed") regardless of the runtime's stop code, which
+    // stays in UH_RESULT only as a record. Otherwise unchanged.
+    const runExitCode = postCheckExitCode(status, finalStopCode, postChecksFailed);
 
     if (wiring.surfaceBlocked && result.result?.status === "blocked") {
       console.log(`[BLOCKED] mission classified as blocked`);

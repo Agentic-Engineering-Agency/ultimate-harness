@@ -1,13 +1,13 @@
 import { describe, expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
 import { proposeMission } from "../src/harness/propose.js";
-import { AcpClient, checkAcp, extractAcpAgentText, planAcpRun, runAcp, type AcpClientOptions } from "../src/adapters/acp.js";
+import { applyAcpEnvPolicy, AcpClient, checkAcp, extractAcpAgentText, planAcpRun, runAcp, type AcpClientOptions } from "../src/adapters/acp.js";
 import { AcpRuntimeConfigSchema, AcpSessionPromptResultSchema } from "../src/schema/acp.js";
 import { validateRuntimeResult } from "../src/schema/artifacts.js";
 
@@ -108,6 +108,16 @@ describe("ACP (Agent-Client Protocol) schema", () => {
   test("rejects unknown runtime_config keys and a string protocol version", () => {
     expect(() => AcpRuntimeConfigSchema.parse({ server_arg: ["--x"] })).toThrow();
     expect(() => AcpRuntimeConfigSchema.parse({ protocol_version: "1.0" })).toThrow();
+  });
+
+  test("defaults mcp_servers and env, and rejects malformed entries and drop globs", () => {
+    const parsed = AcpRuntimeConfigSchema.parse({});
+    expect(parsed.mcp_servers).toEqual([]);
+    expect(parsed.env).toEqual({ set: {}, drop: [] });
+    // An unknown key in an MCP server entry is rejected.
+    expect(() => AcpRuntimeConfigSchema.parse({ mcp_servers: [{ name: "x", command: "y", bogus: true }] })).toThrow();
+    // Only an exact name or NAME_PREFIX* is a valid drop entry.
+    expect(() => AcpRuntimeConfigSchema.parse({ env: { drop: ["A*B"] } })).toThrow();
   });
 
   test("ACP prompt stop reasons match the v1 enum", () => {
@@ -283,6 +293,150 @@ describe("ACP adapter run", () => {
     }
   });
 
+  test("resolves the launch command with the policy env and passes resolved command/args to the factory", async () => {
+    const { root, missionPath } = await missionFixture("uh-test-acp-resolve-");
+    const originalOrca = process.env.ORCA_ACP_TEST;
+    process.env.ORCA_ACP_TEST = "secret";
+    try {
+      const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+      let received: { command: string; args: string[] } | undefined;
+      await runAcp(root, missionPath, {
+        runId: "20260101T000000Z-acp010",
+        collectDiff: async () => ({ patch: "" }),
+        extraRuntimeConfigOverrides: {
+          server_command: "prime-agent",
+          server_args: ["--mode", "acp"],
+          env: { set: { DO_NOT_TRACK: "1" }, drop: ["ORCA_*"] },
+        },
+        resolveCommand: async (command, args, environment) => {
+          calls.push({ command, args, env: environment ?? {} });
+          return { command: "resolved-node", args: ["resolved-cli.js", ...args] };
+        },
+        clientFactory: (command, args, _cwd, options) => {
+          received = { command, args };
+          return new FakeAgentClient(() => {}, options);
+        },
+      });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0].command).toBe("prime-agent");
+      expect(calls[0].args).toEqual(["--mode", "acp"]);
+      expect(calls[0].env.DO_NOT_TRACK).toBe("1");
+      expect(calls[0].env.ORCA_ACP_TEST).toBeUndefined();
+      expect(received).toEqual({ command: "resolved-node", args: ["resolved-cli.js", "--mode", "acp"] });
+    } finally {
+      if (originalOrca === undefined) delete process.env.ORCA_ACP_TEST;
+      else process.env.ORCA_ACP_TEST = originalOrca;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.runIf(process.platform === "win32")("resolves an npm .cmd shim on PATH to node plus the script", async () => {
+    const { root, missionPath } = await missionFixture("uh-test-acp-shim-");
+    const shimDir = await mkdtemp(path.join(tmpdir(), "uh-acp-shim-"));
+    const originalPath = process.env.PATH;
+    try {
+      await mkdir(path.join(shimDir, "node_modules", "x"), { recursive: true });
+      const script = path.join(shimDir, "node_modules", "x", "cli.js");
+      await writeFile(script, "console.log('x')\n");
+      await writeFile(path.join(shimDir, "x.cmd"), '"%dp0%\\node_modules\\x\\cli.js" %*\r\n');
+      process.env.PATH = `${shimDir}${path.delimiter}${originalPath ?? ""}`;
+
+      let received: { command: string; args: string[] } | undefined;
+      const outcome = await runAcp(root, missionPath, {
+        runId: "20260101T000000Z-acp011",
+        collectDiff: async () => ({ patch: "" }),
+        extraRuntimeConfigOverrides: { server_command: "x", server_args: [] },
+        clientFactory: (command, args, _cwd, options) => {
+          received = { command, args };
+          return new FakeAgentClient(() => {}, options);
+        },
+      });
+
+      expect(outcome.result.status).toBe("passed");
+      expect(received!.command).toMatch(/node\.exe$/i);
+      expect(received!.args[0]).toBe(script);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(shimDir, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("maps configured MCP servers to the ACP session/new wire shape", async () => {
+    const { root, missionPath } = await missionFixture("uh-test-acp-mcp-");
+    try {
+      let client: FakeAgentClient | undefined;
+      await runAcp(root, missionPath, {
+        runId: "20260101T000000Z-acp012",
+        collectDiff: async () => ({ patch: "" }),
+        extraRuntimeConfigOverrides: {
+          mcp_servers: [
+            { name: "files", command: "npx", args: ["-y", "server-files"], env: { TOKEN: "abc" } },
+            { type: "http", name: "remote", url: "https://example.test/mcp", headers: { Authorization: "Bearer xyz" } },
+          ],
+        },
+        clientFactory: (_command, _args, _cwd, options) => {
+          client = new FakeAgentClient(() => {}, options);
+          return client;
+        },
+      });
+      const sessionNew = client!.sent.find((message) => message.method === "session/new");
+      expect((sessionNew!.params as Record<string, unknown>).mcpServers).toEqual([
+        { name: "files", command: "npx", args: ["-y", "server-files"], env: [{ name: "TOKEN", value: "abc" }] },
+        { type: "http", name: "remote", url: "https://example.test/mcp", headers: [{ name: "Authorization", value: "Bearer xyz" }] },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("defaults to no MCP servers and an unchanged environment", async () => {
+    const { root, missionPath } = await missionFixture("uh-test-acp-default-");
+    try {
+      let client: FakeAgentClient | undefined;
+      let capturedEnv: NodeJS.ProcessEnv | undefined;
+      await runAcp(root, missionPath, {
+        runId: "20260101T000000Z-acp013",
+        collectDiff: async () => ({ patch: "" }),
+        resolveCommand: async (command, args, environment) => {
+          capturedEnv = environment;
+          return { command, args };
+        },
+        clientFactory: (_command, _args, _cwd, options) => {
+          client = new FakeAgentClient(() => {}, options);
+          return client;
+        },
+      });
+      const sessionNew = client!.sent.find((message) => message.method === "session/new");
+      expect((sessionNew!.params as Record<string, unknown>).mcpServers).toEqual([]);
+      expect(capturedEnv).toEqual({ ...process.env });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("fails cleanly when command resolution throws, without constructing a client", async () => {
+    const { root, missionPath } = await missionFixture("uh-test-acp-resolve-err-");
+    try {
+      const outcome = await runAcp(root, missionPath, {
+        runId: "20260101T000000Z-acp015",
+        collectDiff: async () => ({ patch: "" }),
+        resolveCommand: async () => {
+          throw new Error("shim target escapes its installation directory");
+        },
+        clientFactory: () => {
+          throw new Error("client must not be constructed");
+        },
+      });
+      expect(outcome.result.status).toBe("failed");
+      expect(outcome.result.errors).toContain("shim target escapes its installation directory");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("fails cleanly when the ACP server cannot be reached", async () => {
     const { root, missionPath } = await missionFixture("uh-test-acp-err-");
     try {
@@ -321,5 +475,15 @@ describe("ACP adapter run", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("applyAcpEnvPolicy", () => {
+  test("drops exact and prefix names, then applies set so set wins over drop", () => {
+    const env = applyAcpEnvPolicy(
+      { ORCA_A: "1", ORCA_B: "2", EXACT_DROP: "3", KEEP: "4" },
+      { set: { DO_NOT_TRACK: "1", ORCA_KEEP: "kept" }, drop: ["ORCA_*", "EXACT_DROP"] },
+    );
+    expect(env).toEqual({ KEEP: "4", DO_NOT_TRACK: "1", ORCA_KEEP: "kept" });
   });
 });
