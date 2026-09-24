@@ -405,6 +405,7 @@ export class RuntimeSupervision {
   private readonly guardCompletedCalls = new Set<string>();
   private readonly countedDenials = new Set<string>();
   private readonly protectedChecks = new Set<string>();
+  private readonly assistantMessageIds = new Set<string>();
   guardArmed?: boolean;
   turns = 0;
   denials = 0;
@@ -727,6 +728,14 @@ export class RuntimeSupervision {
       this.markProgress(now);
       if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
     } else if (type === "assistant" || (type === "system" && event.subtype === "init")) {
+      // Claude Code: one turn per distinct assistant message id.
+      if (type === "assistant") {
+        const message = record(event.message);
+        if (typeof message?.id === "string" && message.id.length > 0 && !this.assistantMessageIds.has(message.id)) {
+          this.assistantMessageIds.add(message.id);
+          this.turns++;
+        }
+      }
       this.readyAt ??= now;
       this.markProgress(now);
     } else if (type === "model_request_start" || type === "model_request_end" ||
