@@ -8,9 +8,9 @@ import { parse, stringify } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
 import { proposeMission } from "../src/harness/propose.js";
-import { prepareIndependentReview, collectIndependentReview, validateIndependentReviewReport } from "../src/harness/independent-review.js";
+import { prepareIndependentReview, collectIndependentReview, retireIndependentReviewWorkspace, validateIndependentReviewReport } from "../src/harness/independent-review.js";
 import { IndependentReviewAssessmentSchema, IndependentReviewRequestSchema, IndependentReviewReportSchema } from "../src/schema/independent-review.js";
-import { createSandbox } from "../src/harness/sandbox.js";
+import { createSandbox, listSandboxes } from "../src/harness/sandbox.js";
 import { runCommandCode, planCommandCodeRun } from "../src/adapters/command-code.js";
 import { verifyMission } from "../src/harness/verify.js";
 
@@ -121,6 +121,23 @@ test("a separate native review produces an advisory assessment, never owner appr
     await expect(planCommandCodeRun(root, path.join(root, ".harness", "missions", "review", "mission.yaml"))).rejects.toThrow();
     await expect(planCommandCodeRun(workspace.path, missionPath, { artifactRoot: root, extraRuntimeConfigOverrides: { resume_session: "worker-session" } })).rejects.toThrow();
     await expect(planCommandCodeRun(workspace.path, missionPath, { artifactRoot: root, extraRuntimeConfigOverrides: { model: "another-model" } })).rejects.toThrow();
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test("retiring a collected review keeps the reviewer's report and discards its workspace", async () => {
+  const root = await fixture();
+  try {
+    const { workspace } = await executeFixture(root);
+    await collectIndependentReview(root, "review");
+    const sandboxReport = await readFile(path.join(workspace.path, "out", "review-report.json"), "utf8");
+
+    expect(await retireIndependentReviewWorkspace(root, "review")).toBe("review-workspace");
+
+    expect(await readFile(path.join(root, ".harness", "missions", "review", "review-report.json"), "utf8")).toBe(sandboxReport);
+    await expect(readFile(path.join(workspace.path, "out", "review-report.json"))).rejects.toThrow();
+    expect((await listSandboxes(root)).map(sandbox => sandbox.id)).not.toContain("review-workspace");
+    expect(IndependentReviewAssessmentSchema.parse(JSON.parse(
+      await readFile(path.join(root, ".harness", "missions", "review", "review-assessment.json"), "utf8"))).recommendation).toBe("pass");
   } finally { await rm(root, { recursive: true, force: true }); }
 }, 30_000);
 

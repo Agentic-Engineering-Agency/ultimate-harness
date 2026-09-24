@@ -54,6 +54,7 @@ import { loadMissionFile } from "./capabilities.js";
 import { aggregateRuntimeUsage, type RuntimeUsage } from "./usage.js";
 import { readRuntimeAccounting } from "./runtime-accounting.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists } from "./mission.js";
+import { removeWorktreeLinks } from "./worktree-links.js";
 import { registerLiveRun } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 const execFileP = promisify(execFile);
@@ -542,7 +543,14 @@ export const defaultGitOps: GitOps = {
     // directories "not a git repository" even when they come back. When this
     // worktree's directory was deleted out of band we drop only its own
     // registration; if git still refuses we leave the orphan for
-    // `git worktree list` to surface.
+    // `git worktree list` to surface. Git for Windows' `worktree remove`
+    // deletes through junctions, so every link is dropped first; if one
+    // cannot be dropped, the worktree is left in place.
+    try {
+      await removeWorktreeLinks(worktreePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") return;
+    }
     try {
       await execFileP("git", ["worktree", "unlock", worktreePath], { cwd: root });
     } catch { /* tolerated: not locked, or already unregistered */ }
