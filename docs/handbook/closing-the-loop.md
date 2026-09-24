@@ -100,10 +100,13 @@ It then:
    `claude-session`, `generated with` and the robot emoji, case-insensitive);
 4. commits with the repository's configured git identity as author and committer;
 5. runs the build (default `bun run build`);
-6. fast-forwards every `--fast-forward` checkout to the new commit.
+6. fast-forwards every `--fast-forward` checkout to the new commit;
+7. removes each landed worker's retained worktree, and a team's leader worktree once none of that team's worker
+   worktrees remain. Branches are kept, and so are the target and every `--fast-forward` checkout. A worktree that
+   cannot be removed stays and does not fail the land. `--keep-worktrees` skips this step.
 
-Any failure after the gates restores the target to its recorded `HEAD` and exits non-zero naming the step and the
-reason.
+Any failure after the gates restores the target to its recorded `HEAD`, keeps every worktree, and exits non-zero
+naming the step and the reason.
 
 The checks, patterns and build come from an optional `land` block in `.harness/project.yaml`; an absent field keeps
 the default:
