@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { prepareIndependentReview, collectIndependentReview } from "./harness/independent-review.js";
+import { prepareIndependentReview, collectIndependentReview, retireIndependentReviewWorkspace } from "./harness/independent-review.js";
 import { Command } from "commander";
 import { z } from "zod";
 import type { RuntimeLimits } from "./schema/runtime-control.js";
@@ -1838,10 +1838,20 @@ missionCmd.command("review-collect")
   .description("Validate review provenance and evidence; never grants human acceptance or promotes source work")
   .argument("<id>", "Review mission id")
   .option("--root <path>", "Canonical project root (default: cwd)")
-  .action(async (id: string, opts: { root?: string }) => {
+  .option("--keep-workspace", "Keep the review's sandbox after collecting (default: discard it)")
+  .action(async (id: string, opts: { root?: string; keepWorkspace?: boolean }) => {
     try {
-      const assessment = await collectIndependentReview(resolveRoot(opts.root), id);
+      const root = resolveRoot(opts.root);
+      const assessment = await collectIndependentReview(root, id);
       console.log(JSON.stringify(assessment, null, 2));
+      if (!opts.keepWorkspace) {
+        try {
+          const discarded = await retireIndependentReviewWorkspace(root, id);
+          if (discarded) console.log(`Review workspace ${discarded} discarded; the reviewer's report is kept at .harness/missions/${id}/review-report.json.`);
+        } catch (error) {
+          console.error(`[WARN] mission review-collect: review collected, but its workspace was not discarded: ${(error as Error).message}`);
+        }
+      }
       const contradicted = (assessment.claims ?? []).filter(claim => claim.verdict === "contradicted");
       const attention = (assessment.findings ?? []).filter(finding => finding.severity === "error" || finding.severity === "warning");
       if (contradicted.length === 0 && attention.length === 0) {
