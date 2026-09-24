@@ -121,11 +121,11 @@ test("worker runs refuse guard-less missions, non-default permission modes, and 
 });
 
 test("orchestrator role arms controller commands while keeping worker protections", async () => {
-  const { root, missionPath } = await fixture({ role: "orchestrator" }, mission => { delete mission.guard; });
+  const { root, missionPath } = await fixture({ role: "orchestrator" });
   try {
     const plan = await planClaudeCodeRun(root, missionPath);
     expect(plan.guard).toMatchObject({
-      write_roots: ["."], deny_git_mutations: true, deny_package_installs: true, controller_commands: true,
+      write_roots: ["out"], deny_git_mutations: true, deny_package_installs: true, controller_commands: true,
     });
     expect(plan.permission_mode).toBe("guard");
     const settings = JSON.parse(flag(plan.args, "--settings"));
@@ -140,8 +140,57 @@ test("orchestrator role arms controller commands while keeping worker protection
     const artifact = parse(await readFile(path.join(runDir, "tool-guard.json"), "utf8")) as Record<string, unknown>;
     expect(artifact.controller_commands).toBe(true);
     expect(artifact.deny_git_mutations).toBe(true);
+    expect(artifact.write_roots).toEqual(["out"]);
     expect(seenEnv?.UH_TOOL_GUARD_POLICY).toContain("tool-guard.json");
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("orchestrator write grants cover the guard write roots and nothing wider", async () => {
+  const { root, missionPath } = await fixture({ role: "orchestrator" });
+  try {
+    const plan = await planClaudeCodeRun(root, missionPath);
+    const settings = JSON.parse(flag(plan.args, "--settings"));
+    expect(settings.permissions.allow).toEqual([
+      "Bash(uh *)", "Bash(node *dist/cli.js*)", "Write(out/**)", "Edit(out/**)",
+    ]);
+    // The granted Edit tool has to be enabled, or the rule would be inert.
+    expect(flag(plan.args, "--tools")).toBe("Bash,Read,Write,Edit");
+    // A worker on the same mission is judged by the hook alone.
+    const worker = await fixture();
+    try {
+      const workerPlan = await planClaudeCodeRun(worker.root, worker.missionPath);
+      expect(JSON.parse(flag(workerPlan.args, "--settings")).permissions).toBeUndefined();
+      expect(workerPlan.args).not.toContain("--tools");
+    } finally { await rm(worker.root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+  const nested = await fixture({ role: "orchestrator" }, mission => {
+    mission.guard = { write_roots: ["out", path.join("reports", "settlement")] };
+  });
+  try {
+    const plan = await planClaudeCodeRun(nested.root, nested.missionPath);
+    const settings = JSON.parse(flag(plan.args, "--settings"));
+    expect(settings.permissions.allow).toEqual([
+      "Bash(uh *)", "Bash(node *dist/cli.js*)",
+      "Write(out/**)", "Edit(out/**)", "Write(reports/settlement/**)", "Edit(reports/settlement/**)",
+    ]);
+  } finally { await rm(nested.root, { recursive: true, force: true }); }
+});
+
+test("orchestrator write grants refuse repository-wide and escaping write roots", async () => {
+  const repositoryWide = await fixture({ role: "orchestrator" }, mission => { mission.guard = { write_roots: ["."] }; });
+  try {
+    await expect(planClaudeCodeRun(repositoryWide.root, repositoryWide.missionPath))
+      .rejects.toThrow(/whole repository/);
+  } finally { await rm(repositoryWide.root, { recursive: true, force: true }); }
+  const escaping = await fixture({ role: "orchestrator" }, mission => { mission.guard = { write_roots: ["../outside"] }; });
+  try {
+    await expect(planClaudeCodeRun(escaping.root, escaping.missionPath))
+      .rejects.toThrow(/outside the mission checkout/);
+  } finally { await rm(escaping.root, { recursive: true, force: true }); }
+  const guardless = await fixture({ role: "orchestrator" }, mission => { delete mission.guard; });
+  try {
+    await expect(planClaudeCodeRun(guardless.root, guardless.missionPath)).rejects.toThrow(/guard policy/);
+  } finally { await rm(guardless.root, { recursive: true, force: true }); }
 });
 
 test("orchestrator role preserves a mission-provided guard and its write roots", async () => {

@@ -75,6 +75,19 @@ routes that leave that tree are denied as `containment_escape`:
 `nohup`. Windows nests job objects, so a harness run started inside another
 harness run stays inside the outer job and its limits can only be tighter.
 
+On Windows the guardian also attaches the worker to a headless pseudoconsole
+(`CreatePseudoConsole`, carried through `STARTUPINFOEX` and
+`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`), so the worker and every descendant that
+inherits a console run in one console that has no window and is never handed to
+a default terminal — without it, an implicit console allocation is what a
+default terminal such as Windows Terminal turns into a visible window. The
+pseudoconsole's output is drained and discarded, and the worker's stdout and
+stderr stay on the pipes the supervisor already reads. The guardian receipt
+records whether the pseudoconsole was used and falls back to `CREATE_NO_WINDOW`
+when the API is unavailable. A descendant that itself requests a new console
+(for example through `windowsHide`/`CREATE_NO_WINDOW`) still allocates one, which
+no parent can override.
+
 In a container without an init process, orphaned descendants are never reaped.
 Run the harness under an init (`docker run --init` or tini).
 

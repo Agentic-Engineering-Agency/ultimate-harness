@@ -171,13 +171,43 @@ function streamedClaudeUsage(events: Record<string, unknown>[], model?: string):
   })).usage;
 }
 
-function claudeSettings(role: ClaudeCodeRole, hookPath: string): string {
+/**
+ * Native write rules for the orchestrator role, derived exactly from the resolved
+ * guard's write roots so print mode can settle a report without a prompt nobody
+ * answers. A root that covers the worker root or escapes it cannot be narrowed to
+ * a sandbox, so planning refuses instead of granting repository-wide writes. The
+ * UH guard hook still judges every call: these rules only stop the native denial
+ * that would otherwise precede it.
+ */
+function orchestratorWriteRules(roots: string[]): string[] {
+  const patterns = roots.map(root => {
+    const slashed = root.replaceAll("\\", "/");
+    const segments = slashed.split("/").filter(segment => segment !== "" && segment !== ".");
+    if (slashed.startsWith("/") || /^[a-zA-Z]:/.test(slashed) || segments.includes("..")) {
+      throw new Error(`Claude Code orchestrator guard write root "${root}" is outside the mission checkout; declare roots inside the worker root`);
+    }
+    if (segments.length === 0) {
+      throw new Error(`Claude Code orchestrator guard write root "${root}" covers the whole repository; declare the roots the orchestrator writes, for example [out]`);
+    }
+    return `${segments.join("/")}/**`;
+  });
+  return [...new Set(patterns)];
+}
+
+function claudeSettings(role: ClaudeCodeRole, hookPath: string, writeRules: string[]): string {
   const settings: Record<string, unknown> = {
     hooks: {
       PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `${JSON.stringify(process.execPath)} ${JSON.stringify(hookPath)}`, timeout: 10 }] }],
     },
   };
-  if (role === "orchestrator") settings.permissions = { allow: ["Bash(uh *)", "Bash(node *dist/cli.js*)"] };
+  if (role === "orchestrator") {
+    settings.permissions = {
+      allow: [
+        "Bash(uh *)", "Bash(node *dist/cli.js*)",
+        ...writeRules.flatMap(rule => [`Write(${rule})`, `Edit(${rule})`]),
+      ],
+    };
+  }
   return JSON.stringify(settings);
 }
 
@@ -213,6 +243,7 @@ export async function planClaudeCodeRun(root: string, missionPath: string, optio
   if (config.resume_session && config.resume_from_run) throw new Error("Choose resume_session or resume_from_run, not both");
   if (config.role === "worker" && !mission.guard) throw new Error("Claude Code worker runs require a mission guard policy");
   if (config.role === "worker" && config.permission_mode !== "default") throw new Error("Claude Code worker runs require permission_mode default");
+  if (config.role === "orchestrator" && !mission.guard) throw new Error("Claude Code orchestrator runs require a mission guard policy");
   const reviewRequestSha256 = await assertIndependentReviewExecution(root, missionPath, mission, {
     canonicalRoot: options.artifactRoot ?? root,
     runtime: "claude-code",
@@ -228,19 +259,21 @@ export async function planClaudeCodeRun(root: string, missionPath: string, optio
   const deadline = config.recovery?.on_deadline;
   const workflow = validateWorkflow(parse(await readFile(path.join(root, ".harness", "workflows", `${mission.workflow_profile}.yaml`), "utf8")));
   const prompt = renderPrompt(buildDispatchContext(mission, workflow)) + (resume ? recoveryPrompt(resume) : "");
-  const guard = config.role === "orchestrator" ? controllerGuard(mission.guard) : mission.guard;
+  const orchestratorGuard = config.role === "orchestrator" ? controllerGuard(mission.guard) : undefined;
+  const guard = orchestratorGuard ?? mission.guard;
+  const writeRules = orchestratorGuard ? orchestratorWriteRules(orchestratorGuard.write_roots) : [];
   const args = [...config.cli_args, "-p", prompt];
   const resumeSession = resume?.sessionId ?? config.resume_session;
   if (resumeSession) args.push("--resume", resumeSession);
   args.push("--model", config.model, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", config.permission_mode);
   if (config.role === "orchestrator") {
-    args.push("--tools", "Bash,Read,Write", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
+    args.push("--tools", "Bash,Read,Write,Edit", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
   }
   if (config.effort) args.push("--effort", config.effort);
   // Turn-cap precedence mirrors command-code: top-level max_turns wins, else limits.max_turns.
   const effectiveMaxTurns = grace && deadline ? deadline.grace_turns + 1 : (config.max_turns ?? config.limits?.max_turns);
   if (effectiveMaxTurns) args.push("--max-turns", String(effectiveMaxTurns));
-  if (guard) args.push("--settings", claudeSettings(config.role, await snapshotGuardHook("extensions/tool-guard/claude-code-hook.js")));
+  if (guard) args.push("--settings", claudeSettings(config.role, await snapshotGuardHook("extensions/tool-guard/claude-code-hook.js"), writeRules));
   return {
     command: adapter.config?.cli_command || "claude",
     args,

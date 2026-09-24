@@ -46,6 +46,48 @@ Live runs: 4 (orphaned: 0)
 - The project root is the nearest ancestor of an artifact root that holds `.harness/project.yaml`. A team worker's artifact root lives under `.harness/missions/<team-mission>/team/artifacts/<parent-run>/workers/<role>` and registers with its team mission id and role.
 - The registry directory is gitignored: it is local execution state, not a publication input. Terminal control facts discovered by `uh ps` are reconciled back into the registry.
 
+## Waiting for runs
+
+`uh wait` blocks until matched runs settle, so an orchestrator learns a run is
+done from the command's own exit code instead of polling `uh ps` one model turn
+at a time. Targets resolve with the same semantics as `uh kill`: a run id (or
+unique prefix), `--mission <id>`, or `--team <id>`. The registry is polled every
+~2 s with no model involvement until every matched run is `settled` or
+`orphaned`, or `--timeout-ms` (default 30 minutes) passes.
+
+```bash
+# One run, by id or unique prefix.
+uh wait <run-id> --root <project>
+
+# Every live run of a mission or a team.
+uh wait --mission <mission-id> --root <project>
+uh wait --team <team-mission-id> --root <project>
+
+# Give up after 10 minutes, machine-readable.
+uh wait <run-id> --timeout-ms 600000 --json
+```
+
+Output is one line per matched run (id, mission, final status, stop code) plus
+one summary line:
+
+```
+run-01  wave-a  passed  stop=-
+matched=1 settled=1 passed=1 failed=0 orphaned=0 timed_out=0 elapsed=2044ms
+```
+
+| Exit | Meaning |
+|---|---|
+| `0` | Every matched run settled `passed`. |
+| `1` | At least one matched run settled with a failing status (`failed`, `blocked`, `cancelled`). |
+| `2` | Nothing matched (unknown or ambiguous run id, no live run for the mission/team, no target given). |
+| `3` | At least one matched run is orphaned — the same verdict that makes `uh ps` exit `3`. |
+| `4` | The timeout passed with a run still unsettled. |
+
+Waiting never touches a process: an orphaned run stays open only for the
+verdict, and, like `uh kill`, an unreadable (empty) process table is never
+treated as proof that controllers died — the run simply stays open until it
+settles or the timeout hits.
+
 ## Cancelling an owned run
 
 `uh mission cancel` writes a cancel request the controller reads. It resolves the run through the same discovery `uh ps` uses, so `--root` may be the project root even when the run is a team worker whose `runtime-control.json` lives deeper in the harness tree.

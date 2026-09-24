@@ -106,6 +106,9 @@ type RuntimeDryRunResult = {
   command: string;
   args: string[];
   prompt: string;
+  /** How the runtime receives the prompt: `stdin` for command-code, or the file path for oh-my-pi. */
+  promptSource?: string;
+  promptPath?: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -571,6 +574,45 @@ async function runOperatorResumedAttempt(request: OperatorResumeRequest): Promis
     },
   });
 }
+
+// uh wait — block until matched runs settle, so orchestrators do not poll `uh ps`.
+program
+  .command("wait")
+  .description("Block until a run (or a mission's or team's runs) settles or is orphaned (exit 0/1/3/4; 2 when nothing matches)")
+  .argument("[run-id]", "Run id, or a unique prefix of one")
+  .option("--mission <id>", "Every live run of this mission, including its team workers")
+  .option("--team <id>", "Every live run of this team")
+  .option("--timeout-ms <ms>", "Give up after this many milliseconds (default: 1800000)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the wait report as JSON")
+  .action(async (runId: string | undefined, opts: {
+    mission?: string; team?: string; timeoutMs?: string; root?: string; json?: boolean;
+  }) => {
+    const root = resolveRoot(opts.root);
+    const timeoutMs = opts.timeoutMs === undefined ? undefined : Number.parseInt(opts.timeoutMs, 10);
+    if (opts.timeoutMs !== undefined && (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+      console.error(`[FAIL] --timeout-ms must be a non-negative integer of milliseconds, got: ${opts.timeoutMs}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const { waitForRuns, formatWaitReport } = await import("./harness/wait.js");
+      const report = await waitForRuns(root, {
+        ...(runId !== undefined ? { runId } : {}),
+        ...(opts.mission !== undefined ? { missionId: opts.mission } : {}),
+        ...(opts.team !== undefined ? { teamId: opts.team } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      });
+      if (opts.json) console.log(JSON.stringify(report, null, 2));
+      else console.log(formatWaitReport(report));
+      process.exit(report.exit_code);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      console.error(`[FAIL] wait error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(code === "no_target" || code === "unknown_target" || code === "ambiguous_target" ? 2 : 1);
+    }
+  });
 
 // uh resume — continue a settled run's native session as a new run.
 program
@@ -2000,6 +2042,55 @@ missionCmd
     }
   });
 
+// uh mission put — the coordinator's allowed path to persist a whole packet.
+// An orchestrator may only run controller commands and may not write under
+// .harness (protected), so `mission create`/`new` and `propose` (a subset of
+// the fields) are not enough. This runs checkMissionPackets first and writes
+// nothing on failure, installs atomically, refuses an existing target without
+// --replace, and refuses --replace while a live run of the mission exists
+// (see src/harness/mission-put.ts).
+missionCmd
+  .command("put")
+  .description("Validate and install mission packet(s) into .harness/missions/<id>/mission.yaml")
+  .argument("<files...>", "Mission packet path(s) (mission.yaml)")
+  .option("--replace", "Overwrite an installed packet (refused while the mission has a live run)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the put result as JSON")
+  .action(async (files: string[], opts: { replace?: boolean; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const { putMissionPackets } = await import("./harness/mission-put.js");
+    const { renderMissionCheckLines } = await import("./harness/mission-check.js");
+    let result: import("./harness/mission-put.js").PutMissionPacketsResult;
+    try {
+      result = await putMissionPackets({ root, packetPaths: files, replace: opts.replace === true });
+    } catch (err) {
+      console.error(`[FAIL] mission put error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (!result.ok) {
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        if (result.checks) for (const line of renderMissionCheckLines(result.checks)) console.log(line);
+        console.error(`[FAIL] mission put refused: ${result.reason}`);
+      }
+      process.exit(1);
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    for (const packet of result.installed) {
+      console.log(`Installed mission ${packet.mission_id}`);
+      console.log(`  path: ${packet.path}`);
+      console.log(`  sha256: ${packet.sha256}`);
+    }
+    console.log(`[OK] ${result.installed.length} packet(s) installed; ${result.auditLines.length} audit event(s) appended`);
+  });
+
 missionCmd
   .command("dry-run")
   .description("Show what command would be executed without running it")
@@ -2137,6 +2228,7 @@ missionCmd
       process.exit(1);
     }
     console.log(`Command: ${result.command} ${result.args.join(" ")}`);
+    console.log(`Prompt source: ${result.promptPath ?? result.promptSource ?? "argv"}`);
     console.log(`Worktree mode: ${result.worktree}`);
     console.log(`Session ID passthrough: ${result.session_id_passthrough}`);
     console.log("");
@@ -2604,8 +2696,9 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--base-ref <ref>", "Base git ref for worker / leader worktrees (default: HEAD)")
   .option("--retain", "Preserve worktrees on success (default: cleanup on PASS, preserve on FAIL)")
+  .option("--replace", "Archive a previous run's worktrees, branches, and team directory, then relaunch (refused while a live run exists)")
   .option("--strategy <strategy>", "Leader integration strategy: merge|cherry-pick|rebase (default: merge)", "merge")
-  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean; strategy: string }) => {
+  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean; replace?: boolean; strategy: string }) => {
     try {
       assertSafeMissionId(missionId);
     } catch (err) {
@@ -2682,6 +2775,7 @@ missionCmd
         verifier: async (workRoot, mid) => verifyMission(workRoot, mid, { useSandbox: false }),
         baseRef: opts.baseRef,
         retainOnSuccess: opts.retain === true,
+        replace: opts.replace === true,
         strategy: opts.strategy as "merge" | "cherry-pick" | "rebase",
       });
       // UH-127: PARTIAL is a non-blocking success — M<N workers landed but the

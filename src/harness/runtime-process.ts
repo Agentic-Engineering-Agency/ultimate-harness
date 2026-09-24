@@ -120,6 +120,8 @@ export interface RuntimeProcessInput {
   command: string;
   args: string[];
   cwd: string;
+  /** Payload fed once to the worker's standard input, then closed. */
+  stdin?: string;
   timeoutMs?: number;
   limits?: RuntimeLimits;
   onDeadline?: { grace_turns: number; grace_timeout_ms: number };
@@ -149,6 +151,8 @@ export interface RuntimeProcessOutput {
   nativeTerminal?: boolean;
   nativeTerminalFailure?: string;
   supervisionStopCode?: RuntimeStopCode;
+  /** Windows only: whether the guardian attached a windowless pseudoconsole instead of the CREATE_NO_WINDOW fallback. */
+  pseudoconsole?: boolean;
 }
 
 /** Only accepts the ChildProcess handle allocated by this runner; never searches by title/PID. */
@@ -177,7 +181,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
   let outputLimitReached = false;
   let timedOut = false, cancelled = false, stopReason: string | undefined;
   let stopCode: RuntimeStopCode | undefined;
-  let peakMemoryBytes: number | undefined, settlementConfirmed: boolean | undefined;
+  let peakMemoryBytes: number | undefined, settlementConfirmed: boolean | undefined, pseudoconsole: boolean | undefined;
   let writes = Promise.resolve();
   let streamError: string | undefined;
   let lastHeartbeat = 0;
@@ -303,6 +307,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       resultPath: path.join(jobDirectory!, "windows-job-result.json"),
       stopPath: path.join(jobDirectory!, ".windows-job-stop"),
       controlPath: scope ? path.join(scope.directory, "runtime-control.json") : undefined,
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
     }),
   } : { ...executable, env: input.env };
   return new Promise<RuntimeProcessOutput>((resolve) => {
@@ -312,7 +317,9 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
     child.stdin?.on("error", () => { /* Spawn errors and early process exits are handled below. */ });
-    child.stdin?.end("specification" in launch ? launch.specification : undefined);
+    // On Windows the guardian carries the payload inside its spec and feeds the
+    // worker; elsewhere the payload is the child's stdin directly.
+    child.stdin?.end("specification" in launch ? launch.specification : input.stdin);
     const stop = (reason: string, code: RuntimeStopCode = "controller_error"): void => {
       if (!stopReason || code === "policy") { stopReason = reason; stopCode = code; }
       timedOut ||= code === "timeout" || code === "startup" || code === "stall";
@@ -435,6 +442,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
             const job = WindowsJobResultSchema.parse(JSON.parse((await readFile(path.join(jobDirectory!, "windows-job-result.json"), "utf8")).replace(/^\uFEFF/, "")));
             peakMemoryBytes = job.peak_memory_bytes;
             settlementConfirmed = job.settled;
+            pseudoconsole = job.pseudoconsole === true;
           } catch { settlementConfirmed = false; }
           if (!settlementConfirmed) {
             stopReason = "Owned process-tree settlement was not confirmed";
@@ -456,7 +464,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         resolve({ stdout, stderr, exitCode: spawnError && exitCode === 0 ? 1 : exitCode, timedOut,
           cancelled, spawnError: spawnError ?? (stopCode === "policy" ? stopReason : reportedStreamFailure ?? stopReason), sessionId: supervisor.sessionId, peakMemoryBytes, settlementConfirmed,
           outputTruncated: outputLimitReached, nativeTerminal: supervisor.terminal, nativeTerminalFailure: supervisor.terminalFailure,
-          supervisionStopCode: supervisor.stopCode });
+          supervisionStopCode: supervisor.stopCode, pseudoconsole });
       })();
     });
   });
