@@ -14,6 +14,7 @@ import { assertHiveChainsIntact, recordLandCommit } from "./hive.js";
 import { harnessOwnerRoot } from "./hive-root.js";
 import { chainEntry, lastChainedHash, readJsonLines, sha256Hex, verifyChainedLines, type ChainBreak } from "./hash-chain.js";
 import { projectYaml } from "./paths.js";
+import { removeWorktreeLinks } from "./worktree-links.js";
 
 const execFileP = promisify(execFile);
 
@@ -91,6 +92,8 @@ export type LandOptions = {
    * target worktree's common git directory parent.
    */
   reviewRoot?: string;
+  /** Keep the landed workers' retained worktrees (default: remove them). */
+  keepWorktrees?: boolean;
   git?: LandGitRunner;
   runCommand?: LandCommandRunner;
 };
@@ -106,6 +109,7 @@ export type LandResult = {
   checks: Array<{ name: string; exit_code: number }>;
   build: { command: string; exit_code: number };
   fast_forwarded: string[];
+  removed_worktrees: string[];
   accepted_review?: { reason: string; path: string };
 };
 
@@ -311,6 +315,10 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     messageFile: path.resolve(options.messageFile),
   });
 
+  const removedWorktrees = options.keepWorktrees
+    ? []
+    : await removeLandedWorktrees(git, root, worktrees, options.workerBranches, [root, ...fastForwarded]);
+
   return {
     status: "landed",
     onto: options.onto,
@@ -320,11 +328,63 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     checks: checkResults,
     build: buildResult,
     fast_forwarded: fastForwarded,
+    removed_worktrees: removedWorktrees,
     ...(decisionPath ? { accepted_review: { reason: options.acceptReview ?? "", path: decisionPath } } : {}),
   };
 }
 
 type Worktree = { path: string; branch?: string; head?: string };
+
+/**
+ * A landed worker's retained worktree has served its purpose: its commits are
+ * on the target, and its verification and review have gated this land. Remove
+ * it, and remove a team's leader worktree once none of that team's worker
+ * worktrees remain, so retained team worktrees do not accumulate. Branches are
+ * kept. Best-effort: a worktree that cannot be removed stays for
+ * `git worktree list` to surface and never fails the land. Links inside a
+ * worktree are removed first, because Git for Windows' `worktree remove`
+ * deletes through junctions.
+ */
+async function removeLandedWorktrees(
+  git: LandGitRunner,
+  root: string,
+  worktrees: Worktree[],
+  branches: readonly string[],
+  keep: readonly string[],
+): Promise<string[]> {
+  const kept = new Set(keep.map((entry) => path.resolve(entry)));
+  const removed: string[] = [];
+  const remove = async (worktreePath: string): Promise<void> => {
+    if (kept.has(path.resolve(worktreePath))) return;
+    try {
+      await removeWorktreeLinks(worktreePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") return;
+    }
+    await git(["worktree", "unlock", worktreePath], root);
+    const result = await git(["worktree", "remove", "--force", worktreePath], root);
+    if (result.exitCode === 0) removed.push(path.resolve(worktreePath));
+  };
+
+  const teams = new Set<string>();
+  for (const branch of branches) {
+    const worktree = worktrees.find((entry) => entry.branch === branch);
+    if (worktree) await remove(worktree.path);
+    const team = /^uh\/team\/([^/]+)\/[^/]+$/.exec(branch)?.[1];
+    if (team) teams.add(team);
+  }
+  if (teams.size > 0) {
+    const remaining = await listWorktrees(git, root);
+    for (const team of teams) {
+      const prefix = `uh/team/${team}/`;
+      const leaderBranch = `${prefix}leader`;
+      const workersLeft = remaining.some((entry) => entry.branch?.startsWith(prefix) && entry.branch !== leaderBranch);
+      const leader = remaining.find((entry) => entry.branch === leaderBranch);
+      if (!workersLeft && leader) await remove(leader.path);
+    }
+  }
+  return removed;
+}
 
 async function listWorktrees(git: LandGitRunner, root: string): Promise<Worktree[]> {
   const result = await git(["worktree", "list", "--porcelain"], root);
