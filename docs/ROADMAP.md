@@ -302,8 +302,8 @@ Road to v1.0 is planned in [`docs/prds/uh-roadmap-to-1.0-v1.0-prd.md`](./prds/uh
 - **Native ANTHROPIC_API_KEY adapter** — **shipped in v0.9.0** ([#214], UH-136) as `anthropic` (`status: experimental`): the ToS-clean pay-per-token Messages-API path that complements UH-32. `ANTHROPIC_API_KEY` env-only, blocked classification, graceful no-key checker, optional live-smoke CI job. Graduation to `active` pending a live-smoke promotion record.
 - **Container sandbox backend** — **shipped in v0.8.0** ([#155]/[#157]) behind the OpenSandbox seam, with #154 spike + ADR + runbook. Live docker-CLI fallback rejected as default by the ADR pivot rule.
 - **Honcho-memory follow-ups** — `codex`/`hermes` wired into enrichment + `recordMissionExchange` (v0.6.0); **shipped in v0.9.0** ([#215], UH-137): `honcho_search`/`honcho_remember` harness-side memory operations + per-mission `runtime_config.honcho_memory` opt-out on every Honcho-aware adapter.
-- **Telemetry instrumentation** — an opt-in PostHog telemetry primitive shipped **unwired** in v0.9.0 ([#204]–[#206], UH-131); wiring the actual event emission is the [UH-135](https://linear.app/agenticengineering-agency/issue/UH-135) follow-up (planned v0.10.0). UH still ships no telemetry by default.
-- **Capability-declaration enforcement** — make manifest/mission `capabilities:` binding (warn + `--strict`); planned v0.10.0. (Distinct from the already-shipped `runtime_requirements` preflight.)
+- **Telemetry instrumentation** — an opt-in PostHog telemetry primitive shipped **unwired** in v0.9.0 ([#204]–[#206], UH-131); wiring the actual event emission is the [UH-135](https://linear.app/agenticengineering-agency/issue/UH-135) follow-up, which shipped with 0.11.0 (0.10.0 was skipped). Telemetry stays off unless opted in.
+- **Capability-declaration enforcement** — manifest/mission `capabilities:` binding (warn + `--strict`); shipped with 0.11.0 (0.10.0 was skipped). (Distinct from the `runtime_requirements` preflight, which always blocks.)
 
 **Shipped (no longer proposals):** the native `anthropic` pay-per-token adapter (v0.9.0 #214, experimental); Honcho memory operations + per-mission opt-out (v0.9.0 #215); cross-runtime QA `uh mission run-all --runtimes` with side-by-side diff/sentinel comparison; the Epic 2 TUI polish UH-48..53 (theme, `$EDITOR`, Ctrl+Z, `tui screenshot`, footer adapter-check age, `runtime.cancelled` on SIGTERM).
 
@@ -311,7 +311,7 @@ Road to v1.0 is planned in [`docs/prds/uh-roadmap-to-1.0-v1.0-prd.md`](./prds/uh
 
 - **Muta integration** — UH-as-consumer, UH-as-component, or independent? Needs a co-founder conversation. **Deferred entirely to post-1.0** (see the road-to-1.0 PRD).
 
-_Resolved since: the **Pi adapter** shipped active in v0.7.0 (#135/#150); **oh-my-pi** graduated to active in v0.8.0 (#156); the **native `anthropic` adapter** shipped experimental in v0.9.0 (#214); **Honcho memory operations + opt-out** shipped in v0.9.0 (#215); **mission capability-declaration enforcement** is planned for v0.10.0 (manifest `capabilities:` binding, warn + `--strict`) and `runtime_requirements` preflight already enforces compatibility today._
+_Resolved since: the **Pi adapter** shipped active in v0.7.0 (#135/#150); **oh-my-pi** graduated to active in v0.8.0 (#156); the **native `anthropic` adapter** shipped experimental in v0.9.0 (#214); **Honcho memory operations + opt-out** shipped in v0.9.0 (#215); **mission capability-declaration enforcement** shipped with 0.11.0 (manifest `capabilities:` binding, warn + `--strict`; 0.10.0 was skipped) and `runtime_requirements` preflight enforces compatibility._
 
 ## References
 
