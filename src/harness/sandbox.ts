@@ -1,4 +1,5 @@
 import { cp, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { relativeArtifactPath } from "./artifact-paths.js";
@@ -90,6 +91,17 @@ function readLockOwnerPid(contents: string): number | null {
   }
 }
 
+async function readLockOwnerToken(contents: string): Promise<{ pid: number; nonce: string } | null> {
+  try {
+    const parsed = JSON.parse(contents) as { pid?: unknown; nonce?: unknown };
+    if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid)) return null;
+    if (typeof parsed.nonce !== "string" || parsed.nonce.length === 0) return null;
+    return { pid: parsed.pid, nonce: parsed.nonce };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Break a lock only when it is older than the stale threshold AND its recorded
  * owner is gone (or the lock carries no usable owner). Returns true when the
@@ -104,9 +116,12 @@ async function breakStaleIndexLock(lockPath: string): Promise<boolean> {
   }
   if (ageMs < INDEX_LOCK_STALE_MS) return false;
 
-  let ownerPid: number | null = null;
+  let ownerPid: number | null;
   try {
-    ownerPid = readLockOwnerPid(await readFile(lockPath, "utf-8"));
+    const contents = await readFile(lockPath, "utf-8");
+    // A lock written by an older build carries no nonce; fall back to its pid so
+    // a still-live owner is honored instead of being broken out from under.
+    ownerPid = (await readLockOwnerToken(contents))?.pid ?? readLockOwnerPid(contents);
   } catch {
     return false; // unreadable but not provably abandoned; keep waiting
   }
@@ -132,12 +147,13 @@ async function breakStaleIndexLock(lockPath: string): Promise<boolean> {
 async function acquireSandboxesIndexLock(indexPath: string): Promise<() => Promise<void>> {
   const lockPath = `${indexPath}.lock`;
   const deadline = Date.now() + INDEX_LOCK_TIMEOUT_MS;
+  const nonce = randomUUID();
   for (;;) {
     try {
       const handle = await open(lockPath, "wx");
       try {
         await handle.writeFile(
-          JSON.stringify({ pid: process.pid, acquired_at: new Date().toISOString() }),
+          JSON.stringify({ pid: process.pid, nonce, acquired_at: new Date().toISOString() }),
           "utf-8",
         );
       } catch (error) {
@@ -147,7 +163,19 @@ async function acquireSandboxesIndexLock(indexPath: string): Promise<() => Promi
       }
       await handle.close();
       return async () => {
-        await rm(lockPath, { force: true });
+        try {
+          const contents = await readFile(lockPath, "utf-8");
+          const owner = await readLockOwnerToken(contents);
+          if (owner?.pid === process.pid && owner?.nonce === nonce) {
+            await rm(lockPath, { force: true });
+          } else {
+            console.warn(
+              `[sandbox] release skipped: lock ${lockPath} is held by another process (takeover detected)`,
+            );
+          }
+        } catch {
+          // lock already gone; nothing to do
+        }
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

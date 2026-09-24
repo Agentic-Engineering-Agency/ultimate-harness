@@ -49,3 +49,19 @@ Where "omitted" and "empty" mean different things, write the empty list:
 - The strict schemas reject unknown fields rather than guessing intent: a guard block with an unrecognized key fails validation, and `limits.memory_mb` on a worker fails with "Per-worker memory is governed by team.resources.worker_memory_mb". An explicit empty `skills.required: []` or `source_links: []` documents that the omission is deliberate.
 
 Writing `[]` costs nothing and removes the one ambiguity — "forbidden" versus "forgotten" — that both the guard and the reviewer would otherwise have to guess at.
+
+## 6. Run `uh mission check` before launching the packet
+
+`uh mission check <mission.yaml> [--runtime <id>]` validates a packet without starting a runtime and without writing to `.harness`. It prints one line per check (`PASS`, or `FAIL` with the reason), exits non-zero on any failure, and takes `--json` for tooling. It reuses the adapter planner `uh mission dry-run` uses to validate `runtime_config_overrides`, so the two cannot disagree; `--runtime` defaults to `hermes` for a single-shape packet, and each team worker is validated against its own declared `adapter`. A team packet also validates every worker packet it names through `mission_id`.
+
+The checks map to the launch failures that keep recurring:
+
+- The packet parses and satisfies the strict schemas — broken YAML, duplicate worker roles, and protected expected-output paths fail here.
+- `runtime_config_overrides` are accepted by the chosen runtime: a key that belongs only to another adapter (for example a command-code-only `permission_mode` on an omp packet) fails instead of launching.
+- Every `context.read_first` path exists.
+- Every expected output — mission-level `expected_outputs.files` and each worker's — lies inside its `guard.write_roots`, compared by path boundary, so a write root that does not cover the packet's own outputs fails.
+- Every path a `constraints` entry names after "Change only" exists or lies inside a write root.
+- Every `grounding` claim holds.
+
+`grounding` is an optional, strict list of `{ claim, path, contains }`. Each entry is a falsifiable statement about the code as it is now; `uh mission check` passes the claim only when `path` exists relative to the project root and its text contains the exact `contains` literal (case-sensitive). Absent or empty the field is a no-op, so existing packets stay valid. Use it to pin the facts a prompt asserts — file locations, exported symbol names, configuration keys — so a packet whose claims no longer hold fails the check instead of launching on a false premise.
+

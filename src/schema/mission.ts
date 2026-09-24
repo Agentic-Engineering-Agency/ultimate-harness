@@ -36,6 +36,20 @@ const RequiredCheckSchema = z.object({
   command: z.string().optional(),
 });
 
+/**
+ * A grounding claim: a falsifiable statement about the repository that the
+ * packet asserts is true right now. `path` is repo-relative and `contains`
+ * is a literal string (`uh mission check` passes the claim only when the file
+ * exists and its text contains that literal). Additive and strict: an entry
+ * with an unknown key is rejected rather than silently dropped.
+ */
+export const GroundingClaimSchema = z.object({
+  claim: z.string().min(1),
+  path: z.string().min(1),
+  contains: z.string().min(1),
+}).strict();
+export type GroundingClaim = z.infer<typeof GroundingClaimSchema>;
+
 const DEFAULT_TEST_PATHS = [
   "tests/**",
   "test/**",
@@ -168,6 +182,12 @@ const MissionInputSchema = z.object({
     source_links: z.array(z.string()).optional().default([]),
   }).optional().default({ read_first: [], source_links: [] }),
   constraints: z.array(z.string()).optional().default([]),
+  /**
+   * Additive grounding claims checked by `uh mission check`. Absent means no
+   * claims (legacy packets stay valid); each `{ claim, path, contains }` must
+   * resolve to an existing file whose text contains the literal.
+   */
+  grounding: z.array(GroundingClaimSchema).optional().default([]),
   skills: z.object({
     required: z.array(z.string()).optional().default([]),
     suggested: z.array(z.string()).optional().default([]),

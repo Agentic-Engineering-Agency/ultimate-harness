@@ -14,7 +14,7 @@ import { assertWritableArtifact } from "../adapters/_artifact-context.js";
 import { IndependentReviewAssessmentSchema, IndependentReviewBindingSchema, IndependentReviewReportSchema, IndependentReviewRequestSchema,
   type IndependentReviewBinding, type IndependentReviewReport, type IndependentReviewRequest } from "../schema/independent-review.js";
 import { DEFAULT_PROTECTED_PATHS, RuntimeControlSchema } from "../schema/runtime-control.js";
-import { validateRuntimeResult, type VerdictValue } from "../schema/artifacts.js";
+import { validateRuntimeResult, VerificationStatusSchema, VerificationResultSchema, type VerdictValue } from "../schema/artifacts.js";
 import { loadMissionFile } from "./capabilities.js";
 import { assertSafeMissionId, isPathWithin, requireInitializedProject, requireWorkflowProfile, rejectSymlinkIfExists } from "./mission.js";
 import { proposeMission } from "./propose.js";
@@ -145,6 +145,20 @@ async function snapshotFile(sourceRoot: string, original: string, destination: s
   return hash.digest("hex");
 }
 
+/**
+ * What `uh verify` concluded in the source workspace, read back from the
+ * snapshot just taken. An unreadable result is surfaced as `blocked` with its
+ * cause rather than dropped: the reviewer must see the file and know why it
+ * carries no trustworthy status.
+ */
+async function verificationEvidence(snapshot: string): Promise<{ status: z.infer<typeof VerificationStatusSchema>; reason?: string }> {
+  try {
+    return { status: VerificationResultSchema.parse(parse(await readFile(snapshot, "utf8"))).status };
+  } catch {
+    return { status: "blocked", reason: "the captured verification.yaml does not parse as a uh.verification-result.v0 document" };
+  }
+}
+
 /** Emit a complete UH mission; preparation never starts a model or another controller. */
 export async function prepareIndependentReview(root: string, options: PrepareIndependentReviewOptions) {
   assertSafeMissionId(options.id);
@@ -173,6 +187,7 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
   try {
     const sources: IndependentReviewRequest["sources"] = [];
     const readFirst: string[] = [requestRelative];
+    const workerEvidence: string[] = [];
     for (const source of options.sources) {
       const canonicalContract = path.join(root, ".harness", "missions", source.missionId, "mission.yaml");
       await assertWritableArtifact(path.dirname(canonicalContract), canonicalContract);
@@ -217,6 +232,47 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
           files.push({ kind: "changed", original_path: normalized, state: "absent" });
         }
       }
+      // The worker's own evidence lives under `.harness`, which the protected
+      // path rules keep out of the changed-file walk above, so both files are
+      // captured explicitly by name. A missing one is recorded with a reason:
+      // reviewers must be able to tell "the worker never produced it" from "the
+      // packet did not look".
+      const evidence: string[] = [];
+      const verificationOriginal = path.posix.join(".harness", "missions", source.missionId, "verification.yaml");
+      const verificationSnapshot = path.join(inputDir, "verification.yaml");
+      const verificationHash = await snapshotFile(sourceRoot, verificationOriginal, verificationSnapshot);
+      if (verificationHash) {
+        const snapshotRelative = relativeArtifactPath(root, verificationSnapshot);
+        const status = await verificationEvidence(verificationSnapshot);
+        files.push({ kind: "verification", original_path: verificationOriginal, state: "present",
+          snapshot_path: snapshotRelative, sha256: verificationHash, ...status });
+        readFirst.push(snapshotRelative);
+        evidence.push(`verification ${snapshotRelative} with status ${status.status}${status.reason ? ` (${status.reason})` : ""}`);
+      } else {
+        const reason = "the source workspace has no verification.yaml, so uh verify has never run there";
+        files.push({ kind: "verification", original_path: verificationOriginal, state: "absent", reason });
+        evidence.push(`verification absent (${reason})`);
+      }
+      const latestRun = await readLatestPointer(sourceRoot, source.missionId);
+      const finalOriginal = latestRun
+        ? path.posix.join(".harness", "missions", source.missionId, "runs", latestRun.run_id, "runtime-final.txt")
+        : path.posix.join(".harness", "missions", source.missionId, "latest.json");
+      const finalSnapshot = path.join(inputDir, "runtime-final.txt");
+      const finalHash = latestRun ? await snapshotFile(sourceRoot, finalOriginal, finalSnapshot) : undefined;
+      if (finalHash) {
+        const snapshotRelative = relativeArtifactPath(root, finalSnapshot);
+        files.push({ kind: "report", original_path: finalOriginal, state: "present",
+          snapshot_path: snapshotRelative, sha256: finalHash });
+        readFirst.push(snapshotRelative);
+        evidence.push(`final message ${snapshotRelative}`);
+      } else {
+        const reason = latestRun
+          ? `the latest run ${latestRun.run_id} wrote no runtime-final.txt`
+          : "the source workspace has no latest.json run pointer, so no run's final message can be located";
+        files.push({ kind: "report", original_path: finalOriginal, state: "absent", reason });
+        evidence.push(`final message absent (${reason})`);
+      }
+      workerEvidence.push(`- ${source.missionId}: ${evidence.join("; ")}.`);
       sources.push({ mission_id: source.missionId, source_root: sourceRoot, files,
         reference_paths: mission.read_first,
         acceptance: mission.acceptance_criteria.map(criterion => ({ id: criterion.id, description: criterion.description })),
@@ -235,7 +291,7 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
     const requiredIds = sources.map(source => `- ${source.mission_id}: acceptance: ${idClause(source.acceptance.map(item => item.id))}; checks: ${idClause(source.checks.map(item => item.id))}.`).join("\n");
     const packet = await proposeMission(root, {
       id: options.id, title: `Independent review: ${options.sources.map(source => source.missionId).join(", ")}`, workflow,
-      objective: `Independently assess the captured contracts and outputs in ${binding.request_path}. Read every captured contract and available output in full. Check claims against sources, cover exactly the ids listed below once each, and report missing or unverifiable evidence honestly. The report must contain exactly these ids per source, each exactly once:\n${requiredIds}\nAnything you verified that no listed id covers goes into observations, never into acceptance or checks. Write ${binding.report_path} conforming to the supplied JSON schema and bind it to request_sha256 ${binding.request_sha256}. Missing outputs require needs-remediation; unverified required evidence cannot receive pass. This is an advisory recommendation, not Main/owner acceptance.`,
+      objective: `Independently assess the captured contracts and outputs in ${binding.request_path}. Read every captured contract and available output in full. Check claims against sources, cover exactly the ids listed below once each, and report missing or unverifiable evidence honestly. The report must contain exactly these ids per source, each exactly once:\n${requiredIds}\nAnything you verified that no listed id covers goes into observations, never into acceptance or checks. Worker-side evidence captured per source:\n${workerEvidence.join("\n")}\nGrade a required check against the captured verification result and the captured outputs; the worker's own final message is a claim to compare against that evidence, never proof of it. An absent capture is missing evidence to report, not a failure to invent. Write ${binding.report_path} conforming to the supplied JSON schema and bind it to request_sha256 ${binding.request_sha256}. Missing outputs require needs-remediation; unverified required evidence cannot receive pass. This is an advisory recommendation, not Main/owner acceptance.`,
       readFirst, expectedOutputs: [binding.report_path], sandboxBackend: "directory", promotionPolicy: "human-approved",
       constraints: ["Do not edit source worker outputs or captured review inputs.", "Do not delegate, spawn subagents, or reuse a worker session.",
         "Reference paths are relative to each source_root; captured snapshots, not later source changes, define this review."],

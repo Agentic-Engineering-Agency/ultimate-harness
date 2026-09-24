@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { VerdictValueSchema, VerificationCheckSchema } from "./artifacts.js";
+import { VerdictValueSchema, VerificationCheckSchema, VerificationStatusSchema } from "./artifacts.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const EvidenceSchema = z.string().trim().min(1);
@@ -17,17 +17,34 @@ const ReviewInputFileSchema = z.object({
   original_path: z.string().min(1),
   // `changed` files come from the worker's real diff (git diff --name-only); a
   // deleted file is recorded as `absent`, never `missing`.
-  kind: z.enum(["contract", "output", "changed"]),
+  // `verification` and `report` are the worker's own evidence — the source
+  // workspace's `verification.yaml` and the latest run's `runtime-final.txt`.
+  // Both live under `.harness`, so the changed-file walk never reaches them and
+  // they are captured explicitly by name instead.
+  kind: z.enum(["contract", "output", "changed", "verification", "report"]),
   state: z.enum(["present", "missing", "absent"]),
   snapshot_path: z.string().min(1).optional(),
   sha256: DigestSchema.optional(),
   verification: VerificationCheckSchema.optional(),
+  /** Overall status `uh verify` reached; only meaningful on a `verification` capture. */
+  status: VerificationStatusSchema.optional(),
+  /** Why a capture has no snapshot, or why a present capture carries no trustworthy status. */
+  reason: z.string().trim().min(1).optional(),
 }).strict().superRefine((file, ctx) => {
   if ((file.state === "present") !== (file.snapshot_path !== undefined && file.sha256 !== undefined)) {
     ctx.addIssue({ code: "custom", message: "Present review inputs require a snapshot and digest" });
   }
   if (file.state !== "present" && (file.snapshot_path !== undefined || file.sha256 !== undefined)) {
     ctx.addIssue({ code: "custom", message: "Missing or absent review inputs cannot claim snapshot evidence" });
+  }
+  if (file.status !== undefined && file.kind !== "verification") {
+    ctx.addIssue({ code: "custom", message: "Only a verification capture can state a verification status" });
+  }
+  if (file.kind === "verification" && file.state === "present" && file.status === undefined) {
+    ctx.addIssue({ code: "custom", message: "A captured verification result must state its status" });
+  }
+  if (file.state === "absent" && (file.kind === "verification" || file.kind === "report") && file.reason === undefined) {
+    ctx.addIssue({ code: "custom", message: "Absent worker evidence requires a reason" });
   }
 });
 
