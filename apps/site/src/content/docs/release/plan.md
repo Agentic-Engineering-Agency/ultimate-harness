@@ -40,8 +40,8 @@ Still open from the owner decisions: fixing the placeholder commit authors needs
 
 **Fixed on the stack (was the blocker): tool guard treated POSIX absolute paths as Windows switches.** It was present from the base of `release/v0.11.0`. In `src/harness/tool-guard.ts`, both the copy and delete target scanners dropped every token that starts with `/`, because `cmd.exe` switches look like `/s`. On Linux and macOS this meant:
 
-- `cp out/x /etc/cron.d/x` and `mv out/x ~/.bashrc` are **allowed**. That is a sandbox escape for any worker with a shell tool.
-- `rm -rf /abs/path/inside/root` is **denied** as `delete_outside`, with no target named. This is why `tests/hive-integrity.test.ts` fails on PRs #247 to #249: on Windows the paths start with `C:\` and pass.
+- `cp out/x /etc/cron.d/x` and `mv out/x ~/.bashrc` were **allowed**. That was a sandbox escape for any worker with a shell tool.
+- `rm -rf /abs/path/inside/root` was **denied** as `delete_outside`, with no target named. This is why `tests/hive-integrity.test.ts` failed on PRs #247 to #249: on Windows the paths start with `C:\` and pass.
 
 Fix (verified on the stack tip: the 4 CI failures pass, the full suite passes with 2,184 tests and 12 skipped, and 5 new regression tests fail without the fix):
 
