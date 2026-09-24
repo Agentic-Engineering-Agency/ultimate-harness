@@ -95,6 +95,26 @@ async function unlockWorktree(root: string, worktreePath: string): Promise<void>
 }
 
 /**
+ * `git worktree add` is not safe to run concurrently against one repository:
+ * parallel adds race on `.git/worktrees/<name>/commondir` and one fails with
+ * "failed to read .../commondir". Adds from this process are chained per
+ * repository root; other git commands are unaffected.
+ */
+const worktreeAddQueues = new Map<string, Promise<unknown>>();
+
+function serializedWorktreeAdd<T>(root: string, run: () => Promise<T>): Promise<T> {
+  const key = path.resolve(root);
+  const previous = worktreeAddQueues.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(run);
+  const settled = next.catch(() => undefined);
+  worktreeAddQueues.set(key, settled);
+  void settled.then(() => {
+    if (worktreeAddQueues.get(key) === settled) worktreeAddQueues.delete(key);
+  });
+  return next;
+}
+
+/**
  * Default backend: a `git worktree` sharing the project's object store on a
  * dedicated `sandbox/<id>` branch. Cheap, but ties the sandbox to the parent
  * repo's worktree registry and branch namespace.
@@ -108,9 +128,9 @@ export class GitWorktreeBackend implements SandboxBackend {
     // controller, or a removable/network volume that is briefly unmounted)
     // cannot delete this worktree's administrative entry behind our back.
     // No run id is in scope here, so the branch name is the lock identifier.
-    await runGit(ctx.root, [
+    await serializedWorktreeAdd(ctx.root, () => runGit(ctx.root, [
       "worktree", "add", "--lock", "--reason", `uh:${branch}`, "-b", branch, ctx.worktreePath, ctx.baseRef,
-    ]);
+    ]));
     return { branch, base_ref: ctx.baseRef };
   }
 
