@@ -16,27 +16,29 @@ Decided by the owner on 2026-09-23.
 
 | # | Decision | Outcome | Status |
 |---|---|---|---|
-| D1 | Capability mismatches: block, or warn with `--strict` to block? | **Warn by default, `--strict` blocks** (UH-138 behavior). `run-team` and `queue` should pass `--strict` so unattended runs still block. | Ported and tested on the bottom layer; push pending (see [Stack status](#stack-status)) |
+| D1 | Capability mismatches: block, or warn with `--strict` to block? | **Warn by default, `--strict` blocks** (UH-138 behavior). `run-team` and `queue` should pass `--strict` so unattended runs still block. | Done on the stack, CI green (see [Stack status](#stack-status)) |
 | D2 | GitNexus: mandatory or optional? | **Optional.** Use it when its tools are available; otherwise grep. PR #246 (commit `ffc1f8d`) already makes this change. | Lands with the stack |
 | D3 | Placeholder `uh-team@example.com` authors and the `wip:` commit | **Fix them.** The team-run commits were made by UH's own workers during Mateo-GarciaL's release work, so they are re-attributed to him with a `UH-Team-Role: worker` or `leader` trailer, and the `wip:` commit (`f4de854`, the first cut of the loop probe) gets a descriptive message. | Needs a history rewrite and force-push of `release/v0.11.0` and all 10 stack branches; pending |
-| D4 | Publish 0.10.0 separately, or fold it into 0.11.0? | **Skip 0.10.0.** Its work is folded into 0.11.0 and the changelog says 0.10.0 was never published. | Done with D1; push pending |
+| D4 | Publish 0.10.0 separately, or fold it into 0.11.0? | **Skip 0.10.0.** Its work is folded into 0.11.0 and the changelog says 0.10.0 was never published. | Done with D1 |
 | D5 | Keep the old docs domain or move? | **Retire the old site.** `apps/docs` and `deploy-docs.yml` are removed in PR #250; `uh.agenticengineering.lat` redirects to `uh.agenticeng.app`. | Done in #250; redirect deploys after the old Worker is removed |
 
 Also decided: **turn off the Codex review bot** on the repository (see [Branch and PR audit](/release/branches/#codex-review-bot)), and **land stack fixes on the bottom layer (#240)**, never directly on `main`.
 
 ## Stack status
 
-As of 2026-09-23, three commits are ready for the bottom layer (#240), prepared and tested but **not pushed**, because pushes to the stack branches need a permission rule in the operator's Claude Code settings:
+Updated 2026-09-24. Three commits landed on the bottom layer (#240, `0e6249d..b9ebdce`), and each upper layer (#241 to #249) got a merge commit carrying them. Nothing was force-pushed.
 
 1. `fix(guard)`: POSIX absolute paths are targets, not `cmd.exe` switches (Phase 0 below), with regression tests.
 2. `feat`: 0.10.0 folded into 0.11.0: capability warn by default with `--strict`, the hello-uh example, the `docs:check-links` CI step (over `docs/`, with two broken links fixed), the spec-stale fix, changelog and roadmap notes that 0.10.0 was skipped, and the plugin version bumped to 0.11.0.
 3. `fix(sandbox)`: `git worktree add` is serialized per repository, fixing #240's flaky concurrency test.
 
-Applied to the stack tip (all of 0.11.0), they pass typecheck, build, the docs link check and the full suite: 148 test files, 2,201 tests, 12 skipped, including the 4 hive tests that fail in CI today. Carrying them up the stack conflicts in three places (`CHANGELOG.md`, the `mission run` options in `src/cli.ts`, and two appended blocks in `tests/tool-guard.test.ts`), all resolved by keeping both sides.
+After the push, CI (typecheck, tests, build, publish dry-run) is green on #240, #247 and #249, including the four hive tests that used to fail. Merging up the stack conflicted in two places: the `mission run` options in `src/cli.ts` (layer 05) and the changelog intro (layer 07). Both were resolved by keeping both sides.
+
+Still open from the owner decisions: fixing the placeholder commit authors needs a history rewrite and force-push of all 11 branches, which waits on an explicit go-ahead and on telling Mateo-GarciaL first.
 
 ## Phase 0: unblock the stack
 
-**Blocker: tool guard treats POSIX absolute paths as Windows switches.** It is present since the base of `release/v0.11.0`. In `src/harness/tool-guard.ts`, both the copy and delete target scanners drop every token that starts with `/`, because `cmd.exe` switches look like `/s`. On Linux and macOS this means:
+**Fixed on the stack (was the blocker): tool guard treated POSIX absolute paths as Windows switches.** It was present from the base of `release/v0.11.0`. In `src/harness/tool-guard.ts`, both the copy and delete target scanners dropped every token that starts with `/`, because `cmd.exe` switches look like `/s`. On Linux and macOS this meant:
 
 - `cp out/x /etc/cron.d/x` and `mv out/x ~/.bashrc` are **allowed**. That is a sandbox escape for any worker with a shell tool.
 - `rm -rf /abs/path/inside/root` is **denied** as `delete_outside`, with no target named. This is why `tests/hive-integrity.test.ts` fails on PRs #247 to #249: on Windows the paths start with `C:\` and pass.
@@ -58,11 +60,11 @@ Fix (verified on the stack tip: the 4 CI failures pass, the full suite passes wi
 +            if (isSwitch(verb, token)) continue;
 ```
 
-Land it at the bottom of the stack (#240), because the vulnerable code is in every layer, and restack.
+Landed on #240 and merged up through #249 (see [Stack status](#stack-status)).
 
 Also in Phase 0:
 
-1. **Make the #240 sandbox concurrency test robust.** `git worktree add` races on `.git/worktrees/*/commondir` when eight run at once. Serialize worktree creation per repository inside `createSandbox`, or retry once on that specific error. Do not skip the test.
+1. **Done:** the #240 sandbox concurrency race is fixed by serializing `git worktree add` per repository.
 2. **Move the `land.ts` fix** that rides in the docs PR #246 into #245, where the rest of `uh land` lives. The GitNexus change in #246 stays (decision D2).
 3. **Get a human review on every layer.** None of #239 to #249 has one, and the Codex bot, now being turned off, only posted usage-limit notices. Review #243 (shared guard core), #245 (`uh land` moves branches) and #247 (hive) first.
 
