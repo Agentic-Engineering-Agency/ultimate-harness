@@ -76,6 +76,8 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 
 ### Fixed
 
+- `uh mission review-collect` discards the review's sandbox after a successful collection, keeping the reviewer's report beside the assessment as `review-report.json`. Every review used to leave its sandbox worktree behind. `--keep-workspace` keeps it.
+- Removing a team or sandbox worktree no longer deletes files outside it. On Windows, `git worktree remove --force` recursed into a directory junction inside the worktree and deleted the junction's target, so a `node_modules` junction to the main checkout emptied the main checkout's `node_modules`. UH now removes every link and junction in the worktree, without following it, before asking git to remove the worktree, and leaves a team worktree in place if a link cannot be removed.
 - Tool Guard treated every `/`-prefixed argument as a `cmd.exe` switch. On Linux and macOS, `cp x /etc/y` and `mv x ~/.bashrc` were allowed because the destination was skipped, and `rm -rf` of an absolute path inside the worker root was denied as an untargeted `delete_outside` before the hive and tamper checks. `/x` tokens are now switches only for `cmd.exe` verbs.
 - `spec-stale` drift treats `specs/` as the cross-cutting spec root (specs moved out of `docs/specs/`), so implementation changes with a matching `specs/` update are no longer flagged.
 - Tool Guard judges agent clients by executable position instead of a whole-command text match. `codex.cmd`, `omp.exe`, path-qualified binaries, the PowerShell call operator, `env`/`xargs`/`pnpm dlx` launchers, `bash -c` bodies and command substitutions are denied; `grep -r omp src` and `cat docs/codex.md` are no longer false denials that consumed a worker's denial budget.
