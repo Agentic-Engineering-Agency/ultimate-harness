@@ -29,6 +29,7 @@ Notes:
 - `--runtime` must be the same value passed to `review-prepare`; the packet binds the runtime and model, and a mismatch is refused.
 - The packet objective lists, per source, the exact acceptance criterion ids and required check ids the report must contain — including explicit `acceptance: [] exactly; add nothing` when a list is empty — and points everything that no listed id covers at `observations`, never into `acceptance` or `checks`.
 - `review-collect` re-checks request and snapshot digests, requires a successful native runtime receipt bound to the request, and validates that each acceptance criterion and required check id is covered exactly once. Invented ids are rejected; observations are surfaced in the assessment and printed summary without changing the recommendation.
+- After a successful collection, `review-collect` copies the reviewer's report to `.harness/missions/<review-id>/review-report.json` and discards the review sandbox. `--keep-workspace` keeps it; collecting again needs it.
 
 ## What preparation and collection surface
 
