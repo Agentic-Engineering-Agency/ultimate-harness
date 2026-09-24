@@ -63,6 +63,10 @@ export const InterventionSchema = z.object({
   status: InterventionStatusSchema,
   evidence: Text.optional(),
   verified_by: z.string().min(1).optional(),
+  /** The previous ledger entry's `hash`, or the fixed genesis value for the first chained line. */
+  prev_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  /** sha256 over this entry's canonical JSON without `hash`; absent on a legacy, pre-chain line. */
+  hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict().superRefine((entry, ctx) => {
   if (entry.status === "landed" && entry.evidence === undefined) {
     ctx.addIssue({ code: "custom", message: "A landed intervention requires evidence" });
@@ -86,6 +90,10 @@ export const InterventionStatusChangeSchema = z.object({
   evidence: Text.optional(),
   countermeasure: z.string().min(1).optional(),
   verified_by: z.string().min(1).optional(),
+  /** The previous ledger entry's `hash`, or the fixed genesis value for the first chained line. */
+  prev_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  /** sha256 over this entry's canonical JSON without `hash`; absent on a legacy, pre-chain line. */
+  hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict().superRefine((change, ctx) => {
   if (change.status === "landed" && change.evidence === undefined) {
     ctx.addIssue({ code: "custom", message: "A landed intervention requires evidence" });

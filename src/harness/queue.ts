@@ -16,6 +16,7 @@ import {
   type QueueState,
 } from "../schema/queue.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
+import { assertHiveChainsIntact, recordQueuePass } from "./hive.js";
 import { dispatchEvent, type NotificationEvent } from "./notifications.js";
 import { generateRunId } from "./run-id.js";
 import { workerConcurrency } from "./runtime-resources.js";
@@ -422,6 +423,9 @@ function blankEntryState(id: string): QueueEntryState {
 
 export async function runQueue(queueFilePath: string, options: RunQueueOptions): Promise<QueueRunResult> {
   const root = path.resolve(options.root);
+  // Hive integrity is a precondition: a broken hive facts or ledger chain means
+  // the shared state every agent trusts cannot be extended, so queue refuses.
+  assertHiveChainsIntact(root);
   const queue = await loadQueueFile(path.resolve(queueFilePath));
   const maxOrchestrators = options.maxOrchestrators ?? DEFAULT_MAX_ORCHESTRATORS;
   if (!Number.isInteger(maxOrchestrators) || maxOrchestrators < 1) {
@@ -482,6 +486,15 @@ export async function runQueue(queueFilePath: string, options: RunQueueOptions):
       exitCode: entryState.exit_code,
       ...(outcome.status === "failed" && outcome.reason !== undefined ? { reason: outcome.reason } : {}),
     });
+    // Best-effort: a hive error never fails the queue.
+    if (outcome.status === "passed") {
+      recordQueuePass(root, {
+        queueId: queue.id,
+        entryId: entry.id,
+        runId: entryState.run_id,
+        missionPath: entry.mission,
+      });
+    }
   };
 
   const startTask = (entry: QueueEntry): void => {

@@ -65,6 +65,7 @@ Every command below reads or writes records under `.harness/`; none needs a mode
 | Land verified, reviewed worker branches or leave the target untouched | `uh land` | [closing the loop](./docs/handbook/closing-the-loop.md) |
 | Be told when runs settle | `uh notify` | [notifications](./docs/handbook/notifications.md) |
 | Record corrections and their countermeasures | `uh note`, `uh ledger` | [intervention ledger](./docs/handbook/intervention-ledger.md) |
+| Share proven facts and open items across agents, tamper-evident | `uh hive import` / `show` / `verify` | [closing the loop](./docs/handbook/closing-the-loop.md#the-hive) |
 | Read the run store from an MCP client | `uh mcp serve` | [MCP server](./docs/runbooks/mcp-server.md) |
 
 The [operator handbook](./docs/handbook/README.md) walks the whole loop.

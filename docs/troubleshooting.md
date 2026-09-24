@@ -52,13 +52,13 @@ uh mission put team.yaml worker-a.yaml worker-b.yaml
 
 ## `uh land` Says There Is No Collected Review
 
-When the project is itself a linked git worktree, `uh land` looks for collected reviews in the checkout git's common directory belongs to instead of this project (see [known issues](./known-issues.md)). Pass the project explicitly:
+`uh land` reads collected reviews from the project that owns the worker worktrees. If the reviews live somewhere else, pass that project explicitly:
 
 ```sh
 uh land --worker-branch <branch> --onto <target> --message-file <file> --review-root <project>
 ```
 
-`uh land` also refuses a dirty target worktree and a worker branch without a retained worktree; run teams with `--retain`.
+A review counts only when it names the branch's team mission and its captured file hashes match the branch tip; after any change to a reviewed file, collect a new review. `uh land` also refuses a dirty target worktree and a worker branch without a retained worktree; run teams with `--retain`.
 
 ## Command Code Exits With `write EOF`
 

@@ -17,9 +17,9 @@ session and not re-checked at this commit. A fix removes its entry in the same c
 
 | What goes wrong | Status |
 |---|---|
-| **`uh land` looks for collected reviews in the wrong checkout when the project is itself a linked git worktree.** It resolves "the main checkout" as the parent of git's common directory, which for a linked worktree is a different checkout with its own `.harness`. The land is refused with "no collected independent review". Workaround: pass `--review-root <project>`. A fix (resolve the project that owns the worker worktree from its path) exists on an unmerged branch. | Confirmed: the first live `uh land` was refused this way. |
 | `uh queue` has only been tested with fake launchers; no live queue has run. | Confirmed. |
-| The shared hive (`.harness/hive`: items, evidence-bound facts, claims, hash chains, `uh hive verify`) is not in this branch. It is finished and tested on a separate branch. | Confirmed. |
+| The hive has not run live: no real `uh land`, `uh queue` or `uh verify` has recorded a fact yet; every hive behaviour is proven only by the test suite. | Confirmed. |
+| The hive's last changes (project-owned hive and review root, evidence resolved against the owning project, facts recorded by `uh verify`) were not independently reviewed: the last review, with no contradicted claim, covered the slice before them, and reviews are paused until they stop re-reading unchanged files. Each change has a regression test that fails without it. | Confirmed. |
 
 ## Run control
 

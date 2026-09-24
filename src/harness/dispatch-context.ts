@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { MissionDocument } from "../schema/mission.js";
 import type { WorkflowDocument } from "../schema/workflow.js";
+import { hivePacketFromMission, renderVerifiedHiveFacts } from "./hive.js";
 import { harnessDir } from "./paths.js";
 import { runtimeFinalMessageInstruction } from "./runtime-final-message.js";
 
@@ -140,13 +141,26 @@ export function buildDispatchContext(
   workflow?: WorkflowDocument,
   options: BuildDispatchContextOptions = {},
 ): DispatchContext {
+  const root = options.root ?? mission.context?.repo_root ?? process.cwd();
   // An explicit caller-supplied brief always wins; otherwise the mission's
   // `context.project_brief: false` opts out before any file is read.
   const projectFacts = options.projectBrief !== undefined
     ? capProjectFacts(options.projectBrief)
     : isProjectBriefEnabled(mission)
-      ? loadProjectFacts(options.root ?? mission.context?.repo_root ?? process.cwd())
+      ? loadProjectFacts(root)
       : undefined;
+  // The hive blackboard appends its relevant, controller-verified facts after
+  // the brief. Only facts whose chain and evidence hash still hold are injected;
+  // best-effort: a malformed hive is ignored rather than failing the dispatch.
+  let hiveFacts = "";
+  try {
+    hiveFacts = renderVerifiedHiveFacts(root, hivePacketFromMission(mission, []));
+  } catch {
+    hiveFacts = "";
+  }
+  const factsText = hiveFacts.length > 0
+    ? capProjectFacts(projectFacts !== undefined && projectFacts.length > 0 ? `${projectFacts}\n\n${hiveFacts}` : hiveFacts)
+    : projectFacts;
   return {
     mission,
     workflow,
@@ -166,7 +180,7 @@ export function buildDispatchContext(
       ...(ac.check_command !== undefined ? { check_command: ac.check_command } : {}),
       severity: ac.severity,
     })),
-    ...(projectFacts !== undefined && projectFacts.length > 0 ? { projectFacts } : {}),
+    ...(factsText !== undefined && factsText.length > 0 ? { projectFacts: factsText } : {}),
     memoryBlock: options.memoryBlock,
     finalMessageInstruction: options.finalMessageInstruction ?? runtimeFinalMessageInstruction(),
   };

@@ -34,6 +34,7 @@ import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-pro
 import { COST_CLASSES } from "./schema/adapter-capabilities.js";
 import { resolveSandboxMissionRoot, type SandboxMissionRoute } from "./harness/sandbox.js";
 import { isProjectBriefEnabled } from "./harness/dispatch-context.js";
+import { importItems, readHive } from "./harness/hive.js";
 import { finalizeRuntimeCancelledRun } from "./harness/runtime-events.js";
 import { cancelLocalMissionRun, cancelMissionRunViaPlugin, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
@@ -2973,6 +2974,85 @@ function ledgerEnum<T extends string>(name: string, value: string, allowed: read
   }
   return value as T;
 }
+
+// uh hive
+const hiveCmd = program
+  .command("hive")
+  .description("Shared blackboard: open items (.harness/hive/items.yaml) and proven facts (.harness/hive/facts.ndjson)");
+
+hiveCmd
+  .command("import")
+  .description("Import items from a markdown checklist, merging by id (a checked '[x]' line means done)")
+  .argument("<file>", "Markdown file with lines like '- [ ] A8: title'")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (file: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const markdown = await readFileAsync(file, "utf-8");
+      const items = importItems(root, markdown);
+      console.log(`imported ${items.length} hive item(s)`);
+    } catch (err) {
+      console.error(`[FAIL] hive import: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+hiveCmd
+  .command("show")
+  .description("Show the hive items and facts")
+  .option("--json", "Emit JSON")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { json?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const hive = readHive(root);
+      if (opts.json === true) {
+        console.log(JSON.stringify(hive, null, 2));
+        return;
+      }
+      console.log(`${hive.items.length} item(s):`);
+      for (const item of hive.items) console.log(`  [${item.status}] ${item.id}: ${item.title}`);
+      console.log(`${hive.facts.length} fact(s)`);
+    } catch (err) {
+      console.error(`[FAIL] hive show: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+hiveCmd
+  .command("verify")
+  .description("Verify the hive facts chain, the intervention ledger chain and the land decision index")
+  .option("--json", "Emit JSON")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { json?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { verifyHiveChain } = await import("./harness/hive.js");
+      const { verifyLedgerChain } = await import("./harness/interventions.js");
+      const { verifyLandDecisionChain } = await import("./harness/land.js");
+      const checks = [
+        { name: "hive.facts", file: ".harness/hive/facts.ndjson", first_broken: verifyHiveChain(root) ?? null },
+        { name: "ledger.interventions", file: ".harness/ledger/interventions.ndjson", first_broken: verifyLedgerChain(root) ?? null },
+        { name: "land.decisions", file: ".harness/land/decisions.ndjson", first_broken: verifyLandDecisionChain(root) ?? null },
+      ];
+      const ok = checks.every((entry) => entry.first_broken === null);
+      if (opts.json === true) {
+        console.log(JSON.stringify({ ok, checks }, null, 2));
+      } else if (ok) {
+        console.log("hive chains intact");
+      } else {
+        for (const entry of checks) {
+          if (entry.first_broken !== null) {
+            console.log(`[BROKEN] ${entry.name} ${entry.file} line ${entry.first_broken.line}: ${entry.first_broken.reason}`);
+          }
+        }
+      }
+      if (!ok) process.exit(1);
+    } catch (err) {
+      console.error(`[FAIL] hive verify: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
 
 // uh note
 program
