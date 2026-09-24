@@ -4,6 +4,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileExists } from "./mission.js";
 import { runRuntimeProcess } from "./runtime-process.js";
+import { removeWorktreeLinks } from "./worktree-links.js";
 
 const execFileP = promisify(execFile);
 const OPENSANDBOX_METADATA = ".uh-opensandbox.json";
@@ -136,6 +137,9 @@ export class GitWorktreeBackend implements SandboxBackend {
 
   async teardown(ctx: SandboxTeardownContext, opts: SandboxTeardownOptions): Promise<{ branch_removed: boolean }> {
     if (await fileExists(ctx.worktreePath)) {
+      // Git for Windows' `worktree remove` deletes through junctions; drop
+      // every link first so only the worktree's own files are removed.
+      await removeWorktreeLinks(ctx.worktreePath);
       await unlockWorktree(ctx.root, ctx.worktreePath);
       const removeArgs = ["worktree", "remove"];
       if (opts.force) removeArgs.push("--force");
