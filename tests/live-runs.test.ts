@@ -19,6 +19,7 @@ import {
   settleLiveRun,
   teamFromArtifactRoot,
   type LiveRunRecord,
+  type LiveRunView,
   type NativeProcess,
 } from "../src/harness/live-runs.js";
 import { claimRuntimeAttempt } from "../src/harness/runtime-attempt.js";
@@ -100,6 +101,41 @@ async function seedControl(
   );
   return runDir;
 }
+
+/**
+ * Write the run's `run-digest.json` with the given stalled calls, leaving every
+ * other digest block empty so only the loop signal is under test.
+ */
+async function seedDigest(
+  runDir: string,
+  longRunningTools: Array<Record<string, unknown>>,
+): Promise<void> {
+  await writeFile(
+    path.join(runDir, "run-digest.json"),
+    JSON.stringify({
+      schema_version: "uh.run-digest.v0",
+      generated_at: iso(NOW),
+      runtime: "oh-my-pi",
+      turns: 3,
+      current_activity: { kind: "tool", since: iso(NOW - 420_000), detail: "shell_command" },
+      recent_calls: [],
+      files_written: { files: [], total: 0 },
+      denials: [],
+      native_refusals: 0,
+      usage: {},
+      efficiency: {},
+      loop_signals: {
+        identical_repeats: 0,
+        alternating_pairs: 0,
+        distinct_targets: 3,
+        long_running_tools: longRunningTools,
+      },
+    }),
+    "utf-8",
+  );
+}
+
+const STALLED_SHELL_COMMAND = [{ tool: "shell_command", target: "bunx vitest run", minutes: 7 }];
 
 function processes(list: Array<Partial<NativeProcess> & { pid: number; ppid: number }>): NativeProcess[] {
   return list.map((entry) => ({
@@ -415,6 +451,76 @@ describe("uh ps presentation", () => {
   test("empty registry formats as no live runs", async () => {
     expect(formatLiveRuns([], { now: NOW })).toBe("No live runs.");
   });
+
+  test("a registry run whose digest reports a stalled call shows STALLED on its row", async () => {
+    const runId = "20260922T101100Z-ddddd1";
+    const runDir = await seedControl(ROOT, "wave", runId, { controller_pid: 4242 });
+    await seedDigest(runDir, STALLED_SHELL_COMMAND);
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: "wave", runtime: "oh-my-pi" });
+
+    const { records } = await listLiveRuns(ROOT, {
+      processes: processes([{ pid: 4242, ppid: 1 }]), now: NOW, persist: false,
+    });
+    const found = records.find((entry) => entry.run_id === runId)!;
+    expect(found.stalled_tools).toEqual(STALLED_SHELL_COMMAND);
+    const line = formatLiveRuns(records, { now: NOW });
+    expect(line).toContain("STALLED tool=shell_command 7m");
+    expect(line).toContain("live");
+    expect(line).toContain("pids=4242");
+  });
+
+  test("a scanned run with no registry entry carries the stalled call too", async () => {
+    const runId = "20260922T101130Z-ddddd2";
+    const runDir = await seedControl(ROOT, "scanned", runId, { controller_pid: 4242 });
+    await seedDigest(runDir, STALLED_SHELL_COMMAND);
+
+    const { records } = await listLiveRuns(ROOT, {
+      processes: processes([{ pid: 4242, ppid: 1 }]), now: NOW, persist: false,
+    });
+    const found = records.find((entry) => entry.run_id === runId)!;
+    expect(found.source).toBe("scan");
+    expect(found.stalled_tools).toEqual(STALLED_SHELL_COMMAND);
+    expect(formatLiveRuns(records, { now: NOW })).toContain("STALLED tool=shell_command 7m");
+  });
+
+  test("a digest without the signal, and a run without a digest, change nothing", async () => {
+    const quietId = "20260922T101200Z-ddddd3";
+    const quietDir = await seedControl(ROOT, "quiet", quietId, { controller_pid: 4242 });
+    await seedDigest(quietDir, []);
+    const noDigestId = "20260922T101230Z-ddddd4";
+    await seedControl(ROOT, "no-digest", noDigestId, { controller_pid: 4242 });
+
+    const { records } = await listLiveRuns(ROOT, {
+      processes: processes([{ pid: 4242, ppid: 1 }]), now: NOW, persist: false,
+    });
+    expect(records).toHaveLength(2);
+    expect(records.every((entry) => entry.stalled_tools === undefined)).toBe(true);
+    expect(formatLiveRuns(records, { now: NOW })).not.toContain("STALLED");
+  });
+
+  test("a malformed digest is read as no signal", async () => {
+    const runId = "20260922T101300Z-ddddd5";
+    const runDir = await seedControl(ROOT, "garbage", runId, { controller_pid: 4242 });
+    await writeFile(path.join(runDir, "run-digest.json"), "{ not json", "utf-8");
+
+    const { records } = await listLiveRuns(ROOT, {
+      processes: processes([{ pid: 4242, ppid: 1 }]), now: NOW, persist: false,
+    });
+    expect(records.find((entry) => entry.run_id === runId)!.stalled_tools).toBeUndefined();
+    expect(formatLiveRuns(records, { now: NOW })).not.toContain("STALLED");
+  });
+
+  test("every stalled call is listed on the row, in digest order", () => {
+    const view: LiveRunView = {
+      ...record({ stalled_tools: [
+        { tool: "shell_command", target: "bunx vitest run", minutes: 7 },
+        { tool: "grep", target: "src", minutes: 9 },
+      ] }),
+      liveness: "live",
+      children: [],
+    };
+    expect(formatLiveRuns([view], { now: NOW })).toContain("STALLED tool=shell_command 7m,tool=grep 9m");
+  });
 });
 
 /* ------------------------------------------------------------- CLI contract */
@@ -447,6 +553,22 @@ describe("uh ps CLI", () => {
     } finally {
       await rm(cleanRoot, { recursive: true, force: true });
     }
+  }, 60_000);
+
+  test("--json carries stalled_tools for a run whose digest reports a stalled call", async () => {
+    const runId = "20260922T101400Z-eeeee1";
+    const runDir = await seedControl(ROOT, "wave", runId, { controller_pid: 4242 });
+    await seedDigest(runDir, STALLED_SHELL_COMMAND);
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: "wave", runtime: "oh-my-pi" });
+
+    const ps = runPs(["ps", "--root", ROOT, "--json"]);
+    const parsed = JSON.parse(ps.stdout) as {
+      runs: Array<{ run_id: string; stalled_tools?: typeof STALLED_SHELL_COMMAND }>;
+    };
+    expect(parsed.runs.find((entry) => entry.run_id === runId)?.stalled_tools).toEqual(STALLED_SHELL_COMMAND);
+
+    const plain = runPs(["ps", "--root", ROOT]);
+    expect(plain.stdout).toContain("STALLED tool=shell_command 7m");
   }, 60_000);
 });
 

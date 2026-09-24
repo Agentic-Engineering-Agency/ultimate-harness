@@ -4,9 +4,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { RuntimeControlSchema, type RuntimeControl } from "../schema/runtime-control.js";
+import type { RunDigestLongRunningTool } from "../schema/run-digest.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { assertValidRunId } from "./run-id.js";
+import { readRunDigest } from "./run-digest.js";
 import { elapsedMs, notifyRunSettled } from "./notifications.js";
 import type { MissionArtifactContext } from "../adapters/_artifact-context.js";
 
@@ -101,6 +103,12 @@ export interface LiveRunRecord {
   peak_memory_bytes?: number;
   last_event_at?: string;
   last_tool?: string;
+  /**
+   * Tool calls the run's digest reports as stalled: in flight with no end
+   * event and no output beyond the digest's stall window. Absent, like the
+   * signal itself, whenever the digest carries none.
+   */
+  stalled_tools?: RunDigestLongRunningTool[];
 }
 
 export interface LiveRunView extends LiveRunRecord {
@@ -383,6 +391,18 @@ async function readEventsTail(
   }
 }
 
+/**
+ * Stalled tool calls from the run's `run-digest.json`, which lives beside its
+ * `runtime-control.json`. A missing or malformed digest carries no signal.
+ */
+async function readStalledTools(
+  projectRoot: string,
+  controlPathRel: string,
+): Promise<RunDigestLongRunningTool[]> {
+  const digest = await readRunDigest(path.dirname(path.resolve(projectRoot, controlPathRel)));
+  return digest?.loop_signals.long_running_tools ?? [];
+}
+
 interface ScannedControl {
   runId: string;
   controlPathRel: string;
@@ -433,6 +453,7 @@ async function scanForRuntimeControls(projectRoot: string): Promise<ScannedContr
 async function hydrateRegistryRecord(projectRoot: string, entry: LiveRunEntry): Promise<LiveRunRecord> {
   const control = await readControlFile(projectRoot, entry.control_path);
   const events = await readEventsTail(projectRoot, entry.control_path);
+  const stalledTools = await readStalledTools(projectRoot, entry.control_path);
   return {
     source: "registry",
     run_id: entry.run_id,
@@ -459,6 +480,7 @@ async function hydrateRegistryRecord(projectRoot: string, entry: LiveRunEntry): 
     ...(entry.settled_at !== undefined ? { settled_at: entry.settled_at } : {}),
     ...(events.lastEventAt !== undefined ? { last_event_at: events.lastEventAt } : {}),
     ...(events.lastTool !== undefined ? { last_tool: events.lastTool } : {}),
+    ...(stalledTools.length > 0 ? { stalled_tools: stalledTools } : {}),
   };
 }
 
@@ -466,6 +488,7 @@ async function hydrateScannedRecord(projectRoot: string, found: ScannedControl):
   const control = await readControlFile(projectRoot, found.controlPathRel);
   if (control === undefined) return undefined;
   const events = await readEventsTail(projectRoot, found.controlPathRel);
+  const stalledTools = await readStalledTools(projectRoot, found.controlPathRel);
   const team = teamFromArtifactRoot(projectRoot, found.artifactRootAbs);
   return {
     source: "scan",
@@ -488,6 +511,7 @@ async function hydrateScannedRecord(projectRoot: string, found: ScannedControl):
     ...(team !== undefined ? { team } : {}),
     ...(events.lastEventAt !== undefined ? { last_event_at: events.lastEventAt } : {}),
     ...(events.lastTool !== undefined ? { last_tool: events.lastTool } : {}),
+    ...(stalledTools.length > 0 ? { stalled_tools: stalledTools } : {}),
   };
 }
 
@@ -727,8 +751,16 @@ export function formatLiveRuns(records: readonly LiveRunView[], options: { now?:
         `denials=${record.denials ?? 0}`,
         `hb=${heartbeat}`,
         `last=${record.last_tool ?? "-"} (${lastAge})`,
+        ...formatStalledTools(record.stalled_tools),
         `pids=${pids}`,
       ].join("  ");
     })
     .join("\n");
+}
+
+/** The stalled-call segment of a row: empty unless the run's digest reports one. */
+function formatStalledTools(stalled: readonly RunDigestLongRunningTool[] | undefined): string[] {
+  if (stalled === undefined || stalled.length === 0) return [];
+  const calls = stalled.map((call) => `tool=${call.tool} ${call.minutes}m`).join(",");
+  return [`STALLED ${calls}`];
 }
