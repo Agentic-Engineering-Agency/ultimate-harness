@@ -3,8 +3,11 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { NotificationsSchema } from "../src/schema/project.js";
 import {
   DEFAULT_EVENT_ENV,
+  DEFAULT_TOAST_APP_ID,
+  TOAST_HANDED_OFF_MESSAGE,
   buildSettlementEvents,
   buildTeamSettledEvent,
   deliveriesPath,
@@ -17,11 +20,18 @@ import {
   expandPreset,
   loadNotificationConfig,
   notifyRunSettled,
+  parseWindowsToastSetting,
+  readWindowsToastSetting,
+  reportAttempt,
   resolveSink,
   sinkMatches,
+  sinkConfirmation,
+  windowsToastScript,
+  type DeliveryAttempt,
   type NotificationEvent,
   type ResolvedCommandSink,
   type ResolvedWebhookSink,
+  type WindowsToastPresetSink,
 } from "../src/harness/notifications.js";
 
 let WORK: string;
@@ -204,6 +214,48 @@ describe("preset expansion", () => {
       expect(sink.argv.slice(0, 6)).toEqual(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"]);
       expect(sink.argv[6]).toContain("ToastNotificationManager");
     }
+  });
+
+  test("windows-toast is a handoff: its exit status proves nothing about the display", () => {
+    const toast = resolveSink({ id: "w", preset: "windows-toast" });
+    expect(sinkConfirmation(toast)).toBe("handoff");
+    expect(sinkConfirmation(resolveSink({ id: "h", kind: "command", argv: ["true"] }))).toBe("exit-code");
+    expect(sinkConfirmation(resolveSink({ id: "n", kind: "webhook", url: "https://example.invalid/x" }))).toBe("http-status");
+  });
+
+  test("the toast is raised under the registered Windows PowerShell app id by default", () => {
+    const script = windowsToastScript();
+    expect(script).toContain(`CreateToastNotifier('${DEFAULT_TOAST_APP_ID}')`);
+    expect(script).not.toContain("CreateToastNotifier('Ultimate Harness')");
+    expect(DEFAULT_TOAST_APP_ID).toBe("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe");
+  });
+
+  test("app_id overrides the app id the toast is raised under", () => {
+    const sink: WindowsToastPresetSink = { id: "w", preset: "windows-toast", app_id: "Contoso.UltimateHarness" };
+    const resolved = expandPreset(sink);
+    expect(resolved.transport).toBe("command");
+    if (resolved.transport === "command") {
+      expect(resolved.argv[6]).toContain(`CreateToastNotifier('Contoso.UltimateHarness')`);
+      expect(resolved.argv[6]).not.toContain(DEFAULT_TOAST_APP_ID);
+      expect(windowsToastScript(sink.app_id)).toBe(resolved.argv[6]);
+    }
+    const blank = { id: "w", preset: "windows-toast", app_id: "   " } as WindowsToastPresetSink;
+    expect(() => expandPreset(blank)).toThrow(/requires "app_id"/);
+  });
+
+  test("a config file may set app_id on a windows-toast sink, and it reaches the toast command", () => {
+    const parsed = NotificationsSchema.parse({ sinks: [{ id: "w", preset: "windows-toast", app_id: "Contoso.UltimateHarness" }] });
+    const resolved = expandPreset(parsed.sinks[0] as WindowsToastPresetSink);
+    expect(resolved.transport).toBe("command");
+    if (resolved.transport === "command") {
+      expect(resolved.argv[6]).toContain(`CreateToastNotifier('Contoso.UltimateHarness')`);
+    }
+  });
+
+  test("a configured app id cannot break out of its PowerShell literal", () => {
+    expect(windowsToastScript("a');b")).toContain("CreateToastNotifier('a'');b')");
+    expect(windowsToastScript("a\r\nb")).toContain("CreateToastNotifier('ab')");
+    expect(windowsToastScript("a`b")).toContain("CreateToastNotifier('a`b')");
   });
 
   test("preset options required by the preset are enforced", () => {
@@ -457,6 +509,25 @@ describe("webhook delivery", () => {
     expect(JSON.parse(received[0].body).event).toBe("run.settled");
   });
 
+  test("a successful webhook records the status it confirmed", async () => {
+    const sink: ResolvedWebhookSink = {
+      id: "hook",
+      kind: "webhook",
+      transport: "webhook",
+      url: `http://127.0.0.1:${port}/hook`,
+      method: "POST",
+      headers: [],
+      body: "json",
+      events: ["*"],
+    };
+    const event = buildSettlementEvents({ run_id: "r1", mission: "m", runtime: "hermes", status: "failed" })[0];
+    const attempt = await deliverToSink(sink, event, { env });
+    expect(attempt.outcome).toBe("ok");
+    expect(attempt.confirmation).toBe("http-status");
+    expect(attempt.status).toBe(200);
+    expect(reportAttempt(attempt)).toEqual({ tag: "OK", message: "HTTP 200 accepted" });
+  });
+
   test("ntfy-style text webhook renders the subject into the Title header", async () => {
     const sink: ResolvedWebhookSink = {
       id: "ntfy",
@@ -475,12 +546,60 @@ describe("webhook delivery", () => {
   });
 });
 
+describe("what an attempt confirms", () => {
+  const event: NotificationEvent = { event: "notify.test", at: NOW, subject: "UH notify test", summary: "hello", status: "test" };
+
+  function attemptWith(overrides: Partial<DeliveryAttempt>): DeliveryAttempt {
+    return { at: NOW, event: "notify.test", sink: "s", transport: "command", outcome: "ok", ...overrides };
+  }
+
+  test("a command that exits 0 reports its exit status", async () => {
+    const attempts = await dispatchEvent(ROOT, event, { sinks: [commandSink("log")], deps: { env }, ignoreDedupe: true });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0].confirmation).toBe("exit-code");
+    expect(attempts[0].exit_code).toBe(0);
+    expect(reportAttempt(attempts[0])).toEqual({ tag: "OK", message: "exited 0" });
+  });
+
+  test("a toast reports a handoff, never a delivery", async () => {
+    const toast: ResolvedCommandSink = { ...commandSink("desktop"), confirmation: "handoff" };
+    const attempts = await dispatchEvent(ROOT, event, { sinks: [toast], deps: { env }, ignoreDedupe: true });
+    expect(attempts[0].outcome).toBe("ok");
+    expect(attempts[0].confirmation).toBe("handoff");
+    const report = reportAttempt(attempts[0]);
+    expect(report.tag).toBe("HANDOFF");
+    expect(report.message).toBe("handed to Windows (display cannot be confirmed)");
+    expect(report.message).toBe(TOAST_HANDED_OFF_MESSAGE);
+  });
+
+  test("the ledger records what each success proved", async () => {
+    await dispatchEvent(ROOT, event, { sinks: [commandSink("logged")], deps: { env } });
+    const lines = (await readFile(deliveriesPath(ROOT), "utf8")).split("\n").filter((line) => line.trim().length > 0);
+    const record = JSON.parse(lines[0]) as DeliveryAttempt;
+    expect(record.outcome).toBe("ok");
+    expect(record.confirmation).toBe("exit-code");
+    expect(record.exit_code).toBe(0);
+  });
+
+  test("failures and timeouts are named by what happened", () => {
+    expect(reportAttempt(attemptWith({ transport: "command" }))).toEqual({ tag: "OK", message: "exited 0" });
+    expect(reportAttempt(attemptWith({ transport: "webhook", status: 204 }))).toEqual({ tag: "OK", message: "HTTP 204 accepted" });
+    expect(reportAttempt(attemptWith({ outcome: "error", exit_code: 3 }))).toEqual({ tag: "FAIL", message: "exit code 3" });
+    expect(reportAttempt(attemptWith({ outcome: "error", exit_code: 3, detail: "boom" }))).toEqual({ tag: "FAIL", message: "boom" });
+    expect(reportAttempt(attemptWith({ transport: "webhook", outcome: "error", status: 500 }))).toEqual({ tag: "FAIL", message: "HTTP 500" });
+    expect(reportAttempt(attemptWith({ outcome: "error", detail: "spawn failed: ENOENT" }))).toEqual({ tag: "FAIL", message: "spawn failed: ENOENT" });
+    expect(reportAttempt(attemptWith({ outcome: "timeout", detail: "timed out after 15000 ms" }))).toEqual({ tag: "TIMEOUT", message: "timed out after 15000 ms" });
+    expect(reportAttempt(attemptWith({ outcome: "timeout" }))).toEqual({ tag: "TIMEOUT", message: "delivery timed out" });
+    expect(reportAttempt(attemptWith({ confirmation: "handoff" }))).toEqual({ tag: "HANDOFF", message: TOAST_HANDED_OFF_MESSAGE });
+  });
+});
+
 describe("detect", () => {
   test("reports a fake hermes on a temporary PATH", async () => {
     const bin = path.join(WORK, "bin");
     await mkdir(bin, { recursive: true });
     await writeFile(path.join(bin, "hermes"), "#!/bin/sh\nexit 0\n", "utf8");
-    const detections = await detectPresets({ ...env, PATH: bin, Path: bin, PATHEXT: ".EXE" });
+    const detections = await detectPresets({ ...env, PATH: bin, Path: bin, PATHEXT: ".EXE" }, { readToastSetting: async () => "enabled" });
     const hermes = detections.find((detection) => detection.preset === "hermes")!;
     expect(hermes.available).toBe(true);
     expect(hermes.detail).toContain(bin);
@@ -491,6 +610,52 @@ describe("detect", () => {
     expect(ntfy.available).toBe(true);
     const toast = detections.find((detection) => detection.preset === "windows-toast")!;
     expect(toast.available).toBe(process.platform === "win32");
+  });
+
+  test("offers windows-toast under the registered app id where Windows notifications are on", async () => {
+    const detections = await detectPresets(env, { platform: "win32", readToastSetting: async () => "enabled" });
+    const toast = detections.find((detection) => detection.preset === "windows-toast")!;
+    expect(toast.available).toBe(true);
+    expect(toast.detail).toContain(DEFAULT_TOAST_APP_ID);
+    expect(toast.config).toContain("preset: windows-toast");
+    expect(toast.config).not.toContain("app_id");
+  });
+
+  test("reports windows-toast unavailable when Windows notifications are turned off", async () => {
+    const detections = await detectPresets(env, { platform: "win32", readToastSetting: async () => "disabled" });
+    const toast = detections.find((detection) => detection.preset === "windows-toast")!;
+    expect(toast.available).toBe(false);
+    expect(toast.detail).toContain("notifications are turned off in Windows settings");
+    expect(toast.config).toBeUndefined();
+  });
+
+  test("never calls toasts unavailable over a setting it could not read, and skips the lookup off Windows", async () => {
+    let looked = 0;
+    const readToastSetting = async () => { looked += 1; return "unknown" as const; };
+    const unreadable = await detectPresets(env, { platform: "win32", readToastSetting });
+    expect(unreadable.find((detection) => detection.preset === "windows-toast")!.available).toBe(true);
+    expect(looked).toBe(1);
+    const linux = await detectPresets(env, { platform: "linux", readToastSetting });
+    const toast = linux.find((detection) => detection.preset === "windows-toast")!;
+    expect(toast.available).toBe(false);
+    expect(toast.detail).toBe("not available on linux");
+    expect(looked).toBe(1);
+  });
+
+  test("reads the ToastEnabled value out of reg query output", () => {
+    const header = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications\n";
+    expect(parseWindowsToastSetting(`${header}    ToastEnabled    REG_DWORD    0x1\n`)).toBe("enabled");
+    expect(parseWindowsToastSetting(`${header}    ToastEnabled    REG_DWORD    0x0\n`)).toBe("disabled");
+    expect(parseWindowsToastSetting(`${header}    ToastEnabled    REG_SZ    1\n`)).toBe("enabled");
+    expect(parseWindowsToastSetting(`${header}    ToastEnabled    REG_DWORD    0\n`)).toBe("disabled");
+    expect(parseWindowsToastSetting(`${header}    SilentLiveView    REG_DWORD    0x1\n`)).toBe("unknown");
+    expect(parseWindowsToastSetting("ERROR: The system was unable to find the specified registry key or value.")).toBe("unknown");
+    expect(parseWindowsToastSetting(`${header}    ToastEnabled    REG_DWORD    notavalue\n`)).toBe("unknown");
+    expect(parseWindowsToastSetting(undefined)).toBe("unknown");
+  });
+
+  test("reading this machine's toast setting never fails detection", async () => {
+    expect(["enabled", "disabled", "unknown"]).toContain(await readWindowsToastSetting(env));
   });
 
   test("describeSink surfaces the transport and filters", () => {

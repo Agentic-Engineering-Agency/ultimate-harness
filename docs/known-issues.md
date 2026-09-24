@@ -27,18 +27,23 @@ session and not re-checked at this commit. A fix removes its entry in the same c
 |---|---|
 | `uh steer` on an orchestrator stops its session and leaves the workers it launched orphaned; they stop mid-work without committing. Steer an orchestrator only between its steps. | Confirmed (an orchestrator steered mid-wave orphaned a worker at turn 42). |
 | Real settled runs have not produced deliveries to configured notification sinks; `uh notify test` delivers. | Reported. |
+| A Windows toast sent through the `windows-toast` preset is reported as a handoff: PowerShell accepted it, but whether Windows displays it (registered app id, notification settings) cannot be confirmed by UH and has not been checked by eye since the app id changed. | Confirmed (by design, unverified live). |
+| `--root` on `uh notify detect`, `list` and `test` has no CLI test. | Confirmed. |
+| The toast and notification-report change was recovered from a worker stopped before it finished and was not independently reviewed. | Confirmed. |
 | `uh ps` turn counts for Claude Code (distinct assistant message ids) and ACP (agent activity until a tool call completes) are tested on recorded streams only; the ACP rule is a heuristic that has not been checked against a live run. | Confirmed. |
 | Supervision now counts Claude Code turns, so `limits.max_turns` can stop a Claude Code run where it previously never counted; not yet observed on a live run. | Confirmed (behaviour change). |
 | When neither the run's control file nor its digest has a turn count, `uh ps` reads the run's whole `events.ndjson` to count turns, which is slow for very long runs. | Confirmed in `src/harness/live-runs.ts`. |
 | The turn-count change was recovered from a worker stopped before it finished and was not independently reviewed. | Confirmed. |
 | `uh wait` returned `orphaned` for a run that passed. | Reported. |
 | A blocked run can leave a second run id inside a sandbox, and `UH_RESULT` can name a run directory that was never created. | Reported. |
+| Eight concurrent sandbox creations failed once on Linux CI: one `git worktree add` failed under contention (`tests/sandbox.test.ts`, "eight concurrent createSandbox calls all register"). The same test passed on the other Linux CI runs of this line; it has not been reproduced. | Confirmed once (Linux CI). |
 | Team memory reservations are released by controller pid; workers sharing one controller pid may release each other's reservations and over-admit. | Hypothesis, untested. |
 
 ## Guard
 
 | What goes wrong | Status |
 |---|---|
+| **On Linux, a shell delete of the hive is not a tamper stop.** `rm -rf "<project>/.harness/hive"` is refused, but as `delete_outside` instead of stopping the run as `guard_tamper`, in the Command Code hook, the Claude Code hook and the oh-my-pi extension. File-tool writes, edits and deletes of hive records and shell writes to them are stopped as tamper on Linux too. The same tests pass on Windows; the cause in the shell delete parser has not been found yet. | Confirmed on Linux CI (`tests/hive-integrity.test.ts`, 4 failing tests). |
 | Package installs issued through Command Code's PowerShell tool are not denied as `package_install`. | Reported. |
 | A `.harness` path inside a worker's own scratch directory is treated as `guard_tamper` and hard-stops the run. | Reported. |
 | PowerShell targets built with `(Join-Path ...)` are denied as literal paths; `nohup cmd 2>&1` without a trailing `&` is denied as `containment_escape`. | Reported. |

@@ -64,6 +64,15 @@ export interface NotificationEvent {
 /* Resolved sinks                                                             */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * How much a *successful* delivery attempt actually proves:
+ * - `exit-code` — the command exited 0, which is its own claim of delivery.
+ * - `http-status` — the endpoint answered with a 2xx status.
+ * - `handoff` — the payload only left UH for another subsystem that can still
+ *   drop it silently, so success proves nothing about what the operator sees.
+ */
+export type DeliveryConfirmation = "exit-code" | "http-status" | "handoff";
+
 export interface ResolvedCommandSink {
   id: string;
   kind: "command";
@@ -72,6 +81,8 @@ export interface ResolvedCommandSink {
   envVar: string;
   events: string[];
   filter?: NotificationFilter;
+  /** Narrows what an `ok` outcome means for this sink. Defaults to `exit-code`. */
+  confirmation?: DeliveryConfirmation;
 }
 
 export interface ResolvedWebhookHeader {
@@ -127,19 +138,41 @@ export function userNotificationsFile(env: NodeJS.ProcessEnv = process.env): str
 const EVENT_PLACEHOLDER = "{event}";
 const SUBJECT_PLACEHOLDER = "{subject}";
 
-/** PowerShell that raises a toast through built-in Windows APIs only, reading the message from stdin. */
-export const WINDOWS_TOAST_SCRIPT: string = [
-  "$ErrorActionPreference='Stop'",
-  "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null",
-  "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime] | Out-Null",
-  "$message = [Console]::In.ReadToEnd()",
-  "if ([string]::IsNullOrWhiteSpace($message)) { $message = 'Ultimate Harness notification' }",
-  "$escaped = [System.Security.SecurityElement]::Escape($message)",
-  "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument",
-  "$xml.LoadXml(\"<toast><visual><binding template='ToastGeneric'><text>Ultimate Harness</text><text>$escaped</text></binding></visual></toast>\")",
-  "$toast = New-Object Windows.UI.Notifications.ToastNotification $xml",
-  "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Ultimate Harness').Show($toast)",
-].join("\n");
+/**
+ * Windows delivers a desktop app's toast only under an AppUserModelID it
+ * recognises — one registered by a Start-menu shortcut — and silently drops
+ * every other id (Microsoft Learn, `ToastNotificationManager.CreateToastNotifier`).
+ * A made-up name like "Ultimate Harness" is registered nowhere, so the default is
+ * Windows PowerShell's own id, which exists on every machine that has Windows
+ * PowerShell. `Get-StartApps` lists the ids available on a machine; a sink's
+ * `app_id` overrides this one.
+ */
+export const DEFAULT_TOAST_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+/** A value as a PowerShell single-quoted literal: only `'` needs escaping, by doubling. */
+function powershellLiteral(value: string): string {
+  return `'${value.replace(/[\r\n\0]/g, "").replace(/'/g, "''")}'`;
+}
+
+/**
+ * PowerShell that raises a toast through built-in Windows APIs only, reading the
+ * message from stdin. `appId` must be a registered AppUserModelID or Windows
+ * drops the toast without any error for the exit status to report.
+ */
+export function windowsToastScript(appId: string = DEFAULT_TOAST_APP_ID): string {
+  return [
+    "$ErrorActionPreference='Stop'",
+    "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null",
+    "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime] | Out-Null",
+    "$message = [Console]::In.ReadToEnd()",
+    "if ([string]::IsNullOrWhiteSpace($message)) { $message = 'Ultimate Harness notification' }",
+    "$escaped = [System.Security.SecurityElement]::Escape($message)",
+    "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument",
+    "$xml.LoadXml(\"<toast><visual><binding template='ToastGeneric'><text>Ultimate Harness</text><text>$escaped</text></binding></visual></toast>\")",
+    "$toast = New-Object Windows.UI.Notifications.ToastNotification $xml",
+    `[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(${powershellLiteral(appId)}).Show($toast)`,
+  ].join("\n");
+}
 
 function eventsOf(sink: NotificationSink): string[] {
   return sink.events && sink.events.length > 0 ? [...sink.events] : ["*"];
@@ -147,6 +180,25 @@ function eventsOf(sink: NotificationSink): string[] {
 
 function normalizeUrl(base: string, suffix: string): string {
   return `${base.replace(/\/+$/, "")}/${suffix.replace(/^\/+/, "")}`;
+}
+
+/**
+ * A `windows-toast` preset sink. `app_id` picks the AppUserModelID the toast is
+ * raised under; the option is declared here because `NotificationPresetSinkSchema`
+ * in `src/schema/project.ts` is what decides whether a config file may carry it.
+ */
+export interface WindowsToastPresetSink extends NotificationPresetSink {
+  preset: "windows-toast";
+  app_id?: string;
+}
+
+/** The AppUserModelID a toast sink raises under: its `app_id`, else {@link DEFAULT_TOAST_APP_ID}. */
+function toastAppId(sink: NotificationPresetSink): string {
+  const configured = (sink as WindowsToastPresetSink).app_id;
+  if (configured === undefined) return DEFAULT_TOAST_APP_ID;
+  const appId = configured.trim();
+  if (appId.length === 0) throw new Error(`notification sink "${sink.id}": preset windows-toast requires "app_id" to be a non-empty string`);
+  return appId;
 }
 
 /**
@@ -197,8 +249,12 @@ export function expandPreset(sink: NotificationPresetSink): ResolvedSink {
         ...common,
         kind: "command",
         transport: "command",
-        argv: ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", WINDOWS_TOAST_SCRIPT],
+        argv: ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", windowsToastScript(toastAppId(sink))],
         envVar: DEFAULT_EVENT_ENV,
+        // PowerShell exiting 0 only means it handed the toast to Windows; whether
+        // it appears depends on the app id being registered and on the user's
+        // notification settings, neither of which the exit code can see.
+        confirmation: "handoff",
       };
     }
   }
@@ -411,6 +467,8 @@ export interface DeliveryAttempt {
   sink: string;
   transport: "command" | "webhook";
   outcome: DeliveryOutcome;
+  /** What an `ok` outcome proves for this sink: exit status, HTTP status, or only a handoff. */
+  confirmation?: DeliveryConfirmation;
   exit_code?: number;
   status?: number;
   detail?: string;
@@ -493,7 +551,7 @@ async function deliverCommand(
   const result = await runCommand(argv, messageText(event), env, timeoutMs);
   if (result.error !== undefined) return { outcome: "error", detail: `spawn failed: ${result.error}` };
   if (result.timedOut) return { outcome: "timeout", detail: `timed out after ${timeoutMs} ms` };
-  if (result.code === 0) return { outcome: "ok" };
+  if (result.code === 0) return { outcome: "ok", exit_code: 0 };
   return {
     outcome: "error",
     ...(result.code !== null ? { exit_code: result.code } : {}),
@@ -536,6 +594,12 @@ async function deliverWebhook(
   }
 }
 
+/** What a successful attempt on this sink proves. */
+export function sinkConfirmation(sink: ResolvedSink): DeliveryConfirmation {
+  if (sink.transport === "webhook") return "http-status";
+  return sink.confirmation === "handoff" ? "handoff" : "exit-code";
+}
+
 /** Deliver one event to one sink; never throws, always returns an attempt record. */
 export async function deliverToSink(sink: ResolvedSink, event: NotificationEvent, deps: DeliveryDeps = {}): Promise<DeliveryAttempt> {
   const timeoutMs = deps.timeoutMs ?? NOTIFICATION_TIMEOUT_MS;
@@ -545,6 +609,7 @@ export async function deliverToSink(sink: ResolvedSink, event: NotificationEvent
     ...(event.run_id !== undefined ? { run_id: event.run_id } : {}),
     sink: sink.id,
     transport: sink.transport,
+    confirmation: sinkConfirmation(sink),
   } as const;
   try {
     const result = sink.transport === "command"
@@ -743,8 +808,83 @@ export interface PresetDetection {
   config?: string;
 }
 
+export interface PresetDetectionDeps {
+  /** Overrides the platform the Windows-only preset is judged on (tests). */
+  platform?: NodeJS.Platform;
+  /** Overrides the Windows notification-setting lookup (tests). */
+  readToastSetting?: (env: NodeJS.ProcessEnv) => Promise<WindowsToastSetting>;
+}
+
+/** Where Windows stores the user's global "notifications" toggle. */
+export const WINDOWS_TOAST_SETTINGS_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications";
+
+/** How long a `reg query` may take before detection stops waiting on it. */
+const REGISTRY_QUERY_TIMEOUT_MS = 5_000;
+
+/** `disabled` means Windows suppresses every toast, whatever the sink is configured as. */
+export type WindowsToastSetting = "enabled" | "disabled" | "unknown";
+
+async function captureStdout(argv: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(argv[0], argv.slice(1), {
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+        env,
+      });
+    } catch {
+      resolve(undefined);
+      return;
+    }
+    let settled = false;
+    let stdout = "";
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (value: string | undefined): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      try { child.kill(); } catch { /* the child is already gone */ }
+      finish(undefined);
+    }, timeoutMs);
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      if (stdout.length < 4096) stdout += chunk;
+    });
+    child.on("error", () => finish(undefined));
+    child.on("close", (code) => finish(code === 0 ? stdout : undefined));
+  });
+}
+
+/**
+ * Read the `ToastEnabled` value out of `reg query` output. `undefined` means the
+ * key could not be read at all, which is never treated as "off".
+ */
+export function parseWindowsToastSetting(output: string | undefined): WindowsToastSetting {
+  if (output === undefined) return "unknown";
+  const value = /ToastEnabled\s+REG_[A-Z_]+\s+(\S+)/i.exec(output)?.[1];
+  if (value === undefined) return "unknown";
+  const parsed = /^0x/i.test(value) ? Number.parseInt(value.slice(2), 16) : Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return "unknown";
+  return parsed === 0 ? "disabled" : "enabled";
+}
+
+/**
+ * Read the user's global Windows notification toggle
+ * (`ToastEnabled` under {@link WINDOWS_TOAST_SETTINGS_KEY}). Anything UH cannot
+ * read is `unknown`, which never claims toasts are unavailable.
+ */
+export async function readWindowsToastSetting(env: NodeJS.ProcessEnv = process.env): Promise<WindowsToastSetting> {
+  const output = await captureStdout(["reg", "query", WINDOWS_TOAST_SETTINGS_KEY, "/v", "ToastEnabled"], env, REGISTRY_QUERY_TIMEOUT_MS);
+  return parseWindowsToastSetting(output);
+}
+
 /** Which preset tools this machine can use, with a ready-to-paste config for each found one. */
-export async function detectPresets(env: NodeJS.ProcessEnv = process.env): Promise<PresetDetection[]> {
+export async function detectPresets(env: NodeJS.ProcessEnv = process.env, deps: PresetDetectionDeps = {}): Promise<PresetDetection[]> {
   const detections: PresetDetection[] = [];
   const hermes = await findExecutable("hermes", env);
   detections.push({
@@ -770,12 +910,20 @@ export async function detectPresets(env: NodeJS.ProcessEnv = process.env): Promi
     detail: "needs only a server URL and topic (no tool to install)",
     config: "- id: ntfy\n  preset: ntfy\n  server: https://ntfy.sh\n  topic: <topic>\n  events: [\"*\"]",
   });
-  const toast = process.platform === "win32";
+  const platform = deps.platform ?? process.platform;
+  const onWindows = platform === "win32";
+  const toastSetting = onWindows ? await (deps.readToastSetting ?? readWindowsToastSetting)(env) : "unknown";
+  const toastSuppressed = toastSetting === "disabled";
+  const toastReady = onWindows && !toastSuppressed;
   detections.push({
     preset: "windows-toast",
-    available: toast,
-    detail: toast ? "Windows PowerShell toast is available" : `not available on ${process.platform}`,
-    ...(toast ? { config: "- id: windows-toast\n  preset: windows-toast\n  events: [\"*\"]" } : {}),
+    available: toastReady,
+    detail: !onWindows
+      ? `not available on ${platform}`
+      : toastSuppressed
+        ? "notifications are turned off in Windows settings; switch them on under Settings > System > Notifications"
+        : `Windows PowerShell toast is available (app id ${DEFAULT_TOAST_APP_ID})`,
+    ...(toastReady ? { config: "- id: windows-toast\n  preset: windows-toast\n  events: [\"*\"]" } : {}),
   });
   return detections;
 }
@@ -796,6 +944,38 @@ export function describeSink(sink: ResolvedSink): string {
     return `${sink.id} [command] ${sink.argv.join(" ")} events(${events})${filter}`;
   }
   return `${sink.id} [webhook] ${sink.method} ${sink.url} events(${events})${filter}`;
+}
+
+/** What a successful toast attempt can honestly claim: the handoff happened, nothing more. */
+export const TOAST_HANDED_OFF_MESSAGE = "handed to Windows (display cannot be confirmed)";
+
+export interface AttemptReport {
+  /** The status word `uh notify test` prints for this attempt. */
+  tag: "OK" | "HANDOFF" | "TIMEOUT" | "FAIL";
+  /** The evidence the attempt actually carries. */
+  message: string;
+}
+
+/**
+ * Say what an attempt proved rather than dressing a handoff up as a delivery:
+ * a command that exited 0, an endpoint that answered, a toast Windows may still
+ * drop, or the concrete failure.
+ */
+export function reportAttempt(attempt: DeliveryAttempt): AttemptReport {
+  if (attempt.outcome === "timeout") {
+    return { tag: "TIMEOUT", message: attempt.detail ?? "delivery timed out" };
+  }
+  if (attempt.outcome !== "ok") {
+    const fallback = attempt.transport === "webhook"
+      ? `HTTP ${attempt.status ?? "no response"}`
+      : `exit code ${attempt.exit_code ?? "unknown"}`;
+    return { tag: "FAIL", message: attempt.detail ?? fallback };
+  }
+  if (attempt.confirmation === "handoff") return { tag: "HANDOFF", message: TOAST_HANDED_OFF_MESSAGE };
+  if (attempt.transport === "webhook") {
+    return { tag: "OK", message: `HTTP ${attempt.status ?? "?"} accepted` };
+  }
+  return { tag: "OK", message: `exited ${attempt.exit_code ?? 0}` };
 }
 
 /** A generic test event for `uh notify test`. */
