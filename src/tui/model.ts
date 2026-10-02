@@ -12,7 +12,7 @@
  *   - never validate strictly enough that a single malformed YAML file
  *     blanks the whole pane (mirror `listAdapters` in `harness/status.ts`).
  */
-import { readdir, readFile, stat, access } from "node:fs/promises";
+import { readdir, readFile, realpath, stat, access } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import {
@@ -145,6 +145,15 @@ export async function loadAdapters(root: string): Promise<AdapterRow[]> {
   const rows: AdapterRow[] = [];
   for (const file of yamlFiles) {
     const manifestPath = path.join(dir, file);
+    // An adapter file symlinked outside the harness dir must not be read as a
+    // manifest; containment is checked on the resolved real path.
+    try {
+      const [realDir, realManifest] = await Promise.all([realpath(dir), realpath(manifestPath)]);
+      const relative = path.relative(realDir, realManifest);
+      if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    } catch {
+      continue;
+    }
     const fallbackId = file.replace(/\.ya?ml$/, "");
     try {
       const content = await readFile(manifestPath, "utf-8");

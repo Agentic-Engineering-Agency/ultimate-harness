@@ -214,16 +214,52 @@ def _reset_active_runs() -> Iterator[None]:
     background asyncio tasks (watchdog / eviction) the test spawned."""
     prev = dict(plugin_api._active_runs)
     plugin_api._active_runs.clear()
+    # ``_active_sse_tails`` is a module-level counter incremented by the SSE
+    # generator and decremented in its ``finally``. A few tests intentionally
+    # break out of an SSE stream early (e.g. the keepalive test iterates the
+    # generator directly and returns on the first keepalive); under
+    # httpx.ASGITransport that generator's ``finally`` may run on a later
+    # event loop or not at all, leaving the counter at a non-zero baseline.
+    # test_disconnect_stops_server_generator then sees that leaked +1 and
+    # fails its ``== 0`` assertion even though its own tail closed cleanly.
+    # Snapshot + zero the counter per test so the assertion measures only the
+    # current test's tails, then restore the prior value on teardown
+    # (symmetric with the _active_runs snapshot above).
+    prev_sse_tails = plugin_api._active_sse_tails
+    plugin_api._active_sse_tails = 0
     try:
         yield
     finally:
+        plugin_api._active_sse_tails = prev_sse_tails
         # Cancel any background tasks (watchdog, eviction) the test created
         # so they don't fire after the test exits.
+        #
+        # Blacksmith CI: this sync fixture's teardown runs *after*
+        # pytest-asyncio (pinned 0.24.0) has already closed the test's
+        # per-test event loop. Calling ``task.cancel()`` on that closed loop
+        # schedules ``loop.call_soon(...)`` and raises
+        # ``RuntimeError: Event loop is closed`` — surfacing as 17 teardown
+        # ERRORs. Guard each cancel: only touch a task whose loop is still
+        # open, and defensively swallow the RuntimeError in case the loop
+        # closes between the check and the cancel. Tasks bound to an
+        # already-closed loop are orphaned regardless; there is nothing to
+        # cancel because the loop that owned them is gone.
         for info in plugin_api._active_runs.values():
             for key in ("watchdog", "eviction"):
                 task = info.get(key)
-                if task is not None and not task.done():
+                if task is None or task.done():
+                    continue
+                try:
+                    loop = task.get_loop()
+                except RuntimeError:
+                    continue
+                if loop.is_closed():
+                    continue
+                try:
                     task.cancel()
+                except RuntimeError:
+                    # Loop closed between the is_closed() check and cancel().
+                    pass
         plugin_api._active_runs.clear()
         plugin_api._active_runs.update(prev)
 

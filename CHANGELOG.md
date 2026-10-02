@@ -2,19 +2,7 @@
 
 All notable changes to `@agenticengineeringagency/ultimate-harness` are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to [SemVer](https://semver.org/spec/v2.0.0.html).
 
-Issues are tracked in [Linear](https://linear.app/agentic-eng); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
-
-## [Unreleased]
-
-### Fixed
-
-- Native OMP progress is persisted before child exit, including UTF-8 and trailing-line handling. Nested assistant content and terminal errors are interpreted without treating arbitrary response IDs as authentication failures.
-- Sandboxed OMP execution publishes run facts to the host's canonical mission artifacts without promoting product changes. Cancellation settles the selected run and matching mission mirrors without overwriting newer run facts. Initial and streaming event-write failures settle writable terminal artifacts; the existing Observatory prefers an active run over a stale terminal result and rejects unsafe route metadata.
-- OMP token, cache, and reported cost totals aggregate completed assistant turns without counting repeated update/end envelopes, while retaining distinct explicit message identities. Incomplete measurements remain unknown rather than appearing as complete totals.
-- Product diff capture includes staged and unstaged text and applicable binary patches, leaves the Git index unchanged, and excludes generated harness bookkeeping while retaining harness configuration changes.
-- Team runs publish parent and isolated worker facts to durable host artifact scopes. The existing Observatory shows active/completed teams and reported worker usage after normal worktree cleanup; the leader's verification artifact is retained with the parent run.
-- Native OMP CLI interruption handles Ctrl-C (`SIGINT`) as well as `SIGTERM`, stops the owned process tree, and persists terminal cancellation facts before exit.
-- Verification timeouts terminate the owned process tree on Windows rather than leaving child commands behind. OMP and verification subprocesses no longer request separate Windows console windows.
+Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team/UH/active); PRs live in [GitHub](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pulls).
 
 ## [0.9.0] — 2026-05-29
 
