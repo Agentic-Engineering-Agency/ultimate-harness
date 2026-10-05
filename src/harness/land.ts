@@ -1,4 +1,4 @@
-import { access, appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -192,6 +192,7 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     try {
       await requireCleanReview({
         branch,
+        worktreePath: worktree.path,
         tip: tip.stdout.trim(),
         missionIds,
         reviewRoot,
@@ -467,6 +468,7 @@ type CollectedReview = {
 
 async function requireCleanReview(input: {
   branch: string;
+  worktreePath: string;
   tip: string;
   missionIds: string[];
   reviewRoot: string;
@@ -474,9 +476,18 @@ async function requireCleanReview(input: {
   git: LandGitRunner;
   root: string;
 }): Promise<void> {
-  const { branch, tip, missionIds, reviewRoot, reviews, git, root } = input;
-  const matched = reviews.filter((review) =>
-    review.request.sources.some((source) => missionIds.includes(source.mission_id)));
+  const { branch, worktreePath, tip, missionIds, reviewRoot, reviews, git, root } = input;
+  const workerRoot = await realpath(worktreePath);
+  const matched: Array<{ review: CollectedReview; source: IndependentReviewRequest["sources"][number] }> = [];
+  for (const review of reviews) {
+    for (const source of review.request.sources) {
+      if (!missionIds.includes(source.mission_id)) continue;
+      // Team workers share a mission id. The review's canonical source root
+      // identifies the particular retained worker that supplied its evidence.
+      const sourceRoot = await realpath(source.source_root).catch(() => undefined);
+      if (sourceRoot === workerRoot) matched.push({ review, source });
+    }
+  }
   if (matched.length === 0) {
     if (reviews.length === 0) {
       throw new ReviewGateError(
@@ -486,7 +497,8 @@ async function requireCleanReview(input: {
     }
     const first = reviews[0];
     throw new ReviewGateError(
-      `worker branch ${branch} has no collected independent review naming mission ${missionIds.join(", ")}; ` +
+      `worker branch ${branch} has no collected independent review naming mission ${missionIds.join(", ")} ` +
+        `from worktree ${workerRoot}; ` +
         `review ${first.reviewId} names ${first.request.sources.map((source) => source.mission_id).join(", ")} ` +
         `(first mismatching path: ${first.requestPath})`,
       reviews.map((review) => review.reviewId),
@@ -495,13 +507,19 @@ async function requireCleanReview(input: {
   // Accept the branch as soon as one collected review is bound to it; a single
   // unrelated or broken review must not mask a clean one.
   let firstFailure: ReviewGateError | undefined;
-  for (const review of matched) {
+  for (const { review, source } of matched) {
     try {
-      await assertReviewBoundToTip(review, branch, tip, missionIds, git, root);
+      await assertReviewBoundToTip(review, source, branch, tip, git, root);
       const contradicted = (review.assessment.claims ?? []).filter((claim) => claim.verdict === "contradicted");
       if (contradicted.length > 0) {
         throw new ReviewGateError(
           `contradicted claims in independent review ${review.reviewId}: ${contradicted.map((claim) => claim.claim).join("; ")}`,
+          [review.reviewId],
+        );
+      }
+      if (review.assessment.recommendation !== "pass") {
+        throw new ReviewGateError(
+          `independent review ${review.reviewId} recommends ${review.assessment.recommendation}, not pass`,
           [review.reviewId],
         );
       }
@@ -522,9 +540,9 @@ async function requireCleanReview(input: {
  */
 async function assertReviewBoundToTip(
   review: CollectedReview,
+  source: IndependentReviewRequest["sources"][number],
   branch: string,
   tip: string,
-  missionIds: string[],
   git: LandGitRunner,
   root: string,
 ): Promise<void> {
@@ -536,28 +554,25 @@ async function assertReviewBoundToTip(
       [review.reviewId],
     );
   }
-  for (const source of review.request.sources) {
-    if (!missionIds.includes(source.mission_id)) continue;
-    for (const file of source.files) {
-      if (file.kind !== "output" && file.kind !== "changed") continue;
-      if (file.state !== "present") continue;
-      const originalPath = file.original_path.replaceAll("\\", "/").replace(/^\.\/+/, "");
-      const shown = await git(["show", `${tip}:${originalPath}`], root);
-      if (shown.exitCode !== 0) {
-        throw new ReviewGateError(
-          `review ${review.reviewId} captures ${originalPath}, which ${branch} does not contain ` +
-            `(first mismatching path: ${originalPath})`,
-          [review.reviewId],
-        );
-      }
-      const actual = sha256Hex(shown.stdout);
-      if (file.sha256 !== actual) {
-        throw new ReviewGateError(
-          `review ${review.reviewId} captured ${originalPath} at sha256 ${String(file.sha256)}, but ${branch} holds ${actual} ` +
-            `(first mismatching path: ${originalPath})`,
-          [review.reviewId],
-        );
-      }
+  for (const file of source.files) {
+    if (file.kind !== "output" && file.kind !== "changed") continue;
+    if (file.state !== "present") continue;
+    const originalPath = file.original_path.replaceAll("\\", "/").replace(/^\.\/+/, "");
+    const shown = await git(["show", `${tip}:${originalPath}`], root);
+    if (shown.exitCode !== 0) {
+      throw new ReviewGateError(
+        `review ${review.reviewId} captures ${originalPath}, which ${branch} does not contain ` +
+          `(first mismatching path: ${originalPath})`,
+        [review.reviewId],
+      );
+    }
+    const actual = sha256Hex(shown.stdout);
+    if (file.sha256 !== actual) {
+      throw new ReviewGateError(
+        `review ${review.reviewId} captured ${originalPath} at sha256 ${String(file.sha256)}, but ${branch} holds ${actual} ` +
+          `(first mismatching path: ${originalPath})`,
+        [review.reviewId],
+      );
     }
   }
 }
