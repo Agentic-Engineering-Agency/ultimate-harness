@@ -11,7 +11,6 @@ session and not re-checked at this commit. A fix removes its entry in the same c
 | **Every review re-reads the whole slice.** `uh mission review-prepare` captures every file changed since the branch's recorded base, and review packets require the reviewer to read each captured file in full. There is no reuse of an earlier review for files whose bytes did not change: a one-line edit forces a full re-review. The acceptance runner already solves the same problem with input digests (`uh acceptance rebind`, evidence stays valid while the files it asserts are unchanged); reviews and the `uh land` review gate do not use it. | Confirmed. A MiMo review of a 15-file slice took 504 s; each follow-up fix invalidated it. |
 | **Reviews are slow.** Beyond re-reading, a Command Code reviewer runs one tool call per turn and reads files over 40 KB in 600-line windows (see Command Code below). Where the time goes per run has not been measured; `uh report <run-id>` reports model versus tool time. | Confirmed (duration); breakdown not measured. |
 | `review-prepare` diffs against the branch's recorded base (`git config branch.<name>.base`). After a branch is rebased, the recorded base must be updated, or the review captures unrelated files from the new base. | Confirmed. |
-| The `uh land` review gate binds a review to the branch's team mission, read from `uh/team/<team>/<role>`, not to the individual worker: a review of one worker of a team satisfies the gate for another. | Confirmed in `src/harness/land.ts`. |
 
 ## Landing and the loop
 
