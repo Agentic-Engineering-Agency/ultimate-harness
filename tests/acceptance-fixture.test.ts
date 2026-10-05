@@ -76,7 +76,7 @@ async function copyFixture(label: string): Promise<string> {
 }
 
 function runFixtureSuite(root: string) {
-  return spawnSync(nodeBinary(), ["--test"], { cwd: root, encoding: "utf8", timeout: 25_000 });
+  return spawnSync(nodeBinary(), ["--test", "--test-reporter=tap"], { cwd: root, encoding: "utf8", timeout: 25_000 });
 }
 
 async function listFiles(root: string): Promise<string[]> {
