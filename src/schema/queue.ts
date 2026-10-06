@@ -27,6 +27,11 @@ export const QueueEntrySchema = z
     runtime: z.string().min(1),
     /** Entry ids that must all pass before this entry launches. */
     after: z.array(SafeQueueIdSchema).optional(),
+    /**
+     * Routing, as for `uh mission run`: a mission with a bound sandbox runs in it, and a worker mission
+     * with none is refused. Only `false` opts this entry out and runs it in the project root.
+     */
+    sandbox: z.boolean().optional(),
   })
   .strict();
 export type QueueEntry = z.infer<typeof QueueEntrySchema>;
