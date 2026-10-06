@@ -132,3 +132,24 @@ export function readJsonLines(file: string): string[] {
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf-8").split(/\r?\n/);
 }
+
+export interface RelinkedEntry {
+  line: number;
+  id?: string;
+  reason: "fork" | "follows_fork";
+  old_prev_hash: string;
+  new_prev_hash: string;
+  old_hash: string;
+  new_hash: string;
+}
+
+/** Placeholder until fork tolerance lands; see tests/hash-chain-repair.test.ts. */
+export function verifyChainedLinesTolerant(lines: readonly string[], options: { allowLegacyPrefix?: boolean } = {}): { hard?: ChainBreak; forks: number[] } {
+  const hard = verifyChainedLines(lines, options);
+  return hard ? { hard, forks: [] } : { forks: [] };
+}
+
+/** Placeholder until relinking lands; see tests/hash-chain-repair.test.ts. */
+export function relinkForks(_lines: readonly string[], _options: { allowLegacyPrefix?: boolean } = {}): { lines: string[]; relinked: RelinkedEntry[] } | { error: ChainBreak } {
+  return { error: { line: 1, reason: "not implemented" } };
+}

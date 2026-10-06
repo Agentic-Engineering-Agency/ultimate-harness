@@ -380,8 +380,8 @@ export function readVerifiedHiveFacts(root: string): HiveFact[] {
   return facts;
 }
 
-/** Throws when the hive facts chain or the intervention ledger chain is broken. */
-export function assertHiveChainsIntact(root: string): void {
+/** Throws when the hive facts chain or the intervention ledger chain is broken. Returns warnings. */
+export function assertHiveChainsIntact(root: string): string[] {
   const factsBreak = verifyHiveChain(root);
   if (factsBreak !== undefined) {
     throw new Error(`Hive facts chain is broken at line ${factsBreak.line}: ${factsBreak.reason}`);
@@ -390,6 +390,7 @@ export function assertHiveChainsIntact(root: string): void {
   if (ledgerBreak !== undefined) {
     throw new Error(`Intervention ledger chain is broken at line ${ledgerBreak.line}: ${ledgerBreak.reason}`);
   }
+  return [];
 }
 
 /* -------------------------------------------------------------------------- */
