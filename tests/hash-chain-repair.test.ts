@@ -165,7 +165,7 @@ describe("uh hive verify --repair, end to end", () => {
       result => ({ code: 0, out: result.stdout }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, out: `${error.stdout ?? ""}${error.stderr ?? ""}` }));
     const before = await run([]);
     expect(before.code).not.toBe(0);
-    expect(before.out).toContain("fork");
+    expect(before.out).toMatch(/fork/i);
     expect(before.out).toContain("--repair");
     expect(verifyChainedLines((await readFile(hiveFactsPath(root), "utf-8")).split("\n").filter(Boolean))).not.toBeUndefined();
     const repaired = await run(["--repair"]);

@@ -425,7 +425,8 @@ export async function runQueue(queueFilePath: string, options: RunQueueOptions):
   const root = path.resolve(options.root);
   // Hive integrity is a precondition: a broken hive facts or ledger chain means
   // the shared state every agent trusts cannot be extended, so queue refuses.
-  assertHiveChainsIntact(root);
+  // A fork from the old concurrent-append bug is a warning that names the repair command; any other break refuses.
+  for (const warning of assertHiveChainsIntact(root)) console.warn(`[WARN] ${warning}`);
   const queue = await loadQueueFile(path.resolve(queueFilePath));
   const maxOrchestrators = options.maxOrchestrators ?? DEFAULT_MAX_ORCHESTRATORS;
   if (!Number.isInteger(maxOrchestrators) || maxOrchestrators < 1) {

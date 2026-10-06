@@ -3021,29 +3021,35 @@ hiveCmd
 
 hiveCmd
   .command("verify")
-  .description("Verify the hive facts chain, the intervention ledger chain and the land decision index")
+  .description("Verify the hive facts chain, the intervention ledger chain and the land decision index; --repair re-links a fork left by the old append bug")
   .option("--json", "Emit JSON")
+  .option("--repair", "Re-link chains forked by the old concurrent-append bug (two entries linking to the same parent); any other break is refused. Keeps the original and writes a report")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (opts: { json?: boolean; root?: string }) => {
+  .action(async (opts: { json?: boolean; repair?: boolean; root?: string }) => {
     const root = resolveRoot(opts.root);
     try {
-      const { verifyHiveChain } = await import("./harness/hive.js");
-      const { verifyLedgerChain } = await import("./harness/interventions.js");
-      const { verifyLandDecisionChain } = await import("./harness/land.js");
-      const checks = [
-        { name: "hive.facts", file: ".harness/hive/facts.ndjson", first_broken: verifyHiveChain(root) ?? null },
-        { name: "ledger.interventions", file: ".harness/ledger/interventions.ndjson", first_broken: verifyLedgerChain(root) ?? null },
-        { name: "land.decisions", file: ".harness/land/decisions.ndjson", first_broken: verifyLandDecisionChain(root) ?? null },
-      ];
-      const ok = checks.every((entry) => entry.first_broken === null);
+      const { verifyHiveChains, repairHiveChains } = await import("./harness/hive-verify.js");
+      const repairs = opts.repair === true ? await repairHiveChains(root) : [];
+      const checks = verifyHiveChains(root);
+      const ok = checks.every((entry) => entry.first_broken === null && entry.forks.length === 0);
       if (opts.json === true) {
-        console.log(JSON.stringify({ ok, checks }, null, 2));
-      } else if (ok) {
-        console.log("hive chains intact");
+        console.log(JSON.stringify({ ok, checks, ...(opts.repair === true ? { repairs } : {}) }, null, 2));
       } else {
-        for (const entry of checks) {
-          if (entry.first_broken !== null) {
-            console.log(`[BROKEN] ${entry.name} ${entry.file} line ${entry.first_broken.line}: ${entry.first_broken.reason}`);
+        for (const repair of repairs) {
+          if (repair.outcome.repaired) {
+            const lines = repair.outcome.relinked.map((entry) => entry.line).join(", ");
+            console.log(`[REPAIRED] ${repair.name} ${repair.file}: re-linked ${repair.outcome.relinked.length} entries (lines ${lines}); original kept at ${repair.outcome.backup}; report ${repair.outcome.report}`);
+          }
+        }
+        if (ok) {
+          console.log("hive chains intact");
+        } else {
+          for (const entry of checks) {
+            if (entry.first_broken !== null) {
+              console.log(`[BROKEN] ${entry.name} ${entry.file} line ${entry.first_broken.line}: ${entry.first_broken.reason}`);
+            } else if (entry.forks.length > 0) {
+              console.log(`[FORK] ${entry.name} ${entry.file} line ${entry.forks.join(", ")}: two entries link to the same parent (the old concurrent-append bug); run "uh hive verify --repair" to re-link it`);
+            }
           }
         }
       }
