@@ -693,13 +693,22 @@ export function processChildren(controllerPid: number, processes: readonly Nativ
   return children;
 }
 
-/** Default process lister: Windows CIM, else POSIX `ps`. Never throws. */
-export async function defaultProcessLister(): Promise<NativeProcess[]> {
+/**
+ * The host's process table, or undefined when it could not be read. Callers that act on the absence of
+ * a process (a controller that looks dead) must tell a read failure from a real answer: an empty list
+ * from a failed `ps` makes every live run look orphaned.
+ */
+export async function listProcessesChecked(): Promise<NativeProcess[] | undefined> {
   try {
     return process.platform === "win32" ? await listWindowsProcesses() : await listPosixProcesses();
   } catch {
-    return [];
+    return undefined;
   }
+}
+
+/** Default process lister: Windows CIM, else POSIX `ps`. Never throws; a read failure is an empty list. */
+export async function defaultProcessLister(): Promise<NativeProcess[]> {
+  return (await listProcessesChecked()) ?? [];
 }
 
 async function listWindowsProcesses(): Promise<NativeProcess[]> {

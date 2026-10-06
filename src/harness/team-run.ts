@@ -56,7 +56,7 @@ import { aggregateRuntimeUsage, type RuntimeUsage } from "./usage.js";
 import { readRuntimeAccounting } from "./runtime-accounting.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists, isPathWithin } from "./mission.js";
 import { removeWorktreeLinks } from "./worktree-links.js";
-import { listLiveRuns, registerLiveRun, type ProcessLister } from "./live-runs.js";
+import { listLiveRuns, listProcessesChecked, registerLiveRun, type ProcessLister } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 import { elapsedMs, notifyTeamSettled } from "./notifications.js";
 import { getSessionTemplate } from "./session-templates.js";
@@ -1325,6 +1325,7 @@ export async function runTeamMission(
     missionId: mission.id,
     plan,
     replace: options.replace === true,
+    processLister: options.processLister,
   });
   // The canonical packet on disk is the single source of truth for workers.
   const canonicalBytes = await readFile(missionPath, "utf-8");
@@ -2107,18 +2108,33 @@ async function detectTeamPreexisting(gitOps: GitOps, root: string, plan: TeamPla
   return { branches, worktrees };
 }
 
-/** Run ids of live runs registered against this team, so a refusal can name them. */
-async function liveTeamRunIds(root: string, missionId: string): Promise<string[]> {
+/**
+ * Run ids of registered runs of this team that are not proven dead, so a refusal can name them. Only a
+ * run that is settled, or whose controller is gone from a process table we can trust, is replaceable:
+ * `live`, `stale` (alive but quiet) and `unknown` runs all block. Fails closed: when the registry or the
+ * process table cannot be read, nothing is proven dead and the relaunch is refused.
+ */
+async function blockingTeamRunIds(root: string, missionId: string, lister: ProcessLister | undefined): Promise<string[]> {
+  const own = (record: { team?: { mission_id: string } }) => record.team?.mission_id === missionId;
+  let unsettled: number;
   try {
-    const { records } = await listLiveRuns(root, { persist: false });
-    return records
-      .filter((record) => record.liveness === "live" && record.team?.mission_id === missionId)
-      .map((record) => record.run_id)
-      .sort();
-  } catch {
-    // The registry is best-effort; never block a run because it could not be read.
-    return [];
+    // With an empty table every running record reads as orphaned, which is enough to tell settled from not.
+    const probe = await listLiveRuns(root, { persist: false, processes: [] });
+    unsettled = probe.records.filter((record) => own(record) && record.liveness !== "settled").length;
+  } catch (error) {
+    throw new Error(`Cannot read the live-run registry (${(error as Error).message}); refusing to replace team ${missionId} because no run of it is proven dead.`);
   }
+  if (unsettled === 0) return [];
+  const table = lister ? await lister() : await listProcessesChecked();
+  // This process must be in the table: a table without it is empty, truncated or from another host.
+  if (!table || !table.some((entry) => entry.pid === process.pid)) {
+    throw new Error(`Cannot confirm that no run of team ${missionId} is live: the process table could not be read. Refusing to replace it.`);
+  }
+  const { records } = await listLiveRuns(root, { persist: false, processes: table });
+  return records
+    .filter((record) => own(record) && (record.liveness === "live" || record.liveness === "stale" || record.liveness === "unknown"))
+    .map((record) => record.run_id)
+    .sort();
 }
 
 /**
@@ -2149,6 +2165,27 @@ async function archiveTeamRun(gitOps: GitOps, root: string, plan: TeamPlan): Pro
 }
 
 /**
+ * Archiving removes each old worktree with `git worktree remove --force`, which drops uncommitted
+ * files. A worktree that holds any (outside the harness's own protected roots) is refused, not archived:
+ * the branch rename keeps commits, and only commits.
+ */
+async function assertNoUncommittedWork(gitOps: GitOps, missionId: string, worktrees: string[]): Promise<void> {
+  if (!gitOps.dirtyPaths) return;
+  for (const worktree of worktrees) {
+    let paths: string[];
+    try {
+      paths = await gitOps.dirtyPaths(worktree);
+    } catch {
+      continue; // not a git worktree any more: nothing there to lose
+    }
+    const own = paths.filter((entry) => !isProtectedPath(entry, DEFAULT_PROTECTED_PATHS));
+    if (own.length > 0) {
+      throw new Error(`Team mission ${missionId} has uncommitted work in ${worktree} (${own.slice(0, 5).join(", ")}${own.length > 5 ? `, and ${own.length - 5} more` : ""}); refusing --replace, which would delete it. Commit or move it first.`);
+    }
+  }
+}
+
+/**
  * Refuse (or take over) a relaunch that would collide with a previous run.
  *
  * A live run of the same team always refuses, naming its run ids: nothing may
@@ -2162,16 +2199,18 @@ async function guardTeamRelaunch(args: {
   missionId: string;
   plan: TeamPlan;
   replace: boolean;
+  processLister?: ProcessLister;
 }): Promise<void> {
   const preexisting = await detectTeamPreexisting(args.gitOps, args.root, args.plan);
   if (preexisting.branches.length === 0 && preexisting.worktrees.length === 0) return;
-  const liveRunIds = await liveTeamRunIds(args.root, args.missionId);
+  const liveRunIds = await blockingTeamRunIds(args.root, args.missionId, args.processLister);
   if (liveRunIds.length > 0) {
     throw new Error(
       `Team mission ${args.missionId} already has a live run (${liveRunIds.join(", ")}); refuse to relaunch. Stop it first.`,
     );
   }
   if (args.replace) {
+    await assertNoUncommittedWork(args.gitOps, args.missionId, preexisting.worktrees);
     await archiveTeamRun(args.gitOps, args.root, args.plan);
     await captureReplace(args.root, { missionId: args.missionId });
     return;
