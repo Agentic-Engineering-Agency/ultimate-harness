@@ -735,11 +735,18 @@ function trackDelivery(promise: Promise<unknown>): void {
  * {@link notifyRunOrphaned}, or {@link notifyTeamSettled} that has not settled
  * yet. Tests call this before removing a temporary project directory so an
  * in-flight ledger append cannot race the cleanup; a host can call it before
- * exit. Settlement never awaits this — delivery stays non-blocking.
+ * exit. Settlement never awaits this — delivery stays non-blocking. The wait is bounded (default 5 s) so a sink
+ * that hangs cannot hang the command that is exiting.
  */
-export async function drainNotifications(): Promise<void> {
+export async function drainNotifications(timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (inFlightDeliveries.size > 0) {
-    await Promise.all([...inFlightDeliveries]);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<void>((resolve) => { timer = setTimeout(resolve, remaining); timer.unref?.(); });
+    await Promise.race([Promise.all([...inFlightDeliveries]), expired]);
+    if (timer) clearTimeout(timer);
   }
 }
 

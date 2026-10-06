@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- A run that settles normally now announces itself, and announcements are no longer lost on exit (U-060, U-061, GH #261). `notifyRunSettled` was called only by a reader that found a settlement, by `uh kill` and by controller-loss reconciliation, so an ordinary `uh mission run` never sent a notification. Where it was called, delivery was fire-and-forget and the CLI called `process.exit` right after, so the delivery was dropped: `uh ps`, `uh kill` and `run-team` lost theirs. `uh mission run` now sends `run.settled` when the run settles, and `mission run`, `run-team`, `kill`, `ps` and `wait` let the deliveries they started finish before exiting, for at most 5 seconds (a hung sink cannot hang the command). See `docs/handbook/notifications.md`.
 - Arming a Pi or oh-my-pi guard no longer races another worker's: the extension probe points two process-wide environment variables at its own policy and log, so concurrent team workers could judge one worker's probe against another's policy. Extension probes now run one at a time. #261.
 - A team worker's supervision stop is written to the project's intervention ledger, not to a ledger inside the worker's own nested `.harness`: the ledger root is the outermost `.harness` that holds a project, falling back to the nearest. #261.
 
