@@ -16,6 +16,7 @@ import {
   type HiveItemStatus,
 } from "../schema/hive.js";
 import { harnessHiveDir, harnessOwnerRoot } from "./hive-root.js";
+import { withChainLock } from "./chain-lock.js";
 import {
   chainEntry,
   lastChainedHash,
@@ -241,6 +242,11 @@ export interface HiveFactInput {
  * chain refuses the append rather than extending it.
  */
 export function appendFact(root: string, input: HiveFactInput): HiveFact {
+  // Reading the last hash and appending are one exclusive step across processes (#257).
+  return withChainLock(hiveFactsPath(root), () => appendFactLocked(root, input));
+}
+
+function appendFactLocked(root: string, input: HiveFactInput): HiveFact {
   const at = input.at ?? new Date().toISOString();
   const evidence = HiveFactEvidenceSchema.parse(input.evidence);
   const lines = readJsonLines(hiveFactsPath(root));
