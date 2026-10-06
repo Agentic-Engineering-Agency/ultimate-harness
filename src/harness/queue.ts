@@ -136,6 +136,8 @@ export interface QueueLaunchRequest {
   root: string;
   /** Present when resuming an entry recorded as running: wait on this run instead of launching. */
   resumeRunId?: string;
+  /** The entry's `sandbox` choice. Only `false` runs the mission in the project root. */
+  sandbox?: boolean;
 }
 
 export interface QueueSettleOutcome {
