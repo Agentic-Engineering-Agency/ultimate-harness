@@ -56,7 +56,7 @@ import { aggregateRuntimeUsage, type RuntimeUsage } from "./usage.js";
 import { readRuntimeAccounting } from "./runtime-accounting.js";
 import { assertSafeMissionId, assertWithinRoot, fileExists, isPathWithin } from "./mission.js";
 import { removeWorktreeLinks } from "./worktree-links.js";
-import { listLiveRuns, registerLiveRun } from "./live-runs.js";
+import { listLiveRuns, registerLiveRun, type ProcessLister } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 import { elapsedMs, notifyTeamSettled } from "./notifications.js";
 import { getSessionTemplate } from "./session-templates.js";
@@ -418,6 +418,8 @@ export interface RunTeamMissionOptions {
   now?: () => number;
   /** Injected sleep for admission waiting. Defaults to a real timer. */
   sleep?: (ms: number) => Promise<void>;
+  /** Process table used to decide whether a registered run is alive before `--replace`. Defaults to the host's. */
+  processLister?: ProcessLister;
 }
 
 export interface WorkerOutcome {
