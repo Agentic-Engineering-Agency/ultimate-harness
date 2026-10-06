@@ -103,6 +103,21 @@ describe("orchestrator missions run in the project root without --no-sandbox", (
     expect(refusal.stdout).not.toContain("orchestrator in the project root");
   });
 
+  test("a Command Code orchestrator without write roots is refused too: the check is not the adapter's alone (#254)", async () => {
+    await addAdapter(TEST_ROOT, "command-code");
+    const missionPath = await writeMission("o-cmdc", { role: "orchestrator", model: "qwen/qwen3.8-flash" }, {});
+
+    const refusal = await runUhFailure([
+      "mission", "run", missionPath,
+      "--runtime", "command-code", "--force", "--root", TEST_ROOT,
+    ]);
+
+    expect(`${refusal.stdout}${refusal.stderr}`).toContain("whole repository");
+    expect(`${refusal.stdout}${refusal.stderr}`).not.toContain("has no bound sandbox");
+    // Refused before any run directory or runtime exists.
+    expect(refusal.stdout).not.toContain("Running mission:");
+  });
+
   test("an orchestrator without write roots is still refused by the adapter's guard check", async () => {
     await addAdapter(TEST_ROOT, "claude-code");
     // An empty guard resolves write_roots to the default ["."], which covers the
