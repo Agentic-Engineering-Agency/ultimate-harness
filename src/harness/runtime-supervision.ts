@@ -729,7 +729,9 @@ export class RuntimeSupervision {
       if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
     } else if (type === "assistant" || (type === "system" && event.subtype === "init")) {
       // Claude Code: one turn per distinct assistant message id.
-      if (type === "assistant") {
+      // A sub-agent's messages carry the `parent_tool_use_id` of the call that started it; they are not this run's turns.
+      const subAgentMessage = typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id.length > 0;
+      if (type === "assistant" && !subAgentMessage) {
         const message = record(event.message);
         if (typeof message?.id === "string" && message.id.length > 0 && !this.assistantMessageIds.has(message.id)) {
           this.assistantMessageIds.add(message.id);

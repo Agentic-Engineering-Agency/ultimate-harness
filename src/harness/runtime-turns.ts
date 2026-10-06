@@ -16,7 +16,9 @@ export function countRuntimeTurns(runtime: string, events: unknown[]): number | 
     for (const raw of events) {
       const event = nativeRuntimeEvent(raw);
       if (!event) continue;
-      if (event.type === "assistant") {
+      // A sub-agent's messages carry the `parent_tool_use_id` of the call that started it; they are not the run's turns.
+      const subAgentMessage = typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id.length > 0;
+      if (event.type === "assistant" && !subAgentMessage) {
         const message = record(event.message);
         if (typeof message?.id === "string" && message.id.length > 0) {
           messageIds.add(message.id);
