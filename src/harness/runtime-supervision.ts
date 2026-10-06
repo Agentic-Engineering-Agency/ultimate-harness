@@ -734,6 +734,9 @@ export class RuntimeSupervision {
         if (typeof message?.id === "string" && message.id.length > 0 && !this.assistantMessageIds.has(message.id)) {
           this.assistantMessageIds.add(message.id);
           this.turns++;
+          // This branch counts turns but never checked the cap: a run past `limits.max_turns` kept going and could
+          // finish cleanly. The cap is enforced as it is for `turn_end` runtimes.
+          if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
         }
       }
       this.readyAt ??= now;
