@@ -253,6 +253,32 @@ describe("uh land", () => {
     expect(await status(ROOT)).toBe("");
   });
 
+  test("U-409: a clean review does not outvote another review of the same tip that contradicts it", async () => {
+    const { messageFile, worktree, missionId } = await setup({ reviewVerdicts: ["supported"] });
+    const changedSha256 = sha256(await git(ROOT, ["show", "work:feature.txt"]));
+    await writeCollectedReview(ROOT, {
+      reviewId: "review-b", missionId, sourceRoot: await realpath(worktree),
+      changedPath: "feature.txt", changedSha256, verdicts: ["supported", "contradicted"],
+    });
+    const before = await head(ROOT);
+
+    await expect(runLand({ messageFile })).rejects.toThrow(/contradicted/i);
+
+    expect(await head(ROOT)).toBe(before);
+  });
+
+  test("U-409: a review of an older tip does not block a clean review of this one", async () => {
+    const { messageFile, worktree, missionId } = await setup({ reviewVerdicts: ["supported"] });
+    await writeCollectedReview(ROOT, {
+      reviewId: "review-old", missionId, sourceRoot: await realpath(worktree),
+      changedPath: "feature.txt", changedSha256: "f".repeat(64), verdicts: ["contradicted"],
+    });
+    const before = await head(ROOT);
+    const result = await runLand({ messageFile });
+    expect(result.accepted_review).toBeUndefined();
+    expect(await head(ROOT)).not.toBe(before);
+  });
+
   test("--accept-review records the decision file and lands past a contradicted review", async () => {
     const { messageFile, reviewId } = await setup({ reviewVerdicts: ["contradicted"] });
 

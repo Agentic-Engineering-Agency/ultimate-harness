@@ -504,32 +504,36 @@ async function requireCleanReview(input: {
       reviews.map((review) => review.reviewId),
     );
   }
-  // Accept the branch as soon as one collected review is bound to it; a single
-  // unrelated or broken review must not mask a clean one.
-  let firstFailure: ReviewGateError | undefined;
+  // A review counts only if it is bound to this tip; a stale or unrelated one is set aside and cannot mask a
+  // clean one. Every review that is bound must be clean: a clean review does not outvote another review of the same
+  // tip that contradicts it or recommends against it (U-409).
+  let unbound: ReviewGateError | undefined;
+  const bound: CollectedReview[] = [];
   for (const { review, source } of matched) {
     try {
       await assertReviewBoundToTip(review, source, branch, tip, git, root);
-      const contradicted = (review.assessment.claims ?? []).filter((claim) => claim.verdict === "contradicted");
-      if (contradicted.length > 0) {
-        throw new ReviewGateError(
-          `contradicted claims in independent review ${review.reviewId}: ${contradicted.map((claim) => claim.claim).join("; ")}`,
-          [review.reviewId],
-        );
-      }
-      if (review.assessment.recommendation !== "pass") {
-        throw new ReviewGateError(
-          `independent review ${review.reviewId} recommends ${review.assessment.recommendation}, not pass`,
-          [review.reviewId],
-        );
-      }
-      return;
+      bound.push(review);
     } catch (err) {
       if (!(err instanceof ReviewGateError)) throw err;
-      if (!firstFailure) firstFailure = err;
+      if (!unbound) unbound = err;
     }
   }
-  throw firstFailure!;
+  if (bound.length === 0) throw unbound!;
+  for (const review of bound) {
+    const contradicted = (review.assessment.claims ?? []).filter((claim) => claim.verdict === "contradicted");
+    if (contradicted.length > 0) {
+      throw new ReviewGateError(
+        `contradicted claims in independent review ${review.reviewId}: ${contradicted.map((claim) => claim.claim).join("; ")}`,
+        [review.reviewId],
+      );
+    }
+    if (review.assessment.recommendation !== "pass") {
+      throw new ReviewGateError(
+        `independent review ${review.reviewId} recommends ${review.assessment.recommendation}, not pass`,
+        [review.reviewId],
+      );
+    }
+  }
 }
 
 /**
