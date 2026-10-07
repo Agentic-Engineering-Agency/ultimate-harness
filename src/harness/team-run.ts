@@ -61,6 +61,9 @@ import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 import { elapsedMs, notifyTeamSettled } from "./notifications.js";
 import { getSessionTemplate } from "./session-templates.js";
 import { appendWorkerRules } from "./session-template-adoption.js";
+import { workerGuard } from "./guard-narrowing.js";
+import { assertStrictContainment } from "./session-templates.js";
+import type { ToolGuardFields } from "../schema/runtime-control.js";
 import type { SessionTemplate } from "../schema/session-template.js";
 const execFileP = promisify(execFile);
 
@@ -1033,7 +1036,7 @@ function objectRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function resolveWorkerContract(
+export function resolveWorkerContract(
   canonicalPacket: Record<string, unknown>,
   spec: TeamWorkerSpec,
   basePacket: Record<string, unknown> = canonicalPacket,
@@ -1079,6 +1082,15 @@ function resolveWorkerContract(
       ? basePacket.expected_outputs as WorkerContract["expected_outputs"]
       : undefined
   );
+  // The worker's guard is the team mission's, narrowed by its own packet, its session template and its own block.
+  const guard = workerGuard(
+    canonicalPacket.guard === undefined ? undefined : objectRecord(canonicalPacket.guard) as ToolGuardFields,
+    template?.guard,
+    spec.guard,
+    spec.role,
+    basePacket === canonicalPacket || basePacket.guard === undefined ? undefined : objectRecord(basePacket.guard) as ToolGuardFields,
+  );
+  if (template?.containment === "strict") assertStrictContainment(guard);
   const baseConstraints = Array.isArray(basePacket.constraints)
     ? basePacket.constraints.filter((item): item is string => typeof item === "string")
     : [];
@@ -1095,12 +1107,13 @@ function resolveWorkerContract(
     ...(constraints.length > 0 ? { constraints } : {}),
     ...(Object.keys(runtimeConfigOverrides).length > 0 ? { runtime_config_overrides: runtimeConfigOverrides } : {}),
     ...(Object.keys(contractLimits).length > 0 ? { limits: contractLimits } : {}),
+    ...(guard !== undefined ? { guard } : {}),
     ...(expectedOutputs ? { expected_outputs: expectedOutputs } : {}),
     ...(spec.seed !== undefined ? { seed: spec.seed } : {}),
   };
 }
 
-function deriveWorkerPacket(
+export function deriveWorkerPacket(
   canonicalPacket: Record<string, unknown>,
   contract: WorkerContract,
 ): Record<string, unknown> {
@@ -1113,6 +1126,7 @@ function deriveWorkerPacket(
   if (contract.expected_outputs !== undefined) {
     packet.expected_outputs = contract.expected_outputs;
   }
+  if (contract.guard !== undefined) packet.guard = contract.guard;
   if (contract.seed !== undefined) {
     const constraints = Array.isArray(packet.constraints) ? [...packet.constraints] : [];
     constraints.push(`Seed: ${contract.seed}. Use it for every randomized step and print it in your final message.`);

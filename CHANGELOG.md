@@ -90,6 +90,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
 
 ### Changed
+- A team worker's guard is the team mission's, narrowed by its packet, its session template and its own `guard` block, and is written into the worker's packet. Before, a worker's template guard was dropped and its own `guard` block never applied; a worker adopting a `containment: strict` template was not held to strict containment. A layer can only narrow (restrictions on, permissions off, write and read roots inside the parent's); a widening is refused, naming the worker. U-404.
 
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.
 - Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
