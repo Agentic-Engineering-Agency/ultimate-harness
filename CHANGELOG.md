@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- A team worker's commit holds exactly the paths inside its write roots: the index is cleared before staging, so a path staged outside the roots no longer rides along (#259); changed paths are read with `status --porcelain=v1 -z`, so non-ASCII, spaced and quoted names are staged and committed as they are (#259); a declared output that is a whole ignored directory commits its regular files only, never links, `node_modules`, `.env` files or protected paths (#260).
 - `uh steer` no longer reports success for a steer nothing has taken. It wrote the request, signalled the stop, waited 1.5 s for a verdict, and reported `Steered …` when the controller neither refused nor answered. That case now reports `status: pending` (`Steer requested for <run>, not yet taken`) and still records the intervention; a request the controller took, or a `not_applied` record, are reported as before. #259.
 
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
