@@ -3,7 +3,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { parse, stringify } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
@@ -159,6 +159,45 @@ describe("checkMissionPackets", () => {
     const result = await checkMissionPackets({ root, missionPath, runtime: "oh-my-pi" });
     expect(result.ok).toBe(false);
     expect(failStartingWith(result, "grounding")?.reason).toMatch(/does not exist/);
+  });
+
+  test("a grounding claim cannot read a file outside the project (#259)", async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), "uh-outside-"));
+    const outside = join(outsideDir, "secret.txt");
+    await writeFile(outside, "the secret literal\n", "utf-8");
+    try {
+      const climbing = relative(root, outside).split(sep).join("/");
+      for (const claimPath of [outside, climbing, "docs/../../escape.txt"]) {
+        const missionPath = await writeMission("grounding-escape", {
+          grounding: [{ claim: "Reads outside", path: claimPath, contains: "secret literal" }],
+        });
+        const result = await checkMissionPackets({ root, missionPath, runtime: "oh-my-pi" });
+        expect(result.ok, claimPath).toBe(false);
+        expect(result.checks.some((line) => line.status === "PASS" && line.name.startsWith("grounding")), claimPath).toBe(false);
+      }
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a team worker's mission_id cannot point outside .harness/missions (#259)", async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), "uh-outside-"));
+    await writeFile(join(outsideDir, "mission.yaml"), stringify({
+      schema_version: "uh.mission.v0", id: "elsewhere", title: "x", workflow_profile: "research-docs", objective: "x",
+    }), "utf-8");
+    try {
+      // .harness/missions/<id>/mission.yaml with this id lands on <outsideDir>/mission.yaml.
+      const traversal = relative(join(root, ".harness", "missions"), outsideDir).split(sep).join("/");
+      const missionPath = await writeMission("team-escape", {
+        shape: "team",
+        team: { workers: [{ role: "backend", adapter: "oh-my-pi", mission_id: traversal }], leader: { adapter: "oh-my-pi" } },
+      });
+      const result = await checkMissionPackets({ root, missionPath });
+      expect(result.ok).toBe(false);
+      expect(result.checks.some((line) => line.status === "PASS" && line.name.startsWith("worker packet schema"))).toBe(false);
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 
   test("an omp packet with a command-code-only override key fails runtime validation", async () => {

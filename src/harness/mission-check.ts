@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { validateMission, resolveWorkerAdapter, type MissionDocument } from "../schema/mission.js";
@@ -14,6 +14,7 @@ import { planPiRun } from "../adapters/pi.js";
 import { planClaudeCodeRun } from "../adapters/claude-code.js";
 import { planAcpRun } from "../adapters/acp.js";
 import { findBoundSandbox } from "./sandbox.js";
+import { assertSafeMissionId, isPathWithin } from "./mission.js";
 
 /**
  * UH mission check — validate a packet before it launches.
@@ -260,7 +261,13 @@ async function checkGrounding(push: PushLine, root: string, mission: MissionDocu
     const name = `grounding "${claim.claim}"${suffix}`;
     let content: string;
     try {
-      content = await readFile(path.resolve(root, claim.path), "utf-8");
+      // The schema already refuses an absolute or climbing path; this also holds a link inside the project to the root.
+      const target = path.resolve(root, claim.path);
+      if (!isPathWithin(target, root) || !isPathWithin(await realpath(target), await realpath(root))) {
+        push("FAIL", name, `path is outside the project: ${claim.path}`);
+        continue;
+      }
+      content = await readFile(target, "utf-8");
     } catch {
       push("FAIL", name, `file does not exist: ${claim.path}`);
       continue;
@@ -351,6 +358,7 @@ export async function checkMissionPackets(options: MissionCheckOptions): Promise
       if (worker.mission_id) {
         workerPacketPath = path.join(root, ".harness", "missions", worker.mission_id, "mission.yaml");
         try {
+          assertSafeMissionId(worker.mission_id);
           workerPacket = validateMission(parseYaml(await readFile(workerPacketPath, "utf-8")));
           push("PASS", `worker packet schema [${workerLabel}]`);
         } catch (error) {
