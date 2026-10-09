@@ -13,7 +13,7 @@ import {
   MIN_PROBE_CALLS,
   deterministicLoopSignals,
   evaluateLoopProbe,
-  projectActivity,
+  createActivityProjector,
   serializeLoopProbeState,
   type ActivitySource,
   type ActivityWindow,
@@ -63,9 +63,6 @@ export interface LoopWatchdog {
   /** The number of advisory evaluations actually recorded. */
   readonly evaluations: number;
 }
-
-/** A projection window large enough to count every completed call, not just the retained slice. */
-const COUNT_WINDOW = Number.MAX_SAFE_INTEGER;
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -118,6 +115,9 @@ export function createLoopWatchdog(options: LoopWatchdogOptions): LoopWatchdog {
   const provider = options.provider ?? evaluateSystemOne;
   let lastCounted = 0;
   let evaluations = 0;
+  // Read once: each event is projected when it first arrives, never again. Only the last window of calls is kept.
+  const projector = createActivityProjector({ window: DEFAULT_ACTIVITY_WINDOW, workingDirectory: options.workingDirectory });
+  let consumed = 0;
 
   const appendError = async (detail: string, error: unknown): Promise<void> => {
     try {
@@ -178,14 +178,15 @@ export function createLoopWatchdog(options: LoopWatchdogOptions): LoopWatchdog {
   const observe = async (events: readonly unknown[]): Promise<void> => {
     if (mode === "off") return;
     try {
-      const projected = projectActivity(events, {
-        window: COUNT_WINDOW,
-        workingDirectory: options.workingDirectory,
-      });
-      const total = projected.calls.length;
+      if (events.length > consumed) {
+        projector.push(events.slice(consumed));
+        consumed = events.length;
+      }
+      const total = projector.total;
       if (total < minCalls) return;
       if (total - lastCounted < everyCalls) return;
       lastCounted = total;
+      const projected = projector.snapshot();
       await evaluate(projected);
     } catch (error) {
       await appendError("observe", error);

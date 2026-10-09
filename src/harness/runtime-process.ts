@@ -354,6 +354,8 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
     };
     const nativeEvents: unknown[] = [];
     let watchdogWork: Promise<void> = Promise.resolve();
+    // One observation waits at a time, and it reads the event list as it is when it runs, so a burst of lines costs one pass.
+    let watchdogQueued = false;
     const observe = (line: string): void => {
       try {
         const parsed = JSON.parse(line);
@@ -361,7 +363,10 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         if (watchdog) {
           const active = watchdog;
           // Chained and swallowed: a shadow evaluation never blocks or fails the run.
-          watchdogWork = watchdogWork.then(() => active.observe(nativeEvents)).catch(() => {});
+          if (!watchdogQueued) {
+            watchdogQueued = true;
+            watchdogWork = watchdogWork.then(() => { watchdogQueued = false; return active.observe(nativeEvents); }).catch(() => {});
+          }
         }
         if (digest) {
           // Fed from the same loop as supervision; a digest projection fault is
