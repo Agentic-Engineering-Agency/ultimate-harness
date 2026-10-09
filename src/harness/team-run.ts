@@ -2080,14 +2080,24 @@ function updateIndexSkipWorktree(worktreePath: string, files: readonly string[])
 }
 
 /**
+ * What the harness rewrites inside a worker worktree: the Command Code hook config and its ignore file, the
+ * harness's own ignore file, and the seeded mission packet. Nothing else under a protected root is the harness's.
+ */
+const HARNESS_REWRITTEN_FILES = /^(?:\.commandcode\/(?:settings\.json|\.gitignore)|\.harness\/\.gitignore|\.harness\/missions\/[^/]+\/mission\.yaml)$/;
+
+/**
  * Hide harness-owned churn from `git status` in a worktree without touching the
  * shared index (each worktree has its own). The harness rewrites tracked files
  * under the protected roots — `.commandcode/settings.json` (Command Code hook
  * config with local paths) and the seeded `.harness` packet — none of which the
  * worker authored. `--skip-worktree` makes a fresh worker worktree report a
  * clean tree. Worker commits are unaffected: they never stage protected paths.
+ *
+ * Only the files the harness itself rewrites in a worker worktree are hidden (`HARNESS_REWRITTEN_FILES`). Any other
+ * tracked file under a protected root stays visible, so a worker that edits one shows up in `git status` and in the
+ * acceptance diffs instead of being hidden along with the harness's own churn.
  */
-async function markProtectedPathsSkipWorktree(worktreePath: string): Promise<void> {
+export async function markProtectedPathsSkipWorktree(worktreePath: string): Promise<void> {
   const tracked: string[] = [];
   for (const protectedPath of DEFAULT_PROTECTED_PATHS) {
     if (protectedPath === ".git") continue;
@@ -2098,7 +2108,7 @@ async function markProtectedPathsSkipWorktree(worktreePath: string): Promise<voi
       continue; // not a git worktree, or no index yet
     }
     for (const entry of listing.split("\0")) {
-      if (entry.length === 0) continue;
+      if (entry.length === 0 || !HARNESS_REWRITTEN_FILES.test(entry)) continue;
       if (await fileExists(path.join(worktreePath, entry))) tracked.push(entry);
     }
   }
