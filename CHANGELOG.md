@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- Arming a Pi or oh-my-pi guard no longer races another worker's: the extension probe points two process-wide environment variables at its own policy and log, so concurrent team workers could judge one worker's probe against another's policy. Extension probes now run one at a time. #261.
 - A team worker's supervision stop is written to the project's intervention ledger, not to a ledger inside the worker's own nested `.harness`: the ledger root is the outermost `.harness` that holds a project, falling back to the nearest. #261.
 
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
