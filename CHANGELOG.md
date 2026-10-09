@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- Sandbox, team and land teardown no longer unlink symbolic links the project tracks (git mode 120000); a clean worktree stays clean and a non-forced discard works. Links git does not track are still removed first. #258.
 - The loop watchdog reads each runtime event once instead of re-reading the whole list on every line, and queued observations are coalesced, so a long run no longer costs time quadratic in its length. #258.
 
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
