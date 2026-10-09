@@ -415,6 +415,35 @@ test("the completed-before-steer race records not_applied and uh steer reports i
   }
 });
 
+test("a controller that takes the request first and writes its not_applied record a moment later is still reported not_applied (#259)", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runId = "late-record-run";
+    const runDir = await seedRun(root, "one", runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    const message = "Switch to auth path.";
+    const digest = createHash("sha256").update(message).digest("hex");
+    const result = await steerRun(root, runId, message, {}, {
+      run: async () => ({}),
+      cancel: async () => {
+        await rm(path.join(runDir, "steer-request.json"), { force: true });
+        // The record lands after the request is gone, as it does when the controller consumes first and decides after.
+        setTimeout(() => {
+          void writeFile(path.join(runDir, "steer-record.json"), JSON.stringify({
+            schema_version: "uh.steer-record.v0", mission_id: "one", run_id: runId, status: "not_applied",
+            reason: "attempt completed before the steer took effect", message_digest: digest, recorded_at: new Date().toISOString(),
+          }));
+        }, 20);
+        return { ok: true, status: "running" };
+      },
+      processes: alive(4242),
+    });
+    expect(result).toMatchObject({ ok: false, status: "not_applied", message_digest: digest });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 15_000);
+
 /** Mirror the record a controller writes when it refuses a steer. */
 async function writeSteerRecord(runDir: string, missionId: string, runId: string, message: string, reason: string): Promise<void> {
   await writeFile(path.join(runDir, "steer-record.json"), JSON.stringify({

@@ -409,7 +409,13 @@ async function observeSteerVerdict(root: string, missionId: string, runId: strin
     const record = await readSteerRecord(root, missionId, runId).catch(() => undefined);
     if (record?.message_digest === messageDigest) return record;
     const pending = await readSteerRequest(root, missionId, runId).catch(() => undefined);
-    if (!pending) return undefined;
+    if (!pending) {
+      // The controller took the request. Its verdict may land a moment after the request file goes, so read the
+      // record once more before calling the steer applied.
+      await delay(STEER_VERDICT_POLL_MS);
+      const settled = await readSteerRecord(root, missionId, runId).catch(() => undefined);
+      return settled?.message_digest === messageDigest ? settled : undefined;
+    }
     const remaining = deadline - Date.now();
     if (remaining <= 0) return "pending";
     await delay(Math.min(STEER_VERDICT_POLL_MS, remaining));
