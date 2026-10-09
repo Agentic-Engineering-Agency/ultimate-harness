@@ -135,6 +135,7 @@ git worktree keeps its own.
 uh hive import open-items.md   # seed items from a markdown checklist: '- [ ] A8: title', '[x]' means done
 uh hive show                   # items and facts; --json for machines
 uh hive verify                 # facts chain, intervention ledger chain and land decision index
+uh hive verify --repair        # re-link a chain forked by the old append bug (explicit; keeps the original)
 ```
 
 - **Only the controller writes facts.** `uh land`, `uh queue` and `uh verify` append a fact after a successful land,
@@ -143,7 +144,13 @@ uh hive verify                 # facts chain, intervention ledger chain and land
   match its evidence is refused. Agent statements go to `claims.ndjson`, never to facts.
 - **Tamper-evident.** Facts, the intervention ledger and the land decision index are hash-chained; `uh hive verify`
   reports the first broken line, and `uh land` and `uh queue` refuse to proceed on a broken chain. Unchained ledger
-  lines written before the chain existed are kept as a legacy prefix.
+  lines written before the chain existed are kept as a legacy prefix. One break is not a refusal: before the appends were
+  serialized, two writers could each link an entry to the same parent (a fork). `uh land` and `uh queue` go on with a
+  `[WARN]` that names `uh hive verify --repair`; `uh hive verify` reports it as `[FORK]` and exits `1`; recording new facts
+  stays paused until it is repaired. `--repair` re-links the forked entries, and each entry after them, to one chain,
+  keeps the original file beside the repaired one (`<file>.pre-repair-<time>`) and writes `<file>.repair-report-<time>.json`
+  listing every entry it re-linked with its old and new hashes. It never runs on its own, and it refuses a chain with any
+  other break (an edited, deleted or reordered entry) without touching it.
 - **Guarded.** Any agent write, edit or delete of the hive is a `guard_tamper` stop in the Command Code hook, the
   Claude Code hook and the oh-my-pi extension, and direct reads are denied in favour of `uh hive show`. A `.harness/hive`
   inside a worker's own scratch project is not the project's hive and stays allowed.
