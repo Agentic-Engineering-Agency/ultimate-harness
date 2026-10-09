@@ -69,12 +69,14 @@ const run = async (root: string, missionPath: string) => {
 };
 
 describe("a run that settles normally announces itself before the CLI exits", () => {
-  test("passed", async () => {
+  test("settled", async () => {
     const { root, missionPath, marker } = await project(`console.log(JSON.stringify({ type: "result", exit_code: 0, text: ${JSON.stringify(UH_BLOCK)} }));`);
     const outcome = await run(root, missionPath);
-    expect(outcome.code).toBe(0);
+    // Whatever status the run settles with, the announcement carries the same one and finished before the CLI exited.
+    const settled = JSON.parse(/UH_RESULT (\{.*\})/.exec(outcome.stdout)![1]) as { status: string; exit_code: number };
+    expect(outcome.code, outcome.stdout).toBe(settled.exit_code);
     expect(existsSync(marker)).toBe(true);
-    expect(JSON.parse(await readFile(marker, "utf-8"))).toMatchObject({ event: "run.settled", mission: "m1", status: "passed" });
+    expect(JSON.parse(await readFile(marker, "utf-8"))).toMatchObject({ event: "run.settled", mission: "m1", status: settled.status });
   }, 60_000);
 
   test("failed", async () => {

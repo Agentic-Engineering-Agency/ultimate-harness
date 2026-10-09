@@ -126,8 +126,7 @@ describe("uh mission run-team", () => {
     await mkdir(missionDir, { recursive: true });
     await writeFile(path.join(missionDir, "mission.yaml"), stringify({
       schema_version: "uh.mission.v0", id: "m1", title: "Team", workflow_profile: "staged", objective: "Run", shape: "team",
-      guard: { allow_unconfined: true },
-      team: { workers: [{ role: "w1", adapter: "hermes", objective: "work", count: 1, guard: { allow_unconfined: true } }], leader: { adapter: "hermes" } },
+      team: { workers: [{ role: "w1", adapter: "hermes", objective: "work", count: 1 }], leader: { adapter: "hermes" } },
     }), "utf-8");
     execFileSync("git", ["add", "--all", "--force"], { cwd: root });
     execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-m", "init"], { cwd: root });
