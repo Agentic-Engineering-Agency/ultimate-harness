@@ -162,6 +162,22 @@ export async function putMissionPackets(options: PutMissionPacketsOptions): Prom
   const existed = new Map<string, boolean>();
   for (const packet of packets) existed.set(packet.target, await fileExists(packet.target));
 
+  // Refuse before anything is written, not after a staged write has been undone: an existing target needs
+  // --replace, and --replace is refused while a live run of that mission exists. A refused put leaves every
+  // installed packet exactly as it was, so a running worker never sees a packet change under it.
+  const refusals: string[] = [];
+  for (const packet of packets) {
+    if (!existed.get(packet.target)) continue;
+    if (!replace) {
+      refusals.push(`mission ${packet.id} already exists at ${packet.target}; pass --replace to overwrite`);
+      continue;
+    }
+    if (await missionHasLiveRun(root, packet.id)) {
+      refusals.push(`mission ${packet.id} has a live run; refusing --replace`);
+    }
+  }
+  if (refusals.length > 0) return { ok: false, reason: refusals.join("; ") };
+
   const staged = new Map<string, StagedFile>();
   try {
     // 1. Make provided worker packets visible to their team packet's check
@@ -182,32 +198,14 @@ export async function putMissionPackets(options: PutMissionPacketsOptions): Prom
       }
     }
 
-    // 3. Refuse before writing: an existing target needs --replace, and
-    // --replace is refused while a live run of that mission exists.
-    const refusals: string[] = [];
-    for (const packet of packets) {
-      if (!existed.get(packet.target)) continue;
-      if (!replace) {
-        refusals.push(`mission ${packet.id} already exists at ${packet.target}; pass --replace to overwrite`);
-        continue;
-      }
-      if (await missionHasLiveRun(root, packet.id)) {
-        refusals.push(`mission ${packet.id} has a live run; refusing --replace`);
-      }
-    }
-    if (refusals.length > 0) {
-      await rollback(staged);
-      return { ok: false, reason: refusals.join("; ") };
-    }
-
-    // 4. Install every packet atomically.
+    // 3. Install every packet atomically.
     for (const packet of packets) {
       await mkdir(path.dirname(packet.target), { recursive: true });
       await writeAtomicArtifact(packet.target, packet.raw);
     }
     staged.clear();
 
-    // 5. One mission.put audit event per installed packet.
+    // 4. One mission.put audit event per installed packet.
     const timestamp = options.now ?? new Date().toISOString();
     const logPath = auditLog(root);
     await mkdir(path.dirname(logPath), { recursive: true });
