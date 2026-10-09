@@ -28,6 +28,7 @@ import { settleNativeCap, reconcileNativeCapSettlement } from "../harness/runtim
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { captureDiffWithUntracked, diffCaptureFailureRecord } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
+import { assertOrchestratorWriteRoots } from "../harness/orchestrator-write-roots.js";
 import { getMissionArtifactContext, persistPromptAndSession, appendMissionEvent, writeArtifactFile } from "./_artifact-context.js";
 
 export const CommandCodeRuntimeConfigSchema = z.object({
@@ -124,6 +125,8 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   if (config.role === "orchestrator" && !mission.guard) {
     throw new Error("Command Code orchestrator runs require a mission guard policy");
   }
+  // The orchestrator runs in the live project root, so only its write roots confine it.
+  if (config.role === "orchestrator") assertOrchestratorWriteRoots(controllerGuard(mission.guard).write_roots, "Command Code");
   const permissionMode = mission.guard ? "guard" as const : config.permission_mode ?? "prompt" as const;
   const reviewRequestSha256 = await assertIndependentReviewExecution(root, missionPath, mission, {
     canonicalRoot: options.artifactRoot ?? root, runtime: "command-code", model: config.model,

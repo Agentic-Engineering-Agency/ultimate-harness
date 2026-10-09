@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify } from "yaml";
@@ -101,6 +101,22 @@ describe("orchestrator missions run in the project root without --no-sandbox", (
     );
     expect(refusal.stdout).not.toContain("Running mission:");
     expect(refusal.stdout).not.toContain("orchestrator in the project root");
+  });
+
+  test("a Command Code orchestrator without write roots is refused too: the check is not the adapter's alone (#254)", async () => {
+    await addAdapter(TEST_ROOT, "command-code");
+    const missionPath = await writeMission("o-cmdc", { role: "orchestrator", model: "qwen/qwen3.8-flash" }, {});
+
+    const refusal = await runUhFailure([
+      "mission", "run", missionPath,
+      "--runtime", "command-code", "--force", "--root", TEST_ROOT,
+    ]);
+
+    expect(`${refusal.stdout}${refusal.stderr}`).toContain("whole repository");
+    expect(`${refusal.stdout}${refusal.stderr}`).toContain("[FAIL] mission run error:");
+    expect(`${refusal.stdout}${refusal.stderr}`).not.toContain("has no bound sandbox");
+    // Refused at planning: no run directory was created and no runtime was started.
+    await expect(readdir(join(TEST_ROOT, ".harness", "missions", "o-cmdc", "runs"))).rejects.toThrow();
   });
 
   test("an orchestrator without write roots is still refused by the adapter's guard check", async () => {

@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- A Command Code orchestrator is now refused when its guard's write roots cover the live project root (#254). `uh mission run` lets an orchestrator run in the project root without a sandbox on the promise that its adapter refuses repository-wide write roots, but only the Claude Code adapter did; Command Code accepted an empty guard (write root `.`) and ran with the whole repository writable. Both adapters now share one check (`src/harness/orchestrator-write-roots.ts`): empty, `.`, absolute and `..` roots are refused at planning.
 
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
 - `uh mission review-collect` discards the review's sandbox after a successful collection, keeping the reviewer's report beside the assessment as `review-report.json`. Every review used to leave its sandbox worktree behind. `--keep-workspace` keeps it.
