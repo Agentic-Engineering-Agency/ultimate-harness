@@ -113,6 +113,8 @@ function substitutions(command: string): string[] {
  */
 function uhControllerInvoked(args: string[]): boolean {
   const positional = args.filter(t => !t.startsWith("-")).map(t => t.toLowerCase());
+  // `uh ledger confirm` records the owner's verification; an agent, an orchestrator included, never runs it.
+  if (positional[0] === "ledger" && positional[1] === "confirm") return true;
   if (positional[0] === "mission") return UH_CONTROLLER_MISSION_OPERATIONS.has(positional[1] ?? "");
   if (positional[0] === "acceptance") return positional[1] === "run";
   return UH_CONTROLLER_OPERATIONS.has(positional[0] ?? "");

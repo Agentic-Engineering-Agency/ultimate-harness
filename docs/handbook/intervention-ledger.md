@@ -71,4 +71,4 @@ uh ledger import old-corrections.ndjson
 
 ## The owner line
 
-Only `uh ledger confirm` sets `verified` with `verified_by: "owner"`; the harness refuses every other attempt. A mechanical check may set `verified` with its own id. This keeps "the owner accepted this" a claim only the owner can make.
+Only `uh ledger confirm` sets `verified` with `verified_by: "owner"`; the harness refuses every other attempt. A mechanical check may set `verified` with its own id. This keeps "the owner accepted this" a claim only the owner can make. `uh ledger confirm` refuses to run in a guarded worker (the orchestrator included) and in any process without a terminal, and the tool guard denies it to a worker's shell.

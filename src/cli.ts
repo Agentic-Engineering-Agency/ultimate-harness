@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { ownerOnlyRefusal } from "./harness/owner-only.js";
 import { prepareIndependentReview, collectIndependentReview, retireIndependentReviewWorkspace } from "./harness/independent-review.js";
 import { Command } from "commander";
 import { z } from "zod";
@@ -298,6 +299,16 @@ async function installRuntimeCancelledEventHandler(
 }
 
 const program = new Command();
+// `uh ledger confirm` is the owner's: refuse it, before any command logic, in a guarded worker or with no terminal.
+program.hook("preAction", (_command, action) => {
+  const names: string[] = [];
+  for (let current: Command | null = action; current?.parent; current = current.parent) names.unshift(current.name());
+  const refusal = ownerOnlyRefusal(process.env, names, Boolean(process.stdin.isTTY && process.stdout.isTTY));
+  if (refusal) {
+    console.error(`[BLOCKED] ${refusal}`);
+    process.exit(exitCodeForRun("blocked"));
+  }
+});
 /** Let settlement notifications still being delivered finish (bounded), then exit: `process.exit` straight after a fire-and-forget delivery drops it. */
 async function exitDelivered(code: number): Promise<never> {
   await drainNotifications();
