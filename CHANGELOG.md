@@ -90,6 +90,8 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
 
 ### Changed
+- The post-checks file and the worker-memory reservation file are defined in `src/schema` like the other persisted contracts. A reservation file now carries `schema_version: uh.reservation.v0` (files written before still parse), and the post-checks file may be the original bare list or a versioned `{ schema_version: uh.post-checks.v0, checks }` document. #259.
+- The steer record and the resume link, the two versioned contracts that were defined in `src/harness`, now live in `src/schema` (exported from its index, timestamps checked as datetimes, both known to `uh validate`), and a test fails when a versioned schema literal is defined outside `src/schema`. #259.
 
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.
 - Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
@@ -111,6 +113,11 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- `uh steer` and `uh resume` look for `.harness/adapters` only from the run's scope up to its own project root, so a project without adapters no longer loads the manifests of a directory above it. #259.
+- `uh mission check` no longer reads outside the project: a grounding claim's path must be relative and stay inside (refused by the packet schema, and again at read time through links), and a team worker's `mission_id` must be a plain id. #259.
+- `uh steer` re-reads the controller's record after the request file is gone, so a `not_applied` verdict written a moment after the controller takes the request is reported as not applied, not as success. #259.
+- A team worker's commit holds exactly the paths inside its write roots: the index is cleared before staging, so a path staged outside the roots no longer rides along (#259); changed paths are read with `status --porcelain=v1 -z`, so non-ASCII, spaced and quoted names are staged and committed as they are (#259); a declared output that is a whole ignored directory commits its regular files only, never links, `node_modules`, `.env` files or protected paths (#260).
+- `uh steer` no longer reports success for a steer nothing has taken. It wrote the request, signalled the stop, waited 1.5 s for a verdict, and reported `Steered …` when the controller neither refused nor answered. That case now reports `status: pending` (`Steer requested for <run>, not yet taken`) and still records the intervention; a request the controller took, or a `not_applied` record, are reported as before. #259.
 
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
 - `uh mission review-collect` discards the review's sandbox after a successful collection, keeping the reviewer's report beside the assessment as `review-report.json`. Every review used to leave its sandbox worktree behind. `--keep-workspace` keeps it.

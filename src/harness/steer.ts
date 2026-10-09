@@ -1,3 +1,4 @@
+import { ResumeLinkSchema, type ResumeLink } from "../schema/steer.js";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -75,24 +76,7 @@ export class UnsupportedResumeError extends Error {
   }
 }
 
-/**
- * The operator-authored lineage of a resume, written in both directions:
- * `resumed_from` on the new run, `resumed_by` on the source run.
- */
-export const ResumeLinkSchema = z
-  .object({
-    schema_version: z.literal("uh.resume-link.v0"),
-    mission_id: z.string().min(1),
-    run_id: z.string().min(1),
-    runtime: z.string().min(1),
-    resume_origin: z.literal("operator"),
-    resumed_from: z.string().min(1).optional(),
-    resumed_by: z.string().min(1).optional(),
-    report: z.boolean().default(false),
-    created_at: z.string().min(1),
-  })
-  .strict();
-export type ResumeLink = z.infer<typeof ResumeLinkSchema>;
+export { ResumeLinkSchema, type ResumeLink };
 
 /** A discovered run resolved to everything a resume needs. */
 export interface ResumableRun {
@@ -151,7 +135,8 @@ export interface SteerResult {
   report: boolean;
   /** The operator-started new run; present only for the fallback path. */
   runId?: string;
-  status?: "applied" | "not_applied";
+  /** `pending`: the request is written and the stop signalled, but the controller had not taken it within the wait. */
+  status?: "applied" | "not_applied" | "pending";
   reason?: string;
   message_digest?: string;
 }
@@ -176,6 +161,9 @@ export interface SteerDeps {
  */
 export async function resolveAdapterRoot(scope: string): Promise<string> {
   const start = path.resolve(scope);
+  // Never above the project that owns the scope: an ancestor directory's adapters are not this project's. Without a
+  // project root the scope itself is the only place to look.
+  const ceiling = (await findProjectRoot(start)) ?? start;
   for (let dir = start; ; ) {
     try {
       const stat = await lstat(path.join(dir, ".harness", "adapters"));
@@ -183,12 +171,13 @@ export async function resolveAdapterRoot(scope: string): Promise<string> {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    if (dir === ceiling) break;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   throw new Error(
-    `no .harness/adapters directory found above ${start}; the adapter manifest cannot be resolved from the project root`,
+    `no .harness/adapters directory found from ${start} up to its project root ${ceiling}; the adapter manifest cannot be resolved from the project root`,
   );
 }
 
@@ -397,20 +386,26 @@ function steerMessageDigest(message: string): string {
 /**
  * The controller's verdict on the steer request this command just wrote, when it
  * can be observed: the not_applied record it wrote for exactly this message, or
- * nothing once the controller has taken the request to act on it. Matching on the
- * message digest keeps a record left by an earlier steer from being reported
- * against this one, and the bounded wait keeps a wedged controller from hanging
- * the command.
+ * nothing once the controller has taken the request to act on it, or `pending` when
+ * the request is still there after the wait. Matching on the message digest keeps a
+ * record left by an earlier steer from being reported against this one, and the
+ * bounded wait keeps a wedged controller from hanging the command.
  */
-async function observeSteerVerdict(root: string, missionId: string, runId: string, messageDigest: string): Promise<SteerRecord | undefined> {
+async function observeSteerVerdict(root: string, missionId: string, runId: string, messageDigest: string): Promise<SteerRecord | "pending" | undefined> {
   const deadline = Date.now() + STEER_VERDICT_TIMEOUT_MS;
   for (;;) {
     const record = await readSteerRecord(root, missionId, runId).catch(() => undefined);
     if (record?.message_digest === messageDigest) return record;
     const pending = await readSteerRequest(root, missionId, runId).catch(() => undefined);
-    if (!pending) return undefined;
+    if (!pending) {
+      // The controller took the request. Its verdict may land a moment after the request file goes, so read the
+      // record once more before calling the steer applied.
+      await delay(STEER_VERDICT_POLL_MS);
+      const settled = await readSteerRecord(root, missionId, runId).catch(() => undefined);
+      return settled?.message_digest === messageDigest ? settled : undefined;
+    }
     const remaining = deadline - Date.now();
-    if (remaining <= 0) return undefined;
+    if (remaining <= 0) return "pending";
     await delay(Math.min(STEER_VERDICT_POLL_MS, remaining));
   }
 }
@@ -535,6 +530,11 @@ export async function steerRun(
     // and resumes the session, so no new run is started here.
     await deps.cancel(root, target.missionId, target.runId);
     const record = await observeSteerVerdict(target.artifactRoot, target.missionId, target.runId, steerMessageDigest(trimmed));
+    if (record === "pending") {
+      // The request is written and the stop signalled, but nothing shows the controller took it: say so.
+      await captureSteer(root, { missionId: target.missionId, runId: target.runId, source: options.source, what: trimmed });
+      return { ok: true, mode: "controller", sourceRunId: target.runId, missionId: target.missionId, runtime: target.runtime, report, status: "pending", reason: "the run's controller has not taken the request yet" };
+    }
     if (record) {
       return {
         ok: false,

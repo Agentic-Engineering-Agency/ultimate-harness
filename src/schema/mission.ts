@@ -1,6 +1,7 @@
 import path from "node:path";
 import { TeamResourceLimitsSchema, RuntimeLimitsSchema, ToolGuardFieldsSchema, resolveToolGuardPolicy, type ToolGuardPolicy, DEFAULT_PROTECTED_PATHS } from "./runtime-control.js";
 import { z } from "zod";
+import { RelativePathSchema } from "./relative-path.js";
 import { CostClassSchema } from "./adapter-capabilities.js";
 import { IndependentReviewBindingSchema } from "./independent-review.js";
 
@@ -45,7 +46,7 @@ const RequiredCheckSchema = z.object({
  */
 export const GroundingClaimSchema = z.object({
   claim: z.string().min(1),
-  path: z.string().min(1),
+  path: RelativePathSchema,
   contains: z.string().min(1),
 }).strict();
 export type GroundingClaim = z.infer<typeof GroundingClaimSchema>;

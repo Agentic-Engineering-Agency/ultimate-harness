@@ -1,6 +1,6 @@
 import { z } from "zod";
+import { RelativePathSchema } from "./relative-path.js";
 
-const RelativePathSchema = z.string().min(1).refine((value) => !value.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(value) && !value.split(/[\\/]/).includes(".."), "path must be relative to its owner");
 
 const AcceptanceWorkerExpectedSchema = z.object({
   status: z.string().min(1),

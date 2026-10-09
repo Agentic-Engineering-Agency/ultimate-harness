@@ -415,6 +415,35 @@ test("the completed-before-steer race records not_applied and uh steer reports i
   }
 });
 
+test("a controller that takes the request first and writes its not_applied record a moment later is still reported not_applied (#259)", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runId = "late-record-run";
+    const runDir = await seedRun(root, "one", runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    const message = "Switch to auth path.";
+    const digest = createHash("sha256").update(message).digest("hex");
+    const result = await steerRun(root, runId, message, {}, {
+      run: async () => ({}),
+      cancel: async () => {
+        await rm(path.join(runDir, "steer-request.json"), { force: true });
+        // The record lands after the request is gone, as it does when the controller consumes first and decides after.
+        setTimeout(() => {
+          void writeFile(path.join(runDir, "steer-record.json"), JSON.stringify({
+            schema_version: "uh.steer-record.v0", mission_id: "one", run_id: runId, status: "not_applied",
+            reason: "attempt completed before the steer took effect", message_digest: digest, recorded_at: new Date().toISOString(),
+          }));
+        }, 20);
+        return { ok: true, status: "running" };
+      },
+      processes: alive(4242),
+    });
+    expect(result).toMatchObject({ ok: false, status: "not_applied", message_digest: digest });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 15_000);
+
 /** Mirror the record a controller writes when it refuses a steer. */
 async function writeSteerRecord(runDir: string, missionId: string, runId: string, message: string, reason: string): Promise<void> {
   await writeFile(path.join(runDir, "steer-record.json"), JSON.stringify({
@@ -490,7 +519,7 @@ test("a refusal recorded for a different message never reports this steer", asyn
   }
 });
 
-test("steer of a live run whose controller has not answered yet still reports the controller path", async () => {
+test("steer of a live run whose controller has not answered yet reports the controller path as pending", async () => {
   const root = await project();
   try {
     await missionPacket(root, "one");
@@ -504,8 +533,7 @@ test("steer of a live run whose controller has not answered yet still reports th
       processes: alive(4242),
     });
     expect(ran).toBe(false);
-    expect(result).toMatchObject({ ok: true, mode: "controller", sourceRunId: runId });
-    expect(result.status).toBeUndefined();
+    expect(result).toMatchObject({ ok: true, mode: "controller", sourceRunId: runId, status: "pending" });
     // The wait for a verdict is bounded, and the request survives for the owner.
     expect(Date.now() - started).toBeLessThan(5000);
     expect(await readdir(runDir)).toContain("steer-request.json");
@@ -629,3 +657,41 @@ test("normal steer of a live run continues to succeed when old runs exist in the
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a steer whose controller has not taken the request within the wait is reported pending, not applied (U-069, #259)", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runId = "silent-run";
+    const runDir = await seedRun(root, "one", runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    // The controller never answers: the request stays where steerRun wrote it and no record appears.
+    const result = await steerRun(root, runId, "Switch to auth path.", {}, {
+      run: async () => ({}),
+      cancel: async () => ({ ok: true, status: "running" }),
+      processes: alive(4242),
+    });
+    expect(result).toMatchObject({ mode: "controller", sourceRunId: runId, status: "pending" });
+    expect(result.ok).toBe(true);
+    expect(await readFile(path.join(runDir, "steer-request.json"), "utf8")).toContain("Switch to auth path.");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 15_000);
+
+test("a steer whose request the controller took is not reported pending", async () => {
+  const root = await project();
+  try {
+    await missionPacket(root, "one");
+    const runId = "taken-run";
+    const runDir = await seedRun(root, "one", runId, { status: "running", sessionId: "s1", controllerPid: 4242 });
+    const result = await steerRun(root, runId, "Switch to auth path.", {}, {
+      run: async () => ({}),
+      cancel: async () => { await rm(path.join(runDir, "steer-request.json"), { force: true }); return { ok: true, status: "running" }; },
+      processes: alive(4242),
+    });
+    expect(result.status).toBeUndefined();
+    expect(result.ok).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 15_000);

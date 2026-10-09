@@ -29,7 +29,7 @@ import { captureReplace } from "./interventions.js";
  * goes wrong).
  */
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "yaml";
 import { promisify } from "node:util";
@@ -745,6 +745,45 @@ const COMMIT_PROTECTED_EXCLUDES = DEFAULT_PROTECTED_PATHS
   .filter((protectedPath) => protectedPath !== ".git")
   .map((protectedPath) => `:(exclude)${protectedPath}`);
 
+/** `git add -A` of exact paths, handed over on stdin so no name needs shell or glob escaping and none can overflow a command line. */
+async function addPathspecs(cwd: string, paths: readonly string[], force: boolean): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = execFile(
+      "git",
+      ["-c", "core.longpaths=true", "add", ...(force ? ["-f"] : []), "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+      { cwd, maxBuffer: 16 * 1024 * 1024 },
+      (error, _stdout, stderr) => (error ? reject(new Error(`git add failed: ${String(stderr).trim() || error.message}`)) : resolve()),
+    );
+    child.stdin?.on("error", () => { /* reported through the exit status */ });
+    child.stdin?.end(paths.map((entry) => `:(literal)${entry}\0`).join(""));
+  });
+}
+
+/** Never committed from a declared output directory: dependency folders and environment files. */
+const OUTPUT_DIRECTORY_SKIP = (name: string): boolean => name === "node_modules" || name === ".env" || name.startsWith(".env.");
+
+/**
+ * The declared outputs as exact file paths. A file stays as it is, a symbolic link is dropped, and a directory
+ * is expanded to the regular files under it (links, `node_modules`, `.env*`, `.git` and protected paths left out).
+ */
+async function declaredOutputFiles(cwd: string, declared: readonly string[]): Promise<string[]> {
+  const files: string[] = [];
+  const walk = async (relative: string): Promise<void> => {
+    if (isProtectedPath(relative, DEFAULT_PROTECTED_PATHS)) return;
+    const absolute = path.join(cwd, relative);
+    const info = await lstat(absolute).catch(() => undefined);
+    if (!info || info.isSymbolicLink()) return;
+    if (info.isFile()) { files.push(relative.split(path.sep).join("/")); return; }
+    if (!info.isDirectory()) return;
+    for (const entry of await readdir(absolute)) {
+      if (entry === ".git" || OUTPUT_DIRECTORY_SKIP(entry)) continue;
+      await walk(path.join(relative, entry));
+    }
+  };
+  for (const entry of declared) await walk(normalizeRelativePath(entry));
+  return [...new Set(files)];
+}
+
 export const defaultGitOps: GitOps = {
   async addWorktree(root, branch, worktreePath, baseRef) {
     // Lock the registration so a `git worktree prune` run elsewhere (another
@@ -871,17 +910,17 @@ export const defaultGitOps: GitOps = {
     if (stagePaths === undefined) {
       await runGit(["add", "-A", "--", ".", ...COMMIT_PROTECTED_EXCLUDES], cwd);
     } else {
-      const stagePathspecs = stagePaths.map((entry) => `:(literal)${entry}`);
-      if (stagePathspecs.length > 0) {
-        await runGit(["add", "-A", "--", ...stagePathspecs], cwd);
-      }
+      // The commit takes the whole index, so anything staged beforehand (a path outside the write roots, say) would
+      // ride along and bypass the filter above. Start from an empty index; the working tree is untouched.
+      await runGit(["reset", "--quiet"], cwd);
+      if (stagePaths.length > 0) await addPathspecs(cwd, stagePaths, false);
       // Declared outputs under an ignored directory need `-f`: a plain `git add`
       // refuses them. Only declared outputs reach `forcePaths`, so an ignored
-      // stray never gets staged alongside them.
-      const forcePathspecs = (forcePaths ?? []).map((entry) => `:(literal)${entry}`);
-      if (forcePathspecs.length > 0) {
-        await runGit(["add", "-f", "-A", "--", ...forcePathspecs], cwd);
-      }
+      // stray never gets staged alongside them. A declared directory commits the
+      // regular files inside it, never links, `node_modules`, `.env` files or a
+      // protected path.
+      const forceFiles = await declaredOutputFiles(cwd, forcePaths ?? []);
+      if (forceFiles.length > 0) await addPathspecs(cwd, forceFiles, true);
     }
     // Any residual out-of-root or protected change stays in the worktree
     // unstaged (the worktree is discarded or retained as evidence), so gate the
@@ -907,21 +946,21 @@ export const defaultGitOps: GitOps = {
     ], cwd);
   },
   async dirtyPaths(cwd) {
-    // `--porcelain` keeps the output stable across git versions and locales.
+    // `--porcelain=v1 -z` keeps the output stable across git versions and locales and leaves every name unquoted,
+    // so a name with non-ASCII characters, spaces or quotes comes back exactly as it is on disk.
     // Untracked files are included so a worker that only created new files is
     // still seen as having produced work.
-    const { stdout } = await runGit(["status", "--porcelain", "--untracked-files=all"], cwd);
-    return stdout
-      .split("\n")
-      .map((line) => line.replace(/\r$/, ""))
-      .filter((line) => line.length > 3)
-      // `<XY> <path>`; a rename/copy is rendered as `<old> -> <new>`, so keep
-      // the destination path.
-      .map((line) => line.slice(3))
-      .map((entry) => (entry.includes(" -> ") ? entry.slice(entry.lastIndexOf(" -> ") + 4) : entry))
-      .map((entry) => entry.replace(/^"(.*)"$/, "$1"))
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
+    const { stdout } = await runGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd);
+    const records = stdout.split("\0");
+    const paths: string[] = [];
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      if (record.length <= 3) continue;
+      paths.push(record.slice(3));
+      // A rename or copy is `<XY> <new>` followed by a separate `<old>` record; the destination is what changed.
+      if (record[0] === "R" || record[0] === "C" || record[1] === "R" || record[1] === "C") index += 1;
+    }
+    return paths;
   },
   async longPathsEnabled(root) {
     // Read WITHOUT the `-c core.longpaths=true` prefix every other call carries:
