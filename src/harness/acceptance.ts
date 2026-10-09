@@ -246,6 +246,36 @@ async function listInputFilesAtCommit(root: string, commit: string): Promise<str
   return stdout.split("\0").filter((entry) => entry !== "").map((entry) => entry.split(path.sep).join("/"));
 }
 
+/**
+ * Many blobs at one commit through a single `git cat-file --batch` process. A path that is not in the commit is
+ * simply missing from the result.
+ */
+async function readBlobsAtCommit(root: string, commit: string, paths: string[]): Promise<Map<string, Buffer>> {
+  const found = new Map<string, Buffer>();
+  if (paths.length === 0) return found;
+  const output = await new Promise<Buffer>((resolve, reject) => {
+    const child = execFile("git", ["cat-file", "--batch"], { cwd: root, encoding: "buffer", maxBuffer: 512 * 1024 * 1024 }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+    child.stdin?.on("error", () => { /* surfaced through the exit status */ });
+    child.stdin?.end(paths.map((entry) => `${commit}:${entry}\n`).join(""));
+  });
+  let offset = 0;
+  for (const relativePath of paths) {
+    const newline = output.indexOf(0x0a, offset);
+    if (newline < 0) break;
+    const header = output.toString("utf8", offset, newline);
+    offset = newline + 1;
+    const match = /^[0-9a-f]+ (\w+) (\d+)$/.exec(header);
+    if (!match) continue;
+    const size = Number(match[2]);
+    if (match[1] === "blob") found.set(relativePath, output.subarray(offset, offset + size));
+    offset += size + 1;
+  }
+  return found;
+}
+
 async function readInputContent(root: string, relativePath: string, commit?: string): Promise<Buffer | undefined> {
   try {
     if (commit) {
@@ -276,8 +306,9 @@ export async function computeAcceptanceInputDigest(
   const matched = allFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)).sort();
   const lines = [`runtime=${identity.runtime}`, `runtime_version=${identity.runtimeVersion ?? UNKNOWN}`, `model=${identity.model}`];
   const files: string[] = [];
+  const atCommit = options.commit ? await readBlobsAtCommit(root, options.commit, matched) : undefined;
   for (const relativePath of matched) {
-    const content = await readInputContent(root, relativePath, options.commit);
+    const content = atCommit ? atCommit.get(relativePath) : await readInputContent(root, relativePath);
     if (content === undefined) continue;
     lines.push(`${relativePath}\t${sha256Hex(normalizeInputContent(content))}`);
     files.push(relativePath);
@@ -304,8 +335,10 @@ export async function changedAcceptanceInputs(root: string, inputs: string[], ba
     ...currentFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)),
   ]);
   const changed: string[] = [];
-  for (const relativePath of [...relevant].sort()) {
-    const before = await readInputContent(root, relativePath, baseCommit);
+  const sorted = [...relevant].sort();
+  const beforeAll = await readBlobsAtCommit(root, baseCommit, sorted);
+  for (const relativePath of sorted) {
+    const before = beforeAll.get(relativePath);
     const after = await readInputContent(root, relativePath);
     const beforeHash = before === undefined ? null : sha256Hex(normalizeInputContent(before));
     const afterHash = after === undefined ? null : sha256Hex(normalizeInputContent(after));
@@ -338,6 +371,10 @@ export async function classifyAcceptance(
         ...(version ? { runtimeVersion: version } : {}),
       };
       const current = await computeAcceptanceInputDigest(digestRoot, context.inputs ?? [], identity);
+      if (current.resolved === 0) {
+        // Nothing to hash can never change, so such evidence would stay proven for ever.
+        return { state: "stale", reasons: [`the inputs match no tracked file (${(context.inputs ?? []).join(", ") || "none given"}), so nothing can show this evidence is out of date`] };
+      }
       if (current.digest === evidence.input_digest) {
         return fresh ? { state: "proven", reasons: [] } : { state: "stale", reasons: ["freshness window exceeded"] };
       }

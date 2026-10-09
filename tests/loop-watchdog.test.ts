@@ -11,7 +11,7 @@ import {
   resolveLoopWatchdogMode,
   type LoopWatchdogProvider,
 } from "../src/harness/loop-watchdog.js";
-import { MIN_PROBE_CALLS, deterministicLoopSignals, projectActivity } from "../src/harness/loop-probe.js";
+import { MIN_PROBE_CALLS, createActivityProjector, deterministicLoopSignals, projectActivity } from "../src/harness/loop-probe.js";
 import { DecisionReceiptSchema } from "../src/schema/decisions.js";
 import type { EvaluateSystemOneOptions, SystemOneResult } from "../src/harness/typesafe.js";
 import { runRuntimeProcess, type RuntimeProcessOutput } from "../src/harness/runtime-process.js";
@@ -471,5 +471,31 @@ describe("recorded Command Code event streams", () => {
     expect(calls).toHaveLength(0);
     expect(watchdog.evaluations).toBe(0);
     expect(await receiptFiles(dir)).toEqual([]);
+  });
+});
+
+describe("the watchdog reads a long run once (#258)", () => {
+  test("each event is looked at a fixed number of times however many lines have arrived", async () => {
+    let reads = 0;
+    const counted = (event: Event): Event => new Proxy(event, {
+      get(target, key) { if (key === "type") reads += 1; return target[key as string]; },
+    });
+    const all = repeatedEvents(400).map(event => counted(event as Event));
+    const watchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY, provider: async () => { throw new Error("no provider"); } });
+    // The way runtime-process feeds it: the same growing list, one more line each time.
+    const seen: unknown[] = [];
+    for (const event of all) {
+      seen.push(event);
+      await watchdog.observe(seen);
+    }
+    // 800 events. Re-projecting the whole list every line would read about 320 000 types; once each reads 800 or a few times that.
+    expect(reads).toBeLessThan(all.length * 4);
+  });
+
+  test("the projector keeps a bounded window and counts every call", () => {
+    const projector = createActivityProjector({ window: 10, workingDirectory: WORKING_DIRECTORY });
+    projector.push(repeatedEvents(500));
+    expect(projector.total).toBe(500);
+    expect(projector.snapshot().calls).toHaveLength(10);
   });
 });

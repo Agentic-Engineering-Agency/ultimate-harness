@@ -312,29 +312,38 @@ function projectStatus(end: Event): { ok: boolean; error_class: ErrorClass } {
 }
 
 /**
- * Reduce a native event stream to the last `window` completed tool calls.
- * Only the whitelist is retained: arguments, file contents, command lines,
- * output and message text are read to classify a call and then discarded.
+ * Reduces a native event stream to completed tool calls one batch at a time, so a long run is read once, not once
+ * per new line. It keeps only the last `window` calls and a running total; the pending starts are the only other state.
  */
-export function projectActivity(events: readonly unknown[], options: ProjectActivityOptions = {}): ActivityWindow {
+export interface ActivityProjector {
+  /** Feed the events that arrived since the last call, in order. */
+  push(events: readonly unknown[]): void;
+  /** Every completed call seen so far, including those that have left the window. */
+  readonly total: number;
+  /** The last `window` completed calls. */
+  snapshot(): ActivityWindow;
+}
+
+export function createActivityProjector(options: ProjectActivityOptions = {}): ActivityProjector {
   const requested = options.window ?? DEFAULT_ACTIVITY_WINDOW;
   const size = Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_ACTIVITY_WINDOW;
   const workingDirectory = options.workingDirectory;
 
   const starts = new Map<string, PendingStart>();
-  const calls: ProjectedToolCall[] = [];
+  let calls: ProjectedToolCall[] = [];
+  let total = 0;
   let commandCodeCalls = 0;
   let ohMyPiCalls = 0;
 
-  for (const value of events) {
+  const accept = (value: unknown): void => {
     const event = nativeEvent(value);
-    if (!event) continue;
+    if (!event) return;
     const type = String(event.type ?? "");
     const id = eventCallId(event);
     const name = eventToolName(event);
 
     if (COMMAND_CODE_START_TYPES.has(type) || OH_MY_PI_START_TYPES.has(type)) {
-      if (!id) continue;
+      if (!id) return;
       const args = eventArgs(event);
       const pending = starts.get(id);
       if (pending) {
@@ -343,20 +352,20 @@ export function projectActivity(events: readonly unknown[], options: ProjectActi
         // not erase the arguments the queue captured.
         if (!pending.args && args) pending.args = args;
         if (!pending.toolName && name) pending.toolName = name;
-        continue;
+        return;
       }
-      if (!name) continue;
+      if (!name) return;
       starts.set(id, {
         toolName: name,
         args,
         source: OH_MY_PI_START_TYPES.has(type) ? "oh-my-pi" : "command-code",
       });
-      continue;
+      return;
     }
 
-    if (!TOOL_END_TYPES.has(type) && !TOOL_BLOCK_TYPES.has(type)) continue;
+    if (!TOOL_END_TYPES.has(type) && !TOOL_BLOCK_TYPES.has(type)) return;
     const start = id ? starts.get(id) : undefined;
-    if (!start) continue;
+    if (!start) return;
     starts.delete(id);
 
     const toolName = start.toolName || name;
@@ -371,16 +380,36 @@ export function projectActivity(events: readonly unknown[], options: ProjectActi
       ok: status.ok,
       error_class: status.error_class,
     });
+    total += 1;
+    // Trimmed in blocks, so the array stays bounded without a copy per call.
+    if (calls.length > size * 2) calls = calls.slice(-size);
     if (start.source === "command-code") commandCodeCalls += 1;
     else ohMyPiCalls += 1;
-  }
+  };
 
   return {
-    source: commandCodeCalls > 0 && commandCodeCalls >= ohMyPiCalls ? "command-code" : "oh-my-pi",
-    window: size,
-    generated_at: new Date().toISOString(),
-    calls: calls.slice(-size),
+    push(events) { for (const value of events) accept(value); },
+    get total() { return total; },
+    snapshot() {
+      return {
+        source: commandCodeCalls > 0 && commandCodeCalls >= ohMyPiCalls ? "command-code" : "oh-my-pi",
+        window: size,
+        generated_at: new Date().toISOString(),
+        calls: calls.slice(-size),
+      };
+    },
   };
+}
+
+/**
+ * Reduce a native event stream to the last `window` completed tool calls.
+ * Only the whitelist is retained: arguments, file contents, command lines,
+ * output and message text are read to classify a call and then discarded.
+ */
+export function projectActivity(events: readonly unknown[], options: ProjectActivityOptions = {}): ActivityWindow {
+  const projector = createActivityProjector(options);
+  projector.push(events);
+  return projector.snapshot();
 }
 
 /** The repeatable identity of a call: tool, target and outcome, never its arguments. */

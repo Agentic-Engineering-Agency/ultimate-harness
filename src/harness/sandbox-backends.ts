@@ -132,6 +132,11 @@ export class GitWorktreeBackend implements SandboxBackend {
     await serializedWorktreeAdd(ctx.root, () => runGit(ctx.root, [
       "worktree", "add", "--lock", "--reason", `uh:${branch}`, "-b", branch, ctx.worktreePath, ctx.baseRef,
     ]));
+    // The fork point, for anything that later needs to know what this branch changed (independent review reads it back).
+    try {
+      const fork = (await runGit(ctx.root, ["rev-parse", "--verify", `${ctx.baseRef}^{commit}`])).stdout.trim();
+      if (fork) await runGit(ctx.root, ["config", `branch.${branch}.base`, fork]);
+    } catch { /* A review then falls back to the repository's default branch. */ }
     return { branch, base_ref: ctx.baseRef };
   }
 
