@@ -151,7 +151,8 @@ export interface SteerResult {
   report: boolean;
   /** The operator-started new run; present only for the fallback path. */
   runId?: string;
-  status?: "applied" | "not_applied";
+  /** `pending`: the request is written and the stop signalled, but the controller had not taken it within the wait. */
+  status?: "applied" | "not_applied" | "pending";
   reason?: string;
   message_digest?: string;
 }
@@ -397,12 +398,12 @@ function steerMessageDigest(message: string): string {
 /**
  * The controller's verdict on the steer request this command just wrote, when it
  * can be observed: the not_applied record it wrote for exactly this message, or
- * nothing once the controller has taken the request to act on it. Matching on the
- * message digest keeps a record left by an earlier steer from being reported
- * against this one, and the bounded wait keeps a wedged controller from hanging
- * the command.
+ * nothing once the controller has taken the request to act on it, or `pending` when
+ * the request is still there after the wait. Matching on the message digest keeps a
+ * record left by an earlier steer from being reported against this one, and the
+ * bounded wait keeps a wedged controller from hanging the command.
  */
-async function observeSteerVerdict(root: string, missionId: string, runId: string, messageDigest: string): Promise<SteerRecord | undefined> {
+async function observeSteerVerdict(root: string, missionId: string, runId: string, messageDigest: string): Promise<SteerRecord | "pending" | undefined> {
   const deadline = Date.now() + STEER_VERDICT_TIMEOUT_MS;
   for (;;) {
     const record = await readSteerRecord(root, missionId, runId).catch(() => undefined);
@@ -410,7 +411,7 @@ async function observeSteerVerdict(root: string, missionId: string, runId: strin
     const pending = await readSteerRequest(root, missionId, runId).catch(() => undefined);
     if (!pending) return undefined;
     const remaining = deadline - Date.now();
-    if (remaining <= 0) return undefined;
+    if (remaining <= 0) return "pending";
     await delay(Math.min(STEER_VERDICT_POLL_MS, remaining));
   }
 }
@@ -535,6 +536,11 @@ export async function steerRun(
     // and resumes the session, so no new run is started here.
     await deps.cancel(root, target.missionId, target.runId);
     const record = await observeSteerVerdict(target.artifactRoot, target.missionId, target.runId, steerMessageDigest(trimmed));
+    if (record === "pending") {
+      // The request is written and the stop signalled, but nothing shows the controller took it: say so.
+      await captureSteer(root, { missionId: target.missionId, runId: target.runId, source: options.source, what: trimmed });
+      return { ok: true, mode: "controller", sourceRunId: target.runId, missionId: target.missionId, runtime: target.runtime, report, status: "pending", reason: "the run's controller has not taken the request yet" };
+    }
     if (record) {
       return {
         ok: false,

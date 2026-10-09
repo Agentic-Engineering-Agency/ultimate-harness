@@ -490,7 +490,7 @@ test("a refusal recorded for a different message never reports this steer", asyn
   }
 });
 
-test("steer of a live run whose controller has not answered yet still reports the controller path", async () => {
+test("steer of a live run whose controller has not answered yet reports the controller path as pending", async () => {
   const root = await project();
   try {
     await missionPacket(root, "one");
@@ -504,8 +504,7 @@ test("steer of a live run whose controller has not answered yet still reports th
       processes: alive(4242),
     });
     expect(ran).toBe(false);
-    expect(result).toMatchObject({ ok: true, mode: "controller", sourceRunId: runId });
-    expect(result.status).toBeUndefined();
+    expect(result).toMatchObject({ ok: true, mode: "controller", sourceRunId: runId, status: "pending" });
     // The wait for a verdict is bounded, and the request survives for the owner.
     expect(Date.now() - started).toBeLessThan(5000);
     expect(await readdir(runDir)).toContain("steer-request.json");
