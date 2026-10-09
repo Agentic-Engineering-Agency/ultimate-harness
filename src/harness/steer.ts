@@ -1,3 +1,4 @@
+import { ResumeLinkSchema, type ResumeLink } from "../schema/steer.js";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -75,24 +76,7 @@ export class UnsupportedResumeError extends Error {
   }
 }
 
-/**
- * The operator-authored lineage of a resume, written in both directions:
- * `resumed_from` on the new run, `resumed_by` on the source run.
- */
-export const ResumeLinkSchema = z
-  .object({
-    schema_version: z.literal("uh.resume-link.v0"),
-    mission_id: z.string().min(1),
-    run_id: z.string().min(1),
-    runtime: z.string().min(1),
-    resume_origin: z.literal("operator"),
-    resumed_from: z.string().min(1).optional(),
-    resumed_by: z.string().min(1).optional(),
-    report: z.boolean().default(false),
-    created_at: z.string().min(1),
-  })
-  .strict();
-export type ResumeLink = z.infer<typeof ResumeLinkSchema>;
+export { ResumeLinkSchema, type ResumeLink };
 
 /** A discovered run resolved to everything a resume needs. */
 export interface ResumableRun {
