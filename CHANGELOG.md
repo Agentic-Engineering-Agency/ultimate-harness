@@ -90,6 +90,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
 
 ### Changed
+- The post-checks file and the worker-memory reservation file are defined in `src/schema` like the other persisted contracts. A reservation file now carries `schema_version: uh.reservation.v0` (files written before still parse), and the post-checks file may be the original bare list or a versioned `{ schema_version: uh.post-checks.v0, checks }` document. #259.
 - The steer record and the resume link, the two versioned contracts that were defined in `src/harness`, now live in `src/schema` (exported from its index, timestamps checked as datetimes, both known to `uh validate`), and a test fails when a versioned schema literal is defined outside `src/schema`. #259.
 
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.

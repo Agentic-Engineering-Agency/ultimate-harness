@@ -1,3 +1,4 @@
+import { POST_CHECK_DEFAULT_TIMEOUT_MS, POST_CHECK_NAME_PATTERN, PostCheckEntrySchema, PostCheckFileSchema, type PostCheckEntry } from "../schema/post-checks.js";
 import { execFileSync, spawn } from "node:child_process";
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -19,7 +20,6 @@ import { appendRunsIndexEntry, mirrorRuntimeResultToLatest, readLatestPointer, w
  * in normal use).
  */
 
-export const POST_CHECK_DEFAULT_TIMEOUT_MS = 900_000;
 const TIMEOUT_KILL_GRACE_MS = 100;
 
 /**
@@ -29,26 +29,7 @@ const TIMEOUT_KILL_GRACE_MS = 100;
  */
 const POST_CHECK_RUNNER_FAILURE = "post-check runner failed";
 
-/** Safe, log-friendly check name: no separators, no leading punctuation. */
-export const POST_CHECK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-export const PostCheckEntrySchema = z.object({
-  name: z.string().regex(POST_CHECK_NAME_PATTERN, "post-check name must match /^[A-Za-z0-9][A-Za-z0-9._-]*$/"),
-  command: z.string().min(1),
-  timeout_ms: z.number().int().positive().default(POST_CHECK_DEFAULT_TIMEOUT_MS),
-}).strict();
-
-export const PostCheckFileSchema = z.array(PostCheckEntrySchema).superRefine((checks, ctx) => {
-  const seen = new Set<string>();
-  checks.forEach((check, index) => {
-    if (seen.has(check.name)) {
-      ctx.addIssue({ code: "custom", message: `duplicate post-check name: ${check.name}`, path: [index, "name"] });
-    }
-    seen.add(check.name);
-  });
-});
-
-export type PostCheckEntry = z.infer<typeof PostCheckEntrySchema>;
+export { POST_CHECK_DEFAULT_TIMEOUT_MS, POST_CHECK_NAME_PATTERN, PostCheckEntrySchema, PostCheckFileSchema, type PostCheckEntry };
 export type { PostCheckResult };
 
 export type PostChecksOutcome = {
