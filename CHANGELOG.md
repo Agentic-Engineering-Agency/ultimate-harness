@@ -112,6 +112,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- `uh steer` and `uh resume` look for `.harness/adapters` only from the run's scope up to its own project root, so a project without adapters no longer loads the manifests of a directory above it. #259.
 - `uh mission check` no longer reads outside the project: a grounding claim's path must be relative and stay inside (refused by the packet schema, and again at read time through links), and a team worker's `mission_id` must be a plain id. #259.
 - `uh steer` re-reads the controller's record after the request file is gone, so a `not_applied` verdict written a moment after the controller takes the request is reported as not applied, not as success. #259.
 - A team worker's commit holds exactly the paths inside its write roots: the index is cleared before staging, so a path staged outside the roots no longer rides along (#259); changed paths are read with `status --porcelain=v1 -z`, so non-ASCII, spaced and quoted names are staged and committed as they are (#259); a declared output that is a whole ignored directory commits its regular files only, never links, `node_modules`, `.env` files or protected paths (#260).

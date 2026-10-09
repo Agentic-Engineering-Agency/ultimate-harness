@@ -161,6 +161,9 @@ export interface SteerDeps {
  */
 export async function resolveAdapterRoot(scope: string): Promise<string> {
   const start = path.resolve(scope);
+  // Never above the project that owns the scope: an ancestor directory's adapters are not this project's. Without a
+  // project root the scope itself is the only place to look.
+  const ceiling = (await findProjectRoot(start)) ?? start;
   for (let dir = start; ; ) {
     try {
       const stat = await lstat(path.join(dir, ".harness", "adapters"));
@@ -168,12 +171,13 @@ export async function resolveAdapterRoot(scope: string): Promise<string> {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    if (dir === ceiling) break;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   throw new Error(
-    `no .harness/adapters directory found above ${start}; the adapter manifest cannot be resolved from the project root`,
+    `no .harness/adapters directory found from ${start} up to its project root ${ceiling}; the adapter manifest cannot be resolved from the project root`,
   );
 }
 
