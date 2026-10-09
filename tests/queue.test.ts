@@ -500,3 +500,55 @@ describe("uh queue run", () => {
     expect(notices[0].reason).toBe("launch-failed");
   });
 });
+
+describe("the default queue launcher's argv (#255)", () => {
+  /** What the launcher would spawn for one entry, without spawning anything. */
+  async function launchedArgs(request: Partial<Parameters<ReturnType<typeof createQueueLauncher>>[0]> = {}): Promise<string[]> {
+    let captured: string[] = [];
+    const spawner: NonNullable<QueueLauncherDeps["spawner"]> = (_command, args) => {
+      captured = args;
+      return new EventEmitter() as unknown as ChildProcess;
+    };
+    const launcher = createQueueLauncher({ spawner, cliEntry: "cli.js", settle: async () => ({ status: "passed", exit_code: 0 }) });
+    await launcher({ queueId: "q", entryId: "a", missionPath: "/p/missions/a.yaml", runtime: "codex", root: "/p", ...request });
+    return captured;
+  }
+
+  test("a queued mission runs where `uh mission run` would put it: no --no-sandbox by default", async () => {
+    expect(await launchedArgs()).not.toContain("--no-sandbox");
+  });
+
+  test("an entry that opts out with sandbox: false runs in the project root and says so on the command line", async () => {
+    expect(await launchedArgs({ sandbox: false })).toContain("--no-sandbox");
+  });
+
+  test("an entry that says sandbox: true is routed like the default", async () => {
+    expect(await launchedArgs({ sandbox: true })).not.toContain("--no-sandbox");
+  });
+
+  test("the entry schema accepts sandbox booleans and rejects anything else", () => {
+    const base = { id: "a", mission: "missions/a.yaml", runtime: "codex" };
+    expect(() => validateQueueFile({ id: "q", entries: [{ ...base, sandbox: false }] })).not.toThrow();
+    expect(() => validateQueueFile({ id: "q", entries: [{ ...base, sandbox: "no" }] })).toThrow();
+  });
+
+  test("the scheduler hands the entry's sandbox choice to the launcher", async () => {
+    const root = await makeRoot();
+    const seen: Array<boolean | undefined> = [];
+    const file = await writeQueue(root, {
+      id: "opt",
+      entries: [
+        { id: "a", mission: "missions/a.yaml", runtime: "codex" },
+        { id: "b", mission: "missions/b.yaml", runtime: "codex", sandbox: false },
+      ],
+    });
+    await runQueue(file, {
+      root,
+      launcher: async (request) => { seen.push(request.sandbox); return { run_id: `run-${request.entryId}`, settled: Promise.resolve({ status: "passed", exit_code: 0 }) }; },
+      freeMemoryBytes: () => PLENTY,
+      maxOrchestrators: 1,
+      notify: () => undefined,
+    });
+    expect(seen).toEqual([undefined, false]);
+  });
+});
