@@ -16,6 +16,7 @@ import {
   parseItemsMarkdown,
   readHive,
   readHiveFacts,
+  readVerifiedHiveFacts,
   renderHiveFacts,
   setItemStatus,
   type HivePacket,
@@ -189,6 +190,29 @@ describe("dispatch context hive wiring", () => {
 });
 
 describe("hive feed from queue and land", () => {
+  test("every queue fact stays verifiable after later entries pass (#265)", async () => {
+    const root = await makeRoot();
+    const queueFile = path.join(root, "queue.yaml");
+    await writeFile(queueFile, stringifyYaml({
+      id: "q2",
+      entries: [
+        { id: "first", mission: "missions/a.yaml", runtime: "codex" },
+        { id: "second", mission: "missions/b.yaml", runtime: "codex" },
+        { id: "third", mission: "missions/c.yaml", runtime: "codex" },
+      ],
+    }), "utf8");
+    const launcher: QueueLauncher = async (request) => ({ run_id: `run-${request.entryId}`, settled: Promise.resolve({ status: "passed", exit_code: 0 }) });
+    await runQueue(queueFile, { root, launcher, freeMemoryBytes: () => PLENTY, maxOrchestrators: 1, notify: () => {} });
+
+    expect(readHive(root).facts).toHaveLength(3);
+    // Each cited artifact still hashes to what the fact recorded, so all three are injected, not only the last.
+    expect(readVerifiedHiveFacts(root).map((fact) => fact.text)).toEqual([
+      expect.stringContaining("entry first passed"),
+      expect.stringContaining("entry second passed"),
+      expect.stringContaining("entry third passed"),
+    ]);
+  });
+
   test("queue appends a fact and completes the item named in the entry id on pass", async () => {
     const root = await makeRoot();
     importItems(root, "- [ ] A8: queue work\n- [ ] B2: other work\n");
@@ -215,7 +239,8 @@ describe("hive feed from queue and land", () => {
     expect(hive.facts).toHaveLength(1);
     expect(hive.facts[0]?.source).toBe("queue");
     expect(hive.facts[0]?.item_ids).toEqual(["A8"]);
-    expect(hive.facts[0]?.evidence).toMatchObject({ kind: "run", ref: ".harness/queue/q1/state.json" });
+    // The fact cites a snapshot written once for this entry, never the queue state the next entry rewrites.
+    expect(hive.facts[0]?.evidence).toMatchObject({ kind: "run", ref: ".harness/queue/q1/evidence/A8-run-A8.json" });
     expect(hive.items.find((item) => item.id === "A8")?.status).toBe("done");
     expect(hive.items.find((item) => item.id === "B2")?.status).toBe("open");
   });
