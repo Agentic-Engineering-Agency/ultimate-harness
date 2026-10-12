@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- A worker that runs from a project stored under a `.harness` folder, or in a path spelled with another case on a case-sensitive system, is no longer attributed to the wrong owner: the project owning a worker is resolved only from the worker layouts UH creates (`.harness/missions/<id>/team/...`, `.harness/sandboxes/<id>/...`), and the folder name is compared without regard to case only on Windows. #265.
 - A long project brief no longer cuts the hive facts block out of a worker's prompt: the brief and the verified hive facts are budgeted apart, the brief gives way, and the data block keeps its header, its facts and its closing fence. #265.
 - A queue entry's hive fact cites a snapshot written once for that entry (`.harness/queue/<queue>/evidence/<entry>-<run>.json`) instead of the queue's `state.json`, which the next entry rewrites. Before, every queue fact but the last stopped verifying and was never injected into a worker's prompt. #265.
 
