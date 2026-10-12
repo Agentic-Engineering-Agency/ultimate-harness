@@ -8,6 +8,10 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 
 Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been published. 0.10.0 was prepared on `dev` in June 2026 but never tagged: it is skipped, and its changes (UH-138, UH-139 and the spec-stale fix below) ship in 0.11.0.
 
+### Breaking
+
+- Artifacts written by 0.11 can carry fields that 0.9.0 does not know, under the same `.v0` version: the mission, runtime session and runtime result schemas gained optional fields (usage, cost, post-check results, completion, a worker's template and guard, and others), and the `.v0` schemas are strict, so a 0.9.0 reader rejects such an artifact. Nothing 0.9.0 wrote is rejected by 0.11: the shipped 0.9.0 example packets and 0.9.0-shaped runtime session and result documents are parsed in `tests/v09-artifacts.test.ts`. Run every `uh` command on a project with one version, or finish old runs before upgrading. #267.
+
 ### Added
 - `uh mission prune-runs <mission-id> --keep <n> [--json]` archives a mission's oldest runs beyond a cap and removes their run directories (the pruner `uh validate --repair` already used), so a caller no longer needs its own copy. #267.
 - Capability checks warn by default (UH-138). A mission `capabilities:` tag the resolved adapter does not declare prints one `[WARN]` line per tag and the run proceeds; `--strict` on `uh mission dry-run`, `run` and `run-all` turns each mismatch into an error. `--force` bypasses the check with a `[WARN]` line naming the runtime. `runtime_requirements` stay hard preconditions and are never relaxed.
