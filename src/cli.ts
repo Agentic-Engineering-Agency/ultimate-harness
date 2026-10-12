@@ -2668,7 +2668,7 @@ missionCmd
         for (const warning of post.warnings ?? []) console.log(`[WARN] ${warning}`);
         if (post.aborted) {
           console.log(`[CANCELLED] post-checks stopped by ${interruptedBy ?? "a signal"}; the run keeps its status`);
-          await exitDelivered(interruptedBy === "SIGTERM" ? 143 : 130);
+          process.exit(interruptedBy === "SIGTERM" ? 143 : 130);
         }
         if (post.errors.length > 0) {
           status = "failed";
