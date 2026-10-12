@@ -238,6 +238,8 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   const checkResults: Array<{ name: string; exit_code: number }> = [];
   let buildResult: { command: string; exit_code: number } = { command: buildCommand, exit_code: 0 };
   const fastForwarded: string[] = [];
+  /** Each fast-forwarded checkout's HEAD from before it moved, so a later failure can put it back. */
+  const forwardedFrom = new Map<string, string>();
   let commitId = "";
   try {
     for (const branch of options.workerBranches) {
@@ -298,6 +300,8 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
 
     // ---- Step 7: fast-forward the requested checkouts -------------------
     for (const checkout of options.fastForward ?? []) {
+      const before = await git(["rev-parse", "HEAD"], checkout);
+      if (before.exitCode === 0) forwardedFrom.set(checkout, before.stdout.trim());
       const merged = await git(["merge", "--ff-only", options.onto], checkout);
       if (merged.exitCode !== 0) {
         throw new LandError("fast-forward", `git merge --ff-only ${options.onto} failed in ${checkout}: ${reason(merged)}`);
@@ -306,6 +310,12 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     }
   } catch (err) {
     await restoreTarget(git, root, previousHead);
+    // The commit being discarded must not survive in a checkout that already moved to it. `--keep` refuses to touch
+    // anything the owner changed since, instead of discarding it.
+    for (const checkout of fastForwarded) {
+      const from = forwardedFrom.get(checkout);
+      if (from !== undefined) await git(["reset", "--keep", from], checkout);
+    }
     throw err;
   }
 
