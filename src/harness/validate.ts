@@ -26,7 +26,6 @@ import { QueueStateSchema } from "../schema/queue.js";
 import { RunDigestSchema } from "../schema/run-digest.js";
 import { InterventionSchema } from "../schema/intervention.js";
 import { validateSessionTemplate } from "../schema/session-template.js";
-import { IndependentReviewClaimsReportSchema } from "../schema/independent-review.js";
 import { RuntimeSteerRequestSchema, ToolGuardArtifactSchema } from "../schema/runtime-control.js";
 
 const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
@@ -58,7 +57,6 @@ const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.run-digest.v0": data => RunDigestSchema.parse(data),
   "uh.intervention.v0": data => InterventionSchema.parse(data),
   "uh.session-template.v0": validateSessionTemplate,
-  "uh.independent-review-claims-report.v0": data => IndependentReviewClaimsReportSchema.parse(data),
   "uh.runtime-steer-request.v0": data => RuntimeSteerRequestSchema.parse(data),
   "uh.tool-guard.v0": data => ToolGuardArtifactSchema.parse(data),
 };
