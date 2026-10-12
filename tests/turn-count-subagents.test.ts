@@ -36,6 +36,15 @@ describe("Claude Code turn counting", () => {
     expect(control).toMatchObject({ status: "passed", turns: 2 });
   }, 20_000);
 
+  test("the run's final record gives the turn count, not the number of message ids seen (#266)", async () => {
+    // Three distinct assistant message ids, but Claude Code's own result says the run took two turns.
+    const finalWithTurns = line({ type: "result", subtype: "success", is_error: false, result: "DONE", stop_reason: "end_turn", num_turns: 2 });
+    const script = [assistant("m1"), assistant("m2"), assistant("m3"), finalWithTurns].join("");
+    const { outcome, control } = await run(script, 10);
+    expect(outcome.supervisionStopCode).toBeUndefined();
+    expect(control).toMatchObject({ status: "passed", turns: 2 });
+  }, 20_000);
+
   test("the run's own messages still reach the cap", async () => {
     const script = [assistant("m1"), assistant("sub0", "toolu_task"), assistant("m2"), assistant("m3"), result].join("");
     const { outcome } = await run(script, 2);

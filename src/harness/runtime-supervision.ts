@@ -643,7 +643,9 @@ export class RuntimeSupervision {
     }
     const nativeTurns = event.num_turns ?? record(event.result)?.num_turns;
     if (typeof nativeTurns === "number" && Number.isInteger(nativeTurns) && nativeTurns >= 0) {
-      this.turns = Math.max(this.turns, nativeTurns);
+      // The runtime's own count in its final record is the turn count; the message ids counted along the way can
+      // overshoot it, so at the terminal event it replaces them. Before then it can only raise the count.
+      this.turns = isTerminalEventType(type) ? nativeTurns : Math.max(this.turns, nativeTurns);
       if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
     }
     if (this.failure) {

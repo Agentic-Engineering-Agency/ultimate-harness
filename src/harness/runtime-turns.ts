@@ -6,6 +6,11 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/** Whether `countRuntimeTurns` can count this runtime's turns from its events at all. */
+export function runtimeTurnsCountableFromEvents(runtime: string): boolean {
+  return runtime === "claude-code" || runtime === "acp";
+}
+
 /**
  * Count the turns in a sequence of parsed event records for supported runtimes.
  * Returns undefined for unsupported runtimes.

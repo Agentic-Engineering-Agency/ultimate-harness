@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdir, open, readFile, readdir } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -7,7 +7,7 @@ import { parse as parseYaml } from "yaml";
 import { RuntimeSessionSchema } from "../schema/artifacts.js";
 import { RuntimeControlSchema, type RuntimeControl } from "../schema/runtime-control.js";
 import type { RunDigestLongRunningTool } from "../schema/run-digest.js";
-import { countRuntimeTurns } from "./runtime-turns.js";
+import { countRuntimeTurns, runtimeTurnsCountableFromEvents } from "./runtime-turns.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { assertValidRunId } from "./run-id.js";
@@ -403,6 +403,9 @@ async function resolveRunRuntime(runDir: string, fallback: string): Promise<stri
   return fallback;
 }
 
+/** Turn counts already computed from an events file, keyed by its path and valid while its size and modification time hold. */
+const eventsTurnCache = new Map<string, { size: number; mtimeMs: number; turns: number | undefined }>();
+
 async function resolveRunTurns(
   projectRoot: string,
   controlPathRel: string,
@@ -429,24 +432,35 @@ async function resolveRunTurns(
     return maxNonEvents;
   }
 
-  // Only when neither gives a positive count, countRuntimeTurns over the run's whole events.ndjson.
+  // Only when neither gives a positive count, countRuntimeTurns over the run's whole events.ndjson, and only for a
+  // runtime whose turns can be counted from events, and only when the file changed since the last count.
   try {
     const runtime = await resolveRunRuntime(runDir, fallbackRuntime);
-    const eventsPath = path.join(runDir, "events.ndjson");
-    const content = await readFile(eventsPath, "utf8");
-    const parsedEvents = content
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .flatMap((line) => {
-        try {
-          return [JSON.parse(line)];
-        } catch {
-          return [];
-        }
-      });
-    const computed = countRuntimeTurns(runtime, parsedEvents);
-    if (computed !== undefined && computed > 0) {
-      return computed;
+    if (runtimeTurnsCountableFromEvents(runtime)) {
+      const eventsPath = path.join(runDir, "events.ndjson");
+      const info = await stat(eventsPath);
+      const cached = eventsTurnCache.get(eventsPath);
+      let computed: number | undefined;
+      if (cached !== undefined && cached.size === info.size && cached.mtimeMs === info.mtimeMs) {
+        computed = cached.turns;
+      } else {
+        const content = await readFile(eventsPath, "utf8");
+        const parsedEvents = content
+          .split("\n")
+          .filter((line) => line.trim().length > 0)
+          .flatMap((line) => {
+            try {
+              return [JSON.parse(line)];
+            } catch {
+              return [];
+            }
+          });
+        computed = countRuntimeTurns(runtime, parsedEvents);
+        eventsTurnCache.set(eventsPath, { size: info.size, mtimeMs: info.mtimeMs, turns: computed });
+      }
+      if (computed !== undefined && computed > 0) {
+        return computed;
+      }
     }
   } catch {
     // Missing or unreadable events.ndjson or session yaml.
