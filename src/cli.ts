@@ -1947,6 +1947,31 @@ missionCmd.command("review-collect")
   });
 
 missionCmd
+  .command("prune-runs")
+  .description("Archive a mission's oldest runs beyond a cap and remove their run directories")
+  .argument("<mission-id>", "Mission id")
+  .requiredOption("--keep <n>", "How many non-archived runs to keep (a positive integer)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit JSON")
+  .action(async (missionId: string, opts: { keep: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      assertSafeMissionId(missionId);
+      if (!/^[0-9]+$/.test(opts.keep) || Number.parseInt(opts.keep, 10) <= 0) {
+        throw new Error(`--keep must be a positive integer, got: ${opts.keep}`);
+      }
+      const keep = Number.parseInt(opts.keep, 10);
+      const { pruneOldRuns } = await import("./harness/run-id.js");
+      const pruned = await pruneOldRuns(root, missionId, keep);
+      if (opts.json) console.log(JSON.stringify({ mission_id: missionId, keep, pruned }));
+      else console.log(`pruned ${pruned} run(s) of ${missionId} (keeping ${keep})`);
+    } catch (err) {
+      console.error(`[FAIL] mission prune-runs: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+missionCmd
   .command("create")
   .description("Create a scaffold mission packet")
   .argument("<id>", "Mission id")

@@ -9,6 +9,7 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been published. 0.10.0 was prepared on `dev` in June 2026 but never tagged: it is skipped, and its changes (UH-138, UH-139 and the spec-stale fix below) ship in 0.11.0.
 
 ### Added
+- `uh mission prune-runs <mission-id> --keep <n> [--json]` archives a mission's oldest runs beyond a cap and removes their run directories (the pruner `uh validate --repair` already used), so a caller no longer needs its own copy. #267.
 - Capability checks warn by default (UH-138). A mission `capabilities:` tag the resolved adapter does not declare prints one `[WARN]` line per tag and the run proceeds; `--strict` on `uh mission dry-run`, `run` and `run-all` turns each mismatch into an error. `--force` bypasses the check with a `[WARN]` line naming the runtime. `runtime_requirements` stay hard preconditions and are never relaxed.
 - Runnable `examples/missions/hello-uh` walkthrough and a no-dependency documentation dead-link checker (`bun run docs:check-links`, run in CI) over `docs/` (UH-139).
 - Native ACP (Agent-Client Protocol) v1 adapter: `acp` runtime supporting headless agent orchestration via standard JSON-RPC 2.0 over stdio with run-id integrity, strict `uh.runtime-result.v0` validation, wire-conformance error mapping, bidirectional permission request handling (`session/request_permission`), timeout and cancellation signal threading, and 17 regression tests.
