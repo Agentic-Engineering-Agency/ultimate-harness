@@ -90,6 +90,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
 
 ### Changed
+- GitNexus is optional for contributors and agents (the repository's agent guides say so; the mandatory GitNexus rules and the `## Deviations` section were removed in the documentation layer). This records that project-owner decision explicitly; it needs the owner's confirmation in review of the pull request that carries it. No skill or guide still calls GitNexus mandatory. #264.
 
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.
 - Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
@@ -111,6 +112,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- The land decision index re-hashes the receipts it lists: `uh hive verify` (and the land gate) report a receipt that was edited or deleted after it was recorded, instead of passing because only the index's own chain was checked. #265.
 - A worker that runs from a project stored under a `.harness` folder, or in a path spelled with another case on a case-sensitive system, is no longer attributed to the wrong owner: the project owning a worker is resolved only from the worker layouts UH creates (`.harness/missions/<id>/team/...`, `.harness/sandboxes/<id>/...`), and the folder name is compared without regard to case only on Windows. #265.
 - A long project brief no longer cuts the hive facts block out of a worker's prompt: the brief and the verified hive facts are budgeted apart, the brief gives way, and the data block keeps its header, its facts and its closing fence. #265.
 - A queue entry's hive fact cites a snapshot written once for that entry (`.harness/queue/<queue>/evidence/<entry>-<run>.json`) instead of the queue's `state.json`, which the next entry rewrites. Before, every queue fact but the last stopped verifying and was never injected into a worker's prompt. #265.
