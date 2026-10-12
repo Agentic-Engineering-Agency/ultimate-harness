@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { stringify as stringifyYaml } from "yaml";
 import { MissionSchema } from "../src/schema/mission.js";
 import type { HiveFact } from "../src/schema/hive.js";
-import { buildDispatchContext, capProjectFacts } from "../src/harness/dispatch-context.js";
+import { PROJECT_FACTS_CHAR_LIMIT, buildDispatchContext, capProjectFacts } from "../src/harness/dispatch-context.js";
 import {
   appendFact,
   hiveFactsPath,
@@ -186,6 +186,23 @@ describe("dispatch context hive wiring", () => {
     expect(withHive.projectFacts).toContain("brief text");
     expect(withHive.projectFacts).toContain("### Hive facts");
     expect(withHive.projectFacts).toContain("A8 was implemented");
+  });
+
+  test("a long brief never cuts the hive block: its closing fence survives (#265)", async () => {
+    const root = await makeRoot();
+    const mission = missionPacket(root);
+    const ev = await evidence(root, "src/a.ts", "export const a = 1;\n");
+    appendFact(root, { text: "A8 was implemented", evidence: ev, source: "land", item_ids: ["A8"] });
+    const brief = `${"A long project brief line.\n".repeat(400)}`;
+    const context = buildDispatchContext(mission, undefined, { projectBrief: brief });
+    const text = context.projectFacts ?? "";
+    expect(text.length).toBeLessThanOrEqual(PROJECT_FACTS_CHAR_LIMIT);
+    expect(text).toContain("[project brief truncated");
+    // The data block is whole: header, the fact, and the closing fence on the last line.
+    expect(text).toContain("### Hive facts");
+    expect(text).toContain("A8 was implemented");
+    expect(text.trimEnd().endsWith("```")).toBe(true);
+    expect(text.split("```").length - 1).toBe(2);
   });
 });
 

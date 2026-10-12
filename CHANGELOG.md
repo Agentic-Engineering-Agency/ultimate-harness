@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- A long project brief no longer cuts the hive facts block out of a worker's prompt: the brief and the verified hive facts are budgeted apart, the brief gives way, and the data block keeps its header, its facts and its closing fence. #265.
 - A queue entry's hive fact cites a snapshot written once for that entry (`.harness/queue/<queue>/evidence/<entry>-<run>.json`) instead of the queue's `state.json`, which the next entry rewrites. Before, every queue fact but the last stopped verifying and was never injected into a worker's prompt. #265.
 
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
