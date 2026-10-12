@@ -975,6 +975,15 @@ def _prune_old_runs(root: Path, mission_id: str, max_runs: int) -> int:
     """
     if not isinstance(max_runs, int) or isinstance(max_runs, bool) or max_runs <= 0:
         raise ValueError("max_runs_per_mission must be a positive integer or null")
+    # Reading the run index is a read of a local artifact; only a mission over its cap costs a CLI call.
+    index_path = _harness(root) / "missions" / mission_id / "runs" / "index.json"
+    try:
+        with index_path.open("r", encoding="utf-8") as fh:
+            runs = json.load(fh).get("runs", [])
+        if sum(1 for run in runs if isinstance(run, dict) and run.get("archived") is not True) <= max_runs:
+            return 0
+    except (OSError, ValueError, AttributeError):
+        return 0
     result = get_runner().run_sync(
         ["mission", "prune-runs", mission_id, "--keep", str(max_runs), "--json", "--root", str(root)],
         root,
