@@ -90,6 +90,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
 
 ### Changed
+- GitNexus is optional for contributors and agents (AGENTS.md and CLAUDE.md say so; the mandatory GitNexus rules and the `## Deviations` section were removed in the documentation layer). This records that project-owner decision explicitly; it needs the owner's confirmation in review of the pull request that carries it. No skill or guide still calls GitNexus mandatory. #264.
 - `uh land` checks every independent review bound to the branch tip, not only the first clean one: a clean review no longer outvotes another review of the same tip that contradicts it or recommends against landing. A review of an older tip is still set aside. U-409.
 
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.
@@ -112,6 +113,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- `uh land` binds a review to the branch more strictly. The review's captured files are compared as the bytes git stores (or as git writes them into a checkout, for line-ending and other filters), not as decoded text, so binary and CRLF files bind; a review that captured no output or changed file is refused instead of binding to anything; the review records the commit its source workspace was at (`source_head`) and the branch must contain it; a worker branch's mission comes from the controller's team state, not from files the worker can write; and `--accept-review` records no review ids when none of the collected reviews is about the branch. #264.
 
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
 - `uh mission review-collect` discards the review's sandbox after a successful collection, keeping the reviewer's report beside the assessment as `review-report.json`. Every review used to leave its sandbox worktree behind. `--keep-workspace` keeps it.

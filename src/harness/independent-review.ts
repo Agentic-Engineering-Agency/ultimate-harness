@@ -307,7 +307,10 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
         evidence.push(`final message absent (${absentReason})`);
       }
       workerEvidence.push(`- ${source.missionId}: ${evidence.join("; ")}.`);
+      // The commit the source workspace is at, so a later `uh land` can require the branch to contain what was reviewed.
+      const sourceHead = (await gitOutput(sourceRoot, ["rev-parse", "HEAD"]))?.trim();
       sources.push({ mission_id: source.missionId, source_root: sourceRoot, files,
+        ...(sourceHead !== undefined && /^[0-9a-f]{40}$/.test(sourceHead) ? { source_head: sourceHead } : {}),
         reference_paths: mission.read_first,
         acceptance: mission.acceptance_criteria.map(criterion => ({ id: criterion.id, description: criterion.description })),
         checks: mission.verification.checks.map((check, index) => ({ id: `check-${index + 1}`, description: check })),

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { access, appendFile, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
@@ -184,7 +185,11 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     if (!worktree) {
       throw new LandError("gates", `no retained worktree found for worker branch ${branch}`);
     }
-    const missionIds = await requirePassedVerification(worktree.path, branch);
+    const claimedMissionIds = await requirePassedVerification(worktree.path, branch);
+    // For a team worker the controller's own team state says which mission the branch is; the worker's own
+    // verification file and directory names (which it can write) are only the fallback for a branch with no team state.
+    const recordedMissionIds = await teamStateMissionIds(reviewRoot, branch);
+    const missionIds = recordedMissionIds.length > 0 ? recordedMissionIds : claimedMissionIds;
     const tip = await git(["rev-parse", branch], root);
     if (tip.exitCode !== 0) {
       throw new LandError("gates", `cannot resolve the tip of worker branch ${branch}: ${reason(tip)}`);
@@ -441,6 +446,30 @@ async function requirePassedVerification(worktreePath: string, branch: string): 
   return missionIds;
 }
 
+/**
+ * The mission a `uh/team/<team>/<role>` branch belongs to, from the controller's team state under the project:
+ * the worker's own mission id, else the team's. Empty when the branch is not a team branch or no state names it.
+ */
+async function teamStateMissionIds(projectRoot: string, branch: string): Promise<string[]> {
+  const match = /^uh\/team\/([^/]+)\/([^/]+)$/.exec(branch);
+  if (!match) return [];
+  const [, team, role] = match;
+  const runsRoot = path.join(projectRoot, ".harness", "missions", team, "runs");
+  const found: string[] = [];
+  for (const entry of await readdir(runsRoot).catch(() => [] as string[])) {
+    try {
+      const state = JSON.parse(await readFile(path.join(runsRoot, entry, "team-state.json"), "utf-8")) as { mission_id?: unknown; workers?: unknown };
+      for (const worker of Array.isArray(state.workers) ? state.workers : []) {
+        const record = worker as { role?: unknown; mission_id?: unknown };
+        if (record.role !== role) continue;
+        const id = typeof record.mission_id === "string" && record.mission_id.length > 0 ? record.mission_id : state.mission_id;
+        if (typeof id === "string" && id.length > 0 && !found.includes(id)) found.push(id);
+      }
+    } catch { /* no team state in this run */ }
+  }
+  return found;
+}
+
 /** The mission ids a retained verification result proves: its stated id, else its directory name. */
 function verificationMissionIds(file: string, record: Record<string, unknown>): string[] {
   const stated = record.mission_id;
@@ -501,7 +530,8 @@ async function requireCleanReview(input: {
         `from worktree ${workerRoot}; ` +
         `review ${first.reviewId} names ${first.request.sources.map((source) => source.mission_id).join(", ")} ` +
         `(first mismatching path: ${first.requestPath})`,
-      reviews.map((review) => review.reviewId),
+      // No collected review is about this branch, so an accepted override must not record any of them as reviewed.
+      [],
     );
   }
   // A review counts only if it is bound to this tip; a stale or unrelated one is set aside and cannot mask a
@@ -511,7 +541,7 @@ async function requireCleanReview(input: {
   const bound: CollectedReview[] = [];
   for (const { review, source } of matched) {
     try {
-      await assertReviewBoundToTip(review, source, branch, tip, git, root);
+      await assertReviewBoundToTip(review, source, branch, tip, git, root, worktreePath);
       bound.push(review);
     } catch (err) {
       if (!(err instanceof ReviewGateError)) throw err;
@@ -549,6 +579,7 @@ async function assertReviewBoundToTip(
   tip: string,
   git: LandGitRunner,
   root: string,
+  worktreePath: string,
 ): Promise<void> {
   const requestBytes = await readFile(review.requestPath, "utf-8");
   if (review.assessment.request_sha256 !== sha256Hex(requestBytes)) {
@@ -558,27 +589,70 @@ async function assertReviewBoundToTip(
       [review.reviewId],
     );
   }
-  for (const file of source.files) {
-    if (file.kind !== "output" && file.kind !== "changed") continue;
-    if (file.state !== "present") continue;
+  const bindable = source.files.filter((file) => (file.kind === "output" || file.kind === "changed") && file.state === "present");
+  // A review that captured nothing of the worker's would bind to any branch at all.
+  if (bindable.length === 0) {
+    throw new ReviewGateError(
+      `review ${review.reviewId} captured no output or changed file of ${branch}, so it binds to nothing ` +
+        `(first mismatching path: ${review.requestPath})`,
+      [review.reviewId],
+    );
+  }
+  // The commit the review looked at must be part of the branch being landed.
+  if (source.source_head !== undefined) {
+    const ancestor = await git(["merge-base", "--is-ancestor", source.source_head, tip], root);
+    if (ancestor.exitCode !== 0) {
+      throw new ReviewGateError(
+        `review ${review.reviewId} was of commit ${source.source_head}, which is not part of ${branch} ` +
+          `(it is not an ancestor of ${tip}) (first mismatching path: ${review.requestPath})`,
+        [review.reviewId],
+      );
+    }
+  }
+  for (const file of bindable) {
     const originalPath = file.original_path.replaceAll("\\", "/").replace(/^\.\/+/, "");
-    const shown = await git(["show", `${tip}:${originalPath}`], root);
-    if (shown.exitCode !== 0) {
+    const held = await branchFileDigests(worktreePath, root, tip, originalPath);
+    if (held === undefined) {
       throw new ReviewGateError(
         `review ${review.reviewId} captures ${originalPath}, which ${branch} does not contain ` +
           `(first mismatching path: ${originalPath})`,
         [review.reviewId],
       );
     }
-    const actual = sha256Hex(shown.stdout);
-    if (file.sha256 !== actual) {
+    if (!held.includes(String(file.sha256))) {
       throw new ReviewGateError(
-        `review ${review.reviewId} captured ${originalPath} at sha256 ${String(file.sha256)}, but ${branch} holds ${actual} ` +
+        `review ${review.reviewId} captured ${originalPath} at sha256 ${String(file.sha256)}, but ${branch} holds ${held[0]} ` +
           `(first mismatching path: ${originalPath})`,
         [review.reviewId],
       );
     }
   }
+}
+
+/**
+ * sha256 of a file as the branch holds it, from the bytes git stores (never from decoded text, which changes a file
+ * that is not valid UTF-8) and, when it differs, as git writes it into a work tree (line endings and other filters
+ * from `.gitattributes`), which is what a review of the worker's checkout hashed. `undefined` when the branch does
+ * not contain the path. The stored form comes first.
+ */
+async function branchFileDigests(worktreePath: string, root: string, tip: string, relativePath: string): Promise<string[] | undefined> {
+  const read = async (cwd: string, args: string[]): Promise<Buffer | undefined> => {
+    try {
+      const { stdout } = await execFileP("git", ["-C", cwd, ...args], { encoding: "buffer", maxBuffer: 256 * 1024 * 1024 });
+      return stdout as unknown as Buffer;
+    } catch {
+      return undefined;
+    }
+  };
+  const stored = await read(root, ["cat-file", "blob", `${tip}:${relativePath}`]);
+  if (stored === undefined) return undefined;
+  const digests = [createHash("sha256").update(stored).digest("hex")];
+  const filtered = await read(worktreePath, ["cat-file", "--filters", `${tip}:${relativePath}`]);
+  if (filtered !== undefined) {
+    const digest = createHash("sha256").update(filtered).digest("hex");
+    if (!digests.includes(digest)) digests.push(digest);
+  }
+  return digests;
 }
 
 /** Enumerate `.harness/missions/<id>/<fileName>` under `root`; empty when none. */
