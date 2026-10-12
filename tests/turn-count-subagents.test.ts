@@ -21,7 +21,7 @@ async function run(script: string, maxTurns: number) {
   const root = await mkdtemp(path.join(tmpdir(), "uh-turn-count-"));
   try {
     const outcome = await runRuntimeProcess({
-      command: process.execPath, args: ["-e", script], cwd: root, limits: { max_turns: maxTurns }, requireNativeTerminal: true,
+      command: process.execPath, args: ["-e", script], cwd: root, limits: { max_turns: maxTurns },
       artifacts: { directory: root, missionId: "one", runId: "r", runtime: "claude-code" },
     });
     return { outcome, control: JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8")) as Record<string, unknown> };

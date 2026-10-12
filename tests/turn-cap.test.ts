@@ -32,7 +32,7 @@ describe("a turn cap that is hit while the runtime still finishes cleanly", () =
     const root = await mkdtemp(path.join(tmpdir(), "uh-turn-cap-"));
     try {
       const result = await runRuntimeProcess({
-        command: process.execPath, args: ["-e", script], cwd: root, limits: { max_turns: 2 }, requireNativeTerminal: true,
+        command: process.execPath, args: ["-e", script], cwd: root, limits: { max_turns: 2 },
         artifacts: { directory: root, missionId: "one", runId: "capped", runtime },
       });
       expect(result.exitCode).not.toBe(0);
@@ -47,7 +47,7 @@ describe("a turn cap that is hit while the runtime still finishes cleanly", () =
     try {
       const result = await runRuntimeProcess({
         command: process.execPath, args: ["-e", line({ type: "result", exit_code: 1, error: "max_iterations_reached(3/3)", text: "partial work" })], cwd: root,
-        requireNativeTerminal: true, artifacts: { directory: root, missionId: "one", runId: "hermes-capped", runtime: "hermes" },
+        artifacts: { directory: root, missionId: "one", runId: "hermes-capped", runtime: "hermes" },
       });
       expect(result.exitCode).not.toBe(0);
       const control = JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8"));
