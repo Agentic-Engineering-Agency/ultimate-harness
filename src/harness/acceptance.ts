@@ -665,22 +665,54 @@ async function invariantNoWritesOutsideRoots(runRoot: string, missionRoot: strin
   return offending.length > 0 ? offending : true;
 }
 
+/**
+ * The commits the harness recorded for each worker (`commit`, and `salvage.commit`) in the team states under the
+ * mission, by worker id. `undefined` when no team state records any, as for runs made before it did.
+ */
+async function recordedHarnessCommits(missionRoot: string): Promise<Map<string, Set<string>> | undefined> {
+  const recorded = new Map<string, Set<string>>();
+  let any = false;
+  const runsRoot = path.join(missionRoot, "runs");
+  for (const entry of await readdir(runsRoot, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const state = JSON.parse(await readFile(path.join(runsRoot, entry.name, "team-state.json"), "utf8")) as Record<string, unknown>;
+      for (const worker of Array.isArray(state.workers) ? state.workers : []) {
+        const record = worker as { id?: unknown; commit?: unknown; salvage?: { commit?: unknown } };
+        if (typeof record.id !== "string") continue;
+        for (const commit of [record.commit, record.salvage?.commit]) {
+          if (typeof commit !== "string") continue;
+          any = true;
+          recorded.set(record.id, (recorded.get(record.id) ?? new Set<string>()).add(commit));
+        }
+      }
+    } catch { /* no team state for this run */ }
+  }
+  return any ? recorded : undefined;
+}
+
 async function invariantNoWorkerCommits(runRoot: string, missionRoot: string): Promise<true | string[]> {
   const worktrees = await listWorkerWorktrees(runRoot, missionRoot);
   if (worktrees.length === 0) return unverifiable("no worker worktrees found");
+  const harnessCommitsByWorker = await recordedHarnessCommits(missionRoot);
   const offending: string[] = [];
   for (const worktree of worktrees) {
     const base = await worktreeBaseCommit(runRoot, worktree.path);
     if (!base) continue;
+    const recordedForWorker = harnessCommitsByWorker?.get(worktree.id);
     let harnessCommits = 0;
-    for (const line of await gitLines(worktree.path, ["log", "--format=%h%x09%ae%x09%s", `${base}..HEAD`])) {
+    for (const line of await gitLines(worktree.path, ["log", "--format=%H%x09%ae%x09%s", `${base}..HEAD`])) {
       const [sha, email, subject] = line.split("\t");
-      if (email === HARNESS_COMMIT_EMAIL) continue;
-      if (harnessCommits === 0 && isHarnessWorkerSubject(worktree.id, subject ?? "")) {
+      if (email === HARNESS_COMMIT_EMAIL && harnessCommitsByWorker === undefined) continue;
+      if (harnessCommitsByWorker !== undefined) {
+        // The team state names the harness's own commits, so a message that merely looks like one proves nothing.
+        if (recordedForWorker?.has(sha)) continue;
+      } else if (harnessCommits === 0 && isHarnessWorkerSubject(worktree.id, subject ?? "")) {
+        // Runs made before the state recorded its commits: the exact subject, once, is all there is to go on.
         harnessCommits += 1;
         continue;
       }
-      offending.push(`${worktree.id} ${sha} ${email} ${subject}`);
+      offending.push(`${worktree.id} ${sha.slice(0, 7)} ${email} ${subject}`);
     }
   }
   return offending.length > 0 ? offending : true;

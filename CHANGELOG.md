@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- The `no_worker_commits` acceptance check no longer trusts a commit just because its message is the harness's: the team state now records the commit the harness itself made for each worker (and for a salvage), and only that commit is allowed. A worker that wrote `team(<id>): worker run` as its own commit message is flagged. Runs recorded before this keep the old exact-subject rule. #263.
 - Worker-memory reservations of a team are released one per reporting worker, not all at the first heartbeat: a team's workers share one controller pid, and the first worker to report used to release every reservation of that pid, so memory the other workers still needed was admitted twice. #263.
 - A failed `uh land` puts back every checkout it had already fast-forwarded, not only the target: before, an earlier checkout kept the commit the landing discarded. A checkout the owner changed in the meantime is left as it is (`reset --keep`). #263.
 
