@@ -112,6 +112,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- The Hermes dashboard plugin stays on the public CLI: cancelling a run goes through `uh kill <run> --json` (the CLI settles the run's records; the plugin terminates the child itself only when the CLI cannot find or stop it) and run retention goes through `uh mission prune-runs`. The plugin no longer writes run events or rewrites run history, and its Python copy of the pruner is gone. #267.
 - `docs/architecture/progressive-decisions.md` no longer says the CLI exposes `uh mission decision scope-change`: there is no such command, only a receipt schema kind; the section now says it is not implemented as a command, and a test fails if a doc claims that command while the CLI lacks it. #267.
 - Cancelling `uh mission run` with SIGINT or SIGTERM no longer exits before the run has written its own terminal state: the exit waits, for at most five seconds, for the run to settle `runtime-control.json` and the live-run registry, which the plugin's cancel reads. #267.
 

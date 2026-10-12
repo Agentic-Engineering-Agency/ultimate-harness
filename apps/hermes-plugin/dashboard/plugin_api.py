@@ -959,77 +959,34 @@ async def list_active_runs() -> dict[str, list[dict[str, Any]]]:
 
 
 # ---------------------------------------------------------------------------
-# UH-90 — retention. Python mirror of src/harness/run-id.ts:pruneOldRuns.
-# Both sides exist on purpose: the TS pruner is for `uh validate --repair`
-# (future CLI knob, currently dormant), the Python one is for the plugin's
-# start_run path so we don't shell out to the CLI just to drop directories.
+# UH-90 — retention. The pruning itself is the CLI's: `uh mission prune-runs`.
+# The plugin stays on the public CLI and local `.harness/` artifacts and never
+# rewrites run history itself.
 # ---------------------------------------------------------------------------
 
 
 def _prune_old_runs(root: Path, mission_id: str, max_runs: int) -> int:
-    """Mark the N oldest non-archived entries as archived and rm -rf their
-    per-run dirs. Returns the count actually pruned (0 if cap not exceeded
-    or there is no index yet). Idempotent on repeated invocation.
+    """Ask the CLI to archive the oldest runs of ``mission_id`` beyond
+    ``max_runs`` and remove their per-run dirs. Returns how many it pruned
+    (0 when the cap is not exceeded or there is no index yet). Idempotent.
 
-    Mirrors the TS pruner exactly:
-      * `max_runs` must be a positive integer; non-positive throws.
-      * Already-archived entries don't count against the cap.
-      * Sort by started_at ASC, tie-break on run_id, slice oldest.
-      * Atomic index rewrite via tempfile + os.replace.
+    ``max_runs`` must be a positive integer; anything else raises, as the CLI
+    would refuse it too.
     """
     if not isinstance(max_runs, int) or isinstance(max_runs, bool) or max_runs <= 0:
         raise ValueError("max_runs_per_mission must be a positive integer or null")
-    index_path = _harness(root) / "missions" / mission_id / "runs" / "index.json"
-    try:
-        with index_path.open("r", encoding="utf-8") as fh:
-            current = json.load(fh)
-    except (OSError, ValueError):
-        return 0
-    if not isinstance(current, dict) or not isinstance(current.get("runs"), list):
-        return 0
-    runs: list[dict[str, Any]] = [r for r in current["runs"] if isinstance(r, dict)]
-    non_archived = [r for r in runs if r.get("archived") is not True]
-    if len(non_archived) <= max_runs:
-        return 0
-    oldest_first = sorted(
-        non_archived,
-        key=lambda r: (str(r.get("started_at") or ""), str(r.get("run_id") or "")),
+    result = get_runner().run_sync(
+        ["mission", "prune-runs", mission_id, "--keep", str(max_runs), "--json", "--root", str(root)],
+        root,
+        timeout=60,
     )
-    prune_count = len(non_archived) - max_runs
-    to_prune = oldest_first[:prune_count]
-    archived_ids = {str(r.get("run_id") or "") for r in to_prune}
-    for entry in runs:
-        if str(entry.get("run_id") or "") in archived_ids:
-            entry["archived"] = True
-    current["runs"] = runs
-    # Best-effort per-run dir removal. shutil.rmtree with ignore_errors=True
-    # converges on a partial-prior-failure state.
-    runs_dir = _harness(root) / "missions" / mission_id / "runs"
-    for entry in to_prune:
-        run_id = str(entry.get("run_id") or "")
-        if not run_id:
-            continue
-        shutil.rmtree(runs_dir / run_id, ignore_errors=True)
-    # Atomic write via tempfile + os.replace. Unique tmp name avoids the
-    # same writer-collision class the TS appendRunsIndexEntry fixed in
-    # PR #96.
-    fd, tmp_name = tempfile.mkstemp(
-        prefix="index.", suffix=".tmp", dir=str(index_path.parent)
-    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[:300]
+        raise RuntimeError(f"uh mission prune-runs failed: {detail}")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as tmp_fh:
-            json.dump(current, tmp_fh, indent=2)
-        os.replace(tmp_name, index_path)
-    except Exception:
-        # If anything below mkstemp failed, clean up the staging file so
-        # we don't leak it; os.replace already removes its source on
-        # success.
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-    return prune_count
+        return int(json.loads(result.stdout).get("pruned", 0))
+    except (ValueError, TypeError, AttributeError):
+        return 0
 
 
 @router.post("/missions/{mission_id}/run")
@@ -1252,32 +1209,27 @@ def _events_show_terminal(events_path: Path) -> bool:
     return False
 
 
-def _append_runtime_cancelled_event(
-    events_path: Path,
-    *,
-    mission_id: str,
-    run_id: str,
-    source: str = "plugin-api",
-) -> None:
+def _cancel_through_cli(root: Path, run_id: str) -> bool:
+    """Stop a run with ``uh kill <run_id> --json`` and say whether it did.
+
+    The CLI owns the run's records: it asks the controller to cancel, which
+    settles ``runtime-control.json`` and the live-run registry and appends the
+    cancelled event. The plugin writes none of that itself.
+    """
     try:
-        events_path.parent.mkdir(parents=True, exist_ok=True)
-        with events_path.open("a", encoding="utf-8") as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "event": "runtime.cancelled",
-                        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                        "mission_id": mission_id,
-                        "run_id": run_id,
-                        "signal": "SIGTERM",
-                        "source": source,
-                    },
-                    separators=(",", ":"),
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
+        result = get_runner().run_sync(["kill", run_id, "--json", "--root", str(root)], root, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        entries = json.loads(result.stdout).get("entries", [])
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return any(
+        isinstance(entry, dict) and entry.get("outcome") in ("cancelled_gracefully", "force_killed")
+        for entry in entries
+    )
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -1296,40 +1248,37 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
     mission_id = str(info["missionId"])
     events_path = _run_events_path(root, mission_id, run_id)
     proc: subprocess.Popen[str] = info["process"]
-    wrote_cancel_event = False
     if proc.poll() is None:
-        # Codex P2 round 10: there is a race between the poll() above and
-        # terminate(). The child may exit naturally in that window. On
-        # POSIX that surfaces as ProcessLookupError, on Windows as OSError;
-        # `terminate_failed` flags that path so we don't misreport a
-        # naturally-completed run as cancelled.
-        terminate_failed = False
-        try:
-            proc.terminate()
-        except (ProcessLookupError, OSError):
-            terminate_failed = True
-        proc.poll()
-        if terminate_failed:
-            # The child was already gone — this was a natural exit, not a
-            # cancel. Only flip status if we still own 'running' (respect
-            # any terminal state already set by the watchdog / SSE drain).
-            if info.get("status") == "running":
-                info["status"] = "finished"
-        else:
+        if _cancel_through_cli(root, run_id):
+            # The CLI stopped the run and settled its records.
             info["status"] = "cancelled"
-            wrote_cancel_event = True
+        else:
+            # The CLI could not find or stop it (the run has not registered
+            # yet, or `uh` is not on the path): stop the child we started.
+            # Codex P2 round 10: there is a race between the poll() above and
+            # terminate(). The child may exit naturally in that window. On
+            # POSIX that surfaces as ProcessLookupError, on Windows as OSError;
+            # `terminate_failed` flags that path so we don't misreport a
+            # naturally-completed run as cancelled.
+            terminate_failed = False
+            try:
+                proc.terminate()
+            except (ProcessLookupError, OSError):
+                terminate_failed = True
+            proc.poll()
+            if terminate_failed:
+                # The child was already gone — this was a natural exit, not a
+                # cancel. Only flip status if we still own 'running' (respect
+                # any terminal state already set by the watchdog / SSE drain).
+                if info.get("status") == "running":
+                    info["status"] = "finished"
+            else:
+                info["status"] = "cancelled"
     elif _events_show_terminal(events_path) or info.get("status") not in (None, "running"):
         raise _err(409, "already_finished", f"run {run_id} already finished")
     watchdog = info.get("watchdog")
     if watchdog is not None and not watchdog.done():
         watchdog.cancel()
-    if wrote_cancel_event:
-        _append_runtime_cancelled_event(
-            events_path,
-            mission_id=mission_id,
-            run_id=run_id,
-            source="plugin-ui",
-        )
     # Codex P2 round 5: terminal state — schedule registry eviction.
     _schedule_run_eviction(run_id)
     return {"ok": True, "status": info["status"]}
