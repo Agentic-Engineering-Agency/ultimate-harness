@@ -29,6 +29,10 @@ The file is YAML or JSON, a list of checks:
 - The console prints only the number of checks and the name of a failed one. Each check's output goes to a `logs`
   directory beside the checks file.
 - `runtime-result.yaml` records `post_checks` as names and outcomes.
+- A cancelled run is not graded: its post-checks do not run and its status stays `cancelled`. Ctrl-C or SIGTERM while a
+  check runs kills that check's whole process tree and leaves the run's status as it was. Each stream of a check's
+  output is capped at 1 MiB in its log, with a marker where it was cut, and UH warns when the logs would land inside
+  the project.
 - A failed, timed-out or unrunnable check fails the run with exit code `1` whatever the stop code, and the
   mission-level `runtime-result.yaml`, `latest.json` and the runs index show the failure. An error inside the
   post-check runner itself fails the run with `post-check runner failed`; `UH_RESULT` is still printed.
