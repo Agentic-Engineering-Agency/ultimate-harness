@@ -623,6 +623,12 @@ const CONTROLLER_OPERATIONS = new Set([
 
 function isControllerCommand(command: string): boolean {
   if (!command || /[\r\n;&|`<>]/.test(command)) return false;
+  // A shell expands `$` (substitution, variables) anywhere outside single quotes, and PowerShell evaluates a
+  // parenthesised group or a script block outside quotes, so what runs is not what was checked. A controller command
+  // carries none of them unquoted.
+  const unquoted = command.replace(/'[^']*'/g, "''");
+  if (/\$/.test(unquoted)) return false;
+  if (/[(){}]/.test(unquoted.replace(/"[^"]*"/g, '""'))) return false;
   const commandTokens = tokens(command);
   if (commandTokens[0] === "&") commandTokens.shift();
   if (!commandTokens.length) return false;

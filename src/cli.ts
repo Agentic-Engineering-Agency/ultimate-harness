@@ -701,6 +701,7 @@ program
         { run: runOperatorResumedAttempt, cancel: (cancelRoot, missionId, id) => cancelLocalMissionRun(cancelRoot, missionId, id) });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
       else if (result.status === "not_applied") console.log(`Steer not applied to ${result.sourceRunId}: ${result.reason}`);
+      else if (result.status === "pending") console.log(`Steer requested for ${result.sourceRunId}, not yet taken: ${result.reason}; check again with \`uh ps\``);
       else if (result.mode === "controller") console.log(`Steered ${result.sourceRunId}; its controller will resume the session`);
       else console.log(`Steered ${result.sourceRunId} into ${result.runId}`);
     } catch (err) {
@@ -2673,6 +2674,14 @@ missionCmd
     // failed and its exit code uses exitCodeForRun("failed").
     let postChecksFailed = false;
     if (postChecks && postChecks.length > 0 && postChecksPath) {
+      // Ctrl-C or SIGTERM while a check runs stops that check's whole process tree before the CLI goes, and the run
+      // keeps the status it had instead of being rewritten to failed.
+      const postAbort = new AbortController();
+      let interruptedBy: "SIGINT" | "SIGTERM" | undefined;
+      const onPostSigint = (): void => { interruptedBy ??= "SIGINT"; postAbort.abort(); };
+      const onPostSigterm = (): void => { interruptedBy ??= "SIGTERM"; postAbort.abort(); };
+      process.once("SIGINT", onPostSigint);
+      process.once("SIGTERM", onPostSigterm);
       try {
         const post = await runPostChecks({
           checks: postChecks,
@@ -2682,7 +2691,17 @@ missionCmd
           runDir,
           root: path.resolve(root),
           cwd: routing.effectiveRoot,
+          runStatus: status ?? undefined,
+          signal: postAbort.signal,
         });
+        process.removeListener("SIGINT", onPostSigint);
+        process.removeListener("SIGTERM", onPostSigterm);
+        if (post.skipped) console.log(`[SKIP] ${post.skipped}`);
+        for (const warning of post.warnings ?? []) console.log(`[WARN] ${warning}`);
+        if (post.aborted) {
+          console.log(`[CANCELLED] post-checks stopped by ${interruptedBy ?? "a signal"}; the run keeps its status`);
+          process.exit(interruptedBy === "SIGTERM" ? 143 : 130);
+        }
         if (post.errors.length > 0) {
           status = "failed";
           postChecksFailed = true;
@@ -2691,6 +2710,8 @@ missionCmd
           }
         }
       } catch {
+        process.removeListener("SIGINT", onPostSigint);
+        process.removeListener("SIGTERM", onPostSigterm);
         // Last guard: the runner settles its own failures, but if it still
         // throws the run fails cleanly rather than aborting unsettled, so
         // UH_RESULT is printed and the exit code is exitCodeForRun("failed").
