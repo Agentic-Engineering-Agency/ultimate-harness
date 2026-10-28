@@ -149,9 +149,12 @@ const SUBJECT_PLACEHOLDER = "{subject}";
  */
 export const DEFAULT_TOAST_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
 
-/** A value as a PowerShell single-quoted literal: only `'` needs escaping, by doubling. */
+/**
+ * A value as a PowerShell single-quoted literal. PowerShell treats the ASCII `'` and the typographic single quotes
+ * U+2018 to U+201B alike as quotes, and a quote inside the literal is written by doubling it.
+ */
 function powershellLiteral(value: string): string {
-  return `'${value.replace(/[\r\n\0]/g, "").replace(/'/g, "''")}'`;
+  return `'${value.replace(/[\r\n\0]/g, "").replace(/['\u2018\u2019\u201A\u201B]/g, (quote) => quote + quote)}'`;
 }
 
 /**
@@ -735,11 +738,18 @@ function trackDelivery(promise: Promise<unknown>): void {
  * {@link notifyRunOrphaned}, or {@link notifyTeamSettled} that has not settled
  * yet. Tests call this before removing a temporary project directory so an
  * in-flight ledger append cannot race the cleanup; a host can call it before
- * exit. Settlement never awaits this — delivery stays non-blocking.
+ * exit. Settlement never awaits this — delivery stays non-blocking. The wait is bounded (default 5 s) so a sink
+ * that hangs cannot hang the command that is exiting.
  */
-export async function drainNotifications(): Promise<void> {
+export async function drainNotifications(timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (inFlightDeliveries.size > 0) {
-    await Promise.all([...inFlightDeliveries]);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<void>((resolve) => { timer = setTimeout(resolve, remaining); timer.unref?.(); });
+    await Promise.race([Promise.all([...inFlightDeliveries]), expired]);
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -861,6 +871,15 @@ async function captureStdout(argv: string[], env: NodeJS.ProcessEnv, timeoutMs: 
 }
 
 /**
+ * `reg.exe` under the Windows folder. A bare `reg` is looked up in the current directory first on Windows, so a file
+ * of that name next to where `uh` runs would be run instead.
+ */
+export function windowsRegExecutable(env: NodeJS.ProcessEnv = process.env): string {
+  const windowsFolder = env.SystemRoot ?? env.windir ?? "C:\\Windows";
+  return path.win32.join(windowsFolder, "System32", "reg.exe");
+}
+
+/**
  * Read the `ToastEnabled` value out of `reg query` output. `undefined` means the
  * key could not be read at all, which is never treated as "off".
  */
@@ -879,7 +898,7 @@ export function parseWindowsToastSetting(output: string | undefined): WindowsToa
  * read is `unknown`, which never claims toasts are unavailable.
  */
 export async function readWindowsToastSetting(env: NodeJS.ProcessEnv = process.env): Promise<WindowsToastSetting> {
-  const output = await captureStdout(["reg", "query", WINDOWS_TOAST_SETTINGS_KEY, "/v", "ToastEnabled"], env, REGISTRY_QUERY_TIMEOUT_MS);
+  const output = await captureStdout([windowsRegExecutable(env), "query", WINDOWS_TOAST_SETTINGS_KEY, "/v", "ToastEnabled"], env, REGISTRY_QUERY_TIMEOUT_MS);
   return parseWindowsToastSetting(output);
 }
 

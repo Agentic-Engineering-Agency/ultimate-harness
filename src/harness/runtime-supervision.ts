@@ -643,7 +643,9 @@ export class RuntimeSupervision {
     }
     const nativeTurns = event.num_turns ?? record(event.result)?.num_turns;
     if (typeof nativeTurns === "number" && Number.isInteger(nativeTurns) && nativeTurns >= 0) {
-      this.turns = Math.max(this.turns, nativeTurns);
+      // The runtime's own count in its final record is the turn count; the message ids counted along the way can
+      // overshoot it, so at the terminal event it replaces them. Before then it can only raise the count.
+      this.turns = type === "result" ? nativeTurns : Math.max(this.turns, nativeTurns);
       if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
     }
     if (this.failure) {
@@ -729,11 +731,16 @@ export class RuntimeSupervision {
       if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
     } else if (type === "assistant" || (type === "system" && event.subtype === "init")) {
       // Claude Code: one turn per distinct assistant message id.
-      if (type === "assistant") {
+      // A sub-agent's messages carry the `parent_tool_use_id` of the call that started it; they are not this run's turns.
+      const subAgentMessage = typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id.length > 0;
+      if (type === "assistant" && !subAgentMessage) {
         const message = record(event.message);
         if (typeof message?.id === "string" && message.id.length > 0 && !this.assistantMessageIds.has(message.id)) {
           this.assistantMessageIds.add(message.id);
           this.turns++;
+          // This branch counts turns but never checked the cap: a run past `limits.max_turns` kept going and could
+          // finish cleanly. The cap is enforced as it is for `turn_end` runtimes.
+          if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
         }
       }
       this.readyAt ??= now;

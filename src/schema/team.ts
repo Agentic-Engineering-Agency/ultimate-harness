@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RuntimeLimitsSchema } from "./runtime-control.js";
+import { RuntimeLimitsSchema, ToolGuardFieldsSchema } from "./runtime-control.js";
 
 export const CanonicalTeamStatusSchema = z.enum([
   "running",
@@ -35,6 +35,8 @@ const CanonicalWorkerContractSchema = z.object({
     files: z.array(z.string().min(1)),
   }).strict().optional(),
   seed: z.number().int().nonnegative().optional(),
+  /** The worker's guard: the team mission's, narrowed by its packet, template and own block. */
+  guard: ToolGuardFieldsSchema.optional(),
 }).strict();
 
 const CanonicalWorkerOutputSchema = z.object({

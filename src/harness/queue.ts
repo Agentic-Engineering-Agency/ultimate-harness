@@ -136,6 +136,8 @@ export interface QueueLaunchRequest {
   root: string;
   /** Present when resuming an entry recorded as running: wait on this run instead of launching. */
   resumeRunId?: string;
+  /** The entry's `sandbox` choice. Only `false` runs the mission in the project root. */
+  sandbox?: boolean;
 }
 
 export interface QueueSettleOutcome {
@@ -321,7 +323,10 @@ export function createQueueLauncher(deps: QueueLauncherDeps = {}): QueueLauncher
     const runId = generateRunId();
     const args = [
       cliEntry, "mission", "run", request.missionPath,
-      "--runtime", request.runtime, "--root", request.root, "--run-id", runId, "--no-sandbox",
+      "--runtime", request.runtime, "--root", request.root, "--run-id", runId,
+      // Routing is `uh mission run`'s own: a bound sandbox is used and a worker mission without one is
+      // refused. Only an entry that says `sandbox: false` runs in the live checkout.
+      ...(request.sandbox === false ? ["--no-sandbox"] : []),
     ];
     const child = spawner(nodePath, args, { cwd: request.root });
     const childExit = new Promise<QueueChildExit>((resolve) => {
@@ -436,7 +441,8 @@ export async function runQueue(queueFilePath: string, options: RunQueueOptions):
   const root = path.resolve(options.root);
   // Hive integrity is a precondition: a broken hive facts or ledger chain means
   // the shared state every agent trusts cannot be extended, so queue refuses.
-  assertHiveChainsIntact(root);
+  // A fork from the old concurrent-append bug is a warning that names the repair command; any other break refuses.
+  for (const warning of assertHiveChainsIntact(root)) console.warn(`[WARN] ${warning}`);
   const queue = await loadQueueFile(path.resolve(queueFilePath));
   const maxOrchestrators = options.maxOrchestrators ?? DEFAULT_MAX_ORCHESTRATORS;
   if (!Number.isInteger(maxOrchestrators) || maxOrchestrators < 1) {
@@ -530,6 +536,7 @@ export async function runQueue(queueFilePath: string, options: RunQueueOptions):
           missionPath: path.isAbsolute(entry.mission) ? entry.mission : path.resolve(root, entry.mission),
           runtime: entry.runtime,
           root,
+          ...(entry.sandbox !== undefined ? { sandbox: entry.sandbox } : {}),
           ...(resumeRunId !== undefined ? { resumeRunId } : {}),
         });
       } catch {

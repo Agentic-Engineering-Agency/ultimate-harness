@@ -513,3 +513,11 @@ describe("run digest — report rendering", () => {
     }
   });
 });
+
+describe("Claude Code sub-agent messages (U-064, #266)", () => {
+  const assistant = (id: string, parent: string | null) => ({ type: "assistant", parent_tool_use_id: parent, message: { id, role: "assistant", content: [{ type: "text", text: "x" }] } });
+  test("the digest counts the run's own turns, not a sub-agent's", () => {
+    const events = [assistant("m1", null), assistant("s1", "toolu_task"), assistant("s2", "toolu_task"), assistant("m2", null)];
+    expect(digestOf(events, { runtime: "claude-code" }).turns).toBe(2);
+  });
+});
