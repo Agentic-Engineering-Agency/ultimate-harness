@@ -398,6 +398,21 @@ function mapAcpUsage(source: unknown, model?: string): RuntimeUsage | undefined 
 }
 
 /**
+ * Replace each `${NAME}` in a configured value with `env[NAME]`, so `.harness/adapters/acp.yaml` can name a secret
+ * instead of holding it. An unset or empty name is refused, naming the variable and nothing else: an empty token
+ * would otherwise be sent silently.
+ */
+export function expandEnvReferences(value: string, env: NodeJS.ProcessEnv): string {
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, name: string) => {
+    const resolved = env[name];
+    if (resolved === undefined || resolved === "") {
+      throw new Error(`ACP configuration refers to \${${name}}, which is not set in the environment`);
+    }
+    return resolved;
+  });
+}
+
+/**
  * Apply the runtime's environment policy to a copy of `baseEnv`: drop exact
  * names and `NAME_PREFIX*` matches first, then layer `set` on top so explicit
  * values always win. Names compare case-insensitively on Windows. Values are
@@ -419,7 +434,8 @@ export function applyAcpEnvPolicy(baseEnv: NodeJS.ProcessEnv, policy: AcpEnvPoli
       dropWhere((key) => normalize(key) === exact);
     }
   }
-  for (const [key, value] of Object.entries(policy.set)) env[key] = value;
+  // References resolve against the environment as it was given, so a variable the policy drops can still feed a `set` value.
+  for (const [key, value] of Object.entries(policy.set)) env[key] = expandEnvReferences(value, baseEnv);
   return env;
 }
 
@@ -440,22 +456,22 @@ async function resolveAcpLaunchCommand(
   return { command: resolved.command, args: resolved.args, env };
 }
 
-/** Map configured MCP servers to the ACP v1 `session/new` wire shape. */
-function mcpServersForSessionNew(servers: AcpMcpServer[]): Record<string, unknown>[] {
+/** Map configured MCP servers to the ACP v1 `session/new` wire shape, resolving `${NAME}` references from `env`. */
+export function mcpServersForSessionNew(servers: AcpMcpServer[], env: NodeJS.ProcessEnv = process.env): Record<string, unknown>[] {
   return servers.map((server) => {
     if ("type" in server) {
       return {
         type: "http" as const,
         name: server.name,
         url: server.url,
-        headers: Object.entries(server.headers).map(([name, value]) => ({ name, value })),
+        headers: Object.entries(server.headers).map(([name, value]) => ({ name, value: expandEnvReferences(value, env) })),
       };
     }
     return {
       name: server.name,
       command: server.command,
       args: server.args,
-      env: Object.entries(server.env).map(([name, value]) => ({ name, value })),
+      env: Object.entries(server.env).map(([name, value]) => ({ name, value: expandEnvReferences(value, env) })),
     };
   });
 }
