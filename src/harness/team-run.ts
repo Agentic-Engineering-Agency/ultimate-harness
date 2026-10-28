@@ -61,6 +61,7 @@ import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 import { elapsedMs, notifyTeamSettled } from "./notifications.js";
 import { getSessionTemplate } from "./session-templates.js";
 import { appendWorkerRules } from "./session-template-adoption.js";
+import { changedConfigKeys, executableConfigEntries, hooklessGitConfig } from "./harness-git.js";
 import { workerGuard } from "./guard-narrowing.js";
 import { assertStrictContainment } from "./session-templates.js";
 import type { ToolGuardFields } from "../schema/runtime-control.js";
@@ -116,9 +117,9 @@ function formatGitError(err: unknown): string {
   return message;
 }
 
-/** `git -c core.longpaths=true <args>` — every team-run git call lifts MAX_PATH. */
+/** `git -c core.longpaths=true <args>` — every team-run git call lifts MAX_PATH and runs no configured hook. */
 function gitCommand(args: readonly string[]): string[] {
-  return ["-c", "core.longpaths=true", ...args];
+  return ["-c", "core.longpaths=true", ...hooklessGitConfig(), ...args];
 }
 
 /** Run git with the long-path prefix; on failure throw with git's stderr attached. */
@@ -353,6 +354,15 @@ export interface GitOps {
    * `enableLongPaths` succeeds.
    */
   longPathsEnabled?: (root: string) => Promise<boolean>;
+  /**
+   * The repository's local configuration entries that name a program git runs
+   * (hooks path, filters, aliases, includes and the like), as `key=value`.
+   * Optional so existing test doubles stay valid; absent means the team run
+   * does not compare them around its workers.
+   */
+  executableConfig?: (root: string) => Promise<string[]>;
+  /** Put the {@link executableConfig} entries back to `entries`. */
+  restoreExecutableConfig?: (root: string, entries: readonly string[]) => Promise<void>;
   /** Set `core.longpaths true` in the repository's LOCAL config. */
   enableLongPaths?: (root: string) => Promise<void>;
   /**
@@ -826,7 +836,7 @@ export const defaultGitOps: GitOps = {
       const { stdout } = await runGit([
         "-c", "user.email=uh-team@example.com",
         "-c", "user.name=uh team leader",
-        "merge", "--no-edit", branch,
+        "merge", "--no-edit", "--no-verify", branch,
       ], cwd);
       return { conflicted: false, conflictPaths: [], note: stdout.trim().split("\n").slice(0, 1).join("") };
     } catch (err) {
@@ -947,7 +957,7 @@ export const defaultGitOps: GitOps = {
     await runGit([
       "-c", `user.email=${(await readConfig("user.email")) ?? "uh-team@example.com"}`,
       "-c", `user.name=${(await readConfig("user.name")) ?? "uh team worker"}`,
-      "commit", "-m", message,
+      "commit", "--no-verify", "-m", message,
     ], cwd);
     // The id of the commit just made, so the team state can name the one commit that is the harness's.
     return (await runGit(["rev-parse", "HEAD"], cwd)).stdout.trim();
@@ -997,7 +1007,36 @@ export const defaultGitOps: GitOps = {
     }
     return longest;
   },
+  executableConfig: readExecutableConfig,
+  async restoreExecutableConfig(root, entries) {
+    for (const key of changedConfigKeys(entries, await readExecutableConfig(root))) {
+      try { await runGit(["config", "--local", "--unset-all", key], root); } catch { /* the key is not set */ }
+      for (const entry of entries.filter((item) => item.slice(0, item.indexOf("=")) === key)) {
+        await runGit(["config", "--local", "--add", key, entry.slice(key.length + 1)], root);
+      }
+    }
+  },
 };
+
+async function readExecutableConfig(root: string): Promise<string[]> {
+  const { stdout } = await runGit(["config", "--local", "--list", "-z"], root);
+  return executableConfigEntries(stdout);
+}
+
+/**
+ * Compare the repository's program-naming configuration with the baseline the
+ * team run took before its workers started. A difference is put back, and the
+ * returned reason blocks the worker that was running when it was found.
+ */
+async function executableConfigChange(gitOps: GitOps, root: string, baseline: readonly string[] | undefined): Promise<string | undefined> {
+  if (baseline === undefined || !gitOps.executableConfig || !gitOps.restoreExecutableConfig) return undefined;
+  const current = await gitOps.executableConfig(root).catch(() => undefined);
+  if (current === undefined) return undefined;
+  const changed = changedConfigKeys(baseline, current);
+  if (changed.length === 0) return undefined;
+  await gitOps.restoreExecutableConfig(root, baseline).catch(() => undefined);
+  return `Repository git configuration changed during the worker run (${changed.join(", ")}); restored, and the worker's changes were not committed`;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Run                                                                        */
@@ -1498,6 +1537,7 @@ export async function runTeamMission(
     ? await gitOps.longestTrackedPath(root, worktreeBase).catch(() => "")
     : "";
   const admissionWaits: string[] = [];
+  const configBaseline = gitOps.executableConfig ? await gitOps.executableConfig(root).catch(() => undefined) : undefined;
   const workerOutcomes: WorkerOutcome[] = await mapResourceWaves(plan.workers, resources.limits, async (wp): Promise<WorkerOutcome> => {
     const slot: { plan: WorkerPlan; setupError?: Error } = { plan: wp };
     const setup = setupQueue.then(async () => {
@@ -1631,6 +1671,11 @@ export async function runTeamMission(
           status = "blocked";
           canonicalWorker.blocked_reason = `Declared output ${failure.path}: ${failure.notes ?? "verification failed"}`;
         }
+      }
+      const configChange = await executableConfigChange(gitOps, root, configBaseline);
+      if (configChange !== undefined) {
+        status = "blocked";
+        canonicalWorker.blocked_reason = configChange;
       }
       canonicalWorker.status = status === "succeeded"
         ? "succeeded"

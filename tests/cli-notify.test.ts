@@ -33,7 +33,7 @@ async function project(sinks: unknown[]) {
 }
 const uh = async (cwd: string, args: string[]) => {
   try {
-    const { stdout, stderr } = await execFileP(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href, path.resolve("src/cli.ts"), ...args], { cwd, env: { ...process.env, UH_USER_DATA_DIR: path.join(cwd, "user-data") } });
+    const { stdout, stderr } = await execFileP(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href, path.resolve("src/cli.ts"), ...args], { cwd, env: { ...process.env, UH_USER_DATA_DIR: path.join(cwd, "user-data"), UH_NOTIFICATIONS_TRUST_PROJECT: "1" } });
     return { code: 0, out: stdout, err: stderr };
   } catch (error) {
     const failure = error as { code?: number; stdout?: string; stderr?: string };

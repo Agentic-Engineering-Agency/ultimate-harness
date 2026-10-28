@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -311,6 +311,7 @@ afterEach(async () => {
 
 /** Corrupt the real policy file between the adapter's write and the arming check. */
 const corruptPolicy = async (input: GuardArmingInput): Promise<GuardArmingResult> => {
+  await chmod(input.policyPath, 0o600);
   await writeFile(input.policyPath, "{ not json", "utf8");
   return await armGuard(input);
 };

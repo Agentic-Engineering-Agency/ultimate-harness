@@ -158,10 +158,15 @@ uh hive verify --repair        # re-link a chain forked by the old append bug (e
   stays paused until it is repaired. `--repair` re-links the forked entries, and each entry after them, to one chain,
   keeps the original file beside the repaired one (`<file>.pre-repair-<time>`) and writes `<file>.repair-report-<time>.json`
   listing every entry it re-linked with its old and new hashes. It never runs on its own, and it refuses a chain with any
-  other break (an edited, deleted or reordered entry) without touching it.
+  other break (an edited, deleted or reordered entry) without touching it. The chain alone detects edits, not a rewrite
+  that recomputes it, so each fact also carries a `mac`: an HMAC-SHA256 of its body under a controller key kept in the
+  user data directory (`<user data>/controller.key`, created on first use), outside every repository. A re-link keeps
+  every `mac` valid, because the `mac` covers the body and not the chain fields.
+- **Evidence stays in the project.** A fact's evidence ref is a path relative to the project that owns the hive; an
+  absolute ref, or one that leaves the project, never verifies.
 - **Guarded.** Any agent write, edit or delete of the hive is a `guard_tamper` stop in the Command Code hook, the
   Claude Code hook and the oh-my-pi extension, and direct reads are denied in favour of `uh hive show`. A `.harness/hive`
   inside a worker's own scratch project is not the project's hive and stays allowed.
-- **Injected as data.** Only facts whose chain is intact and whose evidence still hashes to its recorded value reach a
-  worker's prompt, selected by the item ids and paths the packet names, bounded in size, and rendered as a block
-  labelled as data, not instructions, with every field escaped.
+- **Injected as data.** Only facts whose chain is intact, whose `mac` this controller's key produced and whose evidence
+  still hashes to its recorded value reach a worker's prompt, selected by the item ids and paths the packet names,
+  bounded in size, and rendered as a block labelled as data, not instructions, with every field escaped.

@@ -3753,12 +3753,14 @@ notifyCmd
   .action(async (opts: { root?: string; json?: boolean }) => {
     const root = resolveRoot(opts.root);
     try {
-      const { describeSink, loadNotificationConfig } = await import("./harness/notifications.js");
+      const { describeSink, loadNotificationConfig, refusedProjectSinks } = await import("./harness/notifications.js");
       const sinks = await loadNotificationConfig(root);
+      const refused = await refusedProjectSinks(root);
       if (opts.json) {
-        console.log(JSON.stringify({ schema_version: "uh.notify.list.v0", sinks }, null, 2));
+        console.log(JSON.stringify({ schema_version: "uh.notify.list.v0", sinks, ...(refused.length > 0 ? { refused_project_sinks: refused } : {}) }, null, 2));
         return;
       }
+      for (const entry of refused) console.log(`Not used: ${entry.id} (${entry.reason})`);
       if (sinks.length === 0) {
         console.log("No notification sinks configured; nothing is sent. Add notifications.sinks in .harness/project.yaml.");
         return;

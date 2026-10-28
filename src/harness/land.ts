@@ -16,6 +16,7 @@ import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
 import { assertHiveChainsIntact, recordLandCommit } from "./hive.js";
 import { harnessOwnerRoot } from "./hive-root.js";
 import { chainEntry, lastChainedHash, readJsonLines, sha256Hex, verifyChainedLines, type ChainBreak } from "./hash-chain.js";
+import { hooklessGitConfig } from "./harness-git.js";
 import { projectYaml } from "./paths.js";
 import { removeWorktreeLinks } from "./worktree-links.js";
 
@@ -45,7 +46,7 @@ const COMMAND_OUTPUT_CAP = 100_000;
 
 export const defaultLandGitRunner: LandGitRunner = async (args, cwd) => {
   try {
-    const { stdout, stderr } = await execFileP("git", ["-C", cwd, ...args], { maxBuffer: 32 * 1024 * 1024 });
+    const { stdout, stderr } = await execFileP("git", ["-C", cwd, ...hooklessGitConfig(), ...args], { maxBuffer: 32 * 1024 * 1024 });
     return { exitCode: 0, stdout: String(stdout), stderr: String(stderr) };
   } catch (err) {
     const e = err as { code?: number | string; stdout?: string | Buffer; stderr?: string | Buffer; message?: string };
@@ -300,7 +301,7 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     const committed = await git([
       "-c", `user.name=${authorName}`,
       "-c", `user.email=${authorEmail}`,
-      "commit", "-F", messageFile,
+      "commit", "--no-verify", "-F", messageFile,
     ], root);
     if (committed.exitCode !== 0) throw new LandError("commit", `git commit failed: ${reason(committed)}`);
     const newHead = await git(["rev-parse", "HEAD"], root);

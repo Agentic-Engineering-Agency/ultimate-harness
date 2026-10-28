@@ -1252,6 +1252,29 @@ describe("runTeamMission — real git (smoke)", () => {
     expect(leaderB).toBe("// frontend\n");
   });
 
+  test("a worker run that changes program-naming repository config is blocked and the config is restored", async () => {
+    await initGitRepo(ROOT);
+    await seedMissionPacket(ROOT, "team-mission");
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+
+    const runner = (_adapter: string) => async (_a: string, root: string, _missionPath: string) => {
+      const id = basename(root);
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", `${id}.ts`), `// ${id}\n`, "utf-8");
+      if (id === "backend") await execFileP("git", ["config", "core.hooksPath", join(root, "hooks")], { cwd: root });
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+    const result = await runTeamMission(mission("team-mission"), ROOT, { runnerFor: runner, retainOnSuccess: true });
+
+    const backend = result.workers.find((worker) => worker.plan.id === "backend")!;
+    expect(backend.status).toBe("blocked");
+    expect(backend.errorMessage).toMatch(/core\.hookspath/);
+    await expect(execFileP("git", ["config", "--get", "core.hooksPath"], { cwd: ROOT })).rejects.toThrow();
+    const { stdout } = await execFileP("git", ["log", "--oneline", backend.plan.branch], { cwd: ROOT });
+    expect(stdout).not.toMatch(/worker run/);
+  });
+
   test("persists canonical parent and worker facts through non-retained cleanup", async () => {
     await initGitRepo(ROOT);
     await initializeHarness(ROOT);

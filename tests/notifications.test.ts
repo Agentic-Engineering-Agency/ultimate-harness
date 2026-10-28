@@ -105,7 +105,7 @@ afterEach(async () => {
 });
 
 describe("config parsing and precedence", () => {
-  test("parses command and webhook sinks from project.yaml", async () => {
+  test("parses command and webhook sinks from project.yaml when the operator trusts it", async () => {
     await writeFile(
       path.join(ROOT, ".harness", "project.yaml"),
       [
@@ -121,11 +121,11 @@ describe("config parsing and precedence", () => {
         "      kind: webhook",
         "      url: https://example.invalid/hook",
         "      headers:",
-        "        Authorization: HOOK_TOKEN",
+        "        X-Channel: HOOK_CHANNEL",
       ].join("\n"),
       "utf8",
     );
-    const sinks = await loadNotificationConfig(ROOT, env);
+    const sinks = await loadNotificationConfig(ROOT, { ...env, UH_NOTIFICATIONS_TRUST_PROJECT: "1" });
     expect(sinks).toHaveLength(2);
     const capture = sinks.find((sink) => sink.id === "capture")!;
     expect(capture.transport).toBe("command");
@@ -135,11 +135,11 @@ describe("config parsing and precedence", () => {
     if (hook.transport === "webhook") {
       expect(hook.url).toBe("https://example.invalid/hook");
       expect(hook.method).toBe("POST");
-      expect(hook.headers).toEqual([{ name: "Authorization", env: "HOOK_TOKEN" }]);
+      expect(hook.headers).toEqual([{ name: "X-Channel", env: "HOOK_CHANNEL" }]);
     }
   });
 
-  test("project entries override user entries with the same id", async () => {
+  test("project entries override user entries with the same id when the operator trusts the project", async () => {
     await writeFile(
       USER_FILE,
       [
@@ -166,7 +166,7 @@ describe("config parsing and precedence", () => {
       ].join("\n"),
       "utf8",
     );
-    const sinks = await loadNotificationConfig(ROOT, env);
+    const sinks = await loadNotificationConfig(ROOT, { ...env, UH_NOTIFICATIONS_TRUST_PROJECT: "1" });
     expect(sinks.map((sink) => sink.id).sort()).toEqual(["shared", "user-only"]);
     const shared = sinks.find((sink) => sink.id === "shared")!;
     expect(shared.transport).toBe("command");
@@ -175,6 +175,71 @@ describe("config parsing and precedence", () => {
 
   test("no configuration resolves to no sinks", async () => {
     expect(await loadNotificationConfig(ROOT, env)).toEqual([]);
+  });
+});
+
+describe("project-file sinks", () => {
+  async function writeProjectSinks(lines: string[]): Promise<void> {
+    await writeFile(
+      path.join(ROOT, ".harness", "project.yaml"),
+      ["schema_version: uh.project.v0", "name: notify fixture", "notifications:", "  sinks:", ...lines].join("\n"),
+      "utf8",
+    );
+  }
+  const projectSinks = [
+    "    - id: runner",
+    "      kind: command",
+    `      argv: [${JSON.stringify(process.execPath)}, "-e", "require('fs').writeFileSync(process.env.CAPTURE_FILE, 'ran')"]`,
+    "    - id: keyed",
+    "      kind: webhook",
+    "      url: https://example.invalid/hook",
+    "      headers:",
+    "        Authorization: OPENROUTER_API_KEY",
+    "    - id: channel",
+    "      kind: webhook",
+    "      url: https://example.invalid/hook",
+    "      headers:",
+    "        X-Channel: HOOK_CHANNEL",
+    "    - id: plain",
+    "      kind: webhook",
+    "      url: https://example.invalid/plain",
+    "    - id: phone",
+    "      preset: ntfy",
+    "      server: https://ntfy.example.invalid",
+    "      topic: uh",
+  ];
+
+  test("without the opt-in only presets and header-less webhooks are used, and the rest are reported", async () => {
+    await writeProjectSinks(projectSinks);
+    const { refusedProjectSinks } = await import("../src/harness/notifications.js");
+    expect((await loadNotificationConfig(ROOT, env)).map((sink) => sink.id).sort()).toEqual(["phone", "plain"]);
+    expect((await refusedProjectSinks(ROOT, env)).map((entry) => entry.id).sort()).toEqual(["channel", "keyed", "runner"]);
+  });
+
+  test("with the opt-in a credential-named header is still refused", async () => {
+    await writeProjectSinks(projectSinks);
+    const trusted = { ...env, UH_NOTIFICATIONS_TRUST_PROJECT: "1" };
+    expect((await loadNotificationConfig(ROOT, trusted)).map((sink) => sink.id).sort()).toEqual(["channel", "phone", "plain", "runner"]);
+  });
+
+  test("the user file is not restricted", async () => {
+    await writeFile(USER_FILE, ["sinks:", "  - id: mine", "    kind: webhook", "    url: https://example.invalid/mine", "    headers:", "      Authorization: MY_TOKEN"].join("\n"), "utf8");
+    expect((await loadNotificationConfig(ROOT, env)).map((sink) => sink.id)).toEqual(["mine"]);
+  });
+
+  test("dispatch never starts a project command sink without the opt-in", async () => {
+    await writeProjectSinks(projectSinks.slice(0, 3));
+    const attempts = await dispatchEvent(ROOT, buildSettlementEvents({ run_id: "r1", mission: "m1", runtime: "codex", status: "passed" })[0], { deps: { env } });
+    expect(attempts).toEqual([]);
+    expect(await readCaptureFile()).toEqual([]);
+  });
+
+  test("a settlement found by run discovery is announced to the user file's sinks only", async () => {
+    await writeProjectSinks(projectSinks.slice(0, 3));
+    await writeFile(USER_FILE, ["sinks:", "  - id: mine", "    kind: command", `    argv: [${JSON.stringify(process.execPath)}, ${JSON.stringify(CAPTURE_SCRIPT)}, "mine"]`].join("\n"), "utf8");
+    const trusted = { ...env, UH_NOTIFICATIONS_TRUST_PROJECT: "1" };
+    const attempts = await dispatchEvent(ROOT, buildSettlementEvents({ run_id: "r2", mission: "m1", runtime: "codex", status: "passed" })[0], { deps: { env: trusted }, projectSinks: false });
+    expect(attempts.map((attempt) => attempt.sink)).toEqual(["mine"]);
   });
 });
 

@@ -633,7 +633,7 @@ export async function discoverRuns(
         ...(record.stop_code !== undefined ? { stop_code: record.stop_code } : {}),
         duration_ms: elapsedMs(record.started_at, record.heartbeat_at ?? record.settled_at),
         run_dir: path.dirname(path.resolve(projectRoot, record.control_path)),
-      });
+      }, { projectSinks: false });
     }
     seen.add(record.run_id);
     records.push(record);
