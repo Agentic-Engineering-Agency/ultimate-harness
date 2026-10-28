@@ -87,7 +87,8 @@ uh land --worker-branch uh/team/<team>/<worker> --onto <target-branch> \
   --message-file <message-file> --fast-forward <other-checkout>
 ```
 
-It refuses before touching anything unless every branch passes both gates:
+It refuses before touching anything unless the worktree it runs in has `--onto` checked out (a detached `HEAD` or
+another branch is refused, naming the branch it found) and every branch passes both gates:
 
 1. **Verified.** The branch has a passed `uh verify` result in its retained worktree (run the team with `--retain`).
 2. **Reviewed.** A collected independent review names the branch's team mission (read from

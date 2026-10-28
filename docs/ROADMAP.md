@@ -82,8 +82,8 @@ The [progressive-decision specification](./architecture/progressive-decisions.md
 also describes routing, scope-change and retry/stop flows.
 
 - Add validated mission decision policy and enforce confidence/provider requirements:
-  `DecisionPolicySchema` and progressive semantic routing shipped; shadow loop watchdog
-  evaluates retry/stop advisory receipts.
+  `DecisionPolicySchema` and progressive semantic routing shipped; the opt-in shadow loop
+  watchdog (`runtime_config.loop_watchdog: shadow`, off by default) evaluates retry/stop advisory receipts.
   Status: **in progress**.
 - Bound provider requests independently of subprocess deadlines.
   Status: **open**.

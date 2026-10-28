@@ -173,6 +173,14 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   const buildCommand = config.build ?? DEFAULT_LAND_BUILD;
 
   // ---- Step 1: gates (no git mutation happens here) ----------------------
+  const current = await git(["symbolic-ref", "--quiet", "--short", "HEAD"], root);
+  if (current.exitCode !== 0) {
+    throw new LandError("gates", `target worktree ${root} is not on a branch (detached HEAD or unreadable: ${reason(current)}); check out ${options.onto} there to land onto it`);
+  }
+  const currentBranch = current.stdout.trim();
+  if (currentBranch !== options.onto) {
+    throw new LandError("gates", `target worktree ${root} is on ${currentBranch}, not --onto ${options.onto}; check out ${options.onto} there to land onto it`);
+  }
   // `uh mission review-collect` writes the collected assessment in the project
   // that owns the worker worktrees (next to the review's review-request.json),
   // not in the worker worktree. Worker worktrees live inside that project's
