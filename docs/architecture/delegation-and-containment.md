@@ -46,6 +46,10 @@ A route is a provider and a model. A mission pins one; the run is held to it.
   run on which adapter in which role. A run outside it, or with no assigned
   model, is refused before spawn. `--force` does not bypass spend authorization.
 
+## An orchestrator in the project root
+
+An orchestrator (`runtime_config.role: orchestrator`, Claude Code or Command Code) runs in the live project root without a sandbox, so its guard's write roots are all that confine it. Both adapters refuse, at planning and before any process starts, a guard whose write roots are empty or `.` (the whole repository), absolute, or climb out with `..`; an empty guard resolves to `.`, so an orchestrator must declare the folders it writes, for example `write_roots: [out]`.
+
 ## The working directory
 
 Reading anywhere is allowed. Writing is allowed only under the mission's write
