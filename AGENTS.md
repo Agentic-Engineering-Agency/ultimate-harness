@@ -24,9 +24,7 @@ workflow references are maintained in [docs/README.md](docs/README.md).
 - Runtime credentials stay outside UH artifacts; `OPENROUTER_API_KEY` and `ANTHROPIC_API_KEY` come from the environment, and other adapter auth remains in its owning CLI or external session.
 - Telemetry is PostHog-only, disabled by default, and enabled only with `UH_TELEMETRY=posthog` plus `UH_POSTHOG_API_KEY`; remove Opik or Bugsink assumptions.
 - Telemetry may capture only sanitized command name, status, exit code, duration, package version, and platform metadata. Never capture repo paths, secrets, prompts, model output, agent responses, documents, raw payment data, or private legal or financial facts.
-- Before editing a function, class, or method, run upstream `gitnexus_impact`, report callers, affected flows, and risk, and warn before proceeding on HIGH or CRITICAL risk; never ignore those warnings.
-- Use `gitnexus_query` for unfamiliar concepts and `gitnexus_context` for symbol context. Rename with `gitnexus_rename`, never find-and-replace.
-- Run `gitnexus_detect_changes()` before committing. If GitNexus reports a stale index, run `npx gitnexus analyze` first.
+- A mission packet's instructions and `read_first` list take precedence over this file. GitNexus is optional: when its tools are available, upstream `gitnexus_impact` before changing a widely used symbol and `gitnexus_detect_changes()` before committing are useful checks; without them, use grep.
 
 ## Commands
 
@@ -55,11 +53,13 @@ workflow references are maintained in [docs/README.md](docs/README.md).
 
 ## Read order
 
+For open-ended work with no mission packet; a packet's `read_first` replaces this list.
+
 1. `README.md` and `docs/quickstart.md`
 2. `docs/architecture/` and the relevant runtime, TUI, plugin, telemetry, or runbook document
 3. `specs/` for active specifications; specs do not live under `docs/`
-4. GitNexus `context`, `clusters`, `processes`, or `process/{name}` resources for codebase and flow discovery
-5. The matching `.claude/skills/gitnexus/` exploring, impact-analysis, debugging, refactoring, guide, or CLI skill before that task kind
+4. When available, GitNexus `context`, `clusters`, `processes`, or `process/{name}` resources for codebase and flow discovery
+5. When available, the matching `.claude/skills/gitnexus/` skill for that task kind
 
 Indexes and runner bootstraps are local generated state; index the current checkout rather than relying on published machine-specific graph identifiers or counts.
 
@@ -78,8 +78,3 @@ this file remains the single instruction source. It is **not** the default — O
 generated `.commandcode/settings.json` mirrors the OMP discipline in Command Code's permission
 rules and is materialized from `scripts/harness-matrix.json`; never hand-edit it. See
 `docs/standards/harness.md` (Command Code section) and `docs/research/command-code-evaluation.md`.
-
-## Deviations
-
-- GitNexus impact analysis is mandatory before symbol edits because this repo relies on its indexed cross-runtime execution graph.
-

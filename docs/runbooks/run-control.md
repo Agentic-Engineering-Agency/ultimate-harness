@@ -30,6 +30,14 @@ the native pids in the controller's process tree:
 20260922T101500Z-a1b2c3  wave-audit-0  team=live-runs  command-code/gpt-5  live  turns=12  denials=0  hb=2s  last=edit_file (3s)  pids=3140,3141
 ```
 
+When a run's digest reports a tool call that has produced no output for five minutes, the row carries a
+`STALLED` segment with the tool and its minutes before the pids, so a hung tool is visible without opening
+the run:
+
+```
+20260922T101500Z-a1b2c3  wave-audit-0  team=live-runs  command-code/gpt-5  live  turns=12  denials=0  hb=2s  last=shell_command (6m)  STALLED tool=shell_command 6m  pids=3140,3141
+```
+
 `uh status` also prints a single summary line from the same function:
 
 ```

@@ -1457,9 +1457,10 @@ program
   .requiredOption("--message-file <path>", "File holding the commit message")
   .option("--accept-review <reason>", "Accept a failing independent review and record the reason")
   .option("--fast-forward <path>", "Checkout to fast-forward to the target; repeatable", collectRepeatedOption, [])
+  .option("--review-root <path>", "Main checkout holding collected reviews and land decisions (default: the target worktree's common git dir parent)")
   .option("--keep-worktrees", "Keep the landed workers' worktrees (default: remove them, and a team's leader once no worker is left)")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (opts: { workerBranch: string[]; onto: string; messageFile: string; acceptReview?: string; fastForward: string[]; keepWorktrees?: boolean; root?: string }) => {
+  .action(async (opts: { workerBranch: string[]; onto: string; messageFile: string; acceptReview?: string; fastForward: string[]; reviewRoot?: string; keepWorktrees?: boolean; root?: string }) => {
     const root = resolveRoot(opts.root);
     try {
       const summary = await landWorkerBranches({
@@ -1469,6 +1470,7 @@ program
         messageFile: opts.messageFile,
         acceptReview: opts.acceptReview,
         fastForward: opts.fastForward,
+        reviewRoot: opts.reviewRoot,
         keepWorktrees: opts.keepWorktrees,
       });
       console.log(JSON.stringify(summary));

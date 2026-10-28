@@ -17,7 +17,7 @@ uh ps --json
 uh ps --all
 ```
 
-Each line carries the run id, mission, team role (for team workers), runtime and model, verdict, turns, denials, heartbeat age, the last tool and its age, and the native pids in the controller's process tree. `uh status` prints a single summary line from the same function:
+Each line carries the run id, mission, team role (for team workers), runtime and model, verdict, turns, denials, heartbeat age, the last tool and its age, a `STALLED tool=<name> <minutes>m` segment when a tool call has produced no output for five minutes, and the native pids in the controller's process tree. `uh status` prints a single summary line from the same function:
 
 ```
 Live runs: 4 (orphaned: 0)

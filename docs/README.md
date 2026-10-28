@@ -9,6 +9,8 @@ For the active roadmap (epics, in-flight slices, recently shipped), see [ROADMAP
 ## Start here
 
 0. [Quickstart](./quickstart.md) — install, initialize, run, verify, and inspect a mission.
+- [Operator handbook](./handbook/README.md) — the operating loop: dispatch, guard, supervise, watch and stop, settle, verify, review, integrate, prove.
+- [Known issues](./known-issues.md) — open defects, gaps and unproven claims.
 - [Orchestrator guide](./orchestrator-guide.md) — mission lifecycle, team execution, observability, human decisions and CLI reference.
 1. [Configuration](./configuration.md) — project state, env vars, and runtime overrides.
 2. [Runtime targets](./runtime-targets.md) — supported runtimes and adapter boundaries.
@@ -97,6 +99,24 @@ For issue-level state and upcoming epics, see [ROADMAP.md](./ROADMAP.md).
 - [Tool-guard smoke](./runbooks/tool-guard-smoke.md)
 - [Supervisor-loop smoke](./runbooks/supervisor-loop-smoke.md)
 - [MCP server](./runbooks/mcp-server.md)
+- [Run control](./runbooks/run-control.md)
+- [Independent review](./runbooks/independent-review.md)
+- [Acceptance](./runbooks/acceptance.md)
+- [ACP setup](./runbooks/acp-setup.md)
+- [Container sandbox](./runbooks/container-sandbox.md)
+
+### Operator handbook
+
+- [Handbook index](./handbook/README.md)
+- [Run control](./handbook/run-control.md)
+- [Slices and teams](./handbook/slices-and-teams.md)
+- [Review round trip](./handbook/review-round-trip.md)
+- [Closing the loop](./handbook/closing-the-loop.md) — post-checks, `uh queue`, `uh land`
+- [Acceptance](./handbook/acceptance.md)
+- [Fleet](./handbook/fleet.md)
+- [Packet rules](./handbook/packet-rules.md)
+- [Notifications](./handbook/notifications.md)
+- [Intervention ledger](./handbook/intervention-ledger.md)
 
 ### Workflows
 

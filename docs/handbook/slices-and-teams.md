@@ -62,7 +62,7 @@ A team mission adds `shape: team` and a `team` block: `workers[]` with per-worke
 | Field | Meaning |
 | --- | --- |
 | `adapter` | Accepted adapter id (required). |
-| `template` | Optional session template id (`.harness/templates/<id>.yaml`). The worker's contract takes the template's `runtime_config_overrides`, `limits`, `recovery`, and `worker_rules` as defaults; the worker spec and the worker's own `mission_id` packet win. An unknown id fails the team before any worker starts. |
+| `template` | Optional session template id (`.harness/templates/<id>.yaml`). The worker's contract takes the template's `runtime_config_overrides`, `limits`, `recovery`, and `worker_rules` as defaults; the worker spec and the worker's own `mission_id` packet win. A worker with a template may omit `adapter`; the template's adapter is then used by the team run, `uh mission check` and the delivery observatory, and a worker with neither fails validation. An unknown id fails the team before any worker starts. |
 | `role` | Non-empty, unique worker role (required). |
 | `mission_id` | Optional distinct worker mission: the worker's contract and runtime packet are resolved from that mission's `mission.yaml` instead of inheriting the parent packet. |
 | `objective` | Worker-specific objective, combined with the parent mission objective when present; the worker inherits the parent objective when omitted. |
@@ -87,6 +87,10 @@ Strategies are `merge`, `cherry-pick`, or `rebase`. The leader merges changes an
 `--base-ref` is resolved to a commit id once, before any worker starts, so every worker and the leader branch from the same commit. That commit is recorded as `git config branch.<branch>.base` and on each worker's team-state record as `base_commit`; independent review reads the fork point back from the config instead of falling back to a wide range. When a branch is deleted, its `branch.<name>` config section is removed with it.
 
 A fresh worker worktree reports a clean tree: the harness writes a worktree-local `.harness/.gitignore` that ignores itself, and marks the tracked files it rewrites under the protected roots (`.harness`, `.commandcode`, `.omp`, `.pi`) with `git update-index --skip-worktree` in that worktree only. Worker commits are unaffected, since they never stage protected paths.
+
+Worker commits use the repository's configured `user.name` and `user.email` as author and committer, falling back to `uh team worker <uh-team@example.com>` only when the repository has no identity configured.
+
+On Windows, when the repository does not already set `core.longpaths`, worktree setup enables it in the repository's local config and records a note saying so. Only when it cannot be enabled does setup check each worktree: if the worktree path plus the longest tracked path at the base ref exceeds 259 characters, the team fails with a message giving both lengths instead of a partial checkout. Setup errors keep up to 2,000 characters of git's stderr.
 
 Relaunching a team whose previous run was killed is guarded. A team run is refused while a live run of the same team is registered, naming the run ids. Otherwise, retained branches or worktree paths refuse by default; re-run with:
 

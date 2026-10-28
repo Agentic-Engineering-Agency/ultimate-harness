@@ -6,7 +6,7 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 
 ## [Unreleased]
 
-0.10.0 was prepared on `dev` in June 2026 but never tagged or published. It is skipped: its changes (UH-138, UH-139 and the spec-stale fix below) ship in this release instead.
+Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been published. 0.10.0 was prepared on `dev` in June 2026 but never tagged: it is skipped, and its changes (UH-138, UH-139 and the spec-stale fix below) ship in 0.11.0.
 
 ### Added
 - Capability checks warn by default (UH-138). A mission `capabilities:` tag the resolved adapter does not declare prints one `[WARN]` line per tag and the run proceeds; `--strict` on `uh mission dry-run`, `run` and `run-all` turns each mismatch into an error. `--force` bypasses the check with a `[WARN]` line naming the runtime. `runtime_requirements` stay hard preconditions and are never relaxed.
@@ -47,6 +47,7 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Capability inventory: `docs/verification/capability-inventory.md` maps every CLI capability to its implementation, tests and acceptance id, classifies each row, and lists the rows most dangerous to leave unproven.
 - `uh mission check` validates a mission packet and its runtime overrides without launching a runtime, verifying write roots against expected outputs and Change-only paths, checking `read_first` paths, and testing grounding claims against file contents.
 - `uh mission put` validates and installs mission packets into `.harness/missions/<id>/mission.yaml` atomically with audit event logging, refusing overwrite without `--replace` or while a run is live.
+- `uh steer <run-id> <message>` messages a live run: its owning controller stops the attempt with stop code `steered` and resumes the same native session with the message as the first instruction, without consuming restart budgets; `--report` asks for a status report first. Steering an orchestrator orphans the workers it launched (see docs/known-issues.md).
 - `uh wait` blocks without polling until matched runs settle or are orphaned by watching the live-run registry, accepting a run id, unique prefix, `--mission`, or `--team`.
 - `uh note` records manual interventions on the intervention ledger at `.harness/ledger/interventions.ndjson` with cause, qualifier, and source attribution.
 - `uh ledger` inspects and manages the append-only intervention ledger (`list`, `summary`, `land`, `confirm`, `import`), tracking corrections and their countermeasures across runs.
@@ -55,6 +56,37 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Headless pseudoconsole execution on Windows: workers spawn attached to a headless pseudoconsole so inherited descendant processes do not create visible terminal windows.
 - Shadow loop watchdog: supervision monitors live native events and computes deterministic loop signals, recording advisory decision receipts when repetition or alternating thresholds are crossed.
 - Acceptance runner invariants: registry entries can declare invariants (such as untouched protected paths, no worker commits, no package installs, and consistent guard logs) judged against recorded run evidence.
+- `uh queue run <queue.yaml>` launches missions in file order once their `after` entries have passed, at most `--max-orchestrators` (default 2) at a time, and holds a launch while free memory cannot cover one more run above the admission reserve. Entries settle from their run records through the `uh wait` path (an orphaned run fails with reason `orphaned`), state is written atomically to `.harness/queue/<queue-id>/state.json`, a restarted queue resumes from it without relaunching, dependants of a failed entry are skipped, and each settle sends one notification. `uh queue status <id>` prints the state.
+- `uh land --worker-branch <b>... --onto <branch> --message-file <f>` lands verified worker branches from the target's worktree. It refuses unless each branch has a passed `uh verify` result in its retained worktree and a collected review in the main checkout that names the branch's mission, matches its request digest, captured the branch tip's file hashes and contradicts no claim (`--accept-review <reason>` overrides only the review gate and writes a decision under `.harness/land/`). It cherry-picks without committing, runs the project's checks, scans the staged diff and message for forbidden attribution patterns, commits with the repository's configured identity, runs the build and fast-forwards each `--fast-forward` checkout; any failure after the gates restores the target's recorded HEAD. A successful land then removes each landed worker's worktree, and a team's leader worktree once no worker worktree of that team remains, keeping the branches (`--keep-worktrees` skips this). Checks, patterns and build are configurable under `land` in `.harness/project.yaml`.
+- `uh mission run --post-checks <file>` runs operator checks the agent never sees after the runtime settles, in the run's working root with `UH_MISSION_ID`, `UH_RUN_ID`, `UH_RUN_DIR` and `UH_ROOT` set. The file path and commands never reach the prompt, the runtime's environment or argv, or any artifact under the project root; `runtime-result.yaml` records only names and outcomes, and a failed, timed-out or unrunnable check fails the run with exit code 1.
+- Notifications: settled runs, teams and alerts reach configured command or webhook sinks (presets for hermes send, apprise, ntfy and a Windows toast). Nothing is sent until a sink is configured; deliveries are asynchronous, at most once per event, run and sink, logged, and never delay settlement. `uh notify detect`, `list` and `test`.
+- `uh acceptance rebind` revalidates old evidence without rerunning a model. Registry entries declare the files each probe asserts, evidence records an input digest over those files plus runtime and model, and freshness compares digests instead of commits, naming the inputs that changed.
+- `context.project_brief: false` keeps the Project facts section out of a mission's prompt; `uh mission dry-run` prints `Project facts: off`. `.harness/project-brief.md` is otherwise rendered once into every worker prompt, capped at 4,000 characters.
+- A team worker may name a session template, which supplies its limits, recovery, `worker_rules` and, when the worker omits one, its adapter. An unknown template fails the team before any worker starts.
+- oh-my-pi `runtime_config.tools` passes an allowlist to omp as `--tools=<list>`, so a read-only mission can withhold tools such as `eval`.
+- ACP `runtime_config.mcp_servers` passes stdio and http MCP servers to `session/new`, and `runtime_config.env` drops exact names or `PREFIX*` patterns and then sets values before spawn. MCP env and header values go only on the wire. Windows npm shims resolve the same way for check and run.
+- `uh ps` marks a run whose current tool call has produced no output for five minutes with `STALLED tool=<name> <minutes>m`.
+- `uh report` and the run digest count turns, tools, written files and tokens for Claude Code and oh-my-pi runs as for Command Code, and report context size at the first, fifth and last request, single-call turns, re-reads, tool output by kind, and model versus tool time.
+- `docs/known-issues.md` lists every open defect, gap and unproven claim, each marked confirmed or reported; the README gains an operating-runs command table, and the capability inventory gains a section for capabilities added in this development line.
+- Team workers now receive per-worker objectives, runtime budgets, declared outputs, and seeds with canonical contract and settlement records.
+- Deadline grace recovery now preserves an explicitly incomplete deliverable and missing-work handoff before settling the run.
+- Native runtime supervision now reports denial budgets and repeated commands, stops protected-path mutations, and resumes recoverable denials with source stop facts.
+- Acceptance missions now record attested real-runtime evidence, freshness-aware status, and generated capability reports.
+- Acceptance freshness requires evidence from the current harness commit.
+- Acceptance runtime overrides now select the requested adapter explicitly and warn when they differ from registry defaults.
+- Acceptance campaigns inherit caller environment variables and derive hook distribution paths from the known source root.
+- Acceptance evidence records fact sources for merged attempts, with deterministic sorted-run selection and fixture seams.
+- Attempted fixture-only missions now render their actual failure or pass outcome instead of hiding it as fixture-only.
+- Guardian acceptance requires settlement confirmation and a terminal guardian receipt.
+- Acceptance registry entries carry stable capability identifiers independently of probe names.
+- Deadline acceptance exercises an unscripted task rather than treating a turn-limit fixture as deadline proof.
+- Team budget acceptance remains unproven where canonical state does not expose the required budget or reservation fact.
+- Acceptance report generation is checked for drift against the registry and available evidence.
+- Resource-wave admission now maps `mapResourceWaves` with memory-headroom checks and cost reservations, preventing unsupported workers from entering a wave.
+- Team workers now carry distinct mission contracts through `team.workers[].mission_id`.
+- Native Claude Code adapter with structured event capture, tool-guard hooks, route checks, and saved-session recovery. End-to-end coordinator delegation is not yet validated.
+- TypeSafe System One integration in verification and independent-review collection, with typed verdict parsing, compact evidence summaries, and persisted decision receipts. Semantic routing, scope-change, retry policy, and confidence thresholds remain unimplemented.
+- Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
 
 ### Changed
 
@@ -73,6 +105,9 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Orchestrator missions can run observation and run-control commands (`ps`, `report`, `steer`, `resume`, `kill`, `experiment`) as controller commands while agent CLIs remain denied.
 - Team missions support an explicit `unknown_cost: "admit" | "block"` resource policy, allowing completed workers with unpriced runtimes to proceed to later waves without blocking when `admit` is set.
 - Session templates drive team worker dispatch, adopting worker overrides, limits, recovery rules, and budget tiers across wave executions.
+- Team workers commit with the repository's configured `user.name` and `user.email`, falling back to `uh team worker` only when none is set.
+- Teams admit another worker only when measured free memory, minus reservations for workers still starting, covers the worker's need; a reservation ends when the worker reports running or after 60 seconds.
+- Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
 
@@ -110,32 +145,16 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 - Supervisor matches tool-guard log evidence to runtime events by call id before falling back to call count.
 - Review capture retrieves a worker's final message from team run records and captures all modified files.
 - Build compilation outputs to a staging directory before atomically swapping into `dist/`, avoiding inconsistent builds on compilation errors.
-
-## [0.11.0] — 2026-09-21
-
-### Added
-
-- Team workers now receive per-worker objectives, runtime budgets, declared outputs, and seeds with canonical contract and settlement records.
-- Deadline grace recovery now preserves an explicitly incomplete deliverable and missing-work handoff before settling the run.
-- Native runtime supervision now reports denial budgets and repeated commands, stops protected-path mutations, and resumes recoverable denials with source stop facts.
-- Acceptance missions now record attested real-runtime evidence, freshness-aware status, and generated capability reports.
-- Acceptance freshness requires evidence from the current harness commit.
-- Acceptance runtime overrides now select the requested adapter explicitly and warn when they differ from registry defaults.
-- Acceptance campaigns inherit caller environment variables and derive hook distribution paths from the known source root.
-- Acceptance evidence records fact sources for merged attempts, with deterministic sorted-run selection and fixture seams.
-- Attempted fixture-only missions now render their actual failure or pass outcome instead of hiding it as fixture-only.
-- Guardian acceptance requires settlement confirmation and a terminal guardian receipt.
-- Acceptance registry entries carry stable capability identifiers independently of probe names.
-- Deadline acceptance exercises an unscripted task rather than treating a turn-limit fixture as deadline proof.
-- Team budget acceptance remains unproven where canonical state does not expose the required budget or reservation fact.
-- Acceptance report generation is checked for drift against the registry and available evidence.
-- Resource-wave admission now maps `mapResourceWaves` with memory-headroom checks and cost reservations, preventing unsupported workers from entering a wave.
-- Team workers now carry distinct mission contracts through `team.workers[].mission_id`.
-- Native Claude Code adapter with structured event capture, tool-guard hooks, route checks, and saved-session recovery. End-to-end coordinator delegation is not yet validated.
-- TypeSafe System One integration in verification and independent-review collection, with typed verdict parsing, compact evidence summaries, and persisted decision receipts. Semantic routing, scope-change, retry policy, and confidence thresholds remain unimplemented.
-- Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
-
-### Fixed
+- Command Code 1.62.1 exits with an uncaught `write EOF` after a single large tool result (upstream CommandCodeAI/command-code#859). Its guard hook now denies a `read_file` with no limit, or a limit above 600 lines, on any file larger than 40,000 bytes, with a reason telling the model to read in windows; the denial is logged with class `read_window`.
+- ACP runs routed into a sandbox persisted no records; they now write to the project's mission directory while the agent works and diffs are captured in the sandbox.
+- An acceptance entry whose mission left no run record passed when nothing mismatched; it now fails with reason `no_verdict`, a setup or run error records `runner_error` evidence and the campaign continues, every campaign ends with a SUMMARY, and `uh acceptance run` exits 1 when any capability failed.
+- System One never returns a verdict over zero judged criteria, computes confidence over criterion answers only, and receives failed or blocked required checks as deterministic failures.
+- `review-collect` blocks a pass only on required evidence (a contradicted claim, a failed required check or acceptance entry, an error finding) and records an inconsistent pass as needs-attention instead of throwing.
+- `uh mission check` checks an independent review packet from its bound review sandbox, and names the sandbox command when none exists, instead of failing.
+- Team worktrees run git with `core.longpaths=true`, refuse with a clear message when the longest tracked path cannot fit under Windows' 260-character limit, and keep git's stderr in setup errors.
+- The build resolves `tsc` from the project instead of `npx`, restores the previous build when the swap fails, and restores a lone `dist.old` left by an interrupted build.
+- The experience store groups each model under one canonical key while keeping the reported model and provider on each record.
+- The `no_worker_commits` acceptance invariant recognised the harness's commit only by the placeholder email, so once workers committed under the repository's identity every correct run would have been flagged. It now accepts one commit per worker with the exact subject the harness writes, plus any placeholder-identity commit.
 - Command Code print-mode runs now select non-interactive permissions through the harness guard (`--yolo`) and refuse ambiguous launches before spawn.
 - Guarded Command Code runs now fail closed when hook invocation evidence is absent, preventing `--yolo` workers from running unguarded.
 - Team integration-report paths in canonical team state now use relative forward-slash artifact paths, including cross-volume targets.
