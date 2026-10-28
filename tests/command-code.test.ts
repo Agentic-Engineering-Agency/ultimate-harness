@@ -465,6 +465,23 @@ test("an orchestrator mission without a guard is refused before spawn", async ()
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+// An orchestrator runs in the live project root, so its guard's write roots are what confines it.
+test.each([
+  ["the whole repository (an empty guard)", {}, /whole repository/],
+  ["the whole repository (an explicit dot)", { write_roots: ["."] }, /whole repository/],
+  ["a root that climbs out of the checkout", { write_roots: ["../elsewhere"] }, /outside the mission checkout/],
+  ["an absolute root", { write_roots: ["/etc"] }, /outside the mission checkout/],
+])("an orchestrator whose guard writes %s is refused at planning", async (_name, guard, expected) => {
+  const { root, missionPath } = await fixture();
+  try {
+    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+    (mission.runtime_config_overrides as Record<string, unknown>).role = "orchestrator";
+    mission.guard = guard;
+    await writeFile(missionPath, stringify(mission));
+    await expect(planCommandCodeRun(root, missionPath)).rejects.toThrow(expected);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("the orchestrator prompt ends with a fixed delegation paragraph under 80 words", async () => {
   const { root, missionPath } = await fixture();
   try {

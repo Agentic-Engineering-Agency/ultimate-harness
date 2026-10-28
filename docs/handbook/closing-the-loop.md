@@ -58,6 +58,7 @@ uh queue run evening.yaml --max-orchestrators 2
 uh queue status evening
 ```
 
+- **Sandbox routing.** An entry runs as `uh mission run` would run it: a mission with a bound sandbox runs in that sandbox, and a worker mission with none is refused. An entry that must run in the project root says `sandbox: false`; nothing else gives the queue that route.
 - **Memory floor.** A launch is held unless measured free memory covers one more run (1024 MB) above a 1024 MB
   reserve, through the same admission helper team workers use; memory is probed again after a short wait.
 - **Settlement.** Each entry settles from its run's recorded settlement through the same path as `uh wait`, never
