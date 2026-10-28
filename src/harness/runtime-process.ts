@@ -264,6 +264,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       const mode = await resolveLoopWatchdogMode(path.join(missionDir, "mission.yaml"));
       if (mode === "shadow") {
         watchdog = createLoopWatchdog({
+          mode,
           source: scope.runtime === "command-code" ? "command-code" : "oh-my-pi",
           workingDirectory: input.cwd,
           missionDir,

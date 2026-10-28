@@ -47,10 +47,11 @@ Use `.env.example` as a placeholder reference only. Real values should come from
 | `UH_READ_TIMEOUT_S` | Hermes plugin read-command timeout. |
 | `UH_RUN_TIMEOUT_S` | Hermes plugin mission-run timeout. |
 | `HONCHO_API_KEY` | Honcho persistent-memory key. Enables the extension when set (unless `HONCHO_ENABLED=false`). See the [Honcho runbook](runbooks/honcho-memory.md). |
+| `UH_TYPESAFE_MODEL` | TypeSafe System One model id when a caller names none. Defaults to `jev-latest`. |
 | `HONCHO_ENABLED` | Force the Honcho memory extension on/off (`true`/`false`). Defaults to on when a key is resolvable. |
 | `HONCHO_SEARCH_LIMIT` | Max snippets returned by `honcho_search`. Defaults to 8. |
 | `HONCHO_TOOL_PREVIEW_LENGTH` | Per-snippet char cap for `honcho_search`. Defaults to 500. |
-| `TYPESAFE_API_KEY` | Enables TypeSafe System One judgments in verification and independent-review collection. Recommendations can harden a result but cannot override deterministic failure or authorize promotion. See [progressive decisions](./architecture/progressive-decisions.md) for limitations. |
+| `TYPESAFE_API_KEY` | Enables TypeSafe System One judgments in verification and independent-review collection, and in the loop watchdog of missions that set `runtime_config.loop_watchdog: shadow` (off by default). Recommendations can harden a result but cannot override deterministic failure or authorize promotion. See [progressive decisions](./architecture/progressive-decisions.md) for limitations. |
 
 ## Operator Price Table
 
@@ -141,6 +142,15 @@ land:
       command: bun run typecheck
   forbidden_patterns: [co-authored-by]
   build: bun run build
+```
+
+## Mission `runtime_config.loop_watchdog`
+
+The shadow loop watchdog is off unless a mission opts in. With the default `off`, supervision builds no watchdog, writes no loop-watchdog receipt and makes no network or provider call. `shadow` turns it on for that mission: supervision computes deterministic loop signals from the run's native events and records advisory `retry-stop` decision receipts that never change the run. When a signal crosses its threshold and `TYPESAFE_API_KEY` is set, a `shadow` run also sends the serialized loop state (tool names and targets) to TypeSafe System One, a paid API.
+
+```yaml
+runtime_config:
+  loop_watchdog: shadow
 ```
 
 ## Mission `context.project_brief`
