@@ -27,7 +27,10 @@ session and not re-checked at this commit. A fix removes its entry in the same c
 |---|---|
 | `uh steer` on an orchestrator stops its session and leaves the workers it launched orphaned; they stop mid-work without committing. Steer an orchestrator only between its steps. | Confirmed (an orchestrator steered mid-wave orphaned a worker at turn 42). |
 | Real settled runs have not produced deliveries to configured notification sinks; `uh notify test` delivers. | Reported. |
-| `uh ps` shows `turns=0` for Claude Code and ACP runs. A fix exists on an unmerged branch and is unverified. | Reported. |
+| `uh ps` turn counts for Claude Code (distinct assistant message ids) and ACP (agent activity until a tool call completes) are tested on recorded streams only; the ACP rule is a heuristic that has not been checked against a live run. | Confirmed. |
+| Supervision now counts Claude Code turns, so `limits.max_turns` can stop a Claude Code run where it previously never counted; not yet observed on a live run. | Confirmed (behaviour change). |
+| When neither the run's control file nor its digest has a turn count, `uh ps` reads the run's whole `events.ndjson` to count turns, which is slow for very long runs. | Confirmed in `src/harness/live-runs.ts`. |
+| The turn-count change was recovered from a worker stopped before it finished and was not independently reviewed. | Confirmed. |
 | `uh wait` returned `orphaned` for a run that passed. | Reported. |
 | A blocked run can leave a second run id inside a sandbox, and `UH_RESULT` can name a run directory that was never created. | Reported. |
 | Team memory reservations are released by controller pid; workers sharing one controller pid may release each other's reservations and over-admit. | Hypothesis, untested. |

@@ -3,8 +3,11 @@ import { access, mkdir, open, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { parse as parseYaml } from "yaml";
+import { RuntimeSessionSchema } from "../schema/artifacts.js";
 import { RuntimeControlSchema, type RuntimeControl } from "../schema/runtime-control.js";
 import type { RunDigestLongRunningTool } from "../schema/run-digest.js";
+import { countRuntimeTurns } from "./runtime-turns.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { assertValidRunId } from "./run-id.js";
@@ -390,6 +393,72 @@ async function readEventsTail(
     await handle.close();
   }
 }
+async function resolveRunRuntime(runDir: string, fallback: string): Promise<string> {
+  try {
+    const parsed = RuntimeSessionSchema.safeParse(parseYaml(await readFile(path.join(runDir, "runtime-session.yaml"), "utf8")));
+    if (parsed.success) return parsed.data.runtime;
+  } catch {
+    // No readable session document.
+  }
+  return fallback;
+}
+
+async function resolveRunTurns(
+  projectRoot: string,
+  controlPathRel: string,
+  controlTurns: number | undefined,
+  fallbackRuntime: string,
+): Promise<number | undefined> {
+  const runDir = path.dirname(path.resolve(projectRoot, controlPathRel));
+  let digestTurns: number | undefined;
+  try {
+    const digest = await readRunDigest(runDir);
+    if (digest !== undefined && typeof digest.turns === "number" && digest.turns >= 0) {
+      digestTurns = digest.turns;
+    }
+  } catch {
+    // Unreadable or malformed digest.
+  }
+
+  const maxNonEvents = Math.max(
+    controlTurns !== undefined && controlTurns >= 0 ? controlTurns : 0,
+    digestTurns !== undefined && digestTurns >= 0 ? digestTurns : 0,
+  );
+
+  if (maxNonEvents > 0) {
+    return maxNonEvents;
+  }
+
+  // Only when neither gives a positive count, countRuntimeTurns over the run's whole events.ndjson.
+  try {
+    const runtime = await resolveRunRuntime(runDir, fallbackRuntime);
+    const eventsPath = path.join(runDir, "events.ndjson");
+    const content = await readFile(eventsPath, "utf8");
+    const parsedEvents = content
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line)];
+        } catch {
+          return [];
+        }
+      });
+    const computed = countRuntimeTurns(runtime, parsedEvents);
+    if (computed !== undefined && computed > 0) {
+      return computed;
+    }
+  } catch {
+    // Missing or unreadable events.ndjson or session yaml.
+  }
+
+  if (controlTurns !== undefined || digestTurns !== undefined) {
+    return maxNonEvents;
+  }
+
+  return undefined;
+}
+
 
 /**
  * Stalled tool calls from the run's `run-digest.json`, which lives beside its
@@ -454,6 +523,7 @@ async function hydrateRegistryRecord(projectRoot: string, entry: LiveRunEntry): 
   const control = await readControlFile(projectRoot, entry.control_path);
   const events = await readEventsTail(projectRoot, entry.control_path);
   const stalledTools = await readStalledTools(projectRoot, entry.control_path);
+  const turns = await resolveRunTurns(projectRoot, entry.control_path, control?.turns, entry.runtime);
   return {
     source: "registry",
     run_id: entry.run_id,
@@ -473,7 +543,7 @@ async function hydrateRegistryRecord(projectRoot: string, entry: LiveRunEntry): 
       : (entry.stop_code !== undefined ? { stop_code: entry.stop_code } : {})),
     ...(control?.ready_at !== undefined ? { ready_at: control.ready_at } : {}),
     ...(control?.session_id !== undefined ? { session_id: control.session_id } : {}),
-    ...(control?.turns !== undefined ? { turns: control.turns } : {}),
+    ...(turns !== undefined ? { turns } : {}),
     ...(control?.denials !== undefined ? { denials: control.denials } : {}),
     ...(control?.inflight_tools !== undefined ? { inflight_tools: control.inflight_tools } : {}),
     ...(control?.peak_memory_bytes !== undefined ? { peak_memory_bytes: control.peak_memory_bytes } : {}),
@@ -489,6 +559,7 @@ async function hydrateScannedRecord(projectRoot: string, found: ScannedControl):
   if (control === undefined) return undefined;
   const events = await readEventsTail(projectRoot, found.controlPathRel);
   const stalledTools = await readStalledTools(projectRoot, found.controlPathRel);
+  const turns = await resolveRunTurns(projectRoot, found.controlPathRel, control.turns, control.runtime);
   const team = teamFromArtifactRoot(projectRoot, found.artifactRootAbs);
   return {
     source: "scan",
@@ -504,7 +575,7 @@ async function hydrateScannedRecord(projectRoot: string, found: ScannedControl):
     heartbeat_at: control.heartbeat_at,
     ...(control.ready_at !== undefined ? { ready_at: control.ready_at } : {}),
     ...(control.session_id !== undefined ? { session_id: control.session_id } : {}),
-    turns: control.turns,
+    turns: turns ?? control.turns,
     denials: control.denials,
     inflight_tools: control.inflight_tools,
     ...(control.peak_memory_bytes !== undefined ? { peak_memory_bytes: control.peak_memory_bytes } : {}),
