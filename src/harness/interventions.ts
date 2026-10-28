@@ -1,3 +1,4 @@
+import { appendFileSync, mkdirSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -19,6 +20,7 @@ import {
 import type { RuntimeStopCode } from "../schema/runtime-control.js";
 import { redactSecrets } from "./run-digest.js";
 import { chainEntry, lastChainedHash, readJsonLines, verifyChainedLines, type ChainBreak } from "./hash-chain.js";
+import { withChainLock } from "./chain-lock.js";
 
 /**
  * The intervention ledger — every moment a run needed correction.
@@ -134,10 +136,13 @@ export function buildIntervention(input: InterventionInput, options: { owner?: b
  */
 export async function appendIntervention(root: string, record: Intervention | InterventionStatusChange): Promise<void> {
   const file = interventionsPath(root);
-  const lines = readJsonLines(file);
-  const chained = chainEntry(lastChainedHash(lines), record as unknown as Record<string, unknown>);
-  await mkdir(path.dirname(file), { recursive: true });
-  await appendFile(file, `${JSON.stringify(chained)}\n`, "utf8");
+  // The read of the last hash and the append are one exclusive step: two writers that read the same
+  // last line would both link to it and fork the chain (#257).
+  withChainLock(file, () => {
+    const chained = chainEntry(lastChainedHash(readJsonLines(file)), record as unknown as Record<string, unknown>);
+    mkdirSync(path.dirname(file), { recursive: true });
+    appendFileSync(file, `${JSON.stringify(chained)}\n`, "utf8");
+  });
 }
 
 /**
