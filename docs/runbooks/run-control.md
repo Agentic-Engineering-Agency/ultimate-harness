@@ -91,40 +91,61 @@ uh mission cancel --mission <mission-id> --run-id <run-id> --root <project>
 `uh ps` tells you *which* runs exist and their verdict. `uh report` answers the
 follow-up — "what is this run doing right now?" — for one run, in under a second
 and without spending a token. It reads only what is already on disk (the run's
-`runtime-control.json` and its `events.ndjson`) and never starts a controller or
-calls a model.
+`runtime-control.json`, its `run-digest.json`, and, for older runs, its
+`events.ndjson`) and never starts a controller or calls a model.
 
 ```bash
 # One run, by id or by a unique prefix of one.
 uh report 20260922T101500Z-a1b2c3
 uh report 20260922T101500Z-a1b2
 
-# Machine-readable, plus the projection knobs.
+# Machine-readable, plus the projection knob.
 uh report 20260922T101500Z-a1b2c3 --json
 uh report 20260922T101500Z-a1b2c3 --last 20   # project the last 20 tool calls (default: 10)
-uh report 20260922T101500Z-a1b2c3 --full      # read the whole events.ndjson, not just its last 256 KB
 ```
+
+### The live run digest
+
+The supervisor already consumes every native event as it arrives. It reduces the
+same stream — incrementally, with no second parse of the file — into
+`run-digest.json`, written next to `runtime-control.json` on the heartbeat
+cadence and once at settlement (never per event). The digest carries the run's
+runtime, its turn count, what it is doing **now**, its last 12 completed tool
+calls, the files it wrote, its denials and native refusals, the tokens it spent,
+the deterministic loop signals over its recent calls, and its last assistant
+text (bounded and scrubbed).
+
+`uh report` renders from that digest when it is present, so the report stays
+instant no matter how large `events.ndjson` grows — a 6.7 MB stream of reasoning
+and text deltas costs the same as a tiny one. An **older run that has no digest**
+falls back to reading the whole `events.ndjson` once and projecting it; that
+fallback is only for runs started before the digest existed.
 
 A report carries:
 
-- **Mission, team role, runtime and model** — the run's identity, from the live-run
-  registry and its control file. (A registered run records its model; a
-  pre-registry run discovered by scan may not have one.)
+- **Mission, team role, runtime and model** — the run's identity. The runtime
+  comes from the run's `runtime-session.yaml` or its digest, never guessed from
+  the shape of the event stream; the model comes from the live-run registry.
 - **Liveness verdict** — the same `live` / `orphaned` / `stale` / `settled`
   decision `uh ps` makes, against the same process lister.
-- **Elapsed, turns, denials** — elapsed is `started_at` to the settled time (or
-  now); turns and the denial count come from `runtime-control.json`.
+- **Elapsed, turns, denials and native refusals** — elapsed is `started_at` to
+  the settled time (or now); turns come from the digest (or `runtime-control.json`
+  for a run without one).
+- **Current activity** — what the run is doing now: `reasoning since 18:18:02
+  (78,541 chars)`, `tool since 18:18:02 (read_file src/harness/team-run.ts)`, or
+  `idle`. Shown for a run that carries a digest.
 - **Denials, with guard class and target** — each denial in the stream, reduced to
   its guard class (`write_outside`, `git_mutation`, `package_install`,
-  `network_client`, and the other `ToolGuardClass` values, or `denied` when the
-  stream disclosed no finer class) and its **relative** target.
+  `network_client`, `virtual_device`, and the other `ToolGuardClass` values, or
+  `denied` when the stream disclosed no finer class) and its **relative** target.
+  A call the runtime denied natively, without ever invoking the guard hook, is
+  counted separately as a native refusal.
 - **Tokens and cost** — reported when the stream carries them; otherwise `null`
   with a `tokens_unknown_reason` / `cost_unknown_reason`. Cost is never guessed:
   a price the runtime reported is `reported`, a harness estimate from
   `.harness/prices.yaml` is `estimated`, and anything else stays unknown.
-- **Activity** — the last N completed tool calls, projected with the same
-  `projectActivity` the loop probe uses: tool, kind, target, ok, error class and
-  the age of the completion.
+- **Activity** — the last N completed tool calls: tool, kind, target, ok, error
+  class and the age of the completion.
 - **Loop signals** — `identical_repeats`, `alternating_pairs` and
   `distinct_targets` over that window, computed deterministically with no model.
 - **Files written so far** — the distinct write targets that completed
@@ -133,15 +154,11 @@ A report carries:
   characters and scrubbed of recognizable credentials.
 
 Two guarantees hold for every field: no absolute path and no credential is ever
-printed. Guard targets and written files are resolved relative to the run's
-working directory (or to the bounded placeholders `<outside>` / `<pattern>` /
-`unknown`), and the assistant text is passed through a conservative key/token
-redactor before it is bounded.
-
-By default only the **last 256 KB** of `events.ndjson` is read — the tail is
-where the current window lives, and it keeps the answer instant even on a huge
-log. `--full` reads the whole file when you need the history the tail dropped
-(for example, an early usage event that prices the run).
+printed. Targets are resolved against the run's **working directory** in all the
+forms Command Code emits — an absolute path with a leading slash before a drive
+letter (`/C:/run/src/a.ts`), backslash separators, and mixed-case drive letters —
+and anything outside it (or a pure search query) is shown as the bounded
+placeholder `<outside>` / `<pattern>` / `unknown`.
 
 Exit codes: `0` on success, `1` when the run cannot be resolved (unknown or
 ambiguous id) or the report itself fails.
@@ -246,11 +263,12 @@ under. Use `--team` (or `--all`) for that.
 ## Steering a worker
 
 A worker can be nudged mid-run only by stopping it and resuming its native
-session with a message. `uh steer` does both in one command:
+session with a message. `uh steer` validates the request, then has the run's
+owning controller perform the steer:
 
 ```bash
-# Stop the run, then resume its saved session with the message injected as the
-# first instruction of the resumed turn. The new run id is printed.
+# Message the run: its controller stops the attempt (stop code `steered`) and
+# resumes the same native session with the message as the first instruction.
 uh steer 20260922T101500Z-a1b2c3 "Skip the retry loop; the endpoint already returns 429."
 
 # Ask for a status report before the worker continues.
@@ -264,11 +282,63 @@ uh steer <run-id> "<message>" --json
 in progress / blocked on / next three actions / files touched" before anything
 else, then continue.
 
-Steering resolves the run exactly like `uh ps` does — by id or a unique prefix,
-from the project root, including team workers under their own artifact roots. It
-cancels through the normal cancel path and waits for settlement, then starts a
-new run for the same mission, in the same artifact root and sandbox, bound to
-`resume_from_run = <run-id>`. The operator's message becomes the recovery notes.
+### Preflight — everything is validated before the run is touched
+
+`uh steer` refuses, and changes nothing, unless all of the following hold:
+
+1. The run exists (by id or a unique prefix), resolved exactly like `uh ps`
+   does — from the project root, including team workers under their own
+   artifact roots.
+2. A native session id is recorded for the attempt.
+3. The adapter manifest resolves from the **project root** that owns
+   `.harness/adapters` (the nearest ancestor of the run's artifact scope). A
+   team worker's scope lives under
+   `.harness/missions/<team>/team/artifacts/...` and holds no adapters of its
+   own, so the manifest is never looked up there.
+4. The runtime has a native resume path (Command Code, oh-my-pi, Claude Code).
+5. No attempt in the same session lineage is live. Steering or resuming an old
+   run id while its successor is live is refused, naming the live run id so the
+   operator can target it instead of launching duplicate concurrent attempts.
+A refusal is a clear message and no side effect: no stop is signalled and no
+steer request is written.
+
+### The owning controller resumes it
+
+When a live controller owns the attempt (`uh ps` says `live`), steer writes a
+`steer-request.json` (message, `report` flag, `requested_at`) next to the run's
+`runtime-control.json` and signals the attempt to stop. The controller's
+recovery loop (`runWithRuntimeRecovery`) then:
+
+- consumes the request (it is deleted, so it can never be replayed),
+- records the stopped attempt as `stop_code: steered` — a resumable, non-terminal
+  stop, never a bare `cancelled`,
+- starts the next attempt with `resume_from_run = <run-id>` and the operator's
+  message as the first instruction, and
+- records the steer in the attempt lineage (`runtime-recovery.json` on the new
+  run carries `source_stop_code: steered` and the message as its notes).
+
+If the attempt finishes successfully (`status: passed`) while the steer's stop
+is in flight, the controller does not resume; it consumes the steer request only
+when acting on it. When the attempt completed before the steer took effect, the
+controller keeps an explicit record in `steer-record.json` next to
+`runtime-control.json` (`status: "not_applied"`, `reason: "attempt completed before the steer took effect"`,
+and the message digest). `uh steer` observes this and reports that the steer
+was not applied rather than misleading the operator into expecting a resume.
+
+A steered attempt does **not** count against the mission's
+`recovery.max_resumes` budget — an operator message is authorized outside the
+automatic loop. Because the resume happens inside the controller, a team
+worker keeps running inside its team controller and is integrated normally
+instead of being treated as a finished worker.
+### When no live controller owns the run
+
+If the controller is gone (`uh ps` reports `orphaned`), steer falls back to the
+older path — but only after the same preflight succeeded. It asks the settled
+run's remaining owner to stop, then starts a new run for the same mission, in
+the same artifact root and sandbox, bound to `resume_from_run = <run-id>`, and
+records the operator lineage both ways: `resumed_from` on the new run and
+`resumed_by` on the old one, with `resume_origin: "operator"` in
+`runs/<run-id>/resume-link.json` on each.
 
 **The honest caveat**: steering is not a live channel. It costs a stop and a
 restart of the native session. The transcript and prior work survive because the
@@ -283,10 +353,9 @@ acts on the message.
 uh resume <run-id> [--notes "<text>"] [--json]
 ```
 
-It refuses a run that is still live — steer that one instead — and refuses a
-runtime with no session resume path:
-
-```
+It refuses a run that is still live — steer that one instead — refuses any run
+when another attempt in the same session lineage is still live (naming the live
+run id so you can target it), and refuses a runtime with no session resume path:
 unsupported: <runtime> has no session resume
 ```
 
@@ -303,6 +372,6 @@ outside the automatic recovery loop, so they never spend the mission's
 - `uh status` / `uh status --json` include live-run counts.
 - `uh mission cancel` — cancel an owned local run.
 - `uh kill` — stop runs by id, role, mission, team, `--all` or `--orphans`.
-- `uh steer` — cancel a run and resume its session with a message.
+- `uh steer` — message a run; its controller stops the attempt (`steered`) and resumes the session.
 - `uh resume` — continue a settled run's session as a new run.
 - Team fan-out and worker artifact layout: `docs/runbooks/resource-wave-smoke.md`.

@@ -1,4 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -162,7 +163,7 @@ test("the collected assessment keeps contradicted claims and warning/error findi
   } finally { await rm(root, { recursive: true, force: true }); }
 }, 30_000);
 
-test("review-prepare captures the worker's real diff, deletions, and skips protected paths", async () => {
+test("review-prepare captures the worker's real diff, deletions, worker evidence, and skips protected paths", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "uh-independent-review-changed-"));
   const worktreeParent = await mkdtemp(path.join(tmpdir(), "uh-independent-review-worktree-"));
   const worktree = path.join(worktreeParent, "wt");
@@ -185,6 +186,10 @@ test("review-prepare captures the worker's real diff, deletions, and skips prote
     await writeFile(path.join(worktree, "added.ts"), "export const added = true;\n");
     await rm(path.join(worktree, "obsolete.txt"));
     await writeFile(path.join(worktree, ".harness", "note.txt"), "protected change\n");
+    await mkdir(path.join(worktree, ".harness", "missions", "source"), { recursive: true });
+    await writeFile(path.join(worktree, ".harness", "missions", "source", "verification.yaml"),
+      stringify({ schema_version: "uh.verification-result.v0", mission_id: "source", status: "passed",
+        checks: [{ name: "answer-exists", type: "command", status: "passed" }] }));
     git(["add", "--force", "."], worktree);
     git(["commit", "--quiet", "-m", "worker"], worktree);
     git(["config", "branch.worker.base", base]);
@@ -200,10 +205,144 @@ test("review-prepare captures the worker's real diff, deletions, and skips prote
     expect(changed.get("obsolete.txt")).toEqual({ kind: "changed", original_path: "obsolete.txt", state: "absent" });
     expect(await readFile(path.join(root, changed.get("companion.txt")!.snapshot_path!), "utf8")).toBe("after");
     expect(request.sources[0].files.some(file => file.kind === "output" && file.original_path === "answer.txt" && file.state === "present")).toBe(true);
+    // `.harness` stays out of the changed-file walk, and the worker's own
+    // verification result is still carried because it is captured by name.
+    expect(request.sources[0].files.filter(file => file.kind === "changed")
+      .every(file => !file.original_path.startsWith(".harness/"))).toBe(true);
+    const verification = request.sources[0].files.find(file => file.kind === "verification")!;
+    expect(verification).toMatchObject({ state: "present", status: "passed",
+      original_path: ".harness/missions/source/verification.yaml" });
+    expect(await readFile(path.join(root, verification.snapshot_path!), "utf8"))
+      .toBe(await readFile(path.join(worktree, ".harness", "missions", "source", "verification.yaml"), "utf8"));
+    expect(verification.sha256).toBe(createHash("sha256").update(await readFile(path.join(worktree, ".harness", "missions", "source", "verification.yaml"))).digest("hex"));
+    // The worker never ran in this worktree, so its final message is absent with a reason.
+    expect(request.sources[0].files.find(file => file.kind === "report")).toEqual({
+      kind: "report", state: "absent", original_path: ".harness/missions/source/latest.json",
+      reason: "the source workspace has no latest.json run pointer, so no run's final message can be located",
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(worktreeParent, { recursive: true, force: true });
   }
+});
+
+/** Write the two artifacts a worker's own run leaves behind in its workspace. */
+async function writeWorkerEvidence(root: string, verification: unknown, finalMessage: string, runId = "20260922T000000Z-aaaaaa") {
+  const missionDir = path.join(root, ".harness", "missions", "source");
+  await mkdir(path.join(missionDir, "runs", runId), { recursive: true });
+  await writeFile(path.join(missionDir, "verification.yaml"), typeof verification === "string" ? verification : stringify(verification));
+  await writeFile(path.join(missionDir, "runs", runId, "runtime-final.txt"), finalMessage);
+  await writeFile(path.join(missionDir, "latest.json"), JSON.stringify({
+    schema_version: "uh.latest-run.v0", run_id: runId, started_at: "2026-09-22T00:00:00.000Z", status: "passed",
+  }));
+}
+
+const workerResult = { schema_version: "uh.verification-result.v0", mission_id: "source", status: "failed",
+  checks: [{ name: "typecheck", type: "command", status: "failed", notes: "2 errors" }] };
+
+test("a review packet carries the worker's verification status and final message", async () => {
+  const root = await fixture();
+  try {
+    const empty = await prepareIndependentReview(root, { id: "review-empty", sources: [{ missionId: "source" }],
+      runtime: "command-code", model: "offline-review-fixture" });
+    const emptyRequest = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(empty.requestPath, "utf8")));
+    expect(emptyRequest.sources[0].files.filter(file => file.kind === "verification" || file.kind === "report")).toEqual([
+      { kind: "verification", state: "absent", original_path: ".harness/missions/source/verification.yaml",
+        reason: "the source workspace has no verification.yaml, so uh verify has never run there" },
+      { kind: "report", state: "absent", original_path: ".harness/missions/source/latest.json",
+        reason: "the source workspace has no latest.json run pointer, so no run's final message can be located" },
+    ]);
+    expect(String((parse(await readFile(path.join(root, ".harness", "missions", "review-empty", "mission.yaml"), "utf8")) as Record<string, unknown>).objective))
+      .toContain("- source: verification absent (the source workspace has no verification.yaml, so uh verify has never run there);"
+        + " final message absent (the source workspace has no latest.json run pointer, so no run's final message can be located).");
+
+    await writeWorkerEvidence(root, workerResult, "I wrote the answer and ran nothing.\n");
+    const prepared = await prepareIndependentReview(root, { id: "review", sources: [{ missionId: "source" }],
+      runtime: "command-code", model: "offline-review-fixture" });
+    const request = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(prepared.requestPath, "utf8")));
+    const verification = request.sources[0].files.find(file => file.kind === "verification")!;
+    const report = request.sources[0].files.find(file => file.kind === "report")!;
+    const original = path.join(root, ".harness", "missions", "source", "verification.yaml");
+    expect(verification).toMatchObject({ kind: "verification", state: "present", status: "failed",
+      original_path: ".harness/missions/source/verification.yaml" });
+    expect(verification.sha256).toBe(createHash("sha256").update(await readFile(original)).digest("hex"));
+    expect(await readFile(path.join(root, verification.snapshot_path!), "utf8")).toBe(await readFile(original, "utf8"));
+    expect(report).toMatchObject({ kind: "report", state: "present",
+      original_path: ".harness/missions/source/runs/20260922T000000Z-aaaaaa/runtime-final.txt" });
+    expect(report.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(await readFile(path.join(root, report.snapshot_path!), "utf8")).toBe("I wrote the answer and ran nothing.\n");
+    const mission = parse(await readFile(path.join(root, ".harness", "missions", "review", "mission.yaml"), "utf8")) as Record<string, unknown>;
+    const readFirst = ((mission.context as Record<string, unknown>).read_first ?? []) as string[];
+    expect(readFirst).toContain(verification.snapshot_path);
+    expect(readFirst).toContain(report.snapshot_path);
+    expect(String(mission.objective)).toContain(`- source: verification ${verification.snapshot_path} with status failed;`
+      + ` final message ${report.snapshot_path}.`);
+    expect(String(mission.objective)).toContain("the worker's own final message is a claim to compare against that evidence");
+
+    await writeWorkerEvidence(root, "status: [not, a, verification, document\n", "unreadable\n", "20260922T000001Z-bbbbbb");
+    const corrupt = await prepareIndependentReview(root, { id: "review-corrupt", sources: [{ missionId: "source" }],
+      runtime: "command-code", model: "offline-review-fixture" });
+    const corruptRequest = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(corrupt.requestPath, "utf8")));
+    const corruptVerification = corruptRequest.sources[0].files.find(file => file.kind === "verification")!;
+    expect(corruptVerification).toMatchObject({ state: "present", status: "blocked",
+      reason: "the captured verification.yaml does not parse as a uh.verification-result.v0 document" });
+    expect(corruptVerification.sha256).toMatch(/^[a-f0-9]{64}$/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker evidence is integrity-checked and a worker run without a final message is reported absent", async () => {
+  const root = await fixture();
+  try {
+    await writeWorkerEvidence(root, { ...workerResult, status: "passed",
+      checks: [{ name: "answer-exists", type: "command", status: "passed" }] }, "Answer is 42; both checks ran.\n");
+    const prepared = await prepareIndependentReview(root, { id: "review-nomessage", sources: [{ missionId: "source" }],
+      runtime: "command-code", model: "offline-review-fixture" });
+    await rm(path.join(root, ".harness", "missions", "source", "runs", "20260922T000000Z-aaaaaa", "runtime-final.txt"));
+    const absent = await prepareIndependentReview(root, { id: "review-missing", sources: [{ missionId: "source" }],
+      runtime: "command-code", model: "offline-review-fixture" });
+    const absentRequest = IndependentReviewRequestSchema.parse(JSON.parse(await readFile(absent.requestPath, "utf8")));
+    expect(absentRequest.sources[0].files.find(file => file.kind === "verification")).toMatchObject({ state: "present", status: "passed" });
+    expect(absentRequest.sources[0].files.find(file => file.kind === "report")).toEqual({
+      kind: "report", state: "absent", original_path: ".harness/missions/source/runs/20260922T000000Z-aaaaaa/runtime-final.txt",
+      reason: "the latest run 20260922T000000Z-aaaaaa wrote no runtime-final.txt",
+    });
+    expect(prepared.requestSha256).not.toBe(absent.requestSha256);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("the review round trip carries worker evidence and a tampered capture fails collection", async () => {
+  const root = await fixture();
+  try {
+    await writeWorkerEvidence(root, { ...workerResult, status: "passed",
+      checks: [{ name: "answer-exists", type: "command", status: "passed" }] }, "Answer is 42; both checks ran.\n");
+    const { workspace } = await executeFixture(root);
+    const assessment = await collectIndependentReview(root, "review");
+    expect(assessment.recommendation).toBe("pass");
+    const request = IndependentReviewRequestSchema.parse(JSON.parse(
+      await readFile(path.join(root, ".harness", "missions", "review", "review-request.json"), "utf8")));
+    const verification = request.sources[0].files.find(file => file.kind === "verification")!;
+    expect(verification).toMatchObject({ state: "present", status: "passed" });
+    await writeFile(path.join(workspace.path, verification.snapshot_path!), stringify({ ...workerResult, status: "passed" }));
+    await expect(collectIndependentReview(root, "review")).rejects.toThrow("Captured independent review input changed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test("the request schema demands a status on captured verification and a reason on absent evidence", () => {
+  const source = (files: unknown[]) => ({ mission_id: "source", source_root: "/tmp/source", files,
+    reference_paths: [], acceptance: [], checks: [] });
+  const contract = { kind: "contract", state: "present", original_path: "/tmp/source/mission.yaml",
+    snapshot_path: ".harness/missions/review/inputs/source/contract.yaml", sha256: "a".repeat(64) };
+  const digest = { snapshot_path: ".harness/missions/review/inputs/source/verification.yaml", sha256: "b".repeat(64) };
+  const request = (files: unknown[]) => IndependentReviewRequestSchema.parse({
+    schema_version: "uh.independent-review-request.v0", review_id: "review", sources: [source([contract, ...files])] });
+  expect(() => request([{ kind: "verification", state: "present", original_path: ".harness/missions/source/verification.yaml", ...digest }]))
+    .toThrow("A captured verification result must state its status");
+  expect(() => request([{ kind: "verification", state: "absent", original_path: ".harness/missions/source/verification.yaml" }]))
+    .toThrow("Absent worker evidence requires a reason");
+  expect(() => request([{ kind: "report", state: "present", original_path: ".harness/missions/source/runs/r/runtime-final.txt",
+    ...digest, status: "passed" }])).toThrow("Only a verification capture can state a verification status");
+  expect(request([{ kind: "verification", state: "present", original_path: ".harness/missions/source/verification.yaml",
+    ...digest, status: "waived" }]).sources[0].files[1]).toMatchObject({ status: "waived" });
 });
 
 test("an empty review report cannot satisfy the required output", async () => {

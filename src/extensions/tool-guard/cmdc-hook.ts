@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   const tool = typeof request.tool_name === "string" ? request.tool_name : "";
   const input = request.tool_input;
   const logPath = process.env.UH_TOOL_GUARD_LOG;
-  const callId = typeof request.tool_call_id === "string" ? request.tool_call_id : typeof request.toolCallId === "string" ? request.toolCallId : undefined;
+  const callId = typeof request.tool_use_id === "string" ? request.tool_use_id : typeof request.tool_call_id === "string" ? request.tool_call_id : typeof request.toolCallId === "string" ? request.toolCallId : undefined;
   const decision = decideToolCall(policy, tool, input, policy.worker_root, { allowControllerCommands: controllerCommands === true });
   const logEntry = decision.deny
     ? { ts: new Date().toISOString(), call_id: callId, tool, class: decision.deny.class, target: decision.deny.target ?? toolTargetForLog(tool, input), reason: decision.deny.reason }

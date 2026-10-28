@@ -537,6 +537,8 @@ program
 /** One resumed attempt for `uh resume` / `uh steer`, wired to the live CLI. */
 interface OperatorResumeRequest {
   artifactRoot: string;
+  /** Project root that owns `.harness/adapters`; a team worker's scope has none. */
+  adapterRoot: string;
   missionId: string;
   missionPath: string;
   runtime: string;
@@ -549,7 +551,9 @@ interface OperatorResumeRequest {
 async function runOperatorResumedAttempt(request: OperatorResumeRequest): Promise<{ runId?: string; result?: { status?: string } }> {
   const wiring = RUNTIME_WIRINGS[request.runtime];
   if (!wiring) throw new Error(`Unknown runtime: ${request.runtime}`);
-  const routing = await resolveSandboxMissionRoot(request.artifactRoot, request.missionPath, true);
+  // The adapter manifest, workflow and sandbox binding all live at the project
+  // root; a team worker's artifact scope is nested below it and holds neither.
+  const routing = await resolveSandboxMissionRoot(request.adapterRoot, request.missionPath, true);
   if (routing.error) throw new Error(routing.error);
   const recovery = await resolveRuntimeRecoveryPolicy(routing.effectiveRoot, routing.missionPath, request.runtime, {});
   return runWithRuntimeRecovery({
@@ -591,10 +595,10 @@ program
     }
   });
 
-// uh steer — cancel a live or settled run and resume it with a message.
+// uh steer — message a run; its owning controller stops and resumes it.
 program
   .command("steer")
-  .description("Cancel a run, then resume its native session with a message")
+  .description("Message a run: its controller stops the attempt (steered) and resumes the session")
   .argument("<run-id>", "Run id, or a unique prefix of one")
   .argument("<message>", "Message injected as the first instruction of the resumed turn")
   .option("--report", "Ask the worker to write a status report before continuing")
@@ -607,6 +611,8 @@ program
       const result = await steerRun(root, runId, message, { report: opts.report === true },
         { run: runOperatorResumedAttempt, cancel: (cancelRoot, missionId, id) => cancelLocalMissionRun(cancelRoot, missionId, id) });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else if (result.status === "not_applied") console.log(`Steer not applied to ${result.sourceRunId}: ${result.reason}`);
+      else if (result.mode === "controller") console.log(`Steered ${result.sourceRunId}; its controller will resume the session`);
       else console.log(`Steered ${result.sourceRunId} into ${result.runId}`);
     } catch (err) {
       console.error(`[FAIL] steer error:`);
@@ -1958,6 +1964,38 @@ missionCmd
     } catch (err) {
       console.error(`[FAIL] mission verdict error:`);
       console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh mission check — validate a packet's read_first refs, write roots,
+// "Change only" constraints, grounding claims, and runtime_config_overrides
+// before anything is launched. Never starts a runtime and never writes to
+// .harness (see src/harness/mission-check.ts).
+missionCmd
+  .command("check")
+  .description("Validate a mission packet (paths, write roots, grounding, runtime overrides) without launching a runtime")
+  .argument("<file>", "Mission packet path (mission.yaml)")
+  .option("--runtime <runtime>", "Runtime id to validate runtime_config_overrides against (single-shape default: hermes)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the check results as JSON")
+  .action(async (file: string, opts: { runtime?: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const { checkMissionPackets, renderMissionCheckLines } = await import("./harness/mission-check.js");
+    let result: import("./harness/mission-check.js").MissionCheckResult;
+    try {
+      result = await checkMissionPackets({ root, missionPath: file, runtime: opts.runtime });
+    } catch (err) {
+      console.error(`[FAIL] mission check error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      for (const line of renderMissionCheckLines(result)) console.log(line);
+    }
+    if (!result.ok) {
       process.exit(1);
     }
   });

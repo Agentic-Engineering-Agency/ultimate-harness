@@ -440,6 +440,98 @@ describe("runtime supervision", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+  test("recorded Command Code guard evidence without call ids does not stop the run via count fallback", () => {
+    const logPath = path.join(FIXTURE_DIR, "command-code-guard-evidence.tool-guard.ndjson");
+    const run = new RuntimeSupervision({}, 0, undefined, "C:\\worker", "guard", logPath);
+    let stopped: string | undefined;
+    for (const [index, value] of fixture("command-code-guard-evidence.ndjson").entries()) {
+      stopped = run.observe(value, index + 1);
+      if (stopped) break;
+    }
+    expect(stopped).toBeUndefined();
+    expect(run.stopCode).toBeUndefined();
+    expect(run.guardArmed).toBe(true);
+  });
+
+  test("recorded Command Code guard evidence with call_id on every line does not stop the run", () => {
+    const rawEvents = fixture("command-code-guard-evidence.ndjson");
+    const rawLog = readFileSync(path.join(FIXTURE_DIR, "command-code-guard-evidence.tool-guard.ndjson"), "utf8")
+      .trim().split("\n").filter(Boolean).map(l => JSON.parse(l) as Record<string, unknown>);
+    const callIds = [
+      "call_15e4fb62e60e41df9fbb2768",
+      "call_bd67ff01e76a43f38cea078b",
+      "call_26d3cb432a48499fb63a6043",
+      "call_1c265f56b234498e9fa4aef9",
+      "call_6ce64d8887bf4fa2b8ecd3c1",
+      "call_e1aa8803bd83486ea2a050fc",
+      "call_37708db5f8d648ce95f19225",
+      "call_d17a99dddb82405497c1ce24",
+      "call_a270a1c39a8f45feb5fe5b23",
+      "call_75ebddfa1c784d559175c73c",
+      "call_a8a0eb9f181344159233650d",
+      "call_47dcc3d980c64550b5254110",
+      "call_2a3a383e2da84de6817a6617",
+      "call_97226b7ce8f04129873ee870",
+    ];
+    const directory = mkdtempSync(path.join(os.tmpdir(), "uh-guard-call-ids-"));
+    const logPath = path.join(directory, "tool-guard.log");
+    writeFileSync(logPath, rawLog.map((line, idx) => JSON.stringify({ ...line, call_id: callIds[idx] })).join("\n") + "\n");
+    try {
+      const run = new RuntimeSupervision({}, 0, undefined, "C:\\worker", "guard", logPath);
+      let stopped: string | undefined;
+      for (const [index, value] of rawEvents.entries()) {
+        stopped = run.observe(value, index + 1);
+        if (stopped) break;
+      }
+      expect(stopped).toBeUndefined();
+      expect(run.stopCode).toBeUndefined();
+      expect(run.guardArmed).toBe(true);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("recorded Command Code guard evidence stops with missing-evidence when one executed call lacks a call_id match", () => {
+    const rawEvents = fixture("command-code-guard-evidence.ndjson");
+    const rawLog = readFileSync(path.join(FIXTURE_DIR, "command-code-guard-evidence.tool-guard.ndjson"), "utf8")
+      .trim().split("\n").filter(Boolean).map(l => JSON.parse(l) as Record<string, unknown>);
+    const callIds = [
+      "call_15e4fb62e60e41df9fbb2768",
+      "call_bd67ff01e76a43f38cea078b",
+      "call_26d3cb432a48499fb63a6043",
+      "call_1c265f56b234498e9fa4aef9",
+      "call_6ce64d8887bf4fa2b8ecd3c1",
+      "call_e1aa8803bd83486ea2a050fc",
+      "call_37708db5f8d648ce95f19225",
+      "call_d17a99dddb82405497c1ce24",
+      "call_a270a1c39a8f45feb5fe5b23",
+      "call_75ebddfa1c784d559175c73c",
+      "call_a8a0eb9f181344159233650d",
+      "call_47dcc3d980c64550b5254110",
+      "call_2a3a383e2da84de6817a6617",
+      "call_97226b7ce8f04129873ee870",
+    ];
+    const directory = mkdtempSync(path.join(os.tmpdir(), "uh-guard-call-ids-missing-"));
+    const logPath = path.join(directory, "tool-guard.log");
+    // Remove the call_id match for the 14th call (index 13, shell_command)
+    writeFileSync(logPath, rawLog.map((line, idx) => {
+      if (idx === 13) return JSON.stringify(line);
+      return JSON.stringify({ ...line, call_id: callIds[idx] });
+    }).join("\n") + "\n");
+    try {
+      const run = new RuntimeSupervision({}, 0, undefined, "C:\\worker", "guard", logPath);
+      let stopped: string | undefined;
+      for (const [index, value] of rawEvents.entries()) {
+        stopped = run.observe(value, index + 1);
+        if (stopped) break;
+      }
+      expect(stopped).toBe("Guard hook did not run; refusing to continue with permissions enabled");
+      expect(run.stopCode).toBe("policy");
+      expect(run.guardArmed).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   test("deadline wall-time stops at grace boundary with remaining budget", () => {
     const run = new RuntimeSupervision({ timeout_ms: 10_000 }, 1_000, undefined, undefined, undefined, undefined,
       { grace_turns: 2, grace_timeout_ms: 3_000 });

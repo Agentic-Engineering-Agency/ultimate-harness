@@ -87,7 +87,12 @@ export const RuntimeRouteSchema = z.object({
 }).strict();
 export type RuntimeRoute = z.infer<typeof RuntimeRouteSchema>;
 
-export const RuntimeStopCodeSchema = z.enum(["startup", "stall", "timeout", "turn_limit", "deadline", "output_limit", "repeated_failure", "denial_budget", "policy", "route_mismatch", "route_unverified", "cancelled", "runtime_error", "controller_error", "controller_lost"]);
+/**
+ * `steered` is not a terminal cancel: the owning controller stops the attempt
+ * only to resume the same native session with an operator message. It is
+ * resumable and never counts against the recovery `max_resumes` budget.
+ */
+export const RuntimeStopCodeSchema = z.enum(["startup", "stall", "timeout", "turn_limit", "deadline", "output_limit", "repeated_failure", "denial_budget", "policy", "route_mismatch", "route_unverified", "cancelled", "steered", "runtime_error", "controller_error", "controller_lost"]);
 export type RuntimeStopCode = z.infer<typeof RuntimeStopCodeSchema>;
 export const RuntimeRecoveryDeadlineSchema = z.object({
   grace_turns: z.number().int().min(1).default(3),
@@ -154,3 +159,18 @@ export const RuntimeCancelRequestSchema = z.object({
   run_id: z.string().min(1),
   requested_at: z.string().datetime(),
 }).strict();
+
+/**
+ * A `uh steer` request, written next to a live attempt's `runtime-control.json`.
+ * The owning controller consumes it: it stops the attempt (stop code `steered`)
+ * and resumes the same native session with `message` as the first instruction.
+ */
+export const RuntimeSteerRequestSchema = z.object({
+  schema_version: z.literal("uh.runtime-steer-request.v0"),
+  mission_id: z.string().min(1),
+  run_id: z.string().min(1),
+  message: z.string().min(1),
+  report: z.boolean().default(false),
+  requested_at: z.string().datetime(),
+}).strict();
+export type RuntimeSteerRequest = z.infer<typeof RuntimeSteerRequestSchema>;

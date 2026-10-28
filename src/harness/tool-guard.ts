@@ -7,6 +7,14 @@ export type ToolGuardClass =
   | "package_install" | "network_client" | "agent_client" | "protected_root"
   | "guard_tamper" | "containment_escape" | "virtual_device";
 export type ToolGuardDecision = { deny?: { reason: string; class: ToolGuardClass; target?: string } };
+export type ToolGuardLogLine = {
+  ts: string;
+  call_id?: string;
+  tool: string;
+  class: ToolGuardClass | "allow";
+  target?: string;
+  reason?: string;
+};
 
 const SUFFIX = " Do not retry this by another route; record it in your final message and continue with the rest of the task.";
 export const SHELL_TOOLS = new Set(["bash", "shell", "shell_command", "powershell", "pwsh", "cmd", "run_command"]);

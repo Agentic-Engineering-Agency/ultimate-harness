@@ -58,6 +58,16 @@ const CanonicalWorkerSalvageSchema = z.object({
   branch: z.string().min(1),
 }).strict();
 
+/**
+ * Changed paths a worker left outside its resolved write roots (and that are
+ * not protected), so they were never staged into the worker commit. `paths` is
+ * capped for the canonical state; `total` is the true count.
+ */
+const CanonicalWorkerOutOfRootsSchema = z.object({
+  paths: z.array(z.string().min(1)),
+  total: z.number().int().nonnegative(),
+}).strict();
+
 export const CanonicalTeamWorkerSchema = z.object({
   id: z.string().min(1),
   role: z.string().min(1),
@@ -74,6 +84,11 @@ export const CanonicalTeamWorkerSchema = z.object({
   blocked_reason: z.string().optional(),
   outputs: z.array(CanonicalWorkerOutputSchema).optional(),
   salvage: CanonicalWorkerSalvageSchema.optional(),
+  /**
+   * Changed paths left unstaged because they fell outside the worker's write
+   * roots and declared outputs. Present only when such paths existed.
+   */
+  out_of_roots: CanonicalWorkerOutOfRootsSchema.optional(),
 }).strict();
 
 export const CanonicalTeamLeaderSchema = z.object({

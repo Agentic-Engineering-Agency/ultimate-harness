@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { renameWithRetry, writeAtomicArtifact } from "./artifact-transaction.js";
 import { RuntimeCancelRequestSchema, RuntimeControlSchema, RuntimeLimitsSchema, RuntimeRouteSchema, WindowsJobResultSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode } from "../schema/runtime-control.js";
 import { RuntimeSupervision } from "./runtime-supervision.js";
+import { RUN_DIGEST_FILE, RunDigestBuilder } from "./run-digest.js";
 import { createLoopWatchdog, resolveLoopWatchdogMode, type LoopWatchdog } from "./loop-watchdog.js";
 import { resolveRuntimeCommand } from "./runtime-command.js";
 import type { RuntimeUsage } from "./usage.js";
@@ -212,12 +213,32 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       heartbeatPersistenceFailures += 1;
     }
   };
+  // The live run digest is the same native events supervision already consumes,
+  // reduced incrementally. It is written best-effort on the heartbeat cadence
+  // and at settlement — never per event, and never a reason to fail a run.
+  const digest = scope
+    ? new RunDigestBuilder({ runtime: scope.runtime, workingDirectory: input.cwd, startedAt: started })
+    : undefined;
+  let digestWrites: Promise<void> = Promise.resolve();
+  const persistDigest = async (): Promise<void> => {
+    if (!scope || !digest) return;
+    try {
+      await (input.persistArtifact ?? writeAtomicArtifact)(
+        path.join(scope.directory, RUN_DIGEST_FILE),
+        JSON.stringify(digest.snapshot(now())),
+      );
+    } catch {
+      // A digest is a convenience index; a write failure must not fail the run.
+    }
+  };
+  const queueDigest = (): void => { digestWrites = digestWrites.then(persistDigest); };
   if (scope) {
     await mkdir(scope.directory, { recursive: true });
     // Existing attempts must not have their evidence truncated by an accidental retry.
     await writeFile(path.join(scope.directory, "runtime.stdout.log"), "", { flag: "wx" });
     await writeFile(path.join(scope.directory, "runtime.stderr.log"), "", { flag: "wx" });
     await persist("running");
+    await persistDigest();
   }
   if (input.cancellationSignal?.aborted) {
     cancelled = true;
@@ -334,6 +355,11 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
           // Chained and swallowed: a shadow evaluation never blocks or fails the run.
           watchdogWork = watchdogWork.then(() => active.observe(nativeEvents)).catch(() => {});
         }
+        if (digest) {
+          // Fed from the same loop as supervision; a digest projection fault is
+          // isolated here so it can never disturb supervision or the run.
+          try { digest.observe(parsed, now()); } catch { /* A digest is best-effort. */ }
+        }
         const reason = supervisor.observe(parsed, now());
         if (reason) stop(reason, supervisor.stopCode);
       } catch { /* Preserve malformed and partial bytes; the adapter classifies them. */ }
@@ -384,6 +410,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         if (!finished && now() - lastHeartbeat >= 1000) {
           lastHeartbeat = now();
           enqueue(persistHeartbeat);
+          queueDigest();
         }
       })().catch(() => stop("Runtime supervision failed")).finally(() => { polling = false; });
     }, 100);
@@ -400,6 +427,9 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         await stopWrite;
         // Let any pending shadow evaluation settle before the run resolves.
         await watchdogWork;
+        // Drain the queued heartbeat digests, then write the settled snapshot.
+        await digestWrites;
+        await persistDigest();
         if (process.platform === "win32") {
           try {
             const job = WindowsJobResultSchema.parse(JSON.parse((await readFile(path.join(jobDirectory!, "windows-job-result.json"), "utf8")).replace(/^\uFEFF/, "")));

@@ -45,6 +45,13 @@ async function main(): Promise<void> {
   }
 
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "unknown";
+  const callId = typeof input.tool_use_id === "string"
+    ? input.tool_use_id
+    : typeof input.tool_call_id === "string"
+      ? input.tool_call_id
+      : typeof input.toolCallId === "string"
+        ? input.toolCallId
+        : undefined;
   const decision = decideToolCall(
     policy,
     toolName,
@@ -53,8 +60,8 @@ async function main(): Promise<void> {
     { allowControllerCommands: policy.controller_commands === true },
   );
   const logEntry = decision.deny
-    ? { ts: new Date().toISOString(), tool: toolName, target: decision.deny.target ?? toolTargetForLog(toolName, input.tool_input), class: decision.deny.class, reason: decision.deny.reason }
-    : { ts: new Date().toISOString(), tool: toolName, target: toolTargetForLog(toolName, input.tool_input), class: "allow" };
+    ? { ts: new Date().toISOString(), call_id: callId, tool: toolName, target: decision.deny.target ?? toolTargetForLog(toolName, input.tool_input), class: decision.deny.class, reason: decision.deny.reason }
+    : { ts: new Date().toISOString(), call_id: callId, tool: toolName, target: toolTargetForLog(toolName, input.tool_input), class: "allow" };
   try {
     await appendFile(logPath, JSON.stringify(logEntry) + "\n", "utf8");
   } catch {

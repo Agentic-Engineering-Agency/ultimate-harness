@@ -1,0 +1,14 @@
+{
+  "name": "ledger-lib",
+  "version": "0.3.1",
+  "description": "Entry list, running balance, and report formatting for a plain cash ledger.",
+  "type": "module",
+  "main": "src/ledger.js",
+  "exports": {
+    ".": "./src/ledger.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

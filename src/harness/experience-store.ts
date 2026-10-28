@@ -12,6 +12,7 @@ import {
 import { RuntimeControlSchema, RuntimeRecoveryRecordSchema, type RuntimeControl } from "../schema/runtime-control.js";
 import { CanonicalTeamStateSchema, type CanonicalTeamState } from "../schema/team.js";
 import { readNativeCostFacts, resolveRunCost, tokenTotalsFromUsage, type RunTokenTotals } from "./runtime-accounting.js";
+import { canonicalRouteIdentifier } from "./runtime-supervision.js";
 import { loadOperatorPriceTable, type OperatorPriceTable } from "./cost-table.js";
 
 export type RunRecord = {
@@ -20,6 +21,8 @@ export type RunRecord = {
   runtime?: string;
   provider?: string;
   model?: string;
+  /** Canonical grouping identity derived from `model`: case and any provider prefix removed. */
+  model_key?: string;
   workflow_profile?: string;
   /** Adopted session template id, from `session-template.json` when present. */
   template_id?: string;
@@ -152,12 +155,14 @@ async function indexRun(
   const native = runtime === "command-code" ? await readNativeCostFacts(runRoot) : undefined;
   const resolvedCost = resolveRunCost({ runtime, resultCostUsd: cost, resultCostBasis: costBasis, native, priceTable });
   const tokenTotals = tokenTotalsFromUsage(native?.usage) ?? tokenTotalsFromUsage(usage);
+  const model = result?.model ?? usage?.model ?? control?.usage?.model ?? native?.model;
   return {
     mission_id: result?.mission_id ?? control?.mission_id ?? missionId,
     run_id: runId,
     runtime,
     provider: result?.provider ?? usage?.provider ?? control?.usage?.provider,
-    model: result?.model ?? usage?.model ?? control?.usage?.model ?? native?.model,
+    model,
+    model_key: model !== undefined ? canonicalRouteIdentifier(model) : undefined,
     workflow_profile: workflowProfile,
     template_id: optionalString(templateRecord?.template_id),
     tier: optionalString(templateRecord?.tier),
@@ -258,9 +263,15 @@ export async function indexRuns(root: string, options: { missionId?: string } = 
 
 export type RunGroupDimension = "runtime" | "model" | "workflow_profile" | "stop_code" | "template" | "tier";
 
-/** The `groupBy` "template" dimension reads the run record's `template_id`. */
+/**
+ * The `groupBy` "template" dimension reads the run record's `template_id`,
+ * and "model" groups on the canonical `model_key` so the same model reported
+ * with different case or an optional provider prefix shares one bucket.
+ */
 function groupKeyFor(record: RunRecord, groupBy: RunGroupDimension): string | undefined {
-  return groupBy === "template" ? record.template_id : record[groupBy];
+  if (groupBy === "template") return record.template_id;
+  if (groupBy === "model") return record.model_key;
+  return record[groupBy];
 }
 
 export function summarizeRuns(records: RunRecord[], groupBy: RunGroupDimension): RunGroupSummary[] {

@@ -31,10 +31,27 @@ Evidence freshness is tied to the files a probe asserts, not to the harness comm
 - `input_digest` — sha256 over the sorted `(relative path, sha256 of content)` list of every tracked file matching the entry's inputs, plus the runtime id, the runtime version when known, and the model. Line endings are normalized (CRLF to LF) so a commit blob and a checked-out working-tree file hash identically.
 - `inputs_resolved` — the number of files that matched.
 - `harness_commit` — retained as provenance only; it no longer drives freshness while `input_digest` is present.
+- `runtime_version` — the runtime version folded into the digest: Command Code reuses the adapter's check (`cmdc --version --no-auto-update`), oh-my-pi uses its `--version` command, and any other runtime uses `<runtime> --version`. The adapter manifest's `cli_command`/`cli_args` win when present. When the version cannot be read the runner records `"unknown"` and sets `observed.runtime_version_unreadable: true`, saying so in the evidence. Freshness reproduces the digest with the record's own `runtime_version`, so the version it was written with must accompany the digest.
 
-`uh acceptance status` classifies evidence with an `input_digest` as `stale` only when the current digest differs or the `freshness_days` age limit is exceeded, and names up to five changed input files as the reason. Evidence without an `input_digest` (written before this field existed) keeps the commit rule: it is stale when `harness_commit` differs from the current commit or the age limit is exceeded.
+`uh acceptance status` classifies evidence with an `input_digest` as `stale` only when the current digest differs or the `freshness_days` age limit is exceeded, and names up to five changed input files as the reason. Evidence without an `input_digest` (written before this field existed) keeps the commit rule: it is stale when `harness_commit` differs from the current commit or the age limit is exceeded. A digest-bearing record classified without an explicit root resolves the root from the evidence location (`<root>/acceptance/evidence`, two levels up) and re-hashes there, rather than silently falling back to the commit rule.
 
 `uh acceptance rebind` revalidates legacy evidence without rerunning any model: for each record without an `input_digest` it computes the digest at the record's `harness_commit` (reading contents with `git show <commit>:<path>`) and at HEAD, and when the two are equal stamps `input_digest` and `rebound_from_commit` into the record. It prints one line per record — `rebound`, `changed` (with the changed files), or `skipped` (with the reason).
+
+## Invariants, exercised mechanisms, and injected actions
+
+Realistic missions are judged on what the harness guarantees, not only on what a model chose to do. An entry may declare `expected.invariants` (a strict list), `expected.exercised_report` (mechanism names), and an entry-level `inject` block.
+
+Each invariant produces one observed fact (`true`, or the offending paths/lines) under `observed.invariants`, and a false invariant is a mismatch (`invariants.<name>`). The five names are:
+
+- `no_writes_outside_roots` — every file changed in each worker worktree (git diff against its base, including untracked files) is inside that worker's guard write roots or its declared outputs. Base is the merge base of the worker branch and the run root's `HEAD`.
+- `no_worker_commits` — no commit exists on a worker branch since its base other than the harness's own (`user.email=uh-team@example.com`).
+- `no_package_install` — no `node_modules` directory and no lockfile that was not already tracked at the base appeared in any worker worktree.
+- `protected_paths_untouched` — `.commandcode/settings.json`, `.commandcode/.gitignore`, and `.harness/.gitignore` are byte-identical across every copy the harness wrote in the run (the run root and each worker worktree); a differing copy names the file.
+- `guard_log_consistent` — every denial counted in a run's `runtime-control.json` has a matching non-allow `tool-guard.log` line or a recorded native refusal (`class: "native_refusal"`) in the same run directory.
+
+`expected.exercised_report` records, in `observed.exercised`, whether each named mechanism actually fired: a mechanism fires when a guard-log line carries its class (with or without the `guard_` prefix) or a runtime-control receipt carries it as a stop code (`guard_package_install`, `guard_git_mutation`, `guard_write_outside`, `guard_tamper`, `denial_budget`, ...). These are reported, never mismatches, so a model that behaves well still passes while the report shows which mechanisms fired.
+
+An entry may `inject` a runner-side action into a live run: `cancel_after_ready: true` runs `uh mission cancel` once the run is ready, and `steer_after_ready: <message>` runs `uh steer <run-id> <message>`. Readiness is the run's first `runtime-control.json` with a `ready_at` (single-shape runs pin their run id via `--run-id`). The action and its outcome are recorded in `observed.injected` (`cancel_after_ready`/`steer_after_ready`; `ok`, `exit <code>`, `not_ready`, or `error: ...`).
 
 ## Campaign runtime snapshot and CLI outcome
 

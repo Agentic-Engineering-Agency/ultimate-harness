@@ -150,11 +150,24 @@ export function delegatedRouteMismatch(value: unknown, expected: RuntimeRoute | 
 }
 
 /**
+ * The canonical identity of a provider or model name, for places that need
+ * one string to stand for one model (for example grouping run records):
+ * trimmed, lowercased (locale-independent), and with any `provider/` prefix
+ * removed, so the key is the part after the last "/".
+ */
+export function canonicalRouteIdentifier(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+}
+
+/**
  * Whether two provider or model identifiers name the same route. Comparison
  * trims and lowercases (locale-independent), and reconciles an optional
  * `provider/model` prefix: when exactly one side is prefixed, only the part
- * after its last "/" is compared. Nothing else is normalized; there is no
- * alias table and no partial or substring matching.
+ * after its last "/" is compared (the `canonicalRouteIdentifier` of that
+ * side). Nothing else is normalized; there is no alias table and no partial
+ * or substring matching.
  */
 export function sameRouteIdentifier(a: string, b: string): boolean {
   const left = a.trim().toLowerCase();
@@ -163,7 +176,7 @@ export function sameRouteIdentifier(a: string, b: string): boolean {
   const leftSlash = left.lastIndexOf("/");
   const rightSlash = right.lastIndexOf("/");
   if ((leftSlash >= 0) === (rightSlash >= 0)) return false;
-  return leftSlash >= 0 ? left.slice(leftSlash + 1) === right : right.slice(rightSlash + 1) === left;
+  return leftSlash >= 0 ? canonicalRouteIdentifier(left) === right : left === canonicalRouteIdentifier(right);
 }
 
 export function runtimeRouteMismatch(observed: RuntimeRoute | undefined, expected: RuntimeRoute | undefined): boolean {
@@ -316,7 +329,7 @@ function guardTamperEvent(event: Event): boolean {
   return guardTamperRecord(event);
 }
 
-type GuardEvidenceEntry = { tool?: string; target?: string };
+type GuardEvidenceEntry = { call_id?: string };
 
 function guardLogEntries(logPath: string): { lines: number; tamper: boolean; entries: GuardEvidenceEntry[] } {
   if (!existsSync(logPath)) return { lines: 0, tamper: false, entries: [] };
@@ -330,8 +343,7 @@ function guardLogEntries(logPath: string): { lines: number; tamper: boolean; ent
         if (guardTamperRecord(parsed, 0)) tamper = true;
         const item = record(parsed);
         entries.push({
-          tool: typeof item?.tool === "string" && item.tool ? item.tool : undefined,
-          target: typeof item?.target === "string" && item.target ? item.target : undefined,
+          call_id: typeof item?.call_id === "string" && item.call_id ? item.call_id : undefined,
         });
       } catch { entries.push({}); }
     }
@@ -340,18 +352,6 @@ function guardLogEntries(logPath: string): { lines: number; tamper: boolean; ent
     return { lines: 0, tamper: false, entries: [] };
   }
 }
-
-/**
- * Whether a guard-log target can be evidence for the target the supervisor
- * observed for a call. The supervisor truncates shell targets and the hooks
- * sometimes log a resolved sub-target of a command, so a containment in either
- * direction counts. A target unknown on either side matches by tool name alone.
- */
-function guardTargetMatches(logged: string | undefined, observed: string | undefined): boolean {
-  if (logged === undefined || observed === undefined) return true;
-  return logged === observed || logged.includes(observed) || observed.includes(logged);
-}
-
 
 function claudeNativeEvents(event: Event): Event[] {
   const derived: Event[] = [];
@@ -561,14 +561,12 @@ export class RuntimeSupervision {
       this.stop("Guard tamper attempted", "policy");
       return;
     }
-    const name = this.toolNames.get(id);
-    const target = this.toolTargets.get(id);
-    // When every guard-log line records a tool name, evidence matches the call
-    // itself; otherwise the comparison falls back to counting totals.
-    const matchable = name !== undefined && evidence.entries.length > 0 &&
-      evidence.entries.every(entry => entry.tool !== undefined);
-    const hasCallEvidence = !matchable ||
-      evidence.entries.some(entry => entry.tool === name && guardTargetMatches(entry.target, target));
+    // When log lines carry call IDs, evidence matches the call by call_id: a
+    // completed, runtime-executed call is missing evidence only if no line has its
+    // call id. When lines carry no call ids (older hooks), fall back to comparing
+    // totals (native refusals are excluded because they are never added to guardCompletedCalls).
+    const hasCallIds = evidence.entries.some(entry => entry.call_id !== undefined);
+    const hasCallEvidence = !hasCallIds || evidence.entries.some(entry => entry.call_id === id);
     if (evidence.lines >= this.guardCompletedCalls.size && hasCallEvidence) {
       this.guardArmed = true;
     } else {

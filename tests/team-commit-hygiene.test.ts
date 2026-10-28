@@ -44,16 +44,18 @@ async function initGitRepo(root: string): Promise<void> {
   await git(root, ["commit", "-q", "-m", "seed"]);
 }
 
-async function seedMissionPacket(root: string, missionId: string): Promise<void> {
+async function seedMissionPacket(root: string, missionId: string, extraYaml = ""): Promise<void> {
   const dir = join(root, ".harness", "missions", missionId);
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "mission.yaml"), [
+  const lines = [
     "schema_version: uh.mission.v0",
     `id: ${missionId}`,
     "title: Team Mission",
     "workflow_profile: staged",
     "objective: integrate worker fan-out",
-  ].join("\n") + "\n", "utf-8");
+  ];
+  if (extraYaml.trim().length > 0) lines.push(...extraYaml.replace(/\n+$/, "").split("\n"));
+  await writeFile(join(dir, "mission.yaml"), lines.join("\n") + "\n", "utf-8");
 }
 
 /** A mission packet with a single worker, so branch assertions stay simple. */
@@ -224,5 +226,98 @@ describe("worker commit hygiene", () => {
     expect(onDisk).toBe('{"worker":true}\n');
     const status = await git(backend.plan.worktreePath, ["status", "--porcelain"]);
     expect(status).toMatch(/\.commandcode\/settings\.json/);
+  });
+
+  test("only paths inside the worker's write roots are committed; the rest are reported as out_of_roots", async () => {
+    await initGitRepo(ROOT);
+    // The worker may write under `src` only.
+    await seedMissionPacket(ROOT, "team-mission", "guard:\n  write_roots:\n    - src\n");
+
+    const runner = (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", "kept.ts"), "export const kept = 1;\n", "utf-8");
+      // A child process (a build) wrote these outside the worker's roots. The
+      // tool guard judges command targets, not files a child process writes, so
+      // nothing stopped them.
+      await mkdir(join(root, "dist.next", "chunks"), { recursive: true });
+      await writeFile(join(root, "dist.next", "chunks", "a.js"), "console.log(1);\n", "utf-8");
+      await writeFile(join(root, "package-lock.json"), "{}\n", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(singleWorkerMission("team-mission"), ROOT, {
+      runnerFor: runner,
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("succeeded");
+
+    // Only the in-roots source landed on the branch.
+    expect(await changedFiles(ROOT, "HEAD", backend.plan.branch)).toEqual(["src/kept.ts"]);
+    expect(await treeFiles(ROOT, backend.plan.branch)).not.toContain("dist.next/chunks/a.js");
+
+    // Both out-of-roots paths are reported (sorted, capped with a total), on the
+    // outcome and in the canonical state.
+    expect(backend.outOfRoots).toEqual({
+      paths: ["dist.next/chunks/a.js", "package-lock.json"],
+      total: 2,
+    });
+    const state = JSON.parse(await readFile(
+      join(ROOT, ".harness", "missions", "team-mission", "runs", result.runId!, "team-state.json"),
+      "utf-8",
+    ));
+    expect(state.workers[0].out_of_roots).toEqual({
+      paths: ["dist.next/chunks/a.js", "package-lock.json"],
+      total: 2,
+    });
+
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toMatch(/Files touched: 1/);
+    expect(report).toMatch(/Not committed \(outside write roots\): 2 path\(s\)/);
+    expect(report).toContain("`dist.next/chunks/a.js`");
+    expect(report).toContain("`package-lock.json`");
+
+    // The out-of-roots changes stay on disk, unstaged, as evidence.
+    const worktreeStatus = await git(backend.plan.worktreePath, ["status", "--porcelain", "--untracked-files=all"]);
+    expect(worktreeStatus).toMatch(/dist\.next\/chunks\/a\.js/);
+    expect(worktreeStatus).toMatch(/package-lock\.json/);
+  });
+
+  test("a declared output outside the write roots is still committed", async () => {
+    await initGitRepo(ROOT);
+    await seedMissionPacket(ROOT, "team-mission", [
+      "guard:",
+      "  write_roots:",
+      "    - src",
+      "expected_outputs:",
+      "  files:",
+      "    - out/artifact.txt",
+    ].join("\n"));
+
+    const runner = (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", "kept.ts"), "export const kept = 1;\n", "utf-8");
+      await mkdir(join(root, "out"), { recursive: true });
+      await writeFile(join(root, "out", "artifact.txt"), "done\n", "utf-8");
+      await mkdir(join(root, "dist.next"), { recursive: true });
+      await writeFile(join(root, "dist.next", "junk.js"), "// junk\n", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(singleWorkerMission("team-mission"), ROOT, {
+      runnerFor: runner,
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("succeeded");
+
+    // The declared output is committed even though it lives outside `src`; only
+    // the undeclared build junk is out-of-roots.
+    expect(await changedFiles(ROOT, "HEAD", backend.plan.branch)).toEqual(["out/artifact.txt", "src/kept.ts"]);
+    expect(backend.outOfRoots).toEqual({ paths: ["dist.next/junk.js"], total: 1 });
   });
 });
