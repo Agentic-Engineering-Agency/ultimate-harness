@@ -14,8 +14,10 @@ import { join, resolve, basename } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { promisify } from "node:util";
 import {
+  checkWorktreePathLength,
   planTeamRun,
-  runTeamMission,
+  runTeamMission as runTeamMissionRaw,
+  WINDOWS_MAX_PATH,
   type GitOps,
   type MergeOutcome,
   type TeamMission,
@@ -76,6 +78,21 @@ beforeEach(async () => {
 afterEach(async () => {
   if (ROOT) await rm(ROOT, { recursive: true, force: true });
 });
+
+/**
+ * Every team run in this file admits workers with ample injected memory, so
+ * admission never reads the host's real free memory. A test that needs a
+ * specific reading passes its own `availableBytes`.
+ */
+const AMPLE_MEMORY_BYTES = 256 * 1024 * 1024 * 1024;
+
+function runTeamMission(
+  mission: TeamMission,
+  root: string,
+  options: Parameters<typeof runTeamMissionRaw>[2],
+): ReturnType<typeof runTeamMissionRaw> {
+  return runTeamMissionRaw(mission, root, { availableBytes: () => AMPLE_MEMORY_BYTES, ...options });
+}
 
 /* ---------------------------------------------------------------- planning  */
 
@@ -1802,5 +1819,120 @@ describe("runTeamMission — worker session templates", () => {
     expect(dispatchedAdapters).toEqual(["hermes"]);
     const state = await readTeamState(result.runId!);
     expect(state.workers[0].adapter).toBe("hermes");
+  });
+});
+
+/* ------------------------------------------------ Windows long paths (UH)  */
+
+describe("runTeamMission — Windows long paths", () => {
+  const passingVerifier = async (): Promise<VerifyMissionLike> => ({
+    status: "passed", path: "/fake/verification.yaml", checks_total: 1, checks_passed: 1,
+    checks_failed: 0, checks_blocked: 0, acceptance_total: 0, acceptance_passed: 0,
+    acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+  });
+
+  beforeEach(async () => {
+    await seedMissionPacket(ROOT, "team-mission");
+  });
+
+  test("a git setup failure keeps git's stderr in the worker error and the report", async () => {
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const base = fakeGitOps(repo, { write: async () => undefined });
+    const stderr = "fatal: could not create work tree dir '<path>': Filename too long";
+    const gitOps: GitOps = {
+      ...base,
+      async addWorktree(root, branch, worktreePath, baseRef) {
+        if (worktreePath.endsWith("backend")) {
+          // Mimic `child_process`'s exec error: the message names only the
+          // command, while git's explanatory stderr lives on the property.
+          const err = new Error(
+            "Command failed: git worktree add --lock --reason uh:... -b uh/team/team-mission/backend <path> HEAD",
+          );
+          Object.assign(err, { stderr });
+          throw err;
+        }
+        return base.addWorktree(root, branch, worktreePath, baseRef);
+      },
+    };
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      gitOps,
+      runnerFor: makeRunner({ writes: { frontend: { files: { "src/b.ts": "b\n" } } } }, repo),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const failed = result.workers.find((worker) => worker.plan.id === "backend")!;
+    expect(failed.status).toBe("error");
+    expect(failed.errorMessage).toContain(stderr);
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain(stderr);
+  });
+
+  test("the preflight fails a worker over the limit with both lengths named when long paths are unavailable", async () => {
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const base = fakeGitOps(repo, { write: async () => undefined });
+    const tracked = "d".repeat(220);
+    const gitOps: GitOps = {
+      ...base,
+      longPathsEnabled: async () => false,
+      enableLongPaths: async () => { throw new Error("could not write core.longpaths to the repository config"); },
+      longestTrackedPath: async () => tracked,
+    };
+    const backendPath = planTeamRun(mission("team-mission"), ROOT).workers
+      .find((worker) => worker.id === "backend")!.worktreePath;
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      gitOps,
+      platform: "win32",
+      runnerFor: makeRunner({ writes: {} }, repo),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const failed = result.workers.find((worker) => worker.plan.id === "backend")!;
+    expect(failed.status).toBe("error");
+    expect(failed.errorMessage).toContain(`${backendPath.length} characters`);
+    expect(failed.errorMessage).toContain(`${tracked.length} characters`);
+    expect(failed.errorMessage).toContain("over the Windows 260-character limit");
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain(`${backendPath.length} characters`);
+  });
+
+  test("on Windows the repository's core.longpaths is enabled and noted in the report", async () => {
+    // `beforeEach` has already written the mission packet, so the seed commit
+    // from `initGitRepo` carries it as the base ref.
+    await initGitRepo(ROOT);
+    const runner = (_adapter: string) => async (_a: string, root: string, _missionPath: string) => {
+      const id = basename(root);
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", `${id}.ts`), `// ${id}\n`, "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      platform: "win32",
+      runnerFor: runner,
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const { stdout } = await execFileP("git", ["config", "--bool", "core.longpaths"], { cwd: ROOT });
+    expect(stdout.trim()).toBe("true");
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain("Notice:");
+    expect(report).toContain("core.longpaths");
+  });
+
+  test("checkWorktreePathLength allows the last 259 total and rejects 260 without long paths", () => {
+    const tracked = "a".repeat(6);
+    const base = { label: "worker w", longestTrackedPath: tracked, longPathsOk: false, platform: "win32" as const };
+    const atLimit = "w".repeat(WINDOWS_MAX_PATH - 1 - tracked.length);
+    expect(checkWorktreePathLength({ ...base, worktreePath: atLimit })).toBeNull();
+    const over = checkWorktreePathLength({ ...base, worktreePath: `${atLimit}w` });
+    expect(over).toContain("260 total");
+    expect(over).toContain("over the Windows 260-character limit");
+    expect(checkWorktreePathLength({ ...base, worktreePath: "w".repeat(500), longPathsOk: true })).toBeNull();
+    expect(checkWorktreePathLength({ ...base, worktreePath: "w".repeat(500), platform: "linux" })).toBeNull();
   });
 });

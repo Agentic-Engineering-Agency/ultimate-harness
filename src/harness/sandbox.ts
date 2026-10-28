@@ -107,14 +107,14 @@ async function readLockOwnerToken(contents: string): Promise<{ pid: number; nonc
  * owner is gone (or the lock carries no usable owner). Returns true when the
  * lock was removed so the caller can retry the exclusive create immediately.
  */
-async function breakStaleIndexLock(lockPath: string): Promise<boolean> {
+async function breakStaleLock(lockPath: string, staleMs: number, label: string): Promise<boolean> {
   let ageMs: number;
   try {
     ageMs = Date.now() - (await stat(lockPath)).mtimeMs;
   } catch {
     return true; // vanished between EEXIST and stat; retry acquisition
   }
-  if (ageMs < INDEX_LOCK_STALE_MS) return false;
+  if (ageMs < staleMs) return false;
 
   let ownerPid: number | null;
   try {
@@ -139,14 +139,35 @@ async function breakStaleIndexLock(lockPath: string): Promise<boolean> {
     broken_at: new Date().toISOString(),
   });
   console.warn(
-    `[sandbox] broke stale index lock ${lockPath} (owner pid ${ownerPid ?? "unknown"}, age ${Math.round(ageMs / 1000)}s)`,
+    `[sandbox] broke stale ${label} lock ${lockPath} (owner pid ${ownerPid ?? "unknown"}, age ${Math.round(ageMs / 1000)}s)`,
   );
   return true;
 }
 
-async function acquireSandboxesIndexLock(indexPath: string): Promise<() => Promise<void>> {
-  const lockPath = `${indexPath}.lock`;
-  const deadline = Date.now() + INDEX_LOCK_TIMEOUT_MS;
+export type FileLockOptions = {
+  /** Label used in diagnostics for this lock class (for example `index`). */
+  label?: string;
+  /** Bounded acquisition window before giving up. */
+  timeoutMs?: number;
+  /** Age after which a lock whose owner is gone may be broken. */
+  staleMs?: number;
+  /** Poll interval while another owner holds the lock. */
+  backoffMs?: number;
+};
+
+/**
+ * A bounded, stale-owner-aware exclusive file lock created with the exclusive
+ * (`wx`) flag and an owner token (`pid` + `nonce`). Reused by the sandboxes
+ * index and by machine-wide worker admission: the release only removes the lock
+ * when this process still owns it, so a takeover is never released by the
+ * process it displaced.
+ */
+export async function acquireExclusiveFileLock(lockPath: string, options: FileLockOptions = {}): Promise<() => Promise<void>> {
+  const label = options.label ?? "index";
+  const timeoutMs = options.timeoutMs ?? INDEX_LOCK_TIMEOUT_MS;
+  const staleMs = options.staleMs ?? INDEX_LOCK_STALE_MS;
+  const backoffMs = options.backoffMs ?? INDEX_LOCK_BACKOFF_MS;
+  const deadline = Date.now() + timeoutMs;
   const nonce = randomUUID();
   for (;;) {
     try {
@@ -170,7 +191,7 @@ async function acquireSandboxesIndexLock(indexPath: string): Promise<() => Promi
             await rm(lockPath, { force: true });
           } else {
             console.warn(
-              `[sandbox] release skipped: lock ${lockPath} is held by another process (takeover detected)`,
+              `[sandbox] release skipped: ${label} lock ${lockPath} is held by another process (takeover detected)`,
             );
           }
         } catch {
@@ -179,13 +200,13 @@ async function acquireSandboxesIndexLock(indexPath: string): Promise<() => Promi
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (await breakStaleIndexLock(lockPath)) continue;
+      if (await breakStaleLock(lockPath, staleMs, label)) continue;
       if (Date.now() >= deadline) {
         throw new Error(
-          `Sandbox index lock is held by another process: ${lockPath} (gave up after ${INDEX_LOCK_TIMEOUT_MS}ms)`,
+          `Sandbox ${label} lock is held by another process: ${lockPath} (gave up after ${timeoutMs}ms)`,
         );
       }
-      await delay(INDEX_LOCK_BACKOFF_MS);
+      await delay(backoffMs);
     }
   }
 }
@@ -204,7 +225,7 @@ export async function withSandboxesIndexMutation<T>(
 ): Promise<T> {
   const indexPath = sandboxesIndex(root);
   await mkdir(path.dirname(indexPath), { recursive: true });
-  const release = await acquireSandboxesIndexLock(indexPath);
+  const release = await acquireExclusiveFileLock(`${indexPath}.lock`, { label: "index" });
   try {
     const index = await readIndex(root);
     const result = await mutate(index);

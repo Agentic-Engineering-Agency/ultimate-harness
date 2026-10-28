@@ -91,6 +91,25 @@ export const NotificationsSchema = z.object({
 }).strict();
 export type Notifications = z.infer<typeof NotificationsSchema>;
 
+/** One `uh land` full-suite check: a display name and the command to run. */
+export const LandCheckSchema = z.object({
+  name: z.string().min(1),
+  command: z.string().min(1),
+}).strict();
+export type LandCheck = z.infer<typeof LandCheckSchema>;
+
+/**
+ * The optional `land` block of `.harness/project.yaml`: the full-suite checks,
+ * the forbidden patterns grepped from the staged diff and commit message, and
+ * the build command. Absent fields fall back to `uh land`'s defaults.
+ */
+export const LandSchema = z.object({
+  checks: z.array(LandCheckSchema).optional(),
+  forbidden_patterns: z.array(z.string()).optional(),
+  build: z.string().min(1).optional(),
+}).strict();
+export type Land = z.infer<typeof LandSchema>;
+
 export const ProjectSchema = z.object({
   schema_version: z.literal("uh.project.v0"),
   id: z.string().min(1),
@@ -111,6 +130,8 @@ export const ProjectSchema = z.object({
   fleet: FleetPolicySchema.optional(),
   /** Optional notification sinks; absent means nothing is ever sent. */
   notifications: NotificationsSchema.optional(),
+  /** Optional `uh land` configuration: full-suite checks, forbidden patterns, build. */
+  land: LandSchema.optional(),
 });
 
 export type ProjectDocument = z.infer<typeof ProjectSchema>;

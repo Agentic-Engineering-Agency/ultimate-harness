@@ -109,7 +109,11 @@ Team workers run in resource-admitted waves. `team.resources` controls admission
 | `worker_cost_reservation_usd` | Per-worker reservation charged to admission. Both cost fields are required together. |
 | `unknown_cost` | What an unknown completed worker cost does to the next wave: `block` (default) or `admit`. |
 
+Memory admission is scoped **per project**, not machine-wide. The admission lock and the reservations it guards live under this project root's `.harness/worker-admission/`, so they coordinate teams launched from the same project root; two teams started from different checkouts decide independently.
+
 The harness re-admits a wave only after every worker admitted to the prior wave settles. If memory admission cannot launch one worker, or remaining cost cannot reserve one worker, the remaining workers are marked `blocked` and the team records `admission_blocked_reason`; a team with that reason stays `blocked` in its final status.
+
+A memory reservation counts against another team's decision only while its worker's runtime process has not yet started reporting. As soon as the worker reports — a project-root live-run entry with a heartbeat, or its measured memory visible — the memory is already in the free-memory reading, so the reservation stops counting to avoid double counting it. An owner that never reports (or crashed) falls back to a fixed 60 s trust window, after which its reservation is dropped.
 
 **The unknown-cost admission rule:** with the default `unknown_cost: block`, unknown or invalid completed cost — including unavailable accounting — blocks further paid admission. It is never treated as zero. Cost admission is a reservation control, not a provider charge cap: an in-flight worker can exceed its reservation, so this is not a guaranteed spending ceiling. A worker that was never invoked contributes nothing, because no runner ran for it.
 

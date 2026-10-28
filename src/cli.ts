@@ -41,6 +41,7 @@ import { adoptSessionTemplate, type SessionTemplateAdoption } from "./harness/se
 import { writeArtifactFile } from "./adapters/_artifact-context.js";
 import { parseScaffoldLang, scaffoldTestsFromSpec } from "./harness/test-scaffold.js";
 import { assertValidRunId, generateRunId } from "./harness/run-id.js";
+import { landWorkerBranches } from "./harness/land.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -57,6 +58,7 @@ import { installTelemetryHooks } from "./harness/telemetry.js";
 import { projectDeliveryObservatory } from "./harness/delivery-observatory/project.js";
 import { acceptanceStatus, rebindAcceptanceEvidence, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
 import { loadPostChecks, postCheckExitCode, runPostChecks, type PostCheckEntry } from "./harness/post-checks.js";
+import { createQueueLauncher, formatQueueState, readQueueState, runQueue } from "./harness/queue.js";
 
 import {
   createSandbox,
@@ -1445,6 +1447,36 @@ program
 function collectRepeatedOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
+
+// uh land
+program
+  .command("land")
+  .description("Gated cherry-pick of verified worker branches into the target worktree")
+  .requiredOption("--worker-branch <branch>", "Worker branch to land; repeatable", collectRepeatedOption, [])
+  .requiredOption("--onto <branch>", "Target branch the worker commits land on")
+  .requiredOption("--message-file <path>", "File holding the commit message")
+  .option("--accept-review <reason>", "Accept a failing independent review and record the reason")
+  .option("--fast-forward <path>", "Checkout to fast-forward to the target; repeatable", collectRepeatedOption, [])
+  .option("--keep-worktrees", "Keep the landed workers' worktrees (default: remove them, and a team's leader once no worker is left)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { workerBranch: string[]; onto: string; messageFile: string; acceptReview?: string; fastForward: string[]; keepWorktrees?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const summary = await landWorkerBranches({
+        root,
+        workerBranches: opts.workerBranch,
+        onto: opts.onto,
+        messageFile: opts.messageFile,
+        acceptReview: opts.acceptReview,
+        fastForward: opts.fastForward,
+        keepWorktrees: opts.keepWorktrees,
+      });
+      console.log(JSON.stringify(summary));
+    } catch (err) {
+      console.error(`[BLOCKED] ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
 
 // uh promote
 program
@@ -3441,6 +3473,65 @@ mcpCmd
       process.exit(0);
     } catch (err) {
       process.stderr.write(`uh mcp serve: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    }
+  });
+
+// uh queue — launch missions in order under an orchestrator cap and a
+// free-memory floor, resumable from `.harness/queue/<queue-id>/state.json`.
+const queueCmd = program
+  .command("queue")
+  .description("Launch a queue of missions in order under an orchestrator cap and a free-memory floor");
+
+queueCmd
+  .command("run")
+  .description("Run a queue file: launch entries whose dependencies passed, in order, resuming from state.json")
+  .argument("<file>", "Queue YAML file")
+  .option("--max-orchestrators <n>", "How many orchestrators may run at once (default: 2)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (file: string, opts: { maxOrchestrators?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    const maxOrchestrators = opts.maxOrchestrators === undefined ? undefined : Number.parseInt(opts.maxOrchestrators, 10);
+    if (opts.maxOrchestrators !== undefined && (maxOrchestrators === undefined || !Number.isFinite(maxOrchestrators) || maxOrchestrators < 1)) {
+      console.error(`[FAIL] --max-orchestrators must be a positive integer, got: ${opts.maxOrchestrators}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const result = await runQueue(path.resolve(file), {
+        root,
+        launcher: createQueueLauncher(),
+        ...(maxOrchestrators !== undefined ? { maxOrchestrators } : {}),
+      });
+      console.log(formatQueueState({ schema_version: "uh.queue.v0", queue_id: result.queue_id, entries: result.entries }));
+      process.exit(result.status === "passed" ? 0 : 1);
+    } catch (err) {
+      console.error(`[FAIL] queue run error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+queueCmd
+  .command("status")
+  .description("Report per-entry queue state from .harness/queue/<queue-id>/state.json")
+  .argument("<queue-id>", "Queue id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the state as JSON")
+  .action(async (queueId: string, opts: { root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const state = await readQueueState(root, queueId);
+      if (state === undefined) {
+        console.error(`[FAIL] no queue state at .harness/queue/${queueId}/state.json under ${root}`);
+        process.exit(1);
+        return;
+      }
+      if (opts.json) console.log(JSON.stringify(state, null, 2));
+      else console.log(formatQueueState(state));
+    } catch (err) {
+      console.error(`[FAIL] queue status error:`);
+      console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }
   });

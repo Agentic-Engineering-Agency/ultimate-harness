@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
-  runTeamMission,
+  runTeamMission as runTeamMissionRaw,
   type TeamMission,
   type TeamRuntimeRunResult,
   type VerifyMissionLike,
@@ -113,6 +113,20 @@ beforeEach(async () => {
 afterEach(async () => {
   if (ROOT) await rm(ROOT, { recursive: true, force: true });
 });
+
+/**
+ * Every run in this file admits workers with ample injected memory, so admission
+ * never reads the host's real free memory.
+ */
+const AMPLE_MEMORY_BYTES = 256 * 1024 * 1024 * 1024;
+
+function runTeamMission(
+  mission: TeamMission,
+  root: string,
+  options: Parameters<typeof runTeamMissionRaw>[2],
+): ReturnType<typeof runTeamMissionRaw> {
+  return runTeamMissionRaw(mission, root, { availableBytes: () => AMPLE_MEMORY_BYTES, ...options });
+}
 
 describe("worker commit hygiene", () => {
   test("worker commit contains exactly the worker's own source, not harness-written protected files", async () => {
