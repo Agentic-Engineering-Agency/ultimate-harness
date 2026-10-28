@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { parse as parseYaml } from "yaml";
+import { ACP_CLIENT_VERSION } from "../src/adapters/acp.js";
 
 interface PackageJson {
   name: string;
@@ -14,6 +17,13 @@ interface PackageJson {
 
 async function readPackageJson(): Promise<PackageJson> {
   return JSON.parse(await readFile("package.json", "utf-8")) as PackageJson;
+}
+
+function distTag(...args: string[]): string {
+  return execFileSync(process.execPath, ["scripts/npm-dist-tag.mjs", ...args], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
 }
 
 describe("npm/Bun publish package metadata", () => {
@@ -54,7 +64,47 @@ describe("npm/Bun publish package metadata", () => {
   test("exposes a dry-run publish script for PR and release verification", async () => {
     const pkg = await readPackageJson();
 
-    expect(pkg.scripts?.["publish:dry-run"]).toBe("bun publish --dry-run");
+    expect(pkg.scripts?.["publish:dry-run"]).toBe("bun publish --dry-run --tag $(node scripts/npm-dist-tag.mjs)");
+  });
+
+  test("every shipped version field agrees with package.json", async () => {
+    const pkg = await readPackageJson();
+    const plugin = parseYaml(await readFile("apps/hermes-plugin/plugin.yaml", "utf-8")) as { version?: string };
+    const dashboard = JSON.parse(await readFile("apps/hermes-plugin/dashboard/manifest.json", "utf-8")) as { version?: string };
+    const otel = /^const VERSION = "([^"]+)";$/m.exec(await readFile("src/harness/otel-export.ts", "utf-8"))?.[1];
+
+    expect({ plugin: plugin.version, dashboard: dashboard.version, acp: ACP_CLIENT_VERSION, otel }).toEqual({
+      plugin: pkg.version,
+      dashboard: pkg.version,
+      acp: pkg.version,
+      otel: pkg.version,
+    });
+  });
+
+  test("publishes a prerelease version to the next dist-tag, never latest", () => {
+    expect(distTag("--for", "0.11.0-rc.1")).toBe("next");
+    expect(distTag("--for", "1.0.0-beta.2+build.5")).toBe("next");
+    expect(distTag("--for", "0.11.0")).toBe("latest");
+    expect(distTag("--for", "1.0.0+build.5")).toBe("latest");
+    expect(() => distTag("--for", "not-a-version")).toThrow();
+  });
+
+  test("refuses a GitHub release whose pre-release flag disagrees with the version", () => {
+    expect(distTag("--for", "0.11.0-rc.1", "--github-prerelease", "true")).toBe("next");
+    expect(distTag("--for", "0.11.0", "--github-prerelease", "false")).toBe("latest");
+    expect(distTag("--for", "0.11.0", "--github-prerelease", "")).toBe("latest");
+    expect(() => distTag("--for", "0.11.0-rc.1", "--github-prerelease", "false")).toThrow(/not marked as a pre-release/);
+    expect(() => distTag("--for", "0.11.0", "--github-prerelease", "true")).toThrow(/is marked as a pre-release/);
+  });
+
+  test("the publish workflows publish with the derived dist-tag", async () => {
+    const publish = await readFile(".github/workflows/publish.yml", "utf-8");
+    const plugin = await readFile(".github/workflows/release-plugin.yml", "utf-8");
+
+    expect(publish).toContain('TAG=$(node scripts/npm-dist-tag.mjs --github-prerelease "$RELEASE_PRERELEASE")');
+    expect(publish).toContain('npm publish --access public --tag "$DIST_TAG"');
+    expect(publish).not.toMatch(/^\s*npm publish\b(?!.*--tag)/m);
+    expect(plugin).toContain('node scripts/npm-dist-tag.mjs --github-prerelease "$RELEASE_PRERELEASE"');
   });
 
   test("keeps release, TUI, and plugin validation scripts wired", async () => {

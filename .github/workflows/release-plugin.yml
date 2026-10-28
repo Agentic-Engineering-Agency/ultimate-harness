@@ -38,6 +38,14 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Check release channel
+        if: github.event_name == 'release'
+        env:
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        # A prerelease version must be a GitHub pre-release, so the stable
+        # releases/latest/download/hermes-plugin.tar.gz link never serves it.
+        run: node scripts/npm-dist-tag.mjs --github-prerelease "$RELEASE_PRERELEASE"
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:

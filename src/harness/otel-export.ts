@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 
-const VERSION = "0.11.0";
+const VERSION = "0.11.0-rc.1";
 
 export interface OtlpAttribute {
   key: string;
