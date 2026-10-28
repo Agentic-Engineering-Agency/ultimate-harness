@@ -29,6 +29,10 @@ The file is YAML or JSON, a list of checks:
 - The console prints only the number of checks and the name of a failed one. Each check's output goes to a `logs`
   directory beside the checks file.
 - `runtime-result.yaml` records `post_checks` as names and outcomes.
+- A cancelled run is not graded: its post-checks do not run and its status stays `cancelled`. Ctrl-C or SIGTERM while a
+  check runs kills that check's whole process tree and leaves the run's status as it was. Each stream of a check's
+  output is capped at 1 MiB in its log, with a marker where it was cut, and UH warns when the logs would land inside
+  the project.
 - A failed, timed-out or unrunnable check fails the run with exit code `1` whatever the stop code, and the
   mission-level `runtime-result.yaml`, `latest.json` and the runs index show the failure. An error inside the
   post-check runner itself fails the run with `post-check runner failed`; `UH_RESULT` is still printed.
@@ -58,6 +62,7 @@ uh queue run evening.yaml --max-orchestrators 2
 uh queue status evening
 ```
 
+- **Sandbox routing.** An entry runs as `uh mission run` would run it: a mission with a bound sandbox runs in that sandbox, and a worker mission with none is refused. An entry that must run in the project root says `sandbox: false`; nothing else gives the queue that route.
 - **Memory floor.** A launch is held unless measured free memory covers one more run (1024 MB) above a 1024 MB
   reserve, through the same admission helper team workers use; memory is probed again after a short wait.
 - **Settlement.** Each entry settles from its run's recorded settlement through the same path as `uh wait`, never

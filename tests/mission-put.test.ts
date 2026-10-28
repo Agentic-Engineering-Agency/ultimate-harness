@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
@@ -127,6 +127,36 @@ describe("putMissionPackets", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toMatch(/live run/);
+  });
+
+  test("a refused put never touches an installed worker packet, even briefly (#260)", async () => {
+    const worker = await writePacket("worker-live");
+    expect((await putMissionPackets({ root, packetPaths: [worker] })).ok).toBe(true);
+    await registerLiveRun({
+      projectRoot: root,
+      artifactRoot: root,
+      runId: "20260922T101500Z-bb22bb",
+      missionId: "worker-live",
+      runtime: "hermes",
+    });
+    const installed = installedPath("worker-live");
+    const longAgo = new Date("2020-01-01T00:00:00Z");
+    await utimes(installed, longAgo, longAgo);
+    const before = await readFile(installed, "utf-8");
+
+    const changedWorker = await writePacket("worker-live", { objective: "a different objective" });
+    const team = await writePacket("team-over-live", {
+      shape: "team",
+      team: { workers: [{ role: "backend", adapter: "hermes", mission_id: "worker-live" }], leader: { adapter: "hermes" } },
+    });
+    const result = await putMissionPackets({ root, packetPaths: [team, changedWorker], replace: true });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toMatch(/live run/);
+    expect(await readFile(installed, "utf-8")).toBe(before);
+    // A staged-then-restored write would leave a fresh modification time behind.
+    expect((await stat(installed)).mtime.getTime()).toBe(longAgo.getTime());
   });
 
   test("--replace overwrites an existing target when no live run exists", async () => {
