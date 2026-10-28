@@ -8,6 +8,7 @@ on:
       - src/**
       - tsconfig.json
       - tsconfig.tests.json
+      - scripts/npm-dist-tag.mjs
       - .github/workflows/publish.yml
   push:
     branches: [main]
@@ -94,6 +95,18 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve npm dist-tag
+        id: dist-tag
+        env:
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          # A prerelease version (0.11.0-rc.1) publishes to `next`, a release
+          # version to `latest`. On a release event the GitHub pre-release flag
+          # must agree with the version, or nothing is published.
+          TAG=$(node scripts/npm-dist-tag.mjs --github-prerelease "$RELEASE_PRERELEASE")
+          echo "Publishing to npm dist-tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Publish package
         env:
           # `npm publish` looks up auth via `NODE_AUTH_TOKEN` when paired with
@@ -102,6 +115,7 @@ jobs:
           # We pass both so npm picks up whichever channel works.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_CONFIG_TOKEN }}
           npm_config_token: ${{ secrets.NPM_CONFIG_TOKEN }}
+          DIST_TAG: ${{ steps.dist-tag.outputs.tag }}
         run: |
           # `bun publish` against this scope returns a spurious 404 on the
           # registry meta-lookup even when the package + token are valid
@@ -119,4 +133,4 @@ jobs:
             echo "::notice::$PKG@$VER already published; skipping."
             exit 0
           fi
-          npm publish --access public
+          npm publish --access public --tag "$DIST_TAG"
