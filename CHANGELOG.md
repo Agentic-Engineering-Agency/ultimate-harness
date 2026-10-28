@@ -91,6 +91,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 
 ### Changed
 - The capability section of `docs/architecture/runtime-adapter-contract.md` says `--force` prints a `[WARN]` line (a bypass is never silent), and a test pins that `--strict` is registered on `dry-run`, `run` and `run-all`. #221.
+- Exit-safe telemetry is covered by a test that a command ending in `process.exit(1)` hands the beacon `status: failed` with exit code 1, once. #211.
 
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.
 - Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
