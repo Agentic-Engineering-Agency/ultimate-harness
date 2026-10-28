@@ -352,6 +352,29 @@ function exactIds(expected: string[], actual: string[], label: string): void {
   }
 }
 
+/**
+ * Evidence that cannot support a pass: a contradicted claim, a required
+ * acceptance or check entry that did not pass, or an error finding. An
+ * unverified claim no required entry covers is not required evidence and is
+ * deliberately absent here, so it is kept in the report as recorded.
+ */
+function passBlockers(reviewed: IndependentReviewReport["sources"][number]): string[] {
+  const blockers: string[] = [];
+  for (const claim of reviewed.claims_checked) {
+    if (claim.verdict === "contradicted") blockers.push(`contradicted claim "${claim.claim}"`);
+  }
+  for (const entry of reviewed.acceptance) {
+    if (entry.status !== "passed") blockers.push(`acceptance criterion ${entry.id} is ${entry.status}, not passed`);
+  }
+  for (const entry of reviewed.checks) {
+    if (entry.status !== "passed") blockers.push(`required check ${entry.id} is ${entry.status}, not passed`);
+  }
+  for (const finding of reviewed.findings) {
+    if (finding.severity === "error") blockers.push(`error finding "${finding.detail}"`);
+  }
+  return blockers;
+}
+
 export function validateIndependentReviewReport(request: IndependentReviewRequest, report: IndependentReviewReport): VerdictValue {
   exactIds(request.sources.map(source => source.mission_id), report.sources.map(source => source.mission_id), "source mission");
   let recommendation: VerdictValue = "pass";
@@ -360,11 +383,17 @@ export function validateIndependentReviewReport(request: IndependentReviewReques
     exactIds(source.acceptance.map(item => item.id), reviewed.acceptance.map(item => item.id), "acceptance criterion");
     exactIds(source.checks.map(item => item.id), reviewed.checks.map(item => item.id), "required check");
     const missing = source.files.some(file => file.state === "missing" || (file.kind === "output" && file.verification?.status !== "passed"));
-    const unsupported = reviewed.claims_checked.some(claim => claim.verdict !== "supported") ||
-      [...reviewed.acceptance, ...reviewed.checks].some(check => check.status !== "passed") ||
-      reviewed.findings.some(finding => finding.severity === "error");
     if (missing && reviewed.verdict !== "needs-remediation") throw new Error("Missing or invalid review inputs require needs-remediation");
-    if (unsupported && reviewed.verdict === "pass") throw new Error("Unverified or contradicted evidence cannot receive pass");
+    // A pass must agree with the required evidence. Rather than discard a whole
+    // review, lower just the offending source and state why: the review is still
+    // recorded, and the lowered verdict names the source it applies to.
+    const blockers = passBlockers(reviewed);
+    if (blockers.length > 0 && reviewed.verdict === "pass") {
+      reviewed.verdict = "needs-attention";
+      reviewed.findings.push({ severity: "error",
+        detail: `Recorded pass for ${source.mission_id} is inconsistent with its evidence (${blockers.join("; ")}); the verdict was lowered to needs-attention`,
+        evidence: `The captured evidence for ${source.mission_id} contradicts a pass` });
+    }
     if (reviewed.verdict === "needs-remediation" || (reviewed.verdict === "needs-attention" && recommendation === "pass")) recommendation = reviewed.verdict;
   }
   return recommendation;

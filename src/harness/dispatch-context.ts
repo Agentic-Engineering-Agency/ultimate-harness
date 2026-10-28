@@ -126,14 +126,27 @@ export function loadProjectFacts(root: string): string | undefined {
   return capped.length > 0 ? capped : undefined;
 }
 
+/**
+ * Whether the mission receives the project brief. `context.project_brief` is an
+ * opt-out: only an explicit `false` suppresses the `## Project facts` section;
+ * absent (or any other value) keeps today's behaviour — the brief renders.
+ */
+export function isProjectBriefEnabled(mission: MissionDocument): boolean {
+  return mission.context?.project_brief !== false;
+}
+
 export function buildDispatchContext(
   mission: MissionDocument,
   workflow?: WorkflowDocument,
   options: BuildDispatchContextOptions = {},
 ): DispatchContext {
+  // An explicit caller-supplied brief always wins; otherwise the mission's
+  // `context.project_brief: false` opts out before any file is read.
   const projectFacts = options.projectBrief !== undefined
     ? capProjectFacts(options.projectBrief)
-    : loadProjectFacts(options.root ?? mission.context?.repo_root ?? process.cwd());
+    : isProjectBriefEnabled(mission)
+      ? loadProjectFacts(options.root ?? mission.context?.repo_root ?? process.cwd())
+      : undefined;
   return {
     mission,
     workflow,

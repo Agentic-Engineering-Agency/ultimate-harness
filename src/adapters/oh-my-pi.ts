@@ -246,12 +246,32 @@ runtimeRegistry.register("oh-my-pi", ohMyPiRuntimeChecker);
  *
  * Registered with the adapter-schema registry so manifests are validated at
  * load time; unknown keys raise a Zod error.
+ *
+ * `tools` (optional) restricts the set of omp tools a run may use. When set,
+ * `planOhMyPiRun` emits a single `--tools=<name>,<name>` argument immediately
+ * after the `--mode <mode>` pair. When absent, argv is unchanged.
  */
 export const OhMyPiRuntimeConfigSchema = z.object({
   mode: z
     .enum(["json", "text", "rpc", "rpc-ui"])
     .optional()
     .default("json"),
+  /**
+   * Optional allowlist of omp tool names. Requires at least one entry (an
+   * empty list is a validation error, never "no tools") and rejects duplicate
+   * names. Each name must match `/^[A-Za-z0-9_.-]+$/` so separators omp's
+   * `--tools` list cannot survive validation.
+   */
+  tools: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .regex(/^[A-Za-z0-9_.-]+$/, "tool names may contain only letters, digits, dot, underscore, and hyphen"),
+    )
+    .min(1, "tools must name at least one tool")
+    .refine((names) => new Set(names).size === names.length, "tools must not contain duplicate names")
+    .optional(),
   thinking: z
     .union([
       z.literal(""),
@@ -446,6 +466,9 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     args.push("--thinking", thinking);
   }
   args.push("--mode", mode);
+  if (runtimeConfig.tools) {
+    args.push(`--tools=${runtimeConfig.tools.join(",")}`);
+  }
   if (mission.guard) {
     args.push("-e", await snapshotGuardHook("extensions/tool-guard/omp.js"));
   }

@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
+import { proposeMission } from "../src/harness/propose.js";
+import { prepareIndependentReview } from "../src/harness/independent-review.js";
+import { createSandbox } from "../src/harness/sandbox.js";
 import { checkMissionPackets, extractChangeOnlyPaths, renderMissionCheckLines } from "../src/harness/mission-check.js";
 
 const execFileP = promisify(execFile);
@@ -251,6 +254,71 @@ describe("checkMissionPackets", () => {
     const result = await checkMissionPackets({ root, missionPath });
     expect(result.ok).toBe(false);
     expect(failStartingWith(result, "schema")?.reason).toMatch(/adapter, or a template/);
+  });
+});
+
+describe("independent review packets", () => {
+  /**
+   * Emit a real review packet with `uh mission review-prepare`, bound to
+   * command-code. The sandbox is created only on request: preparation must run
+   * before it (so its mission directory is seeded into the sandbox), and the
+   * directory backend clones a git checkout.
+   */
+  async function writeReviewPacket(sandbox: boolean): Promise<string> {
+    await addAdapter(root, "command-code");
+    await writeFile(join(root, "answer.txt"), "42");
+    await proposeMission(root, { id: "source", title: "Answer", objective: "Produce answer 42", workflow: "research-docs",
+      expectedOutputs: ["answer.txt"], completionCriteria: ["Answer equals 42"] });
+    if (sandbox) {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      execFileSync("git", ["add", "--force", "."], { cwd: root });
+      execFileSync("git", ["-c", "user.name=UH Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    }
+    await prepareIndependentReview(root, { id: "review", sources: [{ missionId: "source" }], runtime: "command-code", model: "offline-review-fixture" });
+    if (sandbox) await createSandbox(root, { id: "review-workspace", missionId: "review", backend: "directory" });
+    return join(root, ".harness", "missions", "review", "mission.yaml");
+  }
+
+  test("a prepared review packet is planned from its bound sandbox worktree", async () => {
+    const missionPath = await writeReviewPacket(true);
+    const result = await checkMissionPackets({ root, missionPath, runtime: "command-code" });
+    expect(result.ok, renderMissionCheckLines(result).join("\n")).toBe(true);
+    expect(result.checks.find((line) => line.name === "runtime overrides [command-code]")?.status).toBe("PASS");
+  }, 30_000);
+
+  test("a prepared review packet without a sandbox passes and names the create command", async () => {
+    const missionPath = await writeReviewPacket(false);
+    const result = await checkMissionPackets({ root, missionPath, runtime: "command-code" });
+    expect(result.ok, renderMissionCheckLines(result).join("\n")).toBe(true);
+    const line = result.checks.find((entry) => entry.name === "runtime overrides [command-code]");
+    expect(line?.status).toBe("PASS");
+    expect(line?.reason).toMatch(/review sandbox/);
+    expect(line?.reason).toMatch(/uh sandbox create/);
+    expect(renderMissionCheckLines(result).some((rendered) => rendered.includes("uh sandbox create"))).toBe(true);
+  }, 30_000);
+
+  test("a review packet fails when --runtime does not match the bound runtime", async () => {
+    const missionPath = await writeReviewPacket(false);
+    const result = await checkMissionPackets({ root, missionPath, runtime: "oh-my-pi" });
+    expect(result.ok).toBe(false);
+    expect(failStartingWith(result, "runtime overrides [command-code]")?.reason).toMatch(/binds runtime "command-code"/);
+  }, 30_000);
+
+  test("a review packet fails when it assigns a model other than its binding", async () => {
+    const missionPath = await writeReviewPacket(false);
+    const packet = parse(await readFile(missionPath, "utf8")) as { runtime_config_overrides: Record<string, unknown> };
+    packet.runtime_config_overrides.model = "another-model";
+    await writeFile(missionPath, stringify(packet), "utf-8");
+    const result = await checkMissionPackets({ root, missionPath, runtime: "command-code" });
+    expect(result.ok).toBe(false);
+    expect(failStartingWith(result, "runtime overrides [command-code]")?.reason).toMatch(/binds model "offline-review-fixture"/);
+  }, 30_000);
+
+  test("an ordinary packet still validates its runtime overrides from the project root", async () => {
+    const missionPath = await writeMission("ordinary-packet", { runtime_config_overrides: { thinking: "low" } });
+    const result = await checkMissionPackets({ root, missionPath, runtime: "oh-my-pi" });
+    expect(result.ok, renderMissionCheckLines(result).join("\n")).toBe(true);
+    expect(result.checks.find((line) => line.name === "runtime overrides [oh-my-pi]")?.status).toBe("PASS");
   });
 });
 

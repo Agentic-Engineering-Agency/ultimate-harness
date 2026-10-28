@@ -13,6 +13,7 @@ import { planAnthropicRun } from "../adapters/anthropic.js";
 import { planPiRun } from "../adapters/pi.js";
 import { planClaudeCodeRun } from "../adapters/claude-code.js";
 import { planAcpRun } from "../adapters/acp.js";
+import { findBoundSandbox } from "./sandbox.js";
 
 /**
  * UH mission check — validate a packet before it launches.
@@ -59,6 +60,12 @@ const DEFAULT_RUNTIME = "hermes";
 
 interface RuntimePlanOptions {
   extraRuntimeConfigOverrides?: Record<string, unknown>;
+  /**
+   * Canonical workspace root the planner's independent-review guard compares
+   * the execution root against. Set only when planning a review packet from its
+   * bound sandbox, mirroring `uh mission run`'s `artifactRoot`.
+   */
+  artifactRoot?: string;
 }
 type RuntimePlanner = (root: string, missionPath: string, options: RuntimePlanOptions) => Promise<unknown>;
 
@@ -66,17 +73,19 @@ type RuntimePlanner = (root: string, missionPath: string, options: RuntimePlanOp
  * Planners keyed by adapter id. Each is the same function the adapter's
  * `dryRun*` wrapper calls to validate `runtime_config_overrides`; the check
  * stops at the planner so no run directory or prompt artifact is created.
+ * Only the three independent-review runtimes accept an `artifactRoot`, so it is
+ * forwarded to those planners alone.
  */
 const RUNTIME_PLANNERS: Record<string, RuntimePlanner> = {
   hermes: (root, missionPath, options) => planHermesRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
   codex: (root, missionPath, options) => planCodexRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
-  "oh-my-pi": (root, missionPath, options) => planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
-  "command-code": (root, missionPath, options) => planCommandCodeRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
+  "oh-my-pi": (root, missionPath, options) => planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides, ...(options.artifactRoot ? { artifactRoot: options.artifactRoot } : {}) }),
+  "command-code": (root, missionPath, options) => planCommandCodeRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides, ...(options.artifactRoot ? { artifactRoot: options.artifactRoot } : {}) }),
   "hermes-proxy": (root, missionPath, options) => planHermesProxyRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
   openrouter: (root, missionPath, options) => planOpenRouterRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
   anthropic: (root, missionPath, options) => planAnthropicRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
   pi: (root, missionPath, options) => planPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
-  "claude-code": (root, missionPath, options) => planClaudeCodeRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
+  "claude-code": (root, missionPath, options) => planClaudeCodeRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides, ...(options.artifactRoot ? { artifactRoot: options.artifactRoot } : {}) }),
   acp: (root, missionPath, options) => planAcpRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides }),
 };
 
@@ -142,6 +151,7 @@ async function checkRuntimeOverrides(
   runtime: string,
   extraOverrides: Record<string, unknown> | undefined,
   name: string,
+  artifactRoot?: string,
 ): Promise<void> {
   const planner = RUNTIME_PLANNERS[runtime];
   if (!planner) {
@@ -149,13 +159,56 @@ async function checkRuntimeOverrides(
     return;
   }
   try {
-    const plan = await planner(root, missionPath, extraOverrides ? { extraRuntimeConfigOverrides: extraOverrides } : {});
+    const plan = await planner(root, missionPath, {
+      ...(extraOverrides ? { extraRuntimeConfigOverrides: extraOverrides } : {}),
+      ...(artifactRoot ? { artifactRoot } : {}),
+    });
     const errors = extractPlanErrors(plan);
     if (errors.length > 0) push("FAIL", name, errors.join("; "));
     else push("PASS", name);
   } catch (error) {
     push("FAIL", name, (error as Error).message);
   }
+}
+
+/**
+ * Validate a prepared independent-review packet the way it will actually run.
+ * Such a packet is refused from the project root (`assertIndependentReviewExecution`)
+ * and is launched from the sandbox bound to its mission, so the override check
+ * plans from that sandbox's worktree with the project root as the canonical
+ * root, exactly as `uh mission run` routes it. The lifecycle is
+ * `review-prepare` → `sandbox create` → `mission run`, so a bound sandbox may
+ * not exist yet; then the packet cannot be planned, and the check passes while
+ * naming the command that creates the missing sandbox. The binding's runtime
+ * and model are still checked against the runtime the packet will run with: an
+ * explicit `--runtime` must agree with the binding, and the model the packet
+ * assigns to its runtime must be the bound model.
+ */
+async function checkIndependentReview(
+  push: PushLine,
+  root: string,
+  mission: MissionDocument,
+  requestedRuntime: string | undefined,
+): Promise<void> {
+  const binding = mission.independent_review!;
+  const runtime = binding.runtime;
+  const name = `runtime overrides [${runtime}]`;
+  if (requestedRuntime !== undefined && requestedRuntime !== runtime) {
+    push("FAIL", name, `independent review binds runtime "${runtime}", not "${requestedRuntime}"`);
+    return;
+  }
+  const assignedModel = mission.runtime_config_overrides?.model;
+  if (assignedModel !== binding.model) {
+    push("FAIL", name, `independent review binds model "${binding.model}" but the packet assigns ${assignedModel === undefined ? "no model" : `"${String(assignedModel)}"`}`);
+    return;
+  }
+  const sandbox = await findBoundSandbox(root, mission.id);
+  if (!sandbox) {
+    push("PASS", name, `independent review runs in its bound review sandbox; create it with "uh sandbox create <sandbox-id> --mission ${mission.id}"`);
+    return;
+  }
+  const sandboxMissionPath = path.join(sandbox.path, ".harness", "missions", mission.id, "mission.yaml");
+  await checkRuntimeOverrides(push, sandbox.path, sandboxMissionPath, runtime, undefined, name, root);
 }
 
 async function checkReadFirst(push: PushLine, root: string, mission: MissionDocument, suffix: string): Promise<void> {
@@ -262,7 +315,11 @@ export async function checkMissionPackets(options: MissionCheckOptions): Promise
   // A team packet's overrides are merged into each worker, so its own runtime
   // check is only meaningful when the operator pins one with --runtime.
   const parentRuntime = mission.shape === "team" ? options.runtime : (options.runtime ?? DEFAULT_RUNTIME);
-  if (parentRuntime) {
+  if (mission.shape !== "team" && mission.independent_review) {
+    // A review packet runs from the sandbox bound to its mission, never from
+    // the project root, so it is checked the same way.
+    await checkIndependentReview(push, root, mission, options.runtime);
+  } else if (parentRuntime) {
     await checkRuntimeOverrides(push, root, missionPath, parentRuntime, undefined, `runtime overrides [${parentRuntime}]`);
   }
 
@@ -326,11 +383,9 @@ export async function checkMissionPackets(options: MissionCheckOptions): Promise
   return finish(mission.id);
 }
 
-/** Render one line per check: `PASS <name>` or `FAIL <name>: <reason>`. */
+/** Render one line per check: `PASS <name>[: <reason>]` or `FAIL <name>[: <reason>]`. */
 export function renderMissionCheckLines(result: MissionCheckResult): string[] {
   return result.checks.map((line) =>
-    line.status === "PASS"
-      ? `PASS ${line.name}`
-      : `FAIL ${line.name}${line.reason ? `: ${line.reason}` : ""}`,
+    `${line.status} ${line.name}${line.reason ? `: ${line.reason}` : ""}`,
   );
 }
