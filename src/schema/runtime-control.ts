@@ -44,8 +44,39 @@ export const ToolGuardArtifactSchema = ToolGuardPolicySchema.extend({
   protected_paths: z.array(z.string().min(1)),
   /** Only the explicit Claude Code orchestrator role may set this marker. */
   controller_commands: z.boolean().default(false),
-}).strict();
+  /**
+   * sha256 of each harness-written policy file, keyed by the path relative to
+   * `worker_root`. The acceptance `protected_paths_untouched` invariant treats
+   * this as the baseline: later copies must match it, so a policy file
+   * rewritten identically everywhere is still caught.
+   */
+  written_files: z.record(z.string().min(1), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
+}).passthrough();
 export type ToolGuardArtifact = z.infer<typeof ToolGuardArtifactSchema>;
+
+export type AppliedToolGuardPolicy = ToolGuardPolicy & {
+  worker_root: string;
+  protected_paths?: string[];
+  controller_commands?: boolean;
+};
+
+/**
+ * Extract applied policy from an artifact, isolating policy fields from metadata.
+ * The policy fields are read through `ToolGuardPolicySchema`'s own shape, so a key
+ * added to the schema is applied rather than dropped; the metadata fields
+ * (`worker_root`, `protected_paths`, `controller_commands`) are added explicitly.
+ */
+export function policyFromArtifact(artifact: ToolGuardArtifact): AppliedToolGuardPolicy {
+  const source = artifact as Record<string, unknown>;
+  const fields: Record<string, unknown> = {};
+  for (const key of Object.keys(ToolGuardPolicySchema.shape)) fields[key] = source[key];
+  return {
+    ...ToolGuardPolicySchema.parse(fields),
+    worker_root: artifact.worker_root,
+    protected_paths: artifact.protected_paths,
+    controller_commands: artifact.controller_commands,
+  };
+}
 
 /** Optional limits are enforced by UH, independently of model compliance. */
 export const RuntimeLimitsSchema = z.object({
@@ -151,6 +182,8 @@ export const WindowsJobResultSchema = z.object({
   peak_memory_bytes: z.number().int().nonnegative(),
   controller_lost: z.boolean(),
   settled: z.boolean(),
+  /** Whether the guardian attached a headless pseudoconsole instead of the CREATE_NO_WINDOW fallback. */
+  pseudoconsole: z.boolean().optional(),
 }).strict();
 
 export const RuntimeCancelRequestSchema = z.object({

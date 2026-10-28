@@ -89,6 +89,12 @@ export const CanonicalTeamWorkerSchema = z.object({
    * roots and declared outputs. Present only when such paths existed.
    */
   out_of_roots: CanonicalWorkerOutOfRootsSchema.optional(),
+  /**
+   * Commit id every worker (and the leader) branched from, resolved once per
+   * team run. Also written to `git config branch.<branch>.base` so independent
+   * review reads the exact fork point instead of a moving ref.
+   */
+  base_commit: z.string().min(1).optional(),
 }).strict();
 
 export const CanonicalTeamLeaderSchema = z.object({

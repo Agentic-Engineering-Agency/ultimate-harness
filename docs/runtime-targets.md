@@ -26,10 +26,18 @@ remains owned by the installed Claude CLI; UH does not copy credentials into
 mission artifacts.
 
 Worker execution requires a mission guard and `permission_mode: default`.
-Coordinator execution uses `role: orchestrator`, a restricted native tool set and
-strict empty MCP configuration. This does not establish isolation from inherited
-memory, settings, skills or arbitrary caller flags. A UH hook allow also does not
-grant native shell permission.
+Coordinator execution uses `role: orchestrator`, a restricted native tool set
+(`Bash`, `Read`, `Write`, `Edit`) and strict empty MCP configuration. A coordinator
+run also requires a declared guard, because its native write grant is derived from
+that guard's `write_roots`: every root becomes exactly one `Write(<root>/**)` and
+one `Edit(<root>/**)` rule, so a mission that lets the orchestrator report under
+`out` grants nothing outside `out`. A root that names the worker root (`.`) or
+escapes it (`../x`, an absolute path) is refused while planning rather than
+widening the grant to the whole checkout. The UH `PreToolUse` hook still judges
+every call, so a natively allowed path can still be denied by policy; the rules
+only remove the print-mode denial that would otherwise happen before the hook runs.
+This does not establish isolation from inherited memory, settings, skills or
+arbitrary caller flags. A UH hook allow also does not grant native shell permission.
 
 Use an explicit supported model and inspect the planned command before execution.
 The current default includes a context suffix that can differ from native model

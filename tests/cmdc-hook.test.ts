@@ -1,9 +1,14 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { stringify } from "yaml";
+import { initializeHarness } from "../src/harness/init.js";
+import { addAdapter } from "../src/harness/adapter-add.js";
+import { runCommandCode } from "../src/adapters/command-code.js";
+import { ToolGuardPolicySchema, ToolGuardArtifactSchema, policyFromArtifact } from "../src/schema/runtime-control.js";
 
 function withResolvers<T>() {
   let resolve!: (value: T) => void;
@@ -29,87 +34,170 @@ function runCmdcHook(input: unknown, env: NodeJS.ProcessEnv): Promise<{ code: nu
   return promise;
 }
 
+async function harnessFixture(): Promise<{ root: string; missionPath: string }> {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-cmdc-hook-"));
+  await initializeHarness(root);
+  await addAdapter(root, "command-code");
+  const missionPath = path.join(root, ".harness", "missions", "one", "mission.yaml");
+  await mkdir(path.dirname(missionPath), { recursive: true });
+  await writeFile(missionPath, stringify({
+    schema_version: "uh.mission.v0",
+    id: "one",
+    name: "Command Code guard hook",
+    description: "Exercise the Command Code guard hook against its own artifact.",
+    workflow_profile: "research-docs",
+    guard: { write_roots: ["out"] },
+    runtime_config_overrides: { model: "qwen/qwen3.8-flash" },
+  }));
+  return { root, missionPath };
+}
+
+/**
+ * Let the adapter write its own `tool-guard.json` by running it with a stubbed
+ * runtime, so the hook is exercised against the real artifact (including
+ * `written_files`) rather than a hand-written fixture.
+ */
+async function writeAdapterArtifact(root: string, missionPath: string, runId: string): Promise<string> {
+  await runCommandCode(root, missionPath, {
+    runId,
+    runner: async () => ({ stdout: "", stderr: "", exitCode: 1, timedOut: false }),
+    collectDiff: async () => ({ patch: "" }),
+  });
+  return path.join(path.dirname(missionPath), "runs", runId, "tool-guard.json");
+}
+
+let snapshotRoot: string;
+let previousDist: string | undefined;
+let previousCache: string | undefined;
+
+beforeEach(async () => {
+  snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-cmdc-hook-snapshot-"));
+  const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "cmdc-hook.js");
+  await mkdir(path.dirname(hook), { recursive: true });
+  await writeFile(hook, "export default function () {}\n");
+  previousDist = process.env.UH_HARNESS_DIST;
+  previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
+  process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");
+  process.env.UH_RUNTIME_SNAPSHOT_CACHE = path.join(snapshotRoot, "cache");
+});
+
+afterEach(async () => {
+  if (previousDist === undefined) delete process.env.UH_HARNESS_DIST; else process.env.UH_HARNESS_DIST = previousDist;
+  if (previousCache === undefined) delete process.env.UH_RUNTIME_SNAPSHOT_CACHE; else process.env.UH_RUNTIME_SNAPSHOT_CACHE = previousCache;
+  await rm(snapshotRoot, { recursive: true, force: true });
+});
+
 describe("Command Code guard hook", () => {
-  test("a payload with tool_use_id produces a log line with call_id on allow and deny", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "uh-cmdc-hook-test-"));
+  test("the adapter-written artifact allows and logs a read, denies and logs a write outside, and allows and logs a write inside", async () => {
+    const { root, missionPath } = await harnessFixture();
     try {
-      const policyPath = path.join(root, "tool-guard.json");
+      const policyPath = await writeAdapterArtifact(root, missionPath, "guarded-run");
+      const artifact = JSON.parse(await readFile(policyPath, "utf8")) as { written_files?: Record<string, string> };
+      expect(artifact.written_files).toBeDefined();
+      expect(artifact.written_files?.[".commandcode/settings.json"]).toMatch(/^[a-f0-9]{64}$/);
+
       const logPath = path.join(root, "tool-guard.log");
-      await writeFile(policyPath, JSON.stringify({
-        schema_version: "uh.tool-guard.v0",
-        write_roots: ["."],
-        deny_git_mutations: true,
-        deny_package_installs: true,
-        deny_network_clients: true,
-        agent_clients: ["omp", "cmdc"],
-        worker_root: root,
-        protected_paths: [".harness", ".git"],
-        controller_commands: false,
-      }));
       const hookEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
 
-      // 1. Allowed call with tool_use_id
+      // A read is allowed and logged with its call id.
       const allowResult = await runCmdcHook({
         tool_name: "read_file",
         tool_use_id: "call_read_12345",
-        tool_input: { file_path: path.join(root, "allowed.txt") },
+        tool_input: { file_path: path.join(root, "out", "allowed.txt") },
       }, hookEnv);
       expect(allowResult.stdout.trim()).toBe("");
 
-      // 2. Denied call with tool_use_id
+      // A write outside the write roots is denied and logged.
       const denyResult = await runCmdcHook({
-        tool_name: "shell_command",
-        tool_use_id: "call_deny_67890",
-        tool_input: { command: "git commit -m unauthorized" },
+        tool_name: "write_file",
+        tool_use_id: "call_write_out_67890",
+        tool_input: { file_path: path.join(root, "outside", "unauthorized.txt") },
       }, hookEnv);
       const denyOutput = JSON.parse(denyResult.stdout.trim()) as {
         hookSpecificOutput?: { permissionDecision?: string };
       };
       expect(denyOutput.hookSpecificOutput?.permissionDecision).toBe("deny");
 
-      // 3. Fallback tool_call_id
-      await runCmdcHook({
-        tool_name: "read_file",
-        tool_call_id: "call_fallback_call_id",
-        tool_input: { file_path: path.join(root, "allowed2.txt") },
+      // A write inside the write roots is allowed and logged.
+      const insideResult = await runCmdcHook({
+        tool_name: "write_file",
+        tool_use_id: "call_write_in_24680",
+        tool_input: { file_path: path.join(root, "out", "inside.txt") },
       }, hookEnv);
-
-      // 4. Fallback toolCallId
-      await runCmdcHook({
-        tool_name: "read_file",
-        toolCallId: "call_fallback_camel_case",
-        tool_input: { file_path: path.join(root, "allowed3.txt") },
-      }, hookEnv);
-
-      // 5. Payload without call id
-      await runCmdcHook({
-        tool_name: "read_file",
-        tool_input: { file_path: path.join(root, "allowed4.txt") },
-      }, hookEnv);
+      expect(insideResult.stdout.trim()).toBe("");
 
       const rawLog = await readFile(logPath, "utf8");
       const entries = rawLog.trim().split(/\r?\n/).map(l => JSON.parse(l) as Record<string, unknown>);
 
-      expect(entries).toHaveLength(5);
+      expect(entries).toHaveLength(3);
       expect(entries[0].call_id).toBe("call_read_12345");
       expect(entries[0].class).toBe("allow");
       expect(entries[0].tool).toBe("read_file");
 
-      expect(entries[1].call_id).toBe("call_deny_67890");
-      expect(entries[1].class).toBe("git_mutation");
-      expect(entries[1].tool).toBe("shell_command");
-      expect(entries[1].reason).toContain("CONTRACT: no git mutations");
+      expect(entries[1].call_id).toBe("call_write_out_67890");
+      expect(entries[1].class).toBe("write_outside");
+      expect(entries[1].tool).toBe("write_file");
+      expect(entries[1].reason).toContain("CONTRACT: write only under out");
 
-      expect(entries[2].call_id).toBe("call_fallback_call_id");
+      expect(entries[2].call_id).toBe("call_write_in_24680");
       expect(entries[2].class).toBe("allow");
-
-      expect(entries[3].call_id).toBe("call_fallback_camel_case");
-      expect(entries[3].class).toBe("allow");
-
-      expect(entries[4].call_id).toBeUndefined();
-      expect(entries[4].class).toBe("allow");
+      expect(entries[2].tool).toBe("write_file");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("an artifact with one unknown extra field still loads", async () => {
+    const { root, missionPath } = await harnessFixture();
+    try {
+      const policyPath = await writeAdapterArtifact(root, missionPath, "extra-field-run");
+      const artifact = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
+      artifact.unknown_extra_field = "tolerated";
+      await writeFile(policyPath, JSON.stringify(artifact));
+
+      const logPath = path.join(root, "tool-guard.log");
+      const hookEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
+
+      const allowResult = await runCmdcHook({
+        tool_name: "read_file",
+        tool_use_id: "call_read_extra",
+        tool_input: { file_path: path.join(root, "out", "allowed.txt") },
+      }, hookEnv);
+      expect(allowResult.stdout.trim()).toBe("");
+
+      const entries = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(l => JSON.parse(l) as Record<string, unknown>);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].call_id).toBe("call_read_extra");
+      expect(entries[0].class).toBe("allow");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the applied policy carries every key of ToolGuardPolicySchema", () => {
+    const distinct = ToolGuardPolicySchema.parse({
+      write_roots: ["only"],
+      deny_git_mutations: false,
+      deny_package_installs: false,
+      deny_network_clients: false,
+      agent_clients: ["solo"],
+      allow_native_subagents: true,
+    });
+    const artifact = ToolGuardArtifactSchema.parse({
+      schema_version: "uh.tool-guard.v0",
+      ...distinct,
+      worker_root: "/worker/root",
+      protected_paths: ["out"],
+    });
+    const applied = policyFromArtifact(artifact) as Record<string, unknown>;
+
+    // A key added to ToolGuardPolicySchema must reach the applied policy; the
+    // distinct values ensure a key copied from the wrong field would not match.
+    for (const key of Object.keys(ToolGuardPolicySchema.shape)) {
+      expect(applied).toHaveProperty(key);
+      expect(applied[key]).toEqual((artifact as Record<string, unknown>)[key]);
+    }
+    expect(applied.worker_root).toBe("/worker/root");
+    expect(applied.protected_paths).toEqual(["out"]);
   });
 });

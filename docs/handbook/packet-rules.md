@@ -65,3 +65,20 @@ The checks map to the launch failures that keep recurring:
 
 `grounding` is an optional, strict list of `{ claim, path, contains }`. Each entry is a falsifiable statement about the code as it is now; `uh mission check` passes the claim only when `path` exists relative to the project root and its text contains the exact `contains` literal (case-sensitive). Absent or empty the field is a no-op, so existing packets stay valid. Use it to pin the facts a prompt asserts — file locations, exported symbol names, configuration keys — so a packet whose claims no longer hold fails the check instead of launching on a false premise.
 
+## 7. Install a validated packet with `uh mission put`
+
+An orchestrator (a runtime with `runtime_config.role: orchestrator`, such as Claude Code or Command Code) may only run harness controller commands and may not write under `.harness`, which is protected. It therefore cannot author a packet in place, and `uh mission create`/`new` and `uh propose` persist only a subset of the packet fields — no `guard`, `runtime_config_overrides`, recovery, `team` or `shape`. `uh mission put` is the coordinator's allowed path to persist a complete packet:
+
+```
+uh mission put <packet.yaml> [<more.yaml> ...] [--replace] [--root <path>] [--json]
+```
+
+- **Checks run first.** Each packet is validated with the same `checkMissionPackets` engine `uh mission check` uses, and a team packet validates each referenced worker through its own adapter. Any failed check refuses and prints the check output (`PASS`/`FAIL` lines, or the JSON result with `--json`); nothing is written — no mission directory, no audit line.
+- **Install is atomic.** The packet is written to `.harness/missions/<id>/mission.yaml`, where `<id>` is the packet's own `id`. Every installed packet appends one `mission.put` event to `.harness/audit/events.ndjson` carrying the packet id and the sha256 of the installed bytes.
+- **An existing target needs `--replace`.** Without it the command refuses and leaves the installed packet untouched.
+- **`--replace` needs no live run.** While the live-run registry `uh ps` reads reports a non-settled run of that mission (its `mission_id` or a team worker's), `--replace` is refused so a running packet's contract cannot change under it.
+- **Workers are never fabricated.** A team packet installs each worker packet it references by `mission_id` only when that packet is given alongside on the same command line or is already present at `.harness/missions/<worker_id>/mission.yaml`. A referenced worker that is neither fails the team packet's own check.
+
+The observability and control verbs an orchestrator needs are controller commands: `uh ps`, `uh report`, `uh steer`, `uh resume`, `uh kill`, `uh experiment`, alongside the existing `uh mission`/`uh acceptance` runs and `uh mission put`. The tool guard admits them to the orchestrator role and denies them to a worker as `agent_client`; read-only harness commands (`uh status`, `uh validate`, `uh mission check`, `uh mission dry-run`) stay available to every role, and the `--force`/`--yolo`-style flag refusals still apply.
+
+

@@ -1,5 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -63,13 +64,22 @@ test("guard policy selects yolo and records guard permission mode", async () => 
     const plan = await planCommandCodeRun(root, missionPath);
     expect(plan.permission_mode).toBe("guard");
     expect(plan.args).toContain("--yolo");
+    // The prompt is transmitted on stdin, never in argv: `-p` carries no query.
+    expect(plan.args).toContain("-p");
+    expect(plan.args[plan.args.indexOf("-p") + 1]).not.toBe(plan.prompt);
+    expect(plan.args).not.toContain(plan.prompt);
+    expect(plan.promptSource).toBe("stdin");
     let seenMode: string | undefined;
+    let seenInput: { args: string[]; stdin?: string } | undefined;
     await runCommandCode(root, missionPath, {
       runId: "guard-mode",
-      runner: async input => { seenMode = input.permissionMode; return { stdout: "", stderr: "", exitCode: 1, timedOut: false }; },
+      runner: async input => { seenMode = input.permissionMode; seenInput = { args: input.args, stdin: input.stdin }; return { stdout: "", stderr: "", exitCode: 1, timedOut: false }; },
       collectDiff: async () => ({ patch: "" }),
     });
     expect(seenMode).toBe("guard");
+    expect(seenInput!.args).toContain("-p");
+    expect(seenInput!.stdin).toContain("Preserve outputs");
+    expect(seenInput!.args).not.toContain(seenInput!.stdin);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -286,8 +296,13 @@ test("guard policy artifacts and Command Code hook preserve existing settings", 
       collectDiff: async () => ({ patch: "" }),
     });
     const runDir = path.join(path.dirname(missionPath), "runs", "guarded-run");
-    expect(parse(await readFile(path.join(runDir, "tool-guard.json"), "utf8"))).toMatchObject({ schema_version: "uh.tool-guard.v0", write_roots: ["out"] });
+    const guardArtifact = parse(await readFile(path.join(runDir, "tool-guard.json"), "utf8")) as { written_files?: Record<string, string> };
+    expect(guardArtifact).toMatchObject({ schema_version: "uh.tool-guard.v0", write_roots: ["out"] });
     expect(seenEnv?.UH_TOOL_GUARD_POLICY).toContain("tool-guard.json");
+    // The baseline the protected-paths invariant judges against: the sha256 of
+    // each policy file exactly as written.
+    expect(guardArtifact.written_files?.[".commandcode/settings.json"]).toBe(createHash("sha256").update(await readFile(settingsPath)).digest("hex"));
+    expect(guardArtifact.written_files?.[".commandcode/.gitignore"]).toBe(createHash("sha256").update("*\n").digest("hex"));
     expect(parse(await readFile(settingsPath, "utf8"))).toMatchObject({ permissions: { defaultMode: "default" }, custom: { keep: true }, hooks: { PreToolUse: [{ hooks: [{ type: "command" }] }] } });
     const persistedSettings = parse(await readFile(settingsPath, "utf8")) as { hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> } };
     const hookCommand = persistedSettings.hooks.PreToolUse.at(-1)?.hooks[0]?.command ?? "";

@@ -100,6 +100,49 @@ test("posix filesystem root write root allows subpaths", () => {
   expect(decideToolCall(posixPolicy, "write_file", { file_path: "/tmp/allowed.txt", content: "x" }, "/").deny).toBeUndefined();
 });
 
+describe("controller commands", () => {
+  const orchestrator = { allowControllerCommands: true };
+  function classOf(command: string, options: { allowControllerCommands?: boolean } = {}) {
+    return decideToolCall(policy, "shell_command", { command }, root, options).deny?.class;
+  }
+
+  test.each([
+    ["ps", "uh ps"],
+    ["report", "uh report 20260922T101500Z-aa11aa"],
+    ["mission put", "uh mission put out/x.yaml"],
+    ["mission put --replace", "uh mission put out/x.yaml --replace"],
+    ["steer", "uh steer 20260922T101500Z-aa11aa keep going"],
+    ["resume", "uh resume 20260922T101500Z-aa11aa"],
+    ["kill", "uh kill 20260922T101500Z-aa11aa"],
+    ["experiment", "uh experiment run exp-1"],
+  ] as const)("an orchestrator admits %s", (_name, command) => {
+    expect(classOf(command, orchestrator)).toBeUndefined();
+  });
+
+  test.each([
+    ["ps", "uh ps"],
+    ["report", "uh report 20260922T101500Z-aa11aa"],
+    ["mission put", "uh mission put out/x.yaml"],
+    ["steer", "uh steer 20260922T101500Z-aa11aa keep going"],
+    ["resume", "uh resume 20260922T101500Z-aa11aa"],
+    ["kill", "uh kill 20260922T101500Z-aa11aa"],
+    ["experiment", "uh experiment run exp-1"],
+  ] as const)("a worker is denied %s", (_name, command) => {
+    expect(classOf(command)).toBe("agent_client");
+  });
+
+  test("read-only harness commands stay available to a worker", () => {
+    expect(classOf("uh status")).toBeUndefined();
+    expect(classOf("uh mission check out/x.yaml")).toBeUndefined();
+    expect(classOf("uh mission dry-run out/x.yaml")).toBeUndefined();
+  });
+
+  test("the forced-flag refusal still applies to a controller command", () => {
+    expect(classOf("uh kill 20260922T101500Z-aa11aa --force", orchestrator)).toBe("agent_client");
+    expect(classOf("uh ps --yolo", orchestrator)).toBe("agent_client");
+  });
+});
+
 describe("POSIX absolute paths are targets, not cmd.exe switches", () => {
   const posixRoot = "/work/worker";
   const posixPolicy = { ...resolveToolGuardPolicy({ write_roots: ["out"] }), protected_paths: [".harness", ".git"] };

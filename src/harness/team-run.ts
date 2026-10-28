@@ -28,7 +28,7 @@ import { verifyExpectedArtifact } from "./output-verification.js";
  * goes wrong).
  */
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "yaml";
 import { promisify } from "node:util";
@@ -53,9 +53,9 @@ import {
 import { loadMissionFile } from "./capabilities.js";
 import { aggregateRuntimeUsage, type RuntimeUsage } from "./usage.js";
 import { readRuntimeAccounting } from "./runtime-accounting.js";
-import { assertSafeMissionId, assertWithinRoot, fileExists } from "./mission.js";
+import { assertSafeMissionId, assertWithinRoot, fileExists, isPathWithin } from "./mission.js";
 import { removeWorktreeLinks } from "./worktree-links.js";
-import { registerLiveRun } from "./live-runs.js";
+import { listLiveRuns, registerLiveRun } from "./live-runs.js";
 import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 const execFileP = promisify(execFile);
 
@@ -179,16 +179,36 @@ export interface GitOps {
   merge: (cwd: string, branch: string) => Promise<MergeOutcome>;
   /** Return the changed files (relative paths) for `branch` vs `baseRef`. */
   diffFiles: (root: string, baseRef: string, branch: string) => Promise<string[]>;
-  /** Delete a local branch (`git branch -D`). Best-effort. */
+  /**
+   * Delete a local branch (`git branch -D`) and its `branch.<name>` config
+   * section — `git branch -D` leaves the section behind, so the fork-point
+   * record would otherwise outlive the branch. Best-effort.
+   */
   deleteBranch: (root: string, branch: string) => Promise<void>;
+  /**
+   * Resolve `ref` to a full commit id in `root`. Optional so test doubles that
+   * never touch git stay valid; when absent the base ref is used verbatim and
+   * no `branch.<name>.base` record is written.
+   */
+  resolveCommit?: (root: string, ref: string) => Promise<string>;
+  /** Record `git config branch.<branch>.base <commit>` in `root` (the fork point review reads back). */
+  setBranchBase?: (root: string, branch: string, commit: string) => Promise<void>;
+  /** Rename a local branch (`git branch -m <from> <to>`); used to archive a retained run. */
+  renameBranch?: (root: string, from: string, to: string) => Promise<void>;
+  /** True when a local branch exists. Optional so existing test doubles stay valid. */
+  branchExists?: (root: string, branch: string) => Promise<boolean>;
   /**
    * Stage + commit uncommitted changes in `cwd`, no-op when the staged index is
    * empty. `stagePaths` restricts staging to exactly those paths — an empty
    * array stages nothing — so a worker whose only changes fall outside its
-   * write roots produces no commit. When omitted, the whole worktree is staged
-   * minus the protected roots (the salvage / legacy callers).
+   * write roots produces no commit. Both the worker commit and the salvage
+   * commit route through it. When omitted (a stub gitOps that cannot enumerate
+   * the worktree), the whole worktree is staged minus the protected roots.
+   * `forcePaths` lists declared outputs that git ignores (an `out/` directory in
+   * `.gitignore` is the case that motivated it) and must be staged with
+   * `git add -f`; only declared outputs ever reach it.
    */
-  commitAll: (cwd: string, message: string, stagePaths?: readonly string[]) => Promise<void>;
+  commitAll: (cwd: string, message: string, stagePaths?: readonly string[], forcePaths?: readonly string[]) => Promise<void>;
   /**
    * List the paths with uncommitted changes (staged, unstaged, untracked) in a
    * worktree, relative to the worktree root. Used to decide whether a stopped
@@ -224,6 +244,15 @@ export interface RunTeamMissionOptions {
   baseRef?: string;
   /** When true, do NOT remove worktrees even on success. Useful for tests. */
   retainOnSuccess?: boolean;
+  /**
+   * Relaunch a team whose previous run left worktrees and branches behind: the
+   * old worktrees are removed, each old branch is renamed under
+   * `uh/archive/<team>/<timestamp>/<role>` (never deleted — unmerged work is
+   * kept), and `.harness/missions/<team>/team` is renamed to
+   * `team.<timestamp>`. Without it, a relaunch is refused while retained state
+   * exists. Always refused while a live run of the team is registered.
+   */
+  replace?: boolean;
   /**
    * Leader integration strategy. The mission.yaml surface no longer declares
    * this; callers (CLI, staged workflow) thread it through. Only `"merge"`
@@ -326,6 +355,13 @@ interface WorkerCommitScope {
    * the write roots as pathspecs.
    */
   stagePaths?: string[];
+  /**
+   * Declared outputs that exist in the worktree but `dirtyPaths` never listed —
+   * an `out/` directory in `.gitignore` is the motivating case — so `git add`
+   * needs `-f` to stage them. Only declared outputs, protected paths excluded,
+   * ever land here; an ignored file that is not declared stays out of the commit.
+   */
+  forcePaths?: string[];
   /** Changed paths outside the write roots and declared outputs, protected paths excluded. */
   outOfRoots?: NonNullable<CanonicalTeamWorker["out_of_roots"]>;
 }
@@ -336,7 +372,9 @@ interface WorkerCommitScope {
  * unstaged and are reported as `out_of_roots`. Protected roots keep their
  * existing exclusion behaviour and are never listed as out-of-roots. A child
  * process (a build) can write outside the roots without the tool guard seeing
- * it, which is exactly what this classification catches.
+ * it, which is exactly what this classification catches. A declared output that
+ * exists but git ignores is returned separately in `forcePaths` so the commit
+ * can stage it with `-f`.
  */
 async function resolveWorkerCommitScope(args: {
   gitOps: GitOps;
@@ -356,13 +394,29 @@ async function resolveWorkerCommitScope(args: {
   }
   const stagePaths: string[] = [];
   const outside: string[] = [];
+  const staged = new Set<string>();
   for (const candidate of changed) {
     if (isProtectedPath(candidate, DEFAULT_PROTECTED_PATHS)) continue;
-    if (allowedRoots.some((root) => isWithinRelativeRoot(candidate, root))) stagePaths.push(candidate);
-    else outside.push(candidate);
+    if (allowedRoots.some((root) => isWithinRelativeRoot(candidate, root))) {
+      stagePaths.push(candidate);
+      staged.add(normalizeRelativePath(candidate));
+    } else outside.push(candidate);
+  }
+  // A declared output under an ignored directory (`out/` in `.gitignore`) never
+  // shows up in `dirtyPaths`, so it is not in `stagePaths` and a plain `git add`
+  // would refuse it. Such an output still belongs to the worker's commit: stage
+  // it explicitly with `git add -f`. Only declared outputs are force-added, and
+  // one under a protected root stays excluded like any other changed path.
+  const forcePaths: string[] = [];
+  for (const outputPath of args.expectedOutputs) {
+    if (isProtectedPath(outputPath, DEFAULT_PROTECTED_PATHS)) continue;
+    const normalized = normalizeRelativePath(outputPath);
+    if (normalized.length === 0 || staged.has(normalized)) continue;
+    if (await fileExists(path.join(args.worktreePath, outputPath))) forcePaths.push(outputPath);
   }
   outside.sort();
   const scope: WorkerCommitScope = { stagePaths };
+  if (forcePaths.length > 0) scope.forcePaths = forcePaths;
   if (outside.length > 0) {
     scope.outOfRoots = { paths: outside.slice(0, OUT_OF_ROOTS_LIST_CAP), total: outside.length };
   }
@@ -609,11 +663,38 @@ export const defaultGitOps: GitOps = {
     try {
       await execFileP("git", ["branch", "-D", branch], { cwd: root });
     } catch { /* best-effort */ }
+    // `git branch -D` deletes the ref but leaves `branch.<name>` in the config,
+    // so the base record would outlive its branch (and confuse a later review,
+    // or a same-named branch recreated by a relaunch). Drop the section too.
+    try {
+      await execFileP("git", ["config", "--remove-section", `branch.${branch}`], { cwd: root });
+    } catch { /* best-effort: no section, or no config at all */ }
   },
-  async commitAll(cwd, message, stagePaths) {
+  async resolveCommit(root, ref) {
+    const { stdout } = await execFileP("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: root });
+    const commit = stdout.trim();
+    if (commit.length === 0) throw new Error(`Cannot resolve base ref "${ref}" to a commit`);
+    return commit;
+  },
+  async setBranchBase(root, branch, commit) {
+    await execFileP("git", ["config", `branch.${branch}.base`, commit], { cwd: root });
+  },
+  async renameBranch(root, from, to) {
+    await execFileP("git", ["branch", "-m", from, to], { cwd: root });
+  },
+  async branchExists(root, branch) {
+    try {
+      await execFileP("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: root });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  async commitAll(cwd, message, stagePaths, forcePaths) {
     // An explicit empty list means "nothing is inside the worker's roots":
-    // stage nothing and create no commit, mirroring the protected-path case.
-    if (stagePaths !== undefined && stagePaths.length === 0) return;
+    // stage nothing and create no commit, mirroring the protected-path case —
+    // unless a declared output was force-added (its own ignored `out/` file).
+    if (stagePaths !== undefined && stagePaths.length === 0 && (forcePaths?.length ?? 0) === 0) return;
     // Stage only the worker's own work. When `stagePaths` is given it lists the
     // exact changed paths inside the worker's write roots (plus its declared
     // outputs) — the caller already filtered the protected roots out, so it is
@@ -622,10 +703,21 @@ export const defaultGitOps: GitOps = {
     // pathspecs are mixed in: a file include combined with excludes can
     // mis-stage on some git builds. Otherwise the whole worktree is staged
     // minus the protected roots, so a harness-owned file is never staged.
-    const pathspecs = stagePaths === undefined
-      ? [".", ...COMMIT_PROTECTED_EXCLUDES]
-      : stagePaths.map((entry) => `:(literal)${entry}`);
-    await execFileP("git", ["add", "-A", "--", ...pathspecs], { cwd });
+    if (stagePaths === undefined) {
+      await execFileP("git", ["add", "-A", "--", ".", ...COMMIT_PROTECTED_EXCLUDES], { cwd });
+    } else {
+      const stagePathspecs = stagePaths.map((entry) => `:(literal)${entry}`);
+      if (stagePathspecs.length > 0) {
+        await execFileP("git", ["add", "-A", "--", ...stagePathspecs], { cwd });
+      }
+      // Declared outputs under an ignored directory need `-f`: a plain `git add`
+      // refuses them. Only declared outputs reach `forcePaths`, so an ignored
+      // stray never gets staged alongside them.
+      const forcePathspecs = (forcePaths ?? []).map((entry) => `:(literal)${entry}`);
+      if (forcePathspecs.length > 0) {
+        await execFileP("git", ["add", "-f", "-A", "--", ...forcePathspecs], { cwd });
+      }
+    }
     // Any residual out-of-root or protected change stays in the worktree
     // unstaged (the worktree is discarded or retained as evidence), so gate the
     // commit on the INDEX being non-empty rather than on the worktree being clean.
@@ -678,6 +770,54 @@ function parentTeamStatePath(canonicalMissionDir: string, runId: string): string
 
 function workerArtifactRoot(teamRoot: string, workerId: string, parentRunId: string): string {
   return path.join(teamRoot, "artifacts", parentRunId, "workers", workerId);
+}
+
+/** Where a team worker's run records live, resolved from its worktree path. */
+export type TeamWorkerArtifactLookup = { artifactRoot: string } | { reason: string };
+
+/**
+ * A team worker writes its run records outside its own worktree — the worktree
+ * is `.harness/missions/<team>/team/workers/<worker-id>`, while its records
+ * live under the team's artifact root. Given that worktree path, resolve the
+ * artifact root the team recorded for the worker, through the team's run
+ * pointer and `team-state.json`; never by guessing the newest directory.
+ * Returns `null` when the path is not a team worker worktree, otherwise the
+ * resolved artifact root or the lookup that failed.
+ */
+export async function resolveTeamWorkerArtifactRoot(workerWorktree: string): Promise<TeamWorkerArtifactLookup | null> {
+  const workersRoot = path.dirname(workerWorktree);
+  const teamRoot = path.dirname(workersRoot);
+  const teamMissionDir = path.dirname(teamRoot);
+  const missionsRoot = path.dirname(teamMissionDir);
+  const harnessRoot = path.dirname(missionsRoot);
+  if (path.basename(workersRoot) !== "workers" || path.basename(teamRoot) !== "team"
+    || path.basename(missionsRoot) !== "missions" || path.basename(harnessRoot) !== ".harness") {
+    return null;
+  }
+  const workerId = path.basename(workerWorktree);
+  const teamMissionId = path.basename(teamMissionDir);
+  const teamLatest = await readLatestPointer(path.dirname(harnessRoot), teamMissionId);
+  if (!teamLatest) {
+    return { reason: `the team ${teamMissionId} has no latest.json run pointer, so the worker artifact root cannot be located` };
+  }
+  let state: CanonicalTeamState;
+  try {
+    state = CanonicalTeamStateSchema.parse(JSON.parse(await readFile(parentTeamStatePath(teamMissionDir, teamLatest.run_id), "utf-8")));
+  } catch (error) {
+    const detail = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? "has no team-state.json"
+      : "has an unreadable team-state.json";
+    return { reason: `the team ${teamMissionId} run ${teamLatest.run_id} ${detail}, so the worker artifact root cannot be located` };
+  }
+  const worker = state.workers.find((entry) => entry.id === workerId);
+  if (!worker) {
+    return { reason: `the team state names no worker ${workerId}, so the worker artifact root cannot be located` };
+  }
+  const artifactRoot = path.resolve(teamRoot, worker.artifact_scope);
+  if (!isPathWithin(artifactRoot, teamRoot)) {
+    return { reason: `the team state names an artifact root outside the team for worker ${workerId}` };
+  }
+  return { artifactRoot };
 }
 
 type WorkerContract = NonNullable<CanonicalTeamWorker["contract"]>;
@@ -917,12 +1057,25 @@ export async function runTeamMission(
   }
   const gitOps = options.gitOps ?? defaultGitOps;
   const baseRef = options.baseRef ?? "HEAD";
+  // Resolve the base ref to a commit id ONCE, before any worker starts, so every
+  // worker and the leader branch from the same immutable commit (not from a ref
+  // that can advance mid-run), and so independent review can read the exact fork
+  // point back from `branch.<name>.base`.
+  const baseCommit = gitOps.resolveCommit ? await gitOps.resolveCommit(root, baseRef) : undefined;
+  const worktreeBase = baseCommit ?? baseRef;
 
   const canonicalMissionDir = path.resolve(missionsDir(root), mission.id);
   const missionPath = path.join(canonicalMissionDir, "mission.yaml");
   if (!(await fileExists(missionPath))) {
     throw new Error(`Team mission packet not found at ${missionPath}; create the mission before run-team.`);
   }
+  await guardTeamRelaunch({
+    gitOps,
+    root,
+    missionId: mission.id,
+    plan,
+    replace: options.replace === true,
+  });
   // The canonical packet on disk is the single source of truth for workers.
   const canonicalBytes = await readFile(missionPath, "utf-8");
   const canonicalPacket = parse(canonicalBytes) as Record<string, unknown>;
@@ -985,6 +1138,7 @@ export async function runTeamMission(
         started_at: startedAt,
         finished_at: null,
         contract,
+        ...(baseCommit !== undefined ? { base_commit: baseCommit } : {}),
       };
     }),
   };
@@ -1030,7 +1184,10 @@ export async function runTeamMission(
       const workerMission = workerMissionPackets.get(wp.id);
       const workerMissionId = workerMission?.id ?? mission.id;
       await seedCanonicalWorkerScope(canonicalMissionDir, context.artifactRoot, mission.id);
-      await gitOps.addWorktree(root, wp.branch, wp.worktreePath, baseRef);
+      await gitOps.addWorktree(root, wp.branch, wp.worktreePath, worktreeBase);
+      if (baseCommit !== undefined && gitOps.setBranchBase) {
+        await gitOps.setBranchBase(root, wp.branch, baseCommit);
+      }
       await seedMissionPacket(canonicalMissionDir, wp.worktreePath, mission.id);
       const workerSpec = wp.spec ?? { role: wp.role, adapter: wp.adapter as TeamWorker["adapter"] };
       const contract = resolveWorkerContract(canonicalPacket, workerSpec, workerMission?.packet);
@@ -1042,6 +1199,11 @@ export async function runTeamMission(
         await seedCanonicalWorkerScope(canonicalMissionDir, context.artifactRoot, mission.id, derivedBytes);
       }
       await writeWorkerArtifactGitignore(wp.worktreePath);
+      // The harness owns every protected path; anything it rewrote into this
+      // worktree (the Command Code hook config, the seeded mission packet) must
+      // not masquerade as the worker's own change. `--skip-worktree` is
+      // per-index, so it hides the churn here and nowhere else.
+      await markProtectedPathsSkipWorktree(wp.worktreePath);
     });
     setupQueue = setup.then(() => undefined, () => undefined);
     try { await setup; }
@@ -1152,7 +1314,13 @@ export async function runTeamMission(
         ? relativeArtifactPath(root, path.join(context.artifactRoot, ".harness", "missions", workerMissionId, "runs", context.runId, "runtime-result.yaml"))
         : null;
       // A failed worker may still hold a complete change: salvage evaluates and
-      // (only when both pass) commits it, but the leader never merges it.
+      // (only when both pass) commits it, but the leader never merges it. Both
+      // the salvage commit and the settled worker's commit stage exactly the
+      // paths inside the worker's write roots (or its declared outputs) — so
+      // compute that scope's inputs once here.
+      const commitWorkerSpec = slot.plan.spec ?? { role: slot.plan.role, adapter: slot.plan.adapter as TeamWorker["adapter"] };
+      const commitBasePacket = workerMissionPackets.get(slot.plan.id)?.packet ?? canonicalPacket;
+      const commitWriteRoots = resolveWorkerWriteRoots(commitWorkerSpec, commitBasePacket);
       let salvageStopCode: string | undefined;
       let salvageRecord: WorkerSalvage | undefined;
       if (status === "failed") {
@@ -1167,28 +1335,30 @@ export async function runTeamMission(
           artifactRoot: context.artifactRoot,
           runId: context.runId,
           expectedOutputs: salvageOutputs?.files,
+          writeRoots: commitWriteRoots,
         });
         salvageStopCode = evaluated.stopCode;
         salvageRecord = evaluated.record;
         if (salvageRecord) canonicalWorker.salvage = salvageRecord;
+        if (evaluated.outOfRoots) canonicalWorker.out_of_roots = evaluated.outOfRoots;
       }
       // Classify the worktree's changed paths before committing: only paths
       // inside the worker's resolved write roots (or its declared outputs) are
       // staged. A child process — a build — can write outside those roots with
       // the tool guard none the wiser, so those paths stay unstaged and are
       // recorded as out_of_roots.
-      let outOfRoots: WorkerOutcome["outOfRoots"];
+      let outOfRoots: WorkerOutcome["outOfRoots"] = canonicalWorker.out_of_roots;
       let stagePaths: string[] | undefined;
+      let forcePaths: string[] | undefined;
       if (status === "succeeded") {
-        const workerSpec = slot.plan.spec ?? { role: slot.plan.role, adapter: slot.plan.adapter as TeamWorker["adapter"] };
-        const basePacket = workerMissionPackets.get(slot.plan.id)?.packet ?? canonicalPacket;
         const scope = await resolveWorkerCommitScope({
           gitOps,
           worktreePath: slot.plan.worktreePath,
-          writeRoots: resolveWorkerWriteRoots(workerSpec, basePacket),
+          writeRoots: commitWriteRoots,
           expectedOutputs: expectedOutputs?.files ?? [],
         });
         stagePaths = scope.stagePaths;
+        forcePaths = scope.forcePaths;
         outOfRoots = scope.outOfRoots;
         if (outOfRoots) canonicalWorker.out_of_roots = outOfRoots;
       }
@@ -1196,7 +1366,7 @@ export async function runTeamMission(
       let commitErr: string | null = null;
       if (status === "succeeded") {
         try {
-          await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths);
+          await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths, forcePaths);
         } catch (err) {
           commitErr = err instanceof Error ? err.message : String(err);
         }
@@ -1261,9 +1431,12 @@ export async function runTeamMission(
   // ------------------------------------------------------------------- leader
   canonicalState.leader.status = "integrating";
   await persistState();
-  const leaderError = await safeAddWorktree(gitOps, root, plan.leader, baseRef);
+  const leaderError = await safeAddWorktree(gitOps, root, plan.leader, worktreeBase);
   const leaderReady = leaderError === null;
   if (leaderReady) {
+    if (baseCommit !== undefined && gitOps.setBranchBase) {
+      await gitOps.setBranchBase(root, plan.leader.branch, baseCommit);
+    }
     await seedMissionPacket(canonicalMissionDir, plan.leader.worktreePath, mission.id);
   } else {
     canonicalState.leader.status = "failed";
@@ -1274,7 +1447,7 @@ export async function runTeamMission(
   // the diff reflects the persisted state on the branch.
   for (const outcome of workerOutcomes) {
     if (outcome.status !== "succeeded") continue;
-    outcome.filesTouched = await gitOps.diffFiles(root, baseRef, outcome.plan.branch);
+    outcome.filesTouched = await gitOps.diffFiles(root, worktreeBase, outcome.plan.branch);
   }
 
   // Leader integrates each successful worker. The strategy guard was
@@ -1434,12 +1607,16 @@ function classifyRuntimeStatus(res: TeamRuntimeRunResult): WorkerOutcome["status
  *
  * A worker is only considered when its stop code means it ran out of budget or
  * was halted by safety (`turn_limit`, `timeout`, `deadline`, `stall`, `policy`)
- * AND its worktree holds changes outside the protected roots. Its own declared
- * outputs are re-checked with the output verification, and the worker mission's
+ * AND its worktree holds changes inside its write roots (or its declared
+ * outputs) that are not protected — the same scope the worker commit honors, so
+ * a stray temp file at the repository root is never salvaged into a commit and
+ * is instead reported as `out_of_roots`. Its own declared outputs are re-checked
+ * with the output verification, and the worker mission's
  * `verification.required_checks` are run in the worker worktree through the same
- * verifier the leader uses. The worktree is committed to the worker branch — with
- * the existing commit hygiene — only when both passed. The record is always
- * surfaced so an operator can take it deliberately; the leader never merges it.
+ * verifier the leader uses. The worktree is committed to the worker branch —
+ * staging exactly the in-roots paths — only when both passed. The record is
+ * always surfaced so an operator can take it deliberately; the leader never
+ * merges it.
  */
 async function evaluateWorkerSalvage(args: {
   gitOps: GitOps;
@@ -1451,19 +1628,31 @@ async function evaluateWorkerSalvage(args: {
   artifactRoot: string;
   runId: string;
   expectedOutputs: readonly string[] | undefined;
-}): Promise<{ stopCode?: string; record?: WorkerSalvage }> {
+  writeRoots: readonly string[];
+}): Promise<{
+  stopCode?: string;
+  record?: WorkerSalvage;
+  outOfRoots?: WorkerOutcome["outOfRoots"];
+}> {
   const stopCode = await readWorkerStopCode(args.artifactRoot, args.workerMissionId, args.runId);
   if (stopCode === undefined || !SALVAGE_STOP_CODES.has(stopCode)) return { stopCode };
-  // Without a way to inspect the worktree we cannot tell salvageable work from
-  // harness-owned churn, so we record nothing rather than guess.
-  if (!args.gitOps.dirtyPaths) return { stopCode };
-  let dirty: string[];
-  try {
-    dirty = await args.gitOps.dirtyPaths(args.worktreePath);
-  } catch {
-    return { stopCode };
-  }
-  const eligible = dirty.some((entry) => !isProtectedPath(entry, DEFAULT_PROTECTED_PATHS));
+  // Partition the stopped worktree exactly like a settled worker's commit: only
+  // paths inside the write roots or declared outputs are stageable; the rest
+  // stay unstaged and are surfaced as out_of_roots on the same footing. An
+  // undefined scope means the worktree could not be inspected at all (a stub
+  // gitOps without `dirtyPaths`, or one that threw) — we cannot tell salvageable
+  // work from harness-owned churn, so we record nothing rather than guess.
+  const { stagePaths, forcePaths, outOfRoots } = await resolveWorkerCommitScope({
+    gitOps: args.gitOps,
+    worktreePath: args.worktreePath,
+    writeRoots: args.writeRoots,
+    expectedOutputs: args.expectedOutputs ?? [],
+  });
+  if (stagePaths === undefined) return { stopCode };
+  // A declared output under an ignored directory arrives in `forcePaths` rather
+  // than `stagePaths`, but it is still salvageable work, so either list makes the
+  // stopped worker eligible.
+  const eligible = stagePaths.length > 0 || (forcePaths?.length ?? 0) > 0;
   let outputsPassed = false;
   let checksPassed = false;
   if (eligible) {
@@ -1482,13 +1671,14 @@ async function evaluateWorkerSalvage(args: {
     }
     if (outputsPassed && checksPassed) {
       try {
-        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`);
+        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`, stagePaths, forcePaths);
       } catch { /* best-effort: the record still points at the branch for a human */ }
     }
   }
   return {
     stopCode,
     record: { eligible, outputs_passed: outputsPassed, checks_passed: checksPassed, branch: args.branch },
+    ...(outOfRoots ? { outOfRoots } : {}),
   };
 }
 
@@ -1527,14 +1717,171 @@ async function writeWorkerArtifactGitignore(worktreePath: string): Promise<void>
   // Patterns are relative to `.harness/` (the .gitignore's directory):
   //   audit/            -> .harness/audit/ (incl. events.ndjson)
   //   missions/*/runs/  -> per-run session dirs for every mission
+  //   .gitignore        -> this harness-owned file itself, so a fresh worktree
+  //                        does not report it as an untracked change
   const body = [
     "# UH-128: per-worker runtime artifacts — kept on disk, never committed,",
     "# so the leader merge cannot bleed forensic files no worker authored.",
     "audit/",
     "missions/*/runs/",
+    ".gitignore",
     "",
   ].join("\n");
   await writeFile(gitignorePath, body, "utf-8");
+}
+
+/** Run `git update-index --skip-worktree` for `files`, streaming paths on stdin (no argv cap). */
+function updateIndexSkipWorktree(worktreePath: string, files: readonly string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      "git",
+      ["update-index", "--skip-worktree", "-z", "--stdin"],
+      { cwd: worktreePath },
+      (error) => (error ? reject(error) : resolve()),
+    );
+    child.stdin?.end(files.map((file) => `${file}\0`).join(""));
+  });
+}
+
+/**
+ * Hide harness-owned churn from `git status` in a worktree without touching the
+ * shared index (each worktree has its own). The harness rewrites tracked files
+ * under the protected roots — `.commandcode/settings.json` (Command Code hook
+ * config with local paths) and the seeded `.harness` packet — none of which the
+ * worker authored. `--skip-worktree` makes a fresh worker worktree report a
+ * clean tree. Worker commits are unaffected: they never stage protected paths.
+ */
+async function markProtectedPathsSkipWorktree(worktreePath: string): Promise<void> {
+  const tracked: string[] = [];
+  for (const protectedPath of DEFAULT_PROTECTED_PATHS) {
+    if (protectedPath === ".git") continue;
+    let listing: string;
+    try {
+      ({ stdout: listing } = await execFileP("git", ["ls-files", "-z", "--", protectedPath], { cwd: worktreePath }));
+    } catch {
+      continue; // not a git worktree, or no index yet
+    }
+    for (const entry of listing.split("\0")) {
+      if (entry.length === 0) continue;
+      if (await fileExists(path.join(worktreePath, entry))) tracked.push(entry);
+    }
+  }
+  if (tracked.length === 0) return;
+  try {
+    await updateIndexSkipWorktree(worktreePath, tracked);
+  } catch {
+    // Best-effort: a cosmetic status entry must never fail the worker setup.
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Relaunch lifecycle                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** A branch or worktree path a planned team run would reuse from an earlier run. */
+interface TeamPreexisting {
+  branches: string[];
+  worktrees: string[];
+}
+
+async function safeBranchExists(gitOps: GitOps, root: string, branch: string): Promise<boolean> {
+  if (!gitOps.branchExists) return false;
+  try {
+    return await gitOps.branchExists(root, branch);
+  } catch {
+    return false;
+  }
+}
+
+/** Planned branches and worktree paths that already exist on disk. */
+async function detectTeamPreexisting(gitOps: GitOps, root: string, plan: TeamPlan): Promise<TeamPreexisting> {
+  const planned = [
+    ...plan.workers.map((worker) => ({ branch: worker.branch, worktreePath: worker.worktreePath })),
+    { branch: plan.leader.branch, worktreePath: plan.leader.worktreePath },
+  ];
+  const branches: string[] = [];
+  const worktrees: string[] = [];
+  for (const entry of planned) {
+    if (await safeBranchExists(gitOps, root, entry.branch)) branches.push(entry.branch);
+    if (await fileExists(entry.worktreePath)) worktrees.push(entry.worktreePath);
+  }
+  return { branches, worktrees };
+}
+
+/** Run ids of live runs registered against this team, so a refusal can name them. */
+async function liveTeamRunIds(root: string, missionId: string): Promise<string[]> {
+  try {
+    const { records } = await listLiveRuns(root, { persist: false });
+    return records
+      .filter((record) => record.liveness === "live" && record.team?.mission_id === missionId)
+      .map((record) => record.run_id)
+      .sort();
+  } catch {
+    // The registry is best-effort; never block a run because it could not be read.
+    return [];
+  }
+}
+
+/**
+ * Archive — never delete — a previous run's retained worktrees, branches, and
+ * team directory so a relaunch starts clean while unmerged work survives under
+ * `uh/archive/<team>/<timestamp>/<role>` and `team.<timestamp>`.
+ */
+async function archiveTeamRun(gitOps: GitOps, root: string, plan: TeamPlan): Promise<void> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archiveBranch = (role: string): string => `uh/archive/${plan.missionId}/${timestamp}/${role}`;
+  for (const worker of plan.workers) {
+    await gitOps.removeWorktree(root, worker.worktreePath);
+    if (gitOps.renameBranch && await safeBranchExists(gitOps, root, worker.branch)) {
+      await gitOps.renameBranch(root, worker.branch, archiveBranch(worker.id));
+    }
+  }
+  await gitOps.removeWorktree(root, plan.leader.worktreePath);
+  if (gitOps.renameBranch && await safeBranchExists(gitOps, root, plan.leader.branch)) {
+    await gitOps.renameBranch(root, plan.leader.branch, archiveBranch("leader"));
+  }
+  // Rename only AFTER the worktrees inside it are gone, or the rename would
+  // move their directories out from under the removal.
+  try {
+    await rename(plan.teamRoot, `${plan.teamRoot}.${timestamp}`);
+  } catch {
+    // No team directory to archive (a run that failed during setup), already gone.
+  }
+}
+
+/**
+ * Refuse (or take over) a relaunch that would collide with a previous run.
+ *
+ * A live run of the same team always refuses, naming its run ids: nothing may
+ * delete a worktree out from under a running worker. Otherwise retained
+ * branches / worktrees refuse by default and name `--replace`, which archives
+ * the old state instead.
+ */
+async function guardTeamRelaunch(args: {
+  gitOps: GitOps;
+  root: string;
+  missionId: string;
+  plan: TeamPlan;
+  replace: boolean;
+}): Promise<void> {
+  const preexisting = await detectTeamPreexisting(args.gitOps, args.root, args.plan);
+  if (preexisting.branches.length === 0 && preexisting.worktrees.length === 0) return;
+  const liveRunIds = await liveTeamRunIds(args.root, args.missionId);
+  if (liveRunIds.length > 0) {
+    throw new Error(
+      `Team mission ${args.missionId} already has a live run (${liveRunIds.join(", ")}); refuse to relaunch. Stop it first.`,
+    );
+  }
+  if (args.replace) {
+    await archiveTeamRun(args.gitOps, args.root, args.plan);
+    return;
+  }
+  const retained = [...preexisting.branches, ...preexisting.worktrees];
+  throw new Error(
+    `Team mission ${args.missionId} has retained state from a previous run (${retained.join(", ")}). `
+    + `Re-run with \`uh mission run-team ${args.missionId} --replace\` to archive the old branches and team directory, `
+    + "or remove them by hand.",
+  );
 }
 
 /**
@@ -1679,9 +2026,12 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
     lines.push("");
   }
   // Stopped-but-verified work: a failed worker whose stop code permitted
-  // salvage and whose worktree held non-protected changes. The leader never
-  // merges these automatically — the section exists so a human can take the
-  // branch deliberately (a policy stop always requires a human).
+  // salvage and whose worktree held changes inside its write roots. The leader
+  // never merges these automatically — the section exists so a human can take
+  // the branch deliberately (a policy stop always requires a human). Paths the
+  // stopped worker left outside its roots were never salvaged into the commit,
+  // so they are listed here too: a branch marked "committed" holds only the
+  // in-roots subset.
   const salvaged = args.workers.filter((outcome) => outcome.salvage?.eligible === true);
   lines.push("## Verified work from stopped workers");
   lines.push("");
@@ -1694,6 +2044,10 @@ async function writeIntegrationReport(args: WriteReportArgs): Promise<string> {
       const stop = outcome.stopCode ? `\`${outcome.stopCode}\`` : "_unknown_";
       const verdict = salvage.outputs_passed && salvage.checks_passed ? "committed" : "not committed";
       lines.push(`- \`${outcome.plan.id}\` — stop ${stop}, branch \`${salvage.branch}\`, outputs \`${salvage.outputs_passed ? "passed" : "failed"}\`, checks \`${salvage.checks_passed ? "passed" : "failed"}\` (${verdict})`);
+      if (outcome.outOfRoots && outcome.outOfRoots.total > 0) {
+        lines.push(`  - not committed (outside write roots): ${outcome.outOfRoots.total} path(s)`);
+        for (const p of outcome.outOfRoots.paths) lines.push(`    - \`${p}\``);
+      }
     }
     lines.push("");
     lines.push("> Not merged: the leader never integrates a failed worker automatically. Take this branch deliberately.");

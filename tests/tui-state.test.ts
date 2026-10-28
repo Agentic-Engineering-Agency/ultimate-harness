@@ -45,15 +45,21 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Poll until a condition holds instead of guessing a fixed delay — the initial
-// async load can take longer than a few ms on a loaded/parallel test runner.
-async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+// Poll until a condition holds instead of guessing a fixed delay — async
+// effects (initial load, debounced re-load, persistence saves, TTL timers) can
+// take far longer than a few ms on a loaded or parallel test runner. Fails
+// loudly after a generous timeout instead of racing the effect.
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  label = "condition",
+  timeoutMs = 2000,
+): Promise<void> {
   const start = Date.now();
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() - start > timeoutMs) {
-      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+      throw new Error(`waitFor: ${label} not met within ${timeoutMs}ms`);
     }
-    await delay(2);
+    await delay(5);
   }
 }
 
@@ -68,7 +74,7 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
       },
       debounceMs: 10,
     });
-    await waitFor(() => !state.isLoading() && state.snapshot().capturedAt === "call-1");
+    await waitFor(() => !state.isLoading() && state.snapshot().capturedAt === "call-1", "initial load");
     expect(state.snapshot().capturedAt).toBe("call-1");
     expect(state.isLoading()).toBe(false);
     expect(state.error()).toBeNull();
@@ -89,7 +95,7 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
       },
       debounceMs: 30,
     });
-    await delay(10);
+    await waitFor(() => calls === 1, "initial load");
     expect(calls).toBe(1);
 
     fire!();
@@ -97,7 +103,7 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
     fire!();
     fire!();
     fire!();
-    await delay(60);
+    await waitFor(() => calls === 2, "debounced re-load");
     expect(calls).toBe(2);
     state.dispose();
   });
@@ -121,11 +127,14 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
 
     expect(calls).toBe(1);
     fire!();
+    // Negative window: give the debounce timer (10ms) time to fire and discover
+    // the in-flight load, then assert no second load started. There is no public
+    // observable for "debounce fired", so a widened window is the only check.
     await delay(25);
     expect(calls).toBe(1);
 
     releaseFirst(snap({ capturedAt: "call-1" }));
-    await delay(25);
+    await waitFor(() => calls === 2, "queued follow-up load");
     expect(calls).toBe(2);
     expect(state.snapshot().capturedAt).toBe("call-2");
     state.dispose();
@@ -150,7 +159,7 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
       }),
       debounceMs: 10,
     });
-    await delay(10);
+    await waitFor(() => watched.includes("/fake-root/.harness/missions/m-1"), "mission watcher installed");
     expect(watched).toContain("/fake-root/.harness/missions/m-1");
     state.dispose();
   });
@@ -165,7 +174,7 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
       },
       debounceMs: 500,
     });
-    await delay(10);
+    await waitFor(() => calls === 1, "initial load");
     expect(calls).toBe(1);
     await state.refresh();
     expect(calls).toBe(2);
@@ -181,7 +190,7 @@ describe("tui/state createDashboardState — snapshot lifecycle", () => {
       },
       debounceMs: 10,
     });
-    await delay(10);
+    await waitFor(() => state.error()?.message === "boom", "loader error captured");
     expect(state.error()?.message).toBe("boom");
     expect(state.isLoading()).toBe(false);
     state.dispose();
@@ -360,7 +369,7 @@ describe("tui/state — watcher warnings", () => {
     expect(state.watcherWarning()).toBeNull();
     onError(new Error("EBADF"));
     expect(state.watcherWarning()).toMatch(/EBADF/);
-    await delay(50);
+    await waitFor(() => state.watcherWarning() === null, "watcher warning auto-cleared");
     expect(state.watcherWarning()).toBeNull();
     state.dispose();
   });
@@ -708,7 +717,7 @@ describe("tui/state — sandbox manager actions", () => {
       },
       debounceMs: 10,
     });
-    await delay(5);
+    await waitFor(() => !state.isLoading(), "initial load");
     state.openCreateSandboxDialog();
     state.setCreateSandboxId("sbx-feature-a");
     state.setCreateSandboxMissionId("m-1");
@@ -718,7 +727,7 @@ describe("tui/state — sandbox manager actions", () => {
     expect(state.sandboxAction()).toBe("created");
     expect(state.createSandboxDialogOpen()).toBe(false);
     expect(createCalled).toEqual({ root: "/fake-root", id: "sbx-feature-a", missionId: "m-1", baseRef: "dev" });
-    await delay(15);
+    await waitFor(() => loaderCalls > before, "refresh after sandbox create");
     expect(loaderCalls).toBeGreaterThan(before);
     state.dispose();
   });
@@ -800,7 +809,10 @@ describe("tui/state — persistence", () => {
       persistenceDebounceMs: 0,
       debounceMs: 10,
     });
-    await delay(15);
+    await waitFor(
+      () => state.selectedAdapter()?.id === "codex" && state.selectedMission()?.id === "m-restore",
+      "persisted selections restored",
+    );
     expect(state.selectedAdapter()?.id).toBe("codex");
     expect(state.selectedMission()?.id).toBe("m-restore");
     state.dispose();
@@ -816,9 +828,12 @@ describe("tui/state — persistence", () => {
       persistenceDebounceMs: 0,
       debounceMs: 10,
     });
-    await delay(15);
+    await waitFor(() => !state.isLoading(), "persistence hydration");
     state.selectAdapter(codex);
-    await delay(5);
+    await waitFor(
+      async () => (await store.load("/fake-root"))?.selectedAdapterId === "codex",
+      "selection persisted",
+    );
     const persisted = await store.load("/fake-root");
     expect(persisted?.selectedAdapterId).toBe("codex");
     state.dispose();
