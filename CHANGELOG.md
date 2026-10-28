@@ -111,6 +111,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Orchestrator-role missions run in the project root without `--no-sandbox`; their guard confines writes to their declared write roots, and an orchestrator without write roots is still refused.
 
 ### Fixed
+- `uh mission run-team --replace` no longer force-removes worktrees it cannot prove abandoned (#253). It treated only a `live` run as a blocker and swallowed every read error, so a stale or unknown run, an unreadable registry, or an empty process table (which makes every controller look dead) let it delete worktrees and any uncommitted work in them. It now blocks on `live`, `stale` and unknown runs, fails closed when the registry or the process table cannot be read, and refuses to archive a worktree with uncommitted changes outside the harness's own folders.
 
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
 - `uh mission review-collect` discards the review's sandbox after a successful collection, keeping the reviewer's report beside the assessment as `review-report.json`. Every review used to leave its sandbox worktree behind. `--keep-workspace` keeps it.
