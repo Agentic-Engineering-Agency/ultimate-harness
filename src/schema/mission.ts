@@ -201,12 +201,13 @@ export const DecisionPolicySchema = z.object({
 
 /**
  * Optional governed runtime switches. `loop_watchdog` selects whether the
- * shadow loop observer records advisory receipts for a run (`shadow`, the
- * default) or records nothing at all (`off`). Additive and strict: a legacy
- * mission that omits it keeps the shadow default.
+ * shadow loop observer runs: `off`, the default, observes nothing and makes
+ * no provider call; `shadow` is an explicit opt-in that records advisory
+ * receipts and may ask TypeSafe System One when `TYPESAFE_API_KEY` is set.
+ * Additive and strict: a legacy mission that omits it runs with the watchdog off.
  */
 export const RuntimeConfigSchema = z.object({
-  loop_watchdog: z.enum(["shadow", "off"]).default("shadow"),
+  loop_watchdog: z.enum(["shadow", "off"]).default("off"),
 }).strict();
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 

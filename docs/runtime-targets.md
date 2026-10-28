@@ -157,6 +157,10 @@ can request a typed three-verdict/tamper judgment from `jev-latest`.
   complete response-envelope validation and privacy filtering for arbitrary
   criterion descriptions remain unresolved.
 
+The shadow loop watchdog asks JEV only for missions that opt in with
+`runtime_config.loop_watchdog: shadow`; the default is `off`, which makes no
+provider call. See [configuration](./configuration.md#mission-runtime_configloop_watchdog).
+
 This is not semantic runtime routing, scope approval or retry authorization.
 See [progressive decisions](./architecture/progressive-decisions.md) and the
 [roadmap](./ROADMAP.md#governed-decisions).

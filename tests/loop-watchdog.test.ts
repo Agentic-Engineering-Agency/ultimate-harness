@@ -22,6 +22,7 @@ const WORKING_DIRECTORY = "/repo/work";
 const roots: string[] = [];
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
@@ -124,7 +125,7 @@ describe("createLoopWatchdog", () => {
   test("performs no evaluation below minCalls even when a signal already crosses its threshold", async () => {
     const dir = await missionDir();
     const { provider, calls } = disabledProvider();
-    const watchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
       provider, missionDir: dir, missionId: "one", everyCalls: 1, minCalls: 6 });
 
     const events = repeatedEvents(5);
@@ -144,7 +145,7 @@ describe("createLoopWatchdog", () => {
   test("evaluates only every everyCalls newly completed tool calls", async () => {
     const dir = await missionDir();
     const { provider, calls } = disabledProvider();
-    const watchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
       provider, missionDir: dir, missionId: "one", everyCalls: 6 });
 
     const events: unknown[] = [];
@@ -176,7 +177,7 @@ describe("createLoopWatchdog", () => {
   test("records the deterministic signals and a disabled provider outcome and calls the provider once", async () => {
     const dir = await missionDir();
     const { provider, calls } = disabledProvider();
-    const watchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
       provider, missionDir: dir, missionId: "one" });
 
     await watchdog.observe(repeatedEvents(6));
@@ -206,7 +207,7 @@ describe("createLoopWatchdog", () => {
   test("calls the provider only when a deterministic signal crosses its threshold", async () => {
     const dir = await missionDir();
     const quiet = disabledProvider();
-    const quietWatchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
+    const quietWatchdog = createLoopWatchdog({ mode: "shadow", source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
       provider: quiet.provider, missionDir: dir, missionId: "one" });
 
     // Six distinct successful reads: no repeats, no alternation.
@@ -216,7 +217,7 @@ describe("createLoopWatchdog", () => {
 
     // A-B-A-B-A-B: alternation crosses its threshold.
     const alternating = disabledProvider();
-    const alternatingWatchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
+    const alternatingWatchdog = createLoopWatchdog({ mode: "shadow", source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
       provider: alternating.provider, missionDir: dir, missionId: "one" });
     await alternatingWatchdog.observe(alternatingEvents(4));
     expect(alternating.calls).toHaveLength(1);
@@ -228,7 +229,7 @@ describe("createLoopWatchdog", () => {
   test("writes an ok receipt with answers, model and usage when the provider answers", async () => {
     const dir = await missionDir();
     const { provider, calls } = okProvider();
-    const watchdog = createLoopWatchdog({ source: "command-code", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "command-code", workingDirectory: WORKING_DIRECTORY,
       provider, missionDir: dir, missionId: "one", runId: "run-1" });
 
     await watchdog.observe(repeatedEvents(6));
@@ -262,7 +263,7 @@ describe("createLoopWatchdog", () => {
   test("a throwing provider is caught, written as loop_watchdog_error and writes no receipt", async () => {
     const dir = await missionDir();
     const appended: Event[] = [];
-    const watchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
       provider: async () => { throw new Error("provider exploded"); },
       missionDir: dir, missionId: "one", runId: "run-1",
       appendEvent: async (event) => { appended.push(event); } });
@@ -272,6 +273,19 @@ describe("createLoopWatchdog", () => {
     expect(await receiptFiles(dir)).toEqual([]);
     expect(appended).toHaveLength(1);
     expect(appended[0]).toMatchObject({ event: "loop_watchdog_error", mission_id: "one", run_id: "run-1" });
+  });
+
+  test("a watchdog built without a mode is off and never calls the provider", async () => {
+    const dir = await missionDir();
+    const { provider, calls } = disabledProvider();
+    const watchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY,
+      provider, missionDir: dir, missionId: "one", everyCalls: 1 });
+
+    await watchdog.observe(repeatedEvents(8));
+
+    expect(calls).toHaveLength(0);
+    expect(watchdog.evaluations).toBe(0);
+    expect(await receiptFiles(dir)).toEqual([]);
   });
 
   test("mode off observes nothing at all", async () => {
@@ -293,7 +307,7 @@ describe("createLoopWatchdog", () => {
   test("the serialized receipt contains no absolute path", async () => {
     const dir = await missionDir();
     const { provider } = disabledProvider();
-    const watchdog = createLoopWatchdog({ source: "command-code", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "command-code", workingDirectory: WORKING_DIRECTORY,
       provider, missionDir: dir, missionId: "one" });
 
     const events: unknown[] = [];
@@ -318,13 +332,15 @@ describe("resolveLoopWatchdogMode", () => {
     return path.join(dir, "mission.yaml");
   }
 
-  test("reads runtime_config.loop_watchdog, defaulting to shadow", async () => {
+  test("reads runtime_config.loop_watchdog, defaulting to off", async () => {
     expect(await resolveLoopWatchdogMode(await mission(
       "schema_version: uh.mission.v0\nid: one\ntitle: t\nworkflow_profile: research-docs\nruntime_config:\n  loop_watchdog: off\n"))).toBe("off");
     expect(await resolveLoopWatchdogMode(await mission(
       "schema_version: uh.mission.v0\nid: one\ntitle: t\nworkflow_profile: research-docs\nruntime_config:\n  loop_watchdog: shadow\n"))).toBe("shadow");
     expect(await resolveLoopWatchdogMode(await mission(
-      "schema_version: uh.mission.v0\nid: one\ntitle: t\nworkflow_profile: research-docs\n"))).toBe("shadow");
+      "schema_version: uh.mission.v0\nid: one\ntitle: t\nworkflow_profile: research-docs\n"))).toBe("off");
+    expect(await resolveLoopWatchdogMode(await mission(
+      "schema_version: uh.mission.v0\nid: one\ntitle: t\nworkflow_profile: research-docs\nruntime_config: {}\n"))).toBe("off");
   });
 
   test("degrades to no watchdog when the mission cannot be read", async () => {
@@ -344,7 +360,7 @@ describe("runtime supervision wiring", () => {
     out({ type: "result", subtype: "success", sessionId: "loop-session", stopReason: "end_turn", finalText: "done" });
   `;
 
-  async function fixture(mode: "shadow" | "off"): Promise<{ root: string; missionDir: string; fixturePath: string }> {
+  async function fixture(mode?: "shadow" | "off"): Promise<{ root: string; missionDir: string; fixturePath: string }> {
     const root = await scratchRoot();
     const missionDir = path.join(root, ".harness", "missions", "one");
     await mkdir(missionDir, { recursive: true });
@@ -353,8 +369,7 @@ describe("runtime supervision wiring", () => {
       "id: one",
       "title: Loop watchdog supervision",
       "workflow_profile: research-docs",
-      "runtime_config:",
-      `  loop_watchdog: ${mode}`,
+      ...(mode === undefined ? [] : ["runtime_config:", `  loop_watchdog: ${mode}`]),
       "",
     ].join("\n"), "utf8");
     const fixturePath = path.join(root, "loop-fixture.cjs");
@@ -400,6 +415,23 @@ describe("runtime supervision wiring", () => {
     const receipt = await readReceipt(shadow.missionDir);
     expect(receipt).toMatchObject({ kind: "retry-stop", status: "advisory", authorizer: "shadow", applied: false });
   }, 30_000);
+
+  test("a looping run whose mission does not opt in never calls TypeSafe, even with TYPESAFE_API_KEY set", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "test-placeholder-key");
+    const fetch = vi.fn(async () => { throw new Error("network is not allowed in this test"); });
+    vi.stubGlobal("fetch", fetch);
+
+    const unset = await fixture();
+    await run(unset.root, unset.fixturePath, "default-run");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(await receiptFiles(unset.missionDir)).toEqual([]);
+
+    // The same run with an explicit opt-in does reach the provider, so the assertion above can fail.
+    const shadow = await fixture("shadow");
+    await run(shadow.root, shadow.fixturePath, "opt-in-run");
+    expect(fetch).toHaveBeenCalled();
+    expect(await readReceipt(shadow.missionDir)).toMatchObject({ provider_outcome: "unavailable" });
+  }, 30_000);
 });
 
 describe("recorded Command Code event streams", () => {
@@ -426,7 +458,7 @@ describe("recorded Command Code event streams", () => {
 
     const dir = await missionDir();
     const { provider, calls } = disabledProvider();
-    const watchdog = createLoopWatchdog({ source: "command-code", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "command-code", workingDirectory: WORKING_DIRECTORY,
       provider, missionDir: dir, missionId: "one" });
     await watchdog.observe(events);
 
@@ -443,7 +475,7 @@ describe("recorded Command Code event streams", () => {
 
     const dir = await missionDir();
     const { provider, calls } = okProvider();
-    const watchdog = createLoopWatchdog({ source: "command-code", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "command-code", workingDirectory: WORKING_DIRECTORY,
       provider, missionDir: dir, missionId: "one" });
     await watchdog.observe(events);
 
@@ -464,7 +496,7 @@ describe("recorded Command Code event streams", () => {
 
     const dir = await missionDir();
     const { provider, calls } = okProvider();
-    const watchdog = createLoopWatchdog({ source: "command-code", workingDirectory: WORKING_DIRECTORY,
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "command-code", workingDirectory: WORKING_DIRECTORY,
       provider, missionDir: dir, missionId: "one" });
     await watchdog.observe(events);
 
@@ -481,7 +513,7 @@ describe("the watchdog reads a long run once (#258)", () => {
       get(target, key) { if (key === "type") reads += 1; return target[key as string]; },
     });
     const all = repeatedEvents(400).map(event => counted(event as Event));
-    const watchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY, provider: async () => { throw new Error("no provider"); } });
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY, provider: async () => { throw new Error("no provider"); } });
     // The way runtime-process feeds it: the same growing list, one more line each time.
     const seen: unknown[] = [];
     for (const event of all) {
