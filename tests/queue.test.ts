@@ -473,6 +473,37 @@ describe("uh queue run", () => {
     expect(notices[0].reason).toBe("wait-timeout");
   });
 
+  test("a child that exits 0 with no run record to be found fails as launch-failed after a short grace, without spinning (#263)", async () => {
+    const root = await makeRoot();
+    const { spawner, children } = fakeChildSpawner();
+    const { notices, notify } = noticeCounter();
+    const file = await writeQueue(root, {
+      id: "exit-clean-no-record",
+      entries: [{ id: "a", mission: "missions/a.yaml", runtime: "codex" }],
+    });
+    let calls = 0;
+    const missing: NonNullable<QueueLauncherDeps["wait"]> = async () => {
+      calls += 1;
+      throw new WaitError("no run matching the launch is discoverable yet", "unknown_target");
+    };
+    const pending = runQueue(file, {
+      root,
+      launcher: createQueueLauncher({ spawner, wait: missing, settleTimeoutMs: 20_000 }),
+      freeMemoryBytes: () => PLENTY,
+      maxOrchestrators: 1,
+      notify,
+    });
+    await waitForCondition(async () => children.length === 1);
+    children[0].emit("exit", 0);
+    const started = Date.now();
+    const result = await pending;
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(result.entries[0]).toMatchObject({ status: "failed" });
+    expect(notices[0].reason).toBe("launch-failed");
+    // One read per pause, not one per turn of the event loop.
+    expect(calls).toBeLessThan(40);
+  }, 30_000);
+
   test("fails a child that exits non-zero before any run record as launch-failed", async () => {
     const root = await makeRoot();
     const { spawner, children } = fakeChildSpawner();

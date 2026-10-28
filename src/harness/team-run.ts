@@ -338,7 +338,7 @@ export interface GitOps {
    * `.gitignore` is the case that motivated it) and must be staged with
    * `git add -f`; only declared outputs ever reach it.
    */
-  commitAll: (cwd: string, message: string, stagePaths?: readonly string[], forcePaths?: readonly string[]) => Promise<void>;
+  commitAll: (cwd: string, message: string, stagePaths?: readonly string[], forcePaths?: readonly string[]) => Promise<string | void>;
   /**
    * List the paths with uncommitted changes (staged, unstaged, untracked) in a
    * worktree, relative to the worktree root. Used to decide whether a stopped
@@ -949,6 +949,8 @@ export const defaultGitOps: GitOps = {
       "-c", `user.name=${(await readConfig("user.name")) ?? "uh team worker"}`,
       "commit", "-m", message,
     ], cwd);
+    // The id of the commit just made, so the team state can name the one commit that is the harness's.
+    return (await runGit(["rev-parse", "HEAD"], cwd)).stdout.trim();
   },
   async dirtyPaths(cwd) {
     // `--porcelain=v1 -z` keeps the output stable across git versions and locales and leaves every name unquoted,
@@ -1694,7 +1696,11 @@ export async function runTeamMission(
       let commitErr: string | null = null;
       if (status === "succeeded") {
         try {
-          await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths, forcePaths);
+          const committed = await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths, forcePaths);
+          if (typeof committed === "string" && /^[0-9a-f]{40}$/.test(committed)) {
+            canonicalWorker.commit = committed;
+            await persistState();
+          }
         } catch (err) {
           commitErr = formatGitError(err);
         }
@@ -2008,6 +2014,7 @@ async function evaluateWorkerSalvage(args: {
   const eligible = stagePaths.length > 0 || (forcePaths?.length ?? 0) > 0;
   let outputsPassed = false;
   let checksPassed = false;
+  let salvageCommit: string | undefined;
   if (eligible) {
     outputsPassed = true;
     for (const outputPath of args.expectedOutputs ?? []) {
@@ -2024,13 +2031,14 @@ async function evaluateWorkerSalvage(args: {
     }
     if (outputsPassed && checksPassed) {
       try {
-        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`, stagePaths, forcePaths);
+        const committed = await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`, stagePaths, forcePaths);
+        if (typeof committed === "string" && /^[0-9a-f]{40}$/.test(committed)) salvageCommit = committed;
       } catch { /* best-effort: the record still points at the branch for a human */ }
     }
   }
   return {
     stopCode,
-    record: { eligible, outputs_passed: outputsPassed, checks_passed: checksPassed, branch: args.branch },
+    record: { eligible, outputs_passed: outputsPassed, checks_passed: checksPassed, branch: args.branch, ...(salvageCommit ? { commit: salvageCommit } : {}) },
     ...(outOfRoots ? { outOfRoots } : {}),
   };
 }

@@ -399,11 +399,13 @@ describe("team salvage — real git (smoke)", () => {
     });
 
     const backend = result.workers[0];
+    // The record names the commit the harness made, which `no_worker_commits` later accepts as the harness's own.
     expect(backend.salvage).toEqual({
       eligible: true,
       outputs_passed: true,
       checks_passed: true,
       branch: backend.plan.branch,
+      commit: (await git(ROOT, ["rev-parse", backend.plan.branch])).trim(),
     });
 
     // The default gitOps committed exactly the worker's own change, observed

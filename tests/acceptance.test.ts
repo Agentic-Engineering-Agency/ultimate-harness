@@ -864,6 +864,28 @@ describe("acceptance invariants", () => {
     expect((observed as string[]).length).toBe(1);
   });
 
+  test("no_worker_commits accepts exactly the commit the harness recorded, not any commit with the harness subject (#263)", async () => {
+    const { runRoot, missionRoot, worktree } = await workerFixture("m2c");
+    await writeFile(path.join(worktree, "out.txt"), "work\n", "utf8");
+    git(worktree, ["add", "-A"]);
+    // A worker forges the subject the harness writes.
+    git(worktree, ["-c", "user.email=worker@test.local", "-c", "user.name=worker", "commit", "--quiet", "-m", "team(worker-a): worker run"]);
+    const forged = git(worktree, ["rev-parse", "HEAD"]).trim();
+    const runDir = path.join(missionRoot, "runs", "run-1");
+    await mkdir(runDir, { recursive: true });
+    const expected: AcceptanceExpected = { status: "passed", invariants: ["no_worker_commits"] };
+
+    // The team state names a different commit as the harness's own: the forged one is flagged.
+    await writeFile(path.join(runDir, "team-state.json"), JSON.stringify({ workers: [{ id: "worker-a", commit: "0".repeat(40) }] }), "utf8");
+    const flagged = (await evaluateAcceptanceInvariants(runRoot, "m2c", expected)).no_worker_commits;
+    expect(Array.isArray(flagged)).toBe(true);
+    expect((flagged as string[]).some((line) => line.includes("worker@test.local"))).toBe(true);
+
+    // When the state records this very commit, it is the harness's.
+    await writeFile(path.join(runDir, "team-state.json"), JSON.stringify({ workers: [{ id: "worker-a", commit: forged }] }), "utf8");
+    expect((await evaluateAcceptanceInvariants(runRoot, "m2c", expected)).no_worker_commits).toBe(true);
+  });
+
   test("no_package_install flags a node_modules directory and an appeared lockfile", async () => {
     const { runRoot, worktree } = await workerFixture("m3");
     const expected: AcceptanceExpected = { status: "passed", invariants: ["no_package_install"] };
