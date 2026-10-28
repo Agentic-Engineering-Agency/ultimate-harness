@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { settleOnSignal } from "./harness/cancel-on-signal.js";
+import { ownerOnlyRefusal } from "./harness/owner-only.js";
 import { prepareIndependentReview, collectIndependentReview, retireIndependentReviewWorkspace } from "./harness/independent-review.js";
 import { Command } from "commander";
 import { z } from "zod";
@@ -51,6 +52,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { readFile as readFileAsync, writeFile as writeFileAsync, readdir, mkdir } from "node:fs/promises";
 import { exitCodeForRun } from "./harness/exit-codes.js";
+import { drainNotifications, elapsedMs, notifyRunSettled } from "./harness/notifications.js";
 import { indexRuns, summarizeRuns, paretoFrontier } from "./harness/experience-store.js";
 import { BEST_OF_N_CAP, MIN_ARM_RUNS, attemptsToMatch, bestOfN, compareArms } from "./harness/run-comparison.js";
 import { exportRunToOtlp, type OtlpTraceExport } from "./harness/otel-export.js";
@@ -300,6 +302,21 @@ async function installRuntimeCancelledEventHandler(
 }
 
 const program = new Command();
+// `uh ledger confirm` is the owner's: refuse it, before any command logic, in a guarded worker or with no terminal.
+program.hook("preAction", (_command, action) => {
+  const names: string[] = [];
+  for (let current: Command | null = action; current?.parent; current = current.parent) names.unshift(current.name());
+  const refusal = ownerOnlyRefusal(process.env, names, Boolean(process.stdin.isTTY && process.stdout.isTTY));
+  if (refusal) {
+    console.error(`[BLOCKED] ${refusal}`);
+    process.exit(exitCodeForRun("blocked"));
+  }
+});
+/** Let settlement notifications still being delivered finish (bounded), then exit: `process.exit` straight after a fire-and-forget delivery drops it. */
+async function exitDelivered(code: number): Promise<never> {
+  await drainNotifications();
+  return process.exit(code);
+}
 
 program
   .name("uh")
@@ -530,7 +547,7 @@ program
       } else {
         console.log(formatLiveRuns(records));
       }
-      process.exit(liveRunsExitCode(records));
+      await exitDelivered(liveRunsExitCode(records));
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
@@ -576,7 +593,7 @@ program
       });
       if (opts.json) console.log(JSON.stringify(report, null, 2));
       else console.log(formatKillReport(report));
-      process.exit(report.exit_code);
+      await exitDelivered(report.exit_code);
     } catch (err) {
       console.error(`[FAIL] kill error:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -652,7 +669,7 @@ program
       });
       if (opts.json) console.log(JSON.stringify(report, null, 2));
       else console.log(formatWaitReport(report));
-      process.exit(report.exit_code);
+      await exitDelivered(report.exit_code);
     } catch (err) {
       const code = (err as { code?: string }).code;
       console.error(`[FAIL] wait error:`);
@@ -2754,7 +2771,16 @@ missionCmd
       run_dir: relativeRunDir,
     };
     console.log(`UH_RESULT ${JSON.stringify(settlementPayload)}`);
-    process.exit(runExitCode);
+    // A run that settles normally announces itself, and the announcement finishes before the process exits.
+    notifyRunSettled(root, {
+      run_id: finalRunId,
+      mission: missionId,
+      runtime,
+      status,
+      ...(finalStopCode ? { stop_code: finalStopCode } : {}),
+      run_dir: path.resolve(root, relativeRunDir),
+    });
+    await exitDelivered(runExitCode);
   });
 
 missionCmd
@@ -3009,7 +3035,7 @@ missionCmd
         : result.status === "blocked"
           ? 2
           : 1;
-      process.exit(exit);
+      await exitDelivered(exit);
     } catch (err) {
       console.error(`[FAIL] mission run-team error:`);
       console.error(`  error: ${(err as Error).message}`);

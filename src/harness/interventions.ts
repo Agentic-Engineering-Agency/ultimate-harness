@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -49,17 +49,25 @@ export function interventionsPath(root: string): string {
 
 /**
  * The project root that owns `.harness` for a run directory. A run lives at
- * `<root>/.harness/missions/<m>/runs/<r>`, and a team worker's run may live
- * under a nested artifact root, so this walks up to the nearest `.harness`
- * ancestor rather than counting levels. With no such ancestor the directory
- * itself is returned, and the capture is simply best-effort.
+ * `<root>/.harness/missions/<m>/runs/<r>`, and a team worker's run lives under a
+ * nested artifact root with a `.harness` of its own, so the nearest `.harness`
+ * is not the project's. The owner is the outermost `.harness` ancestor whose
+ * parent holds a `.harness/project.yaml`; with none of those, the nearest
+ * `.harness` ancestor. With no `.harness` ancestor at all the directory itself
+ * is returned, and the capture is simply best-effort.
  */
 export function harnessRootFor(runDir: string): string {
   let current = path.resolve(runDir);
+  let nearest: string | undefined;
+  let project: string | undefined;
   for (;;) {
-    if (path.basename(current) === ".harness") return path.dirname(current);
+    if (path.basename(current) === ".harness") {
+      const owner = path.dirname(current);
+      nearest ??= owner;
+      if (existsSync(path.join(current, "project.yaml"))) project = owner;
+    }
     const parent = path.dirname(current);
-    if (parent === current) return path.resolve(runDir);
+    if (parent === current) return project ?? nearest ?? path.resolve(runDir);
     current = parent;
   }
 }
