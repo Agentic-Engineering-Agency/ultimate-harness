@@ -355,6 +355,14 @@ export async function verifyMission(root: string, missionId: string, options: Ve
   });
   const tamper = await readRunControlPolicyStop(effectiveRoot, missionId);
 
+  // The deterministic failure the harness already established, passed into the
+  // evaluation explicitly rather than folded into `criteria`: a failed or
+  // blocked required check, a failed acceptance check, or an overall failed
+  // status. A provider judging no criterion can never override it.
+  const deterministicFailure = status === "failed"
+    || requiredCheckEvidence.some((evidence) => evidence.status !== "passed")
+    || acceptanceResults.some((result) => result.status === "failed");
+
   await recordAcceptanceDecision({
     missionDir, missionId, consumer: "verification", from: status,
     state: {
@@ -374,14 +382,15 @@ export async function verifyMission(root: string, missionId: string, options: Ve
       },
       criteria,
       tamper,
+      deterministicFailure,
     },
     prompt: "Assess consistency of the verification disposition with the supplied check and acceptance summaries. Raw outputs and source diffs are not included; do not infer that unreported checks or scope protections passed.",
     apply: gate => {
       const blocked = gate.tamper || gate.verdict === "needs-remediation";
-      findings.push({
-        severity: blocked ? "error" : "warning",
-        message: `TypeSafe System One verdict: ${gate.verdict}${gate.tamper ? " (tamper detected)" : ""}`,
-      });
+      const message = gate.criteria_judged === 0
+        ? `TypeSafe System One: no non-deterministic criteria to judge${gate.tamper ? " (tamper detected)" : ""}`
+        : `TypeSafe System One verdict: ${gate.verdict}${gate.tamper ? " (tamper detected)" : ""}`;
+      findings.push({ severity: blocked ? "error" : "warning", message });
       if (blocked) status = "failed";
       return status;
     },

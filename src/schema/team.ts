@@ -92,6 +92,8 @@ export const CanonicalTeamStateSchema = z.object({
   integration_report_path: z.string().min(1),
   verification_status: z.enum(["passed", "failed", "blocked", "waived"]).nullable(),
   admission_blocked_reason: z.string().min(1).optional(),
+  /** Waves admitted despite unknown completed cost, one explicit note each. */
+  admission_notes: z.array(z.string().min(1)).optional(),
   leader: CanonicalTeamLeaderSchema,
   workers: z.array(CanonicalTeamWorkerSchema),
 }).strict();

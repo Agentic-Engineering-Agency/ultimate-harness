@@ -526,7 +526,7 @@ Independent review packets assess completed work without modifying source files.
 uh mission review-prepare <review-id> --sources '[{"missionId":"<mission-id>"}]' --runtime <runtime> --model <model>
 uh mission review-collect <review-id>
 ```
-- What it writes: `review-collect` validates hashes and writes `review-assessment.json` in the review mission directory.
+- What it writes: `review-collect` validates hashes and writes `review-assessment.json` in the review mission directory, keeps the reviewer's report there as `review-report.json`, and discards the review sandbox unless `--keep-workspace` is passed.
 - Decision boundary: `review-assessment.json` always records `human_acceptance_required: true`. It is purely advisory. It never grants human acceptance, never records an owner verdict, and never promotes source work. An orchestrator must independently review findings and execute `uh mission verdict` or `uh promote`.
 
 ### 4. Cancellation
@@ -669,6 +669,7 @@ Every command and flag mentioned in this guide is verified against the built CLI
 | `uh mission review-collect` | `review-collect [options] <id>           Validate review provenance and evidence; never grants human acceptance or promotes source work` |
 | `uh mission review-collect <id>` | `id             Review mission id` |
 | `uh mission review-collect --root <path>` | `--root <path>  Canonical project root (default: cwd)` |
+| `uh mission review-collect --keep-workspace` | `--keep-workspace  Keep the review's sandbox after collecting (default: discard it)` |
 | `uh mission create` | `create [options] <id>                   Create a scaffold mission packet` |
 | `uh mission create <id>` | `id                    Mission id` |
 | `uh mission create --title <title>` | `--title <title>       Mission title` |

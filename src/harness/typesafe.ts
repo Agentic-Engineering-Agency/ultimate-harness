@@ -105,6 +105,13 @@ export type SystemOneState = {
   criteria?: readonly SystemOneCriterion[];
   /** Deterministic tamper evidence owned by Tool Guard, protected paths and the captured diff. */
   tamper?: boolean;
+  /**
+   * Set when the caller already established a failure outside `criteria` — a
+   * failed or blocked required check, a failed acceptance check, or an overall
+   * failed verification status. Deterministic, never a provider answer, and
+   * authoritative even when no criterion is asked of the provider.
+   */
+  deterministicFailure?: boolean;
 };
 
 export type EvaluateSystemOneOptions = {
@@ -293,8 +300,17 @@ export type ThreeVerdict = "pass" | "needs-attention" | "needs-remediation";
 export type ThreeVerdictResult = {
   kind: "ok";
   verdict: ThreeVerdict;
+  /**
+   * The minimum distance from the midpoint across the asked criterion Nouls,
+   * scaled to `[0,1]`. Zero when no criterion was asked: a judgment over no
+   * criterion carries no discriminating signal.
+   */
   confidence: number;
   tamper: boolean;
+  /** The number of non-deterministic criteria the provider was actually asked to judge. */
+  criteria_judged: number;
+  /** The caller-supplied or criteria-derived deterministic failure this verdict was composed over. */
+  deterministic_failure: boolean;
   /** The versioned model id that answered; thresholds are only valid for that version. */
   model: string;
   latency_ms: number;
@@ -357,15 +373,21 @@ export function composeThreeVerdict(input: {
   if (input.deterministicFailure || input.criterionNouls.some((noul) => noul < REMEDIATION_THRESHOLD)) {
     return "needs-remediation";
   }
+  // A verdict over no criterion is never a pass: `every` is vacuously true for
+  // an empty list, so an unjudged criterion set must fall through to a
+  // non-discriminating, non-passing outcome.
+  if (input.criterionNouls.length === 0) return "needs-attention";
   if (input.reportNouls.some((noul) => noul >= REPORT_FLAG_THRESHOLD)) return "needs-attention";
   return input.criterionNouls.every((noul) => noul >= PASS_THRESHOLD) ? "pass" : "needs-attention";
 }
 
 /**
  * Atomic three-verdict evaluation. Deterministic facts (a check that passed or
- * failed, tamper) are never asked of the model; the model answers one Noul per
- * remaining criterion plus the fixed report battery, and the verdict is
- * composed in code from those answers and the deterministic state.
+ * failed, a caller-established failure, tamper) are never asked of the model;
+ * the model answers one Noul per remaining criterion plus the fixed report
+ * battery, and the verdict is composed in code from those answers and the
+ * deterministic state. When no non-deterministic criterion remains the verdict
+ * is non-discriminating: it is never `pass` and `confidence` is zero.
  */
 export async function evaluateThreeVerdict(
   state: SystemOneState,
@@ -405,22 +427,30 @@ export async function evaluateThreeVerdict(
   });
   if (response.kind !== "ok") return response;
 
+  // Deterministic failure is the caller's established facts OR a criterion the
+  // state already records as failed. It is authoritative even when no
+  // non-deterministic criterion is asked, so a failed required check or a
+  // failed acceptance criterion can never be overridden by an empty criterion set.
+  const deterministicFailure = state.deterministicFailure === true || criteria.some(hasDeterministicFailure);
+
   // The envelope guarantees an answer for every asked question; an abstention
   // default keeps an unexpected gap from reading as a positive signal.
   const noulOf = (name: string): number => response.answers[name]?.noul ?? 0.5;
   const criterionNouls = asked.map(({ path }) => noulOf(path));
   const reportNouls = REPORT_QUESTION_NAMES.map((name) => noulOf(name));
-  const askedNouls = [...criterionNouls, ...reportNouls];
 
   return {
     kind: "ok",
-    verdict: composeThreeVerdict({
-      deterministicFailure: criteria.some(hasDeterministicFailure),
-      criterionNouls,
-      reportNouls,
-    }),
-    confidence: askedNouls.length === 0 ? 0 : Math.min(...askedNouls.map((noul) => Math.abs(noul - 0.5))) * 2,
+    verdict: composeThreeVerdict({ deterministicFailure, criterionNouls, reportNouls }),
+    // Confidence measures how discriminating the answers about the criteria
+    // were. Report answers never raise it: three low report answers cannot
+    // lend confidence to a verdict that judged no criterion.
+    confidence: criterionNouls.length === 0
+      ? 0
+      : Math.min(...criterionNouls.map((noul) => Math.abs(noul - 0.5))) * 2,
     tamper: state.tamper === true,
+    criteria_judged: criterionNouls.length,
+    deterministic_failure: deterministicFailure,
     model: response.model,
     latency_ms: response.latency_ms,
     ...(response.usage ? { usage: response.usage } : {}),

@@ -18,11 +18,23 @@ done
 
 `R10-stall-cmdc` is fixture-only and prints `FIXTURE` without running; `G2-cmdc` hits its denial budget through real guard denials, and `S3-unknown-cost-cmdc` strips runtime usage through `acceptance/support/costless-wrapper-cmdc.mjs` so admission is refused on unknown cost.
 
-Inspect results with `uh acceptance status --json`, then generate a local report with `uh acceptance report`. Canonical runtime artifacts are stored in the selected workspace; generated evidence is written under ignored `acceptance/evidence/<capability>/`. Keep execution records in private local or CI storage, not in the public source repository.
+Inspect results with `uh acceptance status --json`, then generate a local report with `uh acceptance report`. Revalidate legacy evidence without rerunning any model with `uh acceptance rebind` (see below). Canonical runtime artifacts are stored in the selected workspace; generated evidence is written under ignored `acceptance/evidence/<capability>/`. Keep execution records in private local or CI storage, not in the public source repository.
 
 Evidence records include actual `fact_sources`; registry `expected.fact_sources` selects each field from the first or last sorted attempt and is not itself compared. A capability without fresh passing real-runtime evidence is **unproven**, whatever the test suite or fixture smoke says. A failed real run is retained as failed evidence; expectations must not be changed merely to make a run pass.
 
 Run the campaign at one harness commit before evaluating freshness. The report drift check compares the registry and available local evidence with the generated report. A clean checkout ships no local execution records, so its report does not claim live proof. Fixture-only capabilities render `fixture_only` without real evidence; attempted fixture missions retain their actual outcome. Review any generated report before publication: local run identifiers, timestamps, paths, transcripts and account information are not public documentation.
+
+## Input identity freshness
+
+Evidence freshness is tied to the files a probe asserts, not to the harness commit. Each registry entry declares `inputs` (repository-relative glob patterns); when absent the runner falls back to the conservative default of the entry's own mission directory under `acceptance/missions/`, `acceptance/support/**`, and `src/**`. Do not include `src/cli.ts` unless the probe asserts CLI behaviour; each entry's `notes` say why its list is sufficient. When evidence is written, the runner records:
+
+- `input_digest` — sha256 over the sorted `(relative path, sha256 of content)` list of every tracked file matching the entry's inputs, plus the runtime id, the runtime version when known, and the model. Line endings are normalized (CRLF to LF) so a commit blob and a checked-out working-tree file hash identically.
+- `inputs_resolved` — the number of files that matched.
+- `harness_commit` — retained as provenance only; it no longer drives freshness while `input_digest` is present.
+
+`uh acceptance status` classifies evidence with an `input_digest` as `stale` only when the current digest differs or the `freshness_days` age limit is exceeded, and names up to five changed input files as the reason. Evidence without an `input_digest` (written before this field existed) keeps the commit rule: it is stale when `harness_commit` differs from the current commit or the age limit is exceeded.
+
+`uh acceptance rebind` revalidates legacy evidence without rerunning any model: for each record without an `input_digest` it computes the digest at the record's `harness_commit` (reading contents with `git show <commit>:<path>`) and at HEAD, and when the two are equal stamps `input_digest` and `rebound_from_commit` into the record. It prints one line per record — `rebound`, `changed` (with the changed files), or `skipped` (with the reason).
 
 ## Campaign runtime snapshot and CLI outcome
 

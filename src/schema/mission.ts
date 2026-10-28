@@ -49,6 +49,13 @@ const DEFAULT_TEST_PATHS = [
   "**/*.spec.jsx",
   "**/__tests__/**",
 ];
+/**
+ * A single capability tag. Free-form, open string (NOT a closed enum): any
+ * label that matches the regex is accepted, and `:` is permitted so callers can
+ * namespace MCP-style tags (e.g. `mcp:playwright`). Capabilities are matched by
+ * set-containment against the resolved adapter manifest's declared
+ * `capabilities` (`adapter.document.capabilities`, also an open string[]).
+ */
 const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, {
   message: "Capability id must start with [A-Za-z0-9] and use only [A-Za-z0-9._:-]",
 });
@@ -132,6 +139,17 @@ export const DecisionPolicySchema = z.object({
   fallback_model: z.string().min(1).optional(),
 }).strict();
 
+/**
+ * Optional governed runtime switches. `loop_watchdog` selects whether the
+ * shadow loop observer records advisory receipts for a run (`shadow`, the
+ * default) or records nothing at all (`off`). Additive and strict: a legacy
+ * mission that omits it keeps the shadow default.
+ */
+export const RuntimeConfigSchema = z.object({
+  loop_watchdog: z.enum(["shadow", "off"]).default("shadow"),
+}).strict();
+export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
+
 const MissionInputSchema = z.object({
   schema_version: z.literal("uh.mission.v0"),
   id: z.string().min(1),
@@ -142,6 +160,8 @@ const MissionInputSchema = z.object({
   workflow_profile: z.string().min(1),
   priority: z.string().optional(),
   objective: z.string().optional().default(""),
+  /** Governed runtime switches. Additive and strict; absent means the defaults apply. */
+  runtime_config: RuntimeConfigSchema.optional(),
   context: z.object({
     repo_root: z.string().optional(),
     read_first: z.array(z.string()).optional().default([]),
@@ -158,6 +178,15 @@ const MissionInputSchema = z.object({
   completion_criteria: z.array(z.string()).optional().default([]),
   acceptance_criteria: z.array(AcceptanceCriterionSchema).optional().default([]),
   tdd: TddOptionsSchema.optional(),
+  /**
+   * Open string[] of free-form capability tags, matched by set-containment
+   * against the resolved adapter manifest's declared capabilities. Enforced
+   * WARN-by-default at `run` / `dry-run` / `run-all` preflight (a `[WARN]` line
+   * per unmet tag, then the run proceeds); `--strict` escalates each mismatch
+   * to a hard error; `--force` bypasses the check entirely. DISTINCT from
+   * `runtime_requirements` below, which are typed, hard preconditions that are
+   * ALWAYS errors (never relaxed by warn mode) and gate `--auto` routing.
+   */
   capabilities: z.array(CapabilitySchema).optional().default([]),
   runtime_requirements: RuntimeRequirementsSchema.optional(),
   decision_policy: DecisionPolicySchema.optional(),

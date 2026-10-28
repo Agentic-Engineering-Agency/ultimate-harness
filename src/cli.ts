@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { prepareIndependentReview, collectIndependentReview } from "./harness/independent-review.js";
+import { prepareIndependentReview, collectIndependentReview, retireIndependentReviewWorkspace } from "./harness/independent-review.js";
 import { Command } from "commander";
 import { z } from "zod";
 import type { RuntimeLimits } from "./schema/runtime-control.js";
@@ -24,7 +24,7 @@ import { dryRunAnthropic, runAnthropic } from "./adapters/anthropic.js";
 import { dryRunPi, runPi } from "./adapters/pi.js";
 import { dryRunAcp, runAcp } from "./adapters/acp.js";
 import { runtimeRegistry } from "./harness/registry.js";
-import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
+import { enforceCapabilities, formatCapabilityBypassLine, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
 import { assertFleetAdmission, loadFleetPolicy, authorizedFleetAdapters } from "./harness/fleet-policy.js";
 import { chooseAdapter, chooseSemanticRoute, formatAutoRouteExplain, formatSemanticRouteSummary, type SemanticRouteDecision } from "./harness/auto-route.js";
@@ -54,13 +54,14 @@ import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js"
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 import { installTelemetryHooks } from "./harness/telemetry.js";
 import { projectDeliveryObservatory } from "./harness/delivery-observatory/project.js";
-import { acceptanceStatus, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
+import { acceptanceStatus, rebindAcceptanceEvidence, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
 
 import {
   createSandbox,
   discardSandbox,
   getSandboxStatus,
   listSandboxes,
+  repairSandboxes,
 } from "./harness/sandbox.js";
 import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
@@ -143,14 +144,9 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
 };
 
 
-async function enforceRuntimeCapabilities(
-  root: string,
-  missionPath: string,
-  runtime: string,
-  force: boolean,
-): Promise<void> {
-  if (force) return;
-  await assertRuntimeCapabilities(root, missionPath, runtime);
+interface PreflightOptions {
+  force: boolean;
+  strict: boolean;
 }
 
 /** Preflight after runtime is chosen (`--runtime` or post `--auto` routing). */
@@ -158,10 +154,15 @@ async function enforceRuntimePreflight(
   root: string,
   missionPath: string,
   runtime: string,
-  force: boolean,
+  { force, strict }: PreflightOptions,
 ): Promise<void> {
-  if (force) return;
-  await enforceRuntimeCapabilities(root, missionPath, runtime, false);
+  if (force) {
+    // --force bypasses BOTH the capability check and runtime_requirements.
+    const mission = await loadMissionFile(missionPath);
+    console.error(formatCapabilityBypassLine(mission.id, runtime));
+    return;
+  }
+  await enforceCapabilities(root, missionPath, runtime, strict ? "error" : "warn");
   await assertRuntimeRequirements(missionPath, runtime);
 }
 
@@ -688,9 +689,30 @@ acceptanceCmd
     try {
       const summary = await acceptanceStatus(resolveRoot(opts.root));
       if (opts.json) console.log(JSON.stringify(summary, null, 2));
-      else console.log(`Acceptance evidence: proven ${summary.counts.proven}, stale ${summary.counts.stale}, failed ${summary.counts.failed}, unproven ${summary.counts.unproven}, fixture_only ${summary.counts.fixture_only}`);
+      else {
+        console.log(`Acceptance evidence: proven ${summary.counts.proven}, stale ${summary.counts.stale}, failed ${summary.counts.failed}, unproven ${summary.counts.unproven}, fixture_only ${summary.counts.fixture_only}`);
+        for (const [capability, reasons] of Object.entries(summary.reasons)) {
+          console.log(`  stale ${capability}: ${reasons.join(", ")}`);
+        }
+      }
     } catch (error) {
       console.error(`[FAIL] acceptance status: ${(error as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+acceptanceCmd
+  .command("rebind")
+  .description("Revalidate legacy evidence without rerunning models by stamping an input digest at its commit")
+  .option("--root <path>", "Harness repository root (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    try {
+      const outcomes = await rebindAcceptanceEvidence(resolveRoot(opts.root));
+      const summary = { rebound: 0, changed: 0, skipped: 0 } as Record<"rebound" | "changed" | "skipped", number>;
+      for (const outcome of outcomes) summary[outcome.outcome] += 1;
+      console.log(`Acceptance rebind: ${summary.rebound} rebound, ${summary.changed} changed, ${summary.skipped} skipped`);
+    } catch (error) {
+      console.error(`[FAIL] acceptance rebind: ${(error as Error).message}`);
       process.exit(1);
     }
   });
@@ -1755,7 +1777,9 @@ missionCmd.command("review-prepare")
     try {
       const sources = z.array(z.object({ missionId: z.string().min(1), workspaceRoot: z.string().min(1).optional() }).strict()).min(1).parse(JSON.parse(opts.sources));
       const runtime = z.enum(["oh-my-pi", "command-code", "claude-code"]).parse(opts.runtime);
-      console.log(JSON.stringify(await prepareIndependentReview(resolveRoot(opts.root), { id, sources, runtime, model: opts.model, workflow: opts.workflow }), null, 2));
+      const prepared = await prepareIndependentReview(resolveRoot(opts.root), { id, sources, runtime, model: opts.model, workflow: opts.workflow });
+      console.log(JSON.stringify(prepared, null, 2));
+      console.log(`Report: ${prepared.reportPath} (relative to the review workspace; the reviewer writes it inside the review sandbox)`);
     } catch (error) {
       console.error(`[FAIL] mission review-prepare: ${(error as Error).message}`);
       process.exitCode = 1;
@@ -1766,9 +1790,28 @@ missionCmd.command("review-collect")
   .description("Validate review provenance and evidence; never grants human acceptance or promotes source work")
   .argument("<id>", "Review mission id")
   .option("--root <path>", "Canonical project root (default: cwd)")
-  .action(async (id: string, opts: { root?: string }) => {
+  .option("--keep-workspace", "Keep the review's sandbox after collecting (default: discard it)")
+  .action(async (id: string, opts: { root?: string; keepWorkspace?: boolean }) => {
     try {
-      console.log(JSON.stringify(await collectIndependentReview(resolveRoot(opts.root), id), null, 2));
+      const root = resolveRoot(opts.root);
+      const assessment = await collectIndependentReview(root, id);
+      console.log(JSON.stringify(assessment, null, 2));
+      if (!opts.keepWorkspace) {
+        try {
+          const discarded = await retireIndependentReviewWorkspace(root, id);
+          if (discarded) console.log(`Review workspace ${discarded} discarded; the reviewer's report is kept at .harness/missions/${id}/review-report.json.`);
+        } catch (error) {
+          console.error(`[WARN] mission review-collect: review collected, but its workspace was not discarded: ${(error as Error).message}`);
+        }
+      }
+      const contradicted = (assessment.claims ?? []).filter(claim => claim.verdict === "contradicted");
+      const attention = (assessment.findings ?? []).filter(finding => finding.severity === "error" || finding.severity === "warning");
+      if (contradicted.length === 0 && attention.length === 0) {
+        console.log("No contradicted claims or warning/error findings.");
+        return;
+      }
+      for (const claim of contradicted) console.log(`Contradicted claim [${claim.source}]: ${claim.claim}`);
+      for (const finding of attention) console.log(`${finding.severity.toUpperCase()} finding [${finding.source}]: ${finding.detail}`);
     } catch (error) {
       console.error(`[FAIL] mission review-collect: ${(error as Error).message}`);
       process.exitCode = 1;
@@ -1931,7 +1974,8 @@ missionCmd
   .option("--runtime-config-overrides <json>", "JSON object of runtime_config overrides applied on top of the template and mission file")
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; template?: string; runtimeConfigOverrides?: string; auto?: boolean; explain?: boolean }) => {
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; template?: string; runtimeConfigOverrides?: string; auto?: boolean; explain?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -2016,7 +2060,7 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, { force: opts.force === true, strict: opts.strict === true });
     } catch (err) {
       console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -2080,7 +2124,8 @@ missionCmd
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
   .option("--quiet", "Do not print the runtime's stdout or stderr")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean }) => {
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -2161,7 +2206,7 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, { force: opts.force === true, strict: opts.strict === true });
     } catch (err) {
       console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -2428,7 +2473,8 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--serial", "Run runtimes sequentially instead of in parallel")
   .option("--force", "Bypass mission capability matching and runtime_requirements for selected runtimes")
-  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean }) => {
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const requested = opts.runtimes ? opts.runtimes.split(",").map((s) => s.trim()).filter(Boolean) : await resolveActiveRuntimes(root);
     if (requested.length === 0) {
@@ -2453,10 +2499,15 @@ missionCmd
         return;
       }
     }
-    if (opts.force !== true) {
+    if (opts.force === true) {
+      const mission = await loadMissionFile(canonicalMissionPath);
+      for (const rt of requested) {
+        console.error(formatCapabilityBypassLine(mission.id, rt));
+      }
+    } else {
       for (const rt of requested) {
         try {
-          await enforceRuntimePreflight(root, canonicalMissionPath, rt, false);
+          await enforceRuntimePreflight(root, canonicalMissionPath, rt, { force: false, strict: opts.strict === true });
         } catch (err) {
           console.error(`[BLOCKED] runtime preflight failed for ${rt}:`);
           console.error(`  error: ${(err as Error).message}`);
@@ -2736,6 +2787,35 @@ sandboxCmd
       }
     } catch (err) {
       console.error(`[FAIL] sandbox discard error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("repair")
+  .description("Re-register sandbox directories whose index entry is missing")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const repaired = await repairSandboxes(root);
+      if (repaired.length === 0) {
+        console.log("No sandbox registrations repaired.");
+        return;
+      }
+      for (const entry of repaired) {
+        console.log(`[REPAIRED] ${entry.id}`);
+        console.log(`  mission: ${entry.mission_id}`);
+        console.log(`  backend: ${entry.backend}`);
+        if (entry.branch) {
+          console.log(`  branch: ${entry.branch}`);
+        }
+        console.log(`  path: ${entry.path}`);
+        console.log(`  status: ${entry.status}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox repair error:`);
       console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }

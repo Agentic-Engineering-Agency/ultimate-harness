@@ -44,6 +44,8 @@ Notes:
 6. Each source mission, each acceptance criterion id, and each required check id is covered exactly once. Invented ids are rejected.
 7. Missing or invalid review inputs require a `needs-remediation` verdict for that source, and unverified or contradicted evidence cannot receive `pass`.
 
+After writing the assessment, `review-collect` copies the reviewer's report to `.harness/missions/<review-id>/review-report.json` and discards the review sandbox, so review workspaces do not accumulate. Pass `--keep-workspace` to keep the sandbox for inspection; collecting the same review again needs its sandbox.
+
 The written assessment records the recommendation with `human_acceptance_required: true`. A `pass` recommendation still requires a human promotion decision on the source missions; it proves the report was evidence-backed and produced in a sandbox that could only write the report. It does not prove model intelligence or prompt compliance — the reviewer model's judgment is not validated by the harness.
 
 ## The observations outlet

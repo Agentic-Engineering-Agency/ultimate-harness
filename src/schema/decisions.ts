@@ -27,7 +27,7 @@ export const DecisionProviderStatusSchema = z.enum([
   "uncertain",
 ]);
 
-export const DecisionAuthorizerSchema = z.enum(["none", "deterministic", "jev", "human"]);
+export const DecisionAuthorizerSchema = z.enum(["none", "deterministic", "jev", "human", "shadow"]);
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/, "must be a lowercase SHA-256 digest");
 
@@ -55,6 +55,23 @@ export const ReviewEscalationRecommendationSchema = z.object({
 export const RetryStopRecommendationSchema = z.object({
   kind: z.literal("retry-stop"),
   outcome: z.enum(["retry", "stop", "defer"]),
+}).strict();
+
+/** The provider outcome kinds the shadow loop watchdog may record. */
+export const LoopWatchdogOutcomeSchema = z.enum(["ok", "disabled", "unavailable", "malformed"]);
+
+/** The deterministic, model-free loop signals recorded alongside an evaluation. */
+export const LoopWatchdogSignalsSchema = z.object({
+  identical_repeats: z.number().int().nonnegative(),
+  alternating_pairs: z.number().int().nonnegative(),
+  distinct_targets: z.number().int().nonnegative(),
+}).strict();
+
+/** One typed provider answer, reduced to the fields the probe is allowed to publish. */
+export const LoopWatchdogAnswerSchema = z.object({
+  noul: z.number().min(0).max(1).optional(),
+  choice: z.string().optional(),
+  probabilities: z.record(z.string(), z.number().min(0).max(1)).optional(),
 }).strict();
 
 export const DecisionRecommendationSchema = z.discriminatedUnion("kind", [
@@ -102,6 +119,10 @@ export const DecisionReceiptSchema = z.object({
   reason: z.string().min(1).max(500),
   state_transition: DecisionStateTransitionSchema,
   created_at: z.string().datetime({ offset: true }),
+  /** Shadow loop-watchdog fields. Optional and strict: existing records are unchanged. */
+  loop_signals: LoopWatchdogSignalsSchema.optional(),
+  provider_outcome: LoopWatchdogOutcomeSchema.optional(),
+  answers: z.record(z.string(), LoopWatchdogAnswerSchema).optional(),
 }).strict();
 
 export type DecisionKind = z.infer<typeof DecisionKindSchema>;
@@ -111,6 +132,9 @@ export type DecisionAuthorizer = z.infer<typeof DecisionAuthorizerSchema>;
 export type DecisionRecommendation = z.infer<typeof DecisionRecommendationSchema>;
 export type DecisionReceipt = z.infer<typeof DecisionReceiptSchema>;
 export type DecisionProvider = z.infer<typeof DecisionProviderSchema>;
+export type LoopWatchdogOutcome = z.infer<typeof LoopWatchdogOutcomeSchema>;
+export type LoopWatchdogSignals = z.infer<typeof LoopWatchdogSignalsSchema>;
+export type LoopWatchdogAnswer = z.infer<typeof LoopWatchdogAnswerSchema>;
 
 export function validateDecisionReceipt(data: unknown): DecisionReceipt {
   return DecisionReceiptSchema.parse(data);

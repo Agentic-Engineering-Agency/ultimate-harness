@@ -99,3 +99,26 @@ test("posix filesystem root write root allows subpaths", () => {
   const posixPolicy = { ...resolveToolGuardPolicy({ write_roots: ["."] }), protected_paths: [] };
   expect(decideToolCall(posixPolicy, "write_file", { file_path: "/tmp/allowed.txt", content: "x" }, "/").deny).toBeUndefined();
 });
+
+describe("POSIX absolute paths are targets, not cmd.exe switches", () => {
+  const posixRoot = "/work/worker";
+  const posixPolicy = { ...resolveToolGuardPolicy({ write_roots: ["out"] }), protected_paths: [".harness", ".git"] };
+  const posix = (command: string) => decideToolCall(posixPolicy, "shell_command", { command }, posixRoot).deny;
+
+  test.each([
+    ["cp to an absolute path outside", "cp out/x /etc/cron.d/x", "write_outside", "/etc/cron.d/x"],
+    ["mv to an absolute path outside", "mv out/x /home/user/.bashrc", "write_outside", "/home/user/.bashrc"],
+    ["rm of an absolute path outside names it", "rm -rf /etc/important", "delete_outside", "/etc/important"],
+    ["rm of an absolute path in scope", "rm -rf /work/worker/out/tmp", undefined, undefined],
+    ["cp to an absolute path in scope", "cp notes.txt /work/worker/out/notes.txt", undefined, undefined],
+  ] as const)("%s", (_name, command, expected, target) => {
+    const deny = posix(command);
+    expect(deny?.class).toBe(expected);
+    if (target) expect(deny?.target).toBe(target);
+  });
+
+  test("cmd.exe switches are still switches", () => {
+    expect(decision("shell_command", { command: "rd /s /q out\\tmp" })).toBeUndefined();
+    expect(decision("shell_command", { command: "xcopy out\\a out\\b /E /Y" })).toBeUndefined();
+  });
+});

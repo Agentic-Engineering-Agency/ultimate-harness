@@ -42,3 +42,8 @@ __pycache__/
 /.claude/skills/gitnexus-impact-analysis/
 /.claude/skills/gitnexus-refactoring/
 /.harness/sandboxes/
+dist.next/
+dist.old/
+
+# Throwaway marker written by the examples/missions/hello-uh walkthrough.
+HELLO-UH.txt

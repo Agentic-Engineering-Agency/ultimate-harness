@@ -16,7 +16,7 @@ sandbox:
   promotion_policy: human-approved
 shape: team
 team:
-  resources: { max_parallel: 2, max_cost_usd: 10, worker_cost_reservation_usd: 1 }
+  resources: { max_parallel: 2, max_cost_usd: 10, worker_cost_reservation_usd: 1, unknown_cost: admit }
   workers:
     - adapter: command-code
       role: worker-a

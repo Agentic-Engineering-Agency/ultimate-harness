@@ -37,6 +37,13 @@ export const AcceptanceRegistryEntrySchema = z.object({
   expected: AcceptanceExpectedSchema,
   freshness_days: z.number().int().positive().default(30),
   notes: z.string().default(""),
+  /**
+   * Repository-relative glob patterns naming the files whose behaviour the
+   * probe asserts. When absent, evidence freshness falls back to a conservative
+   * default (the entry's own mission directory, `acceptance/support/**`, and
+   * `src/**`). See `acceptanceInputs` in `src/harness/acceptance.ts`.
+   */
+  inputs: z.array(RelativePathSchema).optional(),
 }).strict();
 export type AcceptanceRegistryEntry = z.infer<typeof AcceptanceRegistryEntrySchema>;
 
@@ -69,6 +76,17 @@ export const AcceptanceEvidenceSchema = z.object({
   fact_sources: z.record(z.string(), z.string().min(1)),
   mismatches: z.array(AcceptanceMismatchSchema),
   artifact_root: z.string().min(1),
+  /**
+   * sha256 over the sorted (relative path, content sha256) list of the entry's
+   * resolved inputs plus the runtime id, runtime version when known, and model.
+   * Stamped when evidence is written or rebound; when present it supersedes
+   * `harness_commit` for freshness (which is retained as provenance only).
+   */
+  input_digest: z.string().min(1).optional(),
+  /** Number of tracked files that matched the entry's inputs. */
+  inputs_resolved: z.number().int().nonnegative().optional(),
+  /** The legacy `harness_commit` a rebind revalidated this record against. */
+  rebound_from_commit: z.string().min(1).optional(),
 }).strict();
 export type AcceptanceEvidence = z.infer<typeof AcceptanceEvidenceSchema>;
 

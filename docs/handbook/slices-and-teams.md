@@ -94,10 +94,19 @@ Team workers run in resource-admitted waves. `team.resources` controls admission
 | `reserve_memory_mb` | Memory subtracted before calculating concurrency. Defaults to `1024` MB. |
 | `max_cost_usd` | Upper bound used to calculate remaining admission reservations. |
 | `worker_cost_reservation_usd` | Per-worker reservation charged to admission. Both cost fields are required together. |
+| `unknown_cost` | What an unknown completed worker cost does to the next wave: `block` (default) or `admit`. |
 
 The harness re-admits a wave only after every worker admitted to the prior wave settles. If memory admission cannot launch one worker, or remaining cost cannot reserve one worker, the remaining workers are marked `blocked` and the team records `admission_blocked_reason`; a team with that reason stays `blocked` in its final status.
 
-**The unknown-cost admission rule:** unknown or invalid completed cost — including unavailable accounting — blocks further paid admission. It is never treated as zero. Cost admission is a reservation control, not a provider charge cap: an in-flight worker can exceed its reservation, so this is not a guaranteed spending ceiling. A worker that was never invoked contributes nothing, because no runner ran for it.
+**The unknown-cost admission rule:** with the default `unknown_cost: block`, unknown or invalid completed cost — including unavailable accounting — blocks further paid admission. It is never treated as zero. Cost admission is a reservation control, not a provider charge cap: an in-flight worker can exceed its reservation, so this is not a guaranteed spending ceiling. A worker that was never invoked contributes nothing, because no runner ran for it.
+
+**Opting in with `unknown_cost: admit`:** fleets that cannot report price at all (Command Code reports usage but no provider cost) would otherwise deadlock on the first wave boundary, because a team with more workers than `max_parallel` can never finish. Setting `unknown_cost: admit` lets a later wave proceed when a completed worker's cost is unknown. It changes nothing else: known costs are still summed and still count against `max_cost_usd` exactly as before, unknown spend is still never recorded as zero, and unavailable accounting (a cost lookup that throws) still blocks. Every wave admitted while unknown spend is outstanding records an explicit admission note instead of assuming a number:
+
+```
+wave 2 admitted with unknown cost by policy unknown_cost=admit
+```
+
+Those notes are durable facts, not log noise. They land in `team-state.json` as `admission_notes[]` and in the integration report as `- Cost admission: <note>` lines, so a settlement or cost review can tell admitted-but-unpriced waves apart from waves whose cost was measured. A team with only notes and no `admission_blocked_reason` is not blocked by them.
 
 ## Salvage of stopped workers
 

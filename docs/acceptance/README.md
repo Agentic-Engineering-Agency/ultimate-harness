@@ -28,7 +28,7 @@
 | C1-missing-output | C1 | Missing worker output | unproven | — | oh-my-pi | — | — | — |
 | C1-missing-output-cmdc | C1 | Missing worker output | unproven | — | command-code | qwen/qwen3.8-flash | — | — |
 | S3-budget-exhausted | S3 | Exhausted team budget | unproven | — | oh-my-pi | — | — | — |
-| S3-budget-exhausted-cmdc | S3 | Exhausted team budget | unproven | — | command-code | qwen/qwen3.8-flash | — | — |
+| S3-budget-exhausted-cmdc | S3 | Exhausted team budget | fixture_only | — | command-code | qwen/qwen3.8-flash | — | — |
 | S3-unknown-cost | S3 | Unknown cost admission | unproven | — | oh-my-pi | — | — | — |
 | S3-unknown-cost-cmdc | S3 | Unknown cost admission | unproven | — | command-code | qwen/qwen3.8-flash | — | — |
 | R5-deep-path | R5 | Deep workspace path | unproven | — | oh-my-pi | — | — | — |

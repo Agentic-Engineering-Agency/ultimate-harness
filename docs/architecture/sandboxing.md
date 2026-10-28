@@ -14,6 +14,10 @@ Agent-generated work should happen in an isolated environment by default, then b
 6. **Promote** — apply approved outputs to canonical state.
 7. **Discard/archive** — preserve audit metadata and remove workspace if appropriate.
 
+## Index concurrency and repair
+
+The registry at `.harness/sandboxes/index.yaml` is shared mutable state: every `uh sandbox` command reads the whole document, edits it in memory, and writes it back, so without coordination two concurrent commands (e.g. three `uh sandbox create` started together) each read the same snapshot and the last writer silently discards the others' registrations. Every index mutation — create, discard, and repair — therefore goes through one serialized helper: it acquires an exclusive lock file beside the index (created with the exclusive flag, with a short bounded backoff so it never waits forever), breaks and records a lock that is older than a stale threshold and whose recorded owner process is gone, re-reads the index and applies exactly one change while holding the lock, writes the document atomically via write-then-rename, and releases the lock in a `finally` block. When a lost registration is already feared, `uh sandbox repair` re-registers each sandbox whose worktree exists under `.harness/sandboxes/<id>/worktree` but whose index entry is missing — recovering the bound mission from the worktree's seeded mission packet and reporting every repaired entry — while never touching a valid existing entry or a corrupt index.
+
 ## Git worktree backend
 
 Strengths:
