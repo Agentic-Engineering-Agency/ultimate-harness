@@ -201,11 +201,13 @@ mechanical requirements.
 
 ### Scope-change requests
 
-The CLI exposes `uh mission decision scope-change`. It hashes the requested
-scope and sends only bounded metadata to JEV. Every result is recorded as
-`awaiting-human` (or an explicit unavailable/malformed/uncertain/denied state)
-and `applied: false`; no mission packet, scope, allowlist, or budget changes.
-Human approval must occur through the existing authority surface.
+Not implemented as a command. The receipt schema has a `scope-change` kind, but the
+CLI has no `uh mission decision` command and nothing records one yet. When it is
+added it must hash the requested scope and send only bounded metadata to JEV,
+record every result as `awaiting-human` (or an explicit
+unavailable/malformed/uncertain/denied state) with `applied: false`, and change no
+mission packet, scope, allowlist, or budget; human approval stays with the
+existing authority surface.
 
 ### Retry/stop
 

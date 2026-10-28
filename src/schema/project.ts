@@ -77,7 +77,12 @@ export const NotificationPresetSinkSchema = z.object({
   topic: z.string().min(1).optional(),
   /** windows-toast only: the registered AppUserModelID the toast is raised under. */
   app_id: z.string().min(1).optional(),
-}).strict();
+}).strict().superRefine((sink, ctx) => {
+  // Only windows-toast reads `app_id`; on any other preset it would be silently ignored.
+  if (sink.app_id !== undefined && sink.preset !== "windows-toast") {
+    ctx.addIssue({ code: "custom", path: ["app_id"], message: `app_id is read only by the windows-toast preset, not ${sink.preset}` });
+  }
+});
 export type NotificationPresetSink = z.infer<typeof NotificationPresetSinkSchema>;
 
 export const NotificationSinkSchema = z.union([
