@@ -61,6 +61,9 @@ import { reconcileRuntimeResultControl } from "./runtime-settlement.js";
 import { elapsedMs, notifyTeamSettled } from "./notifications.js";
 import { getSessionTemplate } from "./session-templates.js";
 import { appendWorkerRules } from "./session-template-adoption.js";
+import { workerGuard } from "./guard-narrowing.js";
+import { assertStrictContainment } from "./session-templates.js";
+import type { ToolGuardFields } from "../schema/runtime-control.js";
 import type { SessionTemplate } from "../schema/session-template.js";
 const execFileP = promisify(execFile);
 
@@ -335,7 +338,7 @@ export interface GitOps {
    * `.gitignore` is the case that motivated it) and must be staged with
    * `git add -f`; only declared outputs ever reach it.
    */
-  commitAll: (cwd: string, message: string, stagePaths?: readonly string[], forcePaths?: readonly string[]) => Promise<void>;
+  commitAll: (cwd: string, message: string, stagePaths?: readonly string[], forcePaths?: readonly string[]) => Promise<string | void>;
   /**
    * List the paths with uncommitted changes (staged, unstaged, untracked) in a
    * worktree, relative to the worktree root. Used to decide whether a stopped
@@ -946,6 +949,8 @@ export const defaultGitOps: GitOps = {
       "-c", `user.name=${(await readConfig("user.name")) ?? "uh team worker"}`,
       "commit", "-m", message,
     ], cwd);
+    // The id of the commit just made, so the team state can name the one commit that is the harness's.
+    return (await runGit(["rev-parse", "HEAD"], cwd)).stdout.trim();
   },
   async dirtyPaths(cwd) {
     // `--porcelain=v1 -z` keeps the output stable across git versions and locales and leaves every name unquoted,
@@ -1074,7 +1079,7 @@ function objectRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function resolveWorkerContract(
+export function resolveWorkerContract(
   canonicalPacket: Record<string, unknown>,
   spec: TeamWorkerSpec,
   basePacket: Record<string, unknown> = canonicalPacket,
@@ -1120,6 +1125,15 @@ function resolveWorkerContract(
       ? basePacket.expected_outputs as WorkerContract["expected_outputs"]
       : undefined
   );
+  // The worker's guard is the team mission's, narrowed by its own packet, its session template and its own block.
+  const guard = workerGuard(
+    canonicalPacket.guard === undefined ? undefined : objectRecord(canonicalPacket.guard) as ToolGuardFields,
+    template?.guard,
+    spec.guard,
+    spec.role,
+    basePacket === canonicalPacket || basePacket.guard === undefined ? undefined : objectRecord(basePacket.guard) as ToolGuardFields,
+  );
+  if (template?.containment === "strict") assertStrictContainment(guard);
   const baseConstraints = Array.isArray(basePacket.constraints)
     ? basePacket.constraints.filter((item): item is string => typeof item === "string")
     : [];
@@ -1136,12 +1150,13 @@ function resolveWorkerContract(
     ...(constraints.length > 0 ? { constraints } : {}),
     ...(Object.keys(runtimeConfigOverrides).length > 0 ? { runtime_config_overrides: runtimeConfigOverrides } : {}),
     ...(Object.keys(contractLimits).length > 0 ? { limits: contractLimits } : {}),
+    ...(guard !== undefined ? { guard } : {}),
     ...(expectedOutputs ? { expected_outputs: expectedOutputs } : {}),
     ...(spec.seed !== undefined ? { seed: spec.seed } : {}),
   };
 }
 
-function deriveWorkerPacket(
+export function deriveWorkerPacket(
   canonicalPacket: Record<string, unknown>,
   contract: WorkerContract,
 ): Record<string, unknown> {
@@ -1154,6 +1169,7 @@ function deriveWorkerPacket(
   if (contract.expected_outputs !== undefined) {
     packet.expected_outputs = contract.expected_outputs;
   }
+  if (contract.guard !== undefined) packet.guard = contract.guard;
   if (contract.seed !== undefined) {
     const constraints = Array.isArray(packet.constraints) ? [...packet.constraints] : [];
     constraints.push(`Seed: ${contract.seed}. Use it for every randomized step and print it in your final message.`);
@@ -1680,7 +1696,11 @@ export async function runTeamMission(
       let commitErr: string | null = null;
       if (status === "succeeded") {
         try {
-          await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths, forcePaths);
+          const committed = await gitOps.commitAll(slot.plan.worktreePath, `team(${slot.plan.id}): worker run`, stagePaths, forcePaths);
+          if (typeof committed === "string" && /^[0-9a-f]{40}$/.test(committed)) {
+            canonicalWorker.commit = committed;
+            await persistState();
+          }
         } catch (err) {
           commitErr = formatGitError(err);
         }
@@ -1994,6 +2014,7 @@ async function evaluateWorkerSalvage(args: {
   const eligible = stagePaths.length > 0 || (forcePaths?.length ?? 0) > 0;
   let outputsPassed = false;
   let checksPassed = false;
+  let salvageCommit: string | undefined;
   if (eligible) {
     outputsPassed = true;
     for (const outputPath of args.expectedOutputs ?? []) {
@@ -2010,13 +2031,14 @@ async function evaluateWorkerSalvage(args: {
     }
     if (outputsPassed && checksPassed) {
       try {
-        await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`, stagePaths, forcePaths);
+        const committed = await args.gitOps.commitAll(args.worktreePath, `team(${args.workerId}): salvaged worker run`, stagePaths, forcePaths);
+        if (typeof committed === "string" && /^[0-9a-f]{40}$/.test(committed)) salvageCommit = committed;
       } catch { /* best-effort: the record still points at the branch for a human */ }
     }
   }
   return {
     stopCode,
-    record: { eligible, outputs_passed: outputsPassed, checks_passed: checksPassed, branch: args.branch },
+    record: { eligible, outputs_passed: outputsPassed, checks_passed: checksPassed, branch: args.branch, ...(salvageCommit ? { commit: salvageCommit } : {}) },
     ...(outOfRoots ? { outOfRoots } : {}),
   };
 }

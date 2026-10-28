@@ -247,6 +247,9 @@ function mapWaitReport(report: WaitReport, runId: string): QueueSettleOutcome {
  * wait's own timeout is a `wait-timeout` (the run id is kept so a later resume
  * can wait on it again).
  */
+/** How long a child that exited cleanly is given to become discoverable before its entry fails as launch-failed. */
+const EXIT_GRACE_MS = 1_500;
+
 async function settleRunFromRecords(
   wait: typeof waitForRuns,
   request: QueueSettleRequest,
@@ -255,6 +258,7 @@ async function settleRunFromRecords(
   const timeoutMs = request.timeoutMs ?? defaultTimeoutMs;
   const pollIntervalMs = request.pollIntervalMs ?? DEFAULT_SETTLE_POLL_MS;
   const deadline = Date.now() + timeoutMs;
+  let exitedAt: number | undefined;
   for (;;) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) return { status: "failed", exit_code: 1, reason: "wait-timeout" };
@@ -279,6 +283,13 @@ async function settleRunFromRecords(
     ]);
     if (signal.exited && (signal.exit.error || signal.exit.code !== 0)) {
       return { status: "failed", exit_code: signal.exit.code ?? 1, reason: "launch-failed" };
+    }
+    if (signal.exited) {
+      // A child that exited cleanly and whose run is still not discoverable gets a short grace, with a real pause
+      // each turn (its exit has already resolved, so the race above returns at once and would spin), then fails.
+      exitedAt ??= Date.now();
+      if (Date.now() - exitedAt >= EXIT_GRACE_MS) return { status: "failed", exit_code: 1, reason: "launch-failed" };
+      if (pause > 0) await delay(pause);
     }
   }
 }
@@ -430,7 +441,8 @@ export async function runQueue(queueFilePath: string, options: RunQueueOptions):
   const root = path.resolve(options.root);
   // Hive integrity is a precondition: a broken hive facts or ledger chain means
   // the shared state every agent trusts cannot be extended, so queue refuses.
-  assertHiveChainsIntact(root);
+  // A fork from the old concurrent-append bug is a warning that names the repair command; any other break refuses.
+  for (const warning of assertHiveChainsIntact(root)) console.warn(`[WARN] ${warning}`);
   const queue = await loadQueueFile(path.resolve(queueFilePath));
   const maxOrchestrators = options.maxOrchestrators ?? DEFAULT_MAX_ORCHESTRATORS;
   if (!Number.isInteger(maxOrchestrators) || maxOrchestrators < 1) {

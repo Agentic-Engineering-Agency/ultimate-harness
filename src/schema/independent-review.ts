@@ -56,6 +56,8 @@ export const IndependentReviewRequestSchema = z.object({
   source_root: z.string().min(1),
     files: z.array(ReviewInputFileSchema).min(1),
     reference_paths: z.array(z.string()),
+    /** The commit the source workspace was at when the packet was captured; `uh land` requires the branch to contain it. */
+    source_head: z.string().regex(/^[0-9a-f]{40}$/).optional(),
     acceptance: z.array(z.object({ id: z.string().min(1), description: EvidenceSchema }).strict()),
     checks: z.array(z.object({ id: z.string().min(1), description: EvidenceSchema }).strict()),
   }).strict()).min(1),

@@ -1,3 +1,4 @@
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -19,6 +20,7 @@ import {
 import type { RuntimeStopCode } from "../schema/runtime-control.js";
 import { redactSecrets } from "./run-digest.js";
 import { chainEntry, lastChainedHash, readJsonLines, verifyChainedLines, type ChainBreak } from "./hash-chain.js";
+import { withChainLock } from "./chain-lock.js";
 
 /**
  * The intervention ledger — every moment a run needed correction.
@@ -47,17 +49,25 @@ export function interventionsPath(root: string): string {
 
 /**
  * The project root that owns `.harness` for a run directory. A run lives at
- * `<root>/.harness/missions/<m>/runs/<r>`, and a team worker's run may live
- * under a nested artifact root, so this walks up to the nearest `.harness`
- * ancestor rather than counting levels. With no such ancestor the directory
- * itself is returned, and the capture is simply best-effort.
+ * `<root>/.harness/missions/<m>/runs/<r>`, and a team worker's run lives under a
+ * nested artifact root with a `.harness` of its own, so the nearest `.harness`
+ * is not the project's. The owner is the outermost `.harness` ancestor whose
+ * parent holds a `.harness/project.yaml`; with none of those, the nearest
+ * `.harness` ancestor. With no `.harness` ancestor at all the directory itself
+ * is returned, and the capture is simply best-effort.
  */
 export function harnessRootFor(runDir: string): string {
   let current = path.resolve(runDir);
+  let nearest: string | undefined;
+  let project: string | undefined;
   for (;;) {
-    if (path.basename(current) === ".harness") return path.dirname(current);
+    if (path.basename(current) === ".harness") {
+      const owner = path.dirname(current);
+      nearest ??= owner;
+      if (existsSync(path.join(current, "project.yaml"))) project = owner;
+    }
     const parent = path.dirname(current);
-    if (parent === current) return path.resolve(runDir);
+    if (parent === current) return project ?? nearest ?? path.resolve(runDir);
     current = parent;
   }
 }
@@ -134,10 +144,13 @@ export function buildIntervention(input: InterventionInput, options: { owner?: b
  */
 export async function appendIntervention(root: string, record: Intervention | InterventionStatusChange): Promise<void> {
   const file = interventionsPath(root);
-  const lines = readJsonLines(file);
-  const chained = chainEntry(lastChainedHash(lines), record as unknown as Record<string, unknown>);
-  await mkdir(path.dirname(file), { recursive: true });
-  await appendFile(file, `${JSON.stringify(chained)}\n`, "utf8");
+  // The read of the last hash and the append are one exclusive step: two writers that read the same
+  // last line would both link to it and fork the chain (#257).
+  withChainLock(file, () => {
+    const chained = chainEntry(lastChainedHash(readJsonLines(file)), record as unknown as Record<string, unknown>);
+    mkdirSync(path.dirname(file), { recursive: true });
+    appendFileSync(file, `${JSON.stringify(chained)}\n`, "utf8");
+  });
 }
 
 /**
