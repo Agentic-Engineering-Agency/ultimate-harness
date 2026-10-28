@@ -1,3 +1,6 @@
+import { ReservationFileSchema } from "../schema/runtime-resources.js";
+import { PostCheckFileSchema } from "../schema/post-checks.js";
+import { ResumeLinkSchema, SteerRecordSchema } from "../schema/steer.js";
 import { access, readFile } from "node:fs/promises";
 import path, { basename } from "node:path";
 import { parse } from "yaml";
@@ -41,6 +44,10 @@ const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.independent-review-report.v0": data => IndependentReviewReportSchema.parse(data),
   "uh.independent-review-assessment.v0": data => IndependentReviewAssessmentSchema.parse(data),
   "uh.decision-receipt.v0": validateDecisionReceipt,
+  "uh.steer-record.v0": data => SteerRecordSchema.parse(data),
+  "uh.resume-link.v0": data => ResumeLinkSchema.parse(data),
+  "uh.reservation.v0": data => ReservationFileSchema.parse(data),
+  "uh.post-checks.v0": data => PostCheckFileSchema.parse(data),
 };
 
 export type ValidationResult = {

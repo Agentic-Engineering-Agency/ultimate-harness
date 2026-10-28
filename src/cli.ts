@@ -698,6 +698,7 @@ program
         { run: runOperatorResumedAttempt, cancel: (cancelRoot, missionId, id) => cancelLocalMissionRun(cancelRoot, missionId, id) });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
       else if (result.status === "not_applied") console.log(`Steer not applied to ${result.sourceRunId}: ${result.reason}`);
+      else if (result.status === "pending") console.log(`Steer requested for ${result.sourceRunId}, not yet taken: ${result.reason}; check again with \`uh ps\``);
       else if (result.mode === "controller") console.log(`Steered ${result.sourceRunId}; its controller will resume the session`);
       else console.log(`Steered ${result.sourceRunId} into ${result.runId}`);
     } catch (err) {

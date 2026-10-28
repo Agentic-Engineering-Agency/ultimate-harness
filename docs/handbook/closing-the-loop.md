@@ -22,6 +22,8 @@ The file is YAML or JSON, a list of checks:
   timeout_ms: 600000
 ```
 
+The same list may be wrapped as `{ schema_version: uh.post-checks.v0, checks: [...] }`; both shapes mean the same.
+
 - The file is read at launch. Its path and commands never reach the prompt, the runtime's environment or argv, or
   any artifact under the project root. Keep the file and anything it runs outside the tree the agent can read.
 - Each command runs after the runtime settles, with no window, in the run's working root (the sandbox worktree when

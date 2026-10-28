@@ -1,3 +1,4 @@
+import { ReservationFileSchema } from "../schema/runtime-resources.js";
 import { freemem } from "node:os";
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -63,13 +64,6 @@ function reservationsDir(root: string): string {
   return path.join(workerAdmissionDir(root), "reservations");
 }
 
-const ReservationFileSchema = z.object({
-  reserved_mb: z.number().int().positive(),
-  created_at: z.string().datetime(),
-  release_after_ms: z.number().int().positive(),
-  pid: z.number().int().positive(),
-  worker: z.string().min(1).optional(),
-}).strict();
 
 export type WorkerReservation = { path: string; reserved_mb: number };
 
@@ -319,6 +313,7 @@ async function writeReservations(
   for (let index = 0; index < count; index++) {
     const file = path.join(dir, `res-${process.pid}-${randomUUID()}.json`);
     await writeFile(file, JSON.stringify({
+      schema_version: "uh.reservation.v0",
       reserved_mb: reservedMb,
       created_at: created,
       release_after_ms: WORKER_RESERVATION_RELEASE_MS,
