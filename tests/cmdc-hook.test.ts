@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify } from "yaml";
@@ -154,6 +154,7 @@ describe("Command Code guard hook", () => {
       const policyPath = await writeAdapterArtifact(root, missionPath, "extra-field-run");
       const artifact = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
       artifact.unknown_extra_field = "tolerated";
+      await chmod(policyPath, 0o600);
       await writeFile(policyPath, JSON.stringify(artifact));
 
       const logPath = path.join(root, "tool-guard.log");

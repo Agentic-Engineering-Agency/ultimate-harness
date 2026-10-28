@@ -28,7 +28,7 @@ import { settleNativeCap, reconcileNativeCapSettlement } from "../harness/runtim
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { captureDiffWithUntracked, diffCaptureFailureRecord } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
-import { getMissionArtifactContext, persistPromptAndSession, appendMissionEvent, writeArtifactFile } from "./_artifact-context.js";
+import { getMissionArtifactContext, persistPromptAndSession, appendMissionEvent, writeArtifactFile, writeReadOnlyArtifactFile } from "./_artifact-context.js";
 
 export const CommandCodeRuntimeConfigSchema = z.object({
   model: z.string().optional().default(""),
@@ -250,7 +250,7 @@ export async function runCommandCode(root: string, missionPath: string, options:
         ".commandcode/.gitignore": sha256Hex(gitignoreContent),
       },
     });
-    await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
+    await writeReadOnlyArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
     const arming = await (options.armGuard ?? armGuard)({
       runtime: "command-code",

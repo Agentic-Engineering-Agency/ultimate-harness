@@ -11,6 +11,8 @@ A sink is declared in either of two files:
 
 Both files hold the same sink entries, but **their top-level shapes differ**: the project file nests them under `notifications`, the user file starts at a top-level `sinks` list. The sink list itself is parsed the same strict way in both, so a `notifications:` wrapper in the user file is a rejected document, and a bare `sinks:` list in the project file is silently not a `notifications` section at all. A project sink **overrides** a user sink with the same `id`; user sinks with unique ids are kept. A missing file contributes nothing.
 
+**The project file is trusted less than the user file.** It arrives with the repository, so UH uses a `command` sink or a webhook header read from the environment from it only when the operator sets `UH_NOTIFICATIONS_TRUST_PROJECT=1`, and a project-file header never reads a variable whose name looks like a credential (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, `COOKIE`, `SESSION`, `PRIVATE`), even then. Presets and header-less webhooks from the project file are always used. A sink that is left out is not an error: `uh notify list` names it and says why. Declare a sink that needs a command or a credential in the user file, which is not restricted. A settlement that `uh ps` (run discovery) records is announced to the user file's sinks only.
+
 `.harness/project.yaml`:
 
 ```yaml
@@ -67,7 +69,7 @@ An `argv` array — spawned **directly, never through a shell** — with the ren
 
 ### `webhook`
 
-A request whose `body` is the event JSON (or the text message when `body: text`). Header **values name environment variables**, resolved at delivery time — a credential literal is never written into the file.
+A request whose `body` is the event JSON (or the text message when `body: text`). Header **values name environment variables**, resolved at delivery time — a credential literal is never written into the file. A header that carries a credential belongs in the user file (see above).
 
 ```yaml
 - id: slack

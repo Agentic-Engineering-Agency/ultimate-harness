@@ -305,20 +305,67 @@ async function readSinksFile(file: string): Promise<NotificationSink[]> {
   return NotificationsSchema.parse(parseYaml(await readFile(file, "utf8"))).sinks;
 }
 
+async function readProjectSinks(root: string): Promise<NotificationSink[]> {
+  const projectFile = projectYaml(root);
+  if (!(await fileExists(projectFile))) return [];
+  const doc = parseYaml(await readFile(projectFile, "utf8")) as Record<string, unknown> | null;
+  const notifications = doc && typeof doc === "object" ? (doc as Record<string, unknown>).notifications : undefined;
+  return notifications === undefined ? [] : NotificationsSchema.parse(notifications).sinks;
+}
+
+/** Set to `1` to use the project file's command sinks and environment-backed webhook headers. */
+export const TRUST_PROJECT_NOTIFICATIONS_ENV = "UH_NOTIFICATIONS_TRUST_PROJECT";
+/** Environment variable names a project file's webhook header never reads. */
+const CREDENTIAL_ENV_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE/i;
+
+/**
+ * Why a sink declared in the project file is not used, or `undefined` when it
+ * is. The project file travels with the repository, so a sink that starts a
+ * command or puts an environment value in a header is used only when the
+ * operator sets {@link TRUST_PROJECT_NOTIFICATIONS_ENV}=1, and a header from it
+ * never reads a credential-named variable. Presets and header-less webhooks are
+ * always used. The user file is the operator's own and is not restricted.
+ */
+export function projectSinkRefusal(sink: NotificationSink, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (!("kind" in sink)) return undefined;
+  const trusted = env[TRUST_PROJECT_NOTIFICATIONS_ENV] === "1";
+  if (sink.kind === "command") return trusted ? undefined : `a command sink in the project file needs ${TRUST_PROJECT_NOTIFICATIONS_ENV}=1`;
+  const names = Object.values(sink.headers ?? {});
+  const credential = names.find((name) => CREDENTIAL_ENV_NAME.test(name));
+  if (credential !== undefined) return `a header in the project file may not read ${credential}; declare this sink in the user file`;
+  if (names.length > 0 && !trusted) return `a header read from the environment in the project file needs ${TRUST_PROJECT_NOTIFICATIONS_ENV}=1`;
+  return undefined;
+}
+
+/** Project-file sinks that {@link loadNotificationConfig} leaves out, with the reason for each. */
+export async function refusedProjectSinks(root: string, env: NodeJS.ProcessEnv = process.env): Promise<Array<{ id: string; reason: string }>> {
+  return (await readProjectSinks(root)).flatMap((sink) => {
+    const reason = projectSinkRefusal(sink, env);
+    return reason === undefined ? [] : [{ id: sink.id, reason }];
+  });
+}
+
+export interface LoadNotificationConfigOptions {
+  /** `false` reads the user file only. */
+  projectSinks?: boolean;
+}
+
 /**
  * Every configured sink, user entries first and project entries overriding user
  * entries with the same id. A missing project or user file contributes nothing,
- * and there is no built-in default sink.
+ * a project sink {@link projectSinkRefusal} refuses is left out, and there is no
+ * built-in default sink.
  */
-export async function loadNotificationConfig(root: string, env: NodeJS.ProcessEnv = process.env): Promise<ResolvedSink[]> {
+export async function loadNotificationConfig(
+  root: string,
+  env: NodeJS.ProcessEnv = process.env,
+  options: LoadNotificationConfigOptions = {},
+): Promise<ResolvedSink[]> {
   const merged = new Map<string, NotificationSink>();
   for (const sink of await readSinksFile(userNotificationsFile(env))) merged.set(sink.id, sink);
-  const projectFile = projectYaml(root);
-  if (await fileExists(projectFile)) {
-    const doc = parseYaml(await readFile(projectFile, "utf8")) as Record<string, unknown> | null;
-    const notifications = doc && typeof doc === "object" ? (doc as Record<string, unknown>).notifications : undefined;
-    if (notifications !== undefined) {
-      for (const sink of NotificationsSchema.parse(notifications).sinks) merged.set(sink.id, sink);
+  if (options.projectSinks !== false) {
+    for (const sink of await readProjectSinks(root)) {
+      if (projectSinkRefusal(sink, env) === undefined) merged.set(sink.id, sink);
     }
   }
   return [...merged.values()].map(resolveSink);
@@ -672,6 +719,8 @@ export interface DispatchOptions {
   sinks?: ResolvedSink[];
   /** Ignore the at-most-once ledger and the sink filters (used by `uh notify test`). */
   ignoreDedupe?: boolean;
+  /** `false` delivers to the user file's sinks only (used when run discovery settles a run). */
+  projectSinks?: boolean;
 }
 
 /**
@@ -686,7 +735,7 @@ export async function dispatchEvent(root: string, event: NotificationEvent, opti
     sinks = options.sinks;
   } else {
     try {
-      sinks = await loadNotificationConfig(root, deps.env);
+      sinks = await loadNotificationConfig(root, deps.env, { projectSinks: options.projectSinks });
     } catch {
       return [];
     }
@@ -753,22 +802,27 @@ async function filesWrittenIn(runDir: string): Promise<number | undefined> {
   }
 }
 
-async function announceRun(root: string, input: RunSettlementInput, orphaned: boolean): Promise<void> {
+async function announceRun(root: string, input: RunSettlementInput, orphaned: boolean, options: AnnounceOptions = {}): Promise<void> {
   const events = buildSettlementEvents(input, { orphaned });
   const filesWritten = input.files_written ?? (input.run_dir !== undefined ? await filesWrittenIn(input.run_dir) : undefined);
   const enriched = filesWritten === undefined ? events : events.map((event) => ({ ...event, files_written: filesWritten }));
   for (const event of enriched) {
     try {
-      await dispatchEvent(root, event);
+      await dispatchEvent(root, event, { projectSinks: options.projectSinks });
     } catch {
       // A notification must never fail or delay a settlement.
     }
   }
 }
 
+export interface AnnounceOptions {
+  /** `false` announces to the user file's sinks only, as run discovery does. */
+  projectSinks?: boolean;
+}
+
 /** Announce a run settlement (and a supervision alert when the stop code warrants one). */
-export function notifyRunSettled(root: string, input: RunSettlementInput): void {
-  trackDelivery(announceRun(root, input, false));
+export function notifyRunSettled(root: string, input: RunSettlementInput, options: AnnounceOptions = {}): void {
+  trackDelivery(announceRun(root, input, false, options));
 }
 
 /** Announce a discovered orphaned run (and a supervision alert when the stop code warrants one). */

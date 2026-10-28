@@ -1,6 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -198,6 +198,7 @@ test("orchestrator role arms controller commands while keeping worker protection
     expect(artifact.deny_git_mutations).toBe(true);
     expect(artifact.write_roots).toEqual(["out"]);
     expect(seenEnv?.UH_TOOL_GUARD_POLICY).toContain("tool-guard.json");
+    if (process.platform !== "win32") expect((await stat(path.join(runDir, "tool-guard.json"))).mode & 0o222).toBe(0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

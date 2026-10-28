@@ -89,6 +89,8 @@ export const HiveFactSchema = z.object({
   prev_hash: HiveHashSchema,
   /** sha256 over this entry's canonical JSON without `hash`. */
   hash: HiveHashSchema,
+  /** HMAC-SHA256 of the entry body under the controller's key, which is kept outside the repository. */
+  mac: HiveHashSchema.optional(),
   item_ids: z.array(z.string().min(1)).optional(),
   paths: z.array(z.string().min(1)).optional(),
   source: HiveFactSourceSchema,

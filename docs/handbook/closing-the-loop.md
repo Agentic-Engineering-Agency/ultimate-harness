@@ -143,10 +143,14 @@ uh hive verify                 # facts chain, intervention ledger chain and land
   match its evidence is refused. Agent statements go to `claims.ndjson`, never to facts.
 - **Tamper-evident.** Facts, the intervention ledger and the land decision index are hash-chained; `uh hive verify`
   reports the first broken line, and `uh land` and `uh queue` refuse to proceed on a broken chain. Unchained ledger
-  lines written before the chain existed are kept as a legacy prefix.
+  lines written before the chain existed are kept as a legacy prefix. The chain alone detects edits, not a rewrite
+  that recomputes it, so each fact also carries a `mac`: an HMAC-SHA256 of its body under a controller key kept in the
+  user data directory (`<user data>/controller.key`, created on first use), outside every repository.
+- **Evidence stays in the project.** A fact's evidence ref is a path relative to the project that owns the hive; an
+  absolute ref, or one that leaves the project, never verifies.
 - **Guarded.** Any agent write, edit or delete of the hive is a `guard_tamper` stop in the Command Code hook, the
   Claude Code hook and the oh-my-pi extension, and direct reads are denied in favour of `uh hive show`. A `.harness/hive`
   inside a worker's own scratch project is not the project's hive and stays allowed.
-- **Injected as data.** Only facts whose chain is intact and whose evidence still hashes to its recorded value reach a
-  worker's prompt, selected by the item ids and paths the packet names, bounded in size, and rendered as a block
-  labelled as data, not instructions, with every field escaped.
+- **Injected as data.** Only facts whose chain is intact, whose `mac` this controller's key produced and whose evidence
+  still hashes to its recorded value reach a worker's prompt, selected by the item ids and paths the packet names,
+  bounded in size, and rendered as a block labelled as data, not instructions, with every field escaped.

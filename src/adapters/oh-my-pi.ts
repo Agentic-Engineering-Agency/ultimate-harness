@@ -16,6 +16,7 @@ import {
   assertWritableArtifact,
   assertPathInsideMissionDir,
   writeArtifactFile,
+  writeReadOnlyArtifactFile,
   persistPromptAndSession,
   appendMissionEvent,
 } from "./_artifact-context.js";
@@ -650,7 +651,7 @@ export async function runOhMyPi(
     });
     const policyPath = path.join(artifacts.runDir, "tool-guard.json");
     const logPath = path.join(artifacts.runDir, "tool-guard.log");
-    await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
+    await writeReadOnlyArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
     const arming = await (options.armGuard ?? armGuard)({
       runtime: "oh-my-pi",

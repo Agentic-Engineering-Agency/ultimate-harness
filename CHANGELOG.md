@@ -91,6 +91,7 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 
 ### Changed
 
+- Hardened input handling across the tool guard, notification config, the harness's own git calls, the guard hook snapshot cache and hive facts. The guard judges every command a shell line runs, allows only reading `git` forms, and recognises more write, delete, kill and install forms. Project-file notification sinks that start a command or read the environment into a header need `UH_NOTIFICATIONS_TRUST_PROJECT=1`. Harness commits, merges and cherry-picks run no configured hook, and a team worker that changes program-naming git configuration is blocked and the configuration restored. The hook snapshot cache is private to the user and its files are read-only, as is a run's `tool-guard.json`. Hive facts carry a controller `mac`, and evidence refs must stay inside the project.
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.
 - Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
 - `uh mission run` refuses to run in the project root when no sandbox is bound to the mission, unless `--no-sandbox` is passed. `uh mission dry-run` prints the routing.
