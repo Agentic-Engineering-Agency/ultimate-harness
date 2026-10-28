@@ -513,7 +513,7 @@ describe("the watchdog reads a long run once (#258)", () => {
       get(target, key) { if (key === "type") reads += 1; return target[key as string]; },
     });
     const all = repeatedEvents(400).map(event => counted(event as Event));
-    const watchdog = createLoopWatchdog({ source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY, provider: async () => { throw new Error("no provider"); } });
+    const watchdog = createLoopWatchdog({ mode: "shadow", source: "oh-my-pi", workingDirectory: WORKING_DIRECTORY, provider: async () => { throw new Error("no provider"); } });
     // The way runtime-process feeds it: the same growing list, one more line each time.
     const seen: unknown[] = [];
     for (const event of all) {
