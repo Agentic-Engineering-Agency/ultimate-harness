@@ -250,6 +250,52 @@ describe("reservations stop counting once their worker has started", () => {
     expect(await readdir(join(workerAdmissionDir(ROOT), "reservations"))).toEqual([]);
   });
 
+  test("one worker reporting releases one reservation of its controller, not all of them (#263)", async () => {
+    const { now, sleep } = virtualClock();
+    // A team of three workers shares one controller pid and holds three reservations.
+    for (const suffix of ["a", "b", "c"]) {
+      const dir = join(workerAdmissionDir(ROOT), "reservations");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, `res-4242-${suffix}.json`), JSON.stringify({
+        reserved_mb: 700, created_at: new Date(0).toISOString(), release_after_ms: 60_000, pid: 4242, worker: `slot-${suffix}`,
+      }), "utf-8");
+    }
+    await reportStartedWorker(ROOT, "20260920T000001Z-aaa111", 4242);
+    const blocked: string[] = [];
+
+    // Two reservations (1400 MB) still count, so 1724 MB free leaves too little for a worker plus the reserve.
+    await mapResourceWaves(["w1"], { ...limits, admission_timeout_ms: 1 }, async () => "ran", {
+      availableBytes: () => 1724 * MB, now, sleep, pollIntervalMs: 10_000, root: ROOT,
+      costOf: async () => 0,
+      blocked: async (item) => { blocked.push(item); return "blocked"; },
+    });
+
+    expect(blocked).toEqual(["w1"]);
+  });
+
+  test("when every worker of a controller has reported, all its reservations are released (#263)", async () => {
+    const { now, sleep } = virtualClock();
+    for (const suffix of ["a", "b"]) {
+      const dir = join(workerAdmissionDir(ROOT), "reservations");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, `res-4242-${suffix}.json`), JSON.stringify({
+        reserved_mb: 700, created_at: new Date(0).toISOString(), release_after_ms: 60_000, pid: 4242, worker: `slot-${suffix}`,
+      }), "utf-8");
+    }
+    await reportStartedWorker(ROOT, "20260920T000001Z-aaa111", 4242);
+    await reportStartedWorker(ROOT, "20260920T000002Z-bbb222", 4242);
+    const admitted: string[] = [];
+
+    await mapResourceWaves(["w1"], limits, async (item) => { admitted.push(item); return item; }, {
+      availableBytes: () => 1724 * MB, now, sleep, pollIntervalMs: 10_000, root: ROOT,
+      costOf: async () => 0,
+      blocked: async (item) => item,
+    });
+
+    expect(admitted).toEqual(["w1"]);
+    expect(await readdir(join(workerAdmissionDir(ROOT), "reservations"))).toEqual([]);
+  });
+
   test("a reservation whose worker has not reported is still counted", async () => {
     const { now, sleep } = virtualClock();
     await writeReservation(ROOT, 9999);

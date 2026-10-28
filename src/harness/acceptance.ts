@@ -246,6 +246,36 @@ async function listInputFilesAtCommit(root: string, commit: string): Promise<str
   return stdout.split("\0").filter((entry) => entry !== "").map((entry) => entry.split(path.sep).join("/"));
 }
 
+/**
+ * Many blobs at one commit through a single `git cat-file --batch` process. A path that is not in the commit is
+ * simply missing from the result.
+ */
+async function readBlobsAtCommit(root: string, commit: string, paths: string[]): Promise<Map<string, Buffer>> {
+  const found = new Map<string, Buffer>();
+  if (paths.length === 0) return found;
+  const output = await new Promise<Buffer>((resolve, reject) => {
+    const child = execFile("git", ["cat-file", "--batch"], { cwd: root, encoding: "buffer", maxBuffer: 512 * 1024 * 1024 }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+    child.stdin?.on("error", () => { /* surfaced through the exit status */ });
+    child.stdin?.end(paths.map((entry) => `${commit}:${entry}\n`).join(""));
+  });
+  let offset = 0;
+  for (const relativePath of paths) {
+    const newline = output.indexOf(0x0a, offset);
+    if (newline < 0) break;
+    const header = output.toString("utf8", offset, newline);
+    offset = newline + 1;
+    const match = /^[0-9a-f]+ (\w+) (\d+)$/.exec(header);
+    if (!match) continue;
+    const size = Number(match[2]);
+    if (match[1] === "blob") found.set(relativePath, output.subarray(offset, offset + size));
+    offset += size + 1;
+  }
+  return found;
+}
+
 async function readInputContent(root: string, relativePath: string, commit?: string): Promise<Buffer | undefined> {
   try {
     if (commit) {
@@ -276,8 +306,9 @@ export async function computeAcceptanceInputDigest(
   const matched = allFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)).sort();
   const lines = [`runtime=${identity.runtime}`, `runtime_version=${identity.runtimeVersion ?? UNKNOWN}`, `model=${identity.model}`];
   const files: string[] = [];
+  const atCommit = options.commit ? await readBlobsAtCommit(root, options.commit, matched) : undefined;
   for (const relativePath of matched) {
-    const content = await readInputContent(root, relativePath, options.commit);
+    const content = atCommit ? atCommit.get(relativePath) : await readInputContent(root, relativePath);
     if (content === undefined) continue;
     lines.push(`${relativePath}\t${sha256Hex(normalizeInputContent(content))}`);
     files.push(relativePath);
@@ -304,8 +335,10 @@ export async function changedAcceptanceInputs(root: string, inputs: string[], ba
     ...currentFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)),
   ]);
   const changed: string[] = [];
-  for (const relativePath of [...relevant].sort()) {
-    const before = await readInputContent(root, relativePath, baseCommit);
+  const sorted = [...relevant].sort();
+  const beforeAll = await readBlobsAtCommit(root, baseCommit, sorted);
+  for (const relativePath of sorted) {
+    const before = beforeAll.get(relativePath);
     const after = await readInputContent(root, relativePath);
     const beforeHash = before === undefined ? null : sha256Hex(normalizeInputContent(before));
     const afterHash = after === undefined ? null : sha256Hex(normalizeInputContent(after));
@@ -338,6 +371,10 @@ export async function classifyAcceptance(
         ...(version ? { runtimeVersion: version } : {}),
       };
       const current = await computeAcceptanceInputDigest(digestRoot, context.inputs ?? [], identity);
+      if (current.resolved === 0) {
+        // Nothing to hash can never change, so such evidence would stay proven for ever.
+        return { state: "stale", reasons: [`the inputs match no tracked file (${(context.inputs ?? []).join(", ") || "none given"}), so nothing can show this evidence is out of date`] };
+      }
       if (current.digest === evidence.input_digest) {
         return fresh ? { state: "proven", reasons: [] } : { state: "stale", reasons: ["freshness window exceeded"] };
       }
@@ -665,22 +702,54 @@ async function invariantNoWritesOutsideRoots(runRoot: string, missionRoot: strin
   return offending.length > 0 ? offending : true;
 }
 
+/**
+ * The commits the harness recorded for each worker (`commit`, and `salvage.commit`) in the team states under the
+ * mission, by worker id. `undefined` when no team state records any, as for runs made before it did.
+ */
+async function recordedHarnessCommits(missionRoot: string): Promise<Map<string, Set<string>> | undefined> {
+  const recorded = new Map<string, Set<string>>();
+  let any = false;
+  const runsRoot = path.join(missionRoot, "runs");
+  for (const entry of await readdir(runsRoot, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const state = JSON.parse(await readFile(path.join(runsRoot, entry.name, "team-state.json"), "utf8")) as Record<string, unknown>;
+      for (const worker of Array.isArray(state.workers) ? state.workers : []) {
+        const record = worker as { id?: unknown; commit?: unknown; salvage?: { commit?: unknown } };
+        if (typeof record.id !== "string") continue;
+        for (const commit of [record.commit, record.salvage?.commit]) {
+          if (typeof commit !== "string") continue;
+          any = true;
+          recorded.set(record.id, (recorded.get(record.id) ?? new Set<string>()).add(commit));
+        }
+      }
+    } catch { /* no team state for this run */ }
+  }
+  return any ? recorded : undefined;
+}
+
 async function invariantNoWorkerCommits(runRoot: string, missionRoot: string): Promise<true | string[]> {
   const worktrees = await listWorkerWorktrees(runRoot, missionRoot);
   if (worktrees.length === 0) return unverifiable("no worker worktrees found");
+  const harnessCommitsByWorker = await recordedHarnessCommits(missionRoot);
   const offending: string[] = [];
   for (const worktree of worktrees) {
     const base = await worktreeBaseCommit(runRoot, worktree.path);
     if (!base) continue;
+    const recordedForWorker = harnessCommitsByWorker?.get(worktree.id);
     let harnessCommits = 0;
-    for (const line of await gitLines(worktree.path, ["log", "--format=%h%x09%ae%x09%s", `${base}..HEAD`])) {
+    for (const line of await gitLines(worktree.path, ["log", "--format=%H%x09%ae%x09%s", `${base}..HEAD`])) {
       const [sha, email, subject] = line.split("\t");
-      if (email === HARNESS_COMMIT_EMAIL) continue;
-      if (harnessCommits === 0 && isHarnessWorkerSubject(worktree.id, subject ?? "")) {
+      if (email === HARNESS_COMMIT_EMAIL && harnessCommitsByWorker === undefined) continue;
+      if (harnessCommitsByWorker !== undefined) {
+        // The team state names the harness's own commits, so a message that merely looks like one proves nothing.
+        if (recordedForWorker?.has(sha)) continue;
+      } else if (harnessCommits === 0 && isHarnessWorkerSubject(worktree.id, subject ?? "")) {
+        // Runs made before the state recorded its commits: the exact subject, once, is all there is to go on.
         harnessCommits += 1;
         continue;
       }
-      offending.push(`${worktree.id} ${sha} ${email} ${subject}`);
+      offending.push(`${worktree.id} ${sha.slice(0, 7)} ${email} ${subject}`);
     }
   }
   return offending.length > 0 ? offending : true;

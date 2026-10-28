@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RuntimeLimitsSchema } from "./runtime-control.js";
+import { RuntimeLimitsSchema, ToolGuardFieldsSchema } from "./runtime-control.js";
 
 export const CanonicalTeamStatusSchema = z.enum([
   "running",
@@ -35,6 +35,8 @@ const CanonicalWorkerContractSchema = z.object({
     files: z.array(z.string().min(1)),
   }).strict().optional(),
   seed: z.number().int().nonnegative().optional(),
+  /** The worker's guard: the team mission's, narrowed by its packet, template and own block. */
+  guard: ToolGuardFieldsSchema.optional(),
 }).strict();
 
 const CanonicalWorkerOutputSchema = z.object({
@@ -56,6 +58,8 @@ const CanonicalWorkerSalvageSchema = z.object({
   outputs_passed: z.boolean(),
   checks_passed: z.boolean(),
   branch: z.string().min(1),
+  /** The commit the harness made for the salvaged work. */
+  commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 }).strict();
 
 /**
@@ -95,6 +99,11 @@ export const CanonicalTeamWorkerSchema = z.object({
    * review reads the exact fork point instead of a moving ref.
    */
   base_commit: z.string().min(1).optional(),
+  /**
+   * The commit the harness itself made for this worker's work. The acceptance check `no_worker_commits` allows
+   * exactly this commit; a commit that only carries the harness's message is a worker's.
+   */
+  commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 }).strict();
 
 export const CanonicalTeamLeaderSchema = z.object({

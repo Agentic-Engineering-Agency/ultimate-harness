@@ -117,19 +117,22 @@ async function reviewBaseRef(worktree: string): Promise<string | undefined> {
 }
 
 /**
- * Every path the worker changed between its merge-base with its base ref and
- * its HEAD. Empty when the source workspace is not a git checkout or no base
- * ref resolves.
+ * Every path the worker changed since its merge-base with its base ref:
+ * committed, staged and unstaged changes, and new files git does not ignore.
+ * Empty when the source workspace is not a git checkout or no base ref resolves.
  */
-async function changedGitPaths(sourceRoot: string): Promise<string[]> {
+export async function changedGitPaths(sourceRoot: string): Promise<string[]> {
   if ((await gitOutput(sourceRoot, ["rev-parse", "--is-inside-work-tree"]))?.trim() !== "true") return [];
   const baseRef = await reviewBaseRef(sourceRoot);
   if (!baseRef) return [];
   const mergeBase = (await gitOutput(sourceRoot, ["merge-base", baseRef, "HEAD"]))?.trim();
   if (!mergeBase) return [];
-  const output = await gitOutput(sourceRoot, ["diff", "--name-only", mergeBase, "HEAD"]);
+  // Against the work tree, not HEAD, so uncommitted edits count; new files are listed separately.
+  const output = await gitOutput(sourceRoot, ["-c", "core.quotepath=off", "diff", "--name-only", mergeBase]);
   if (output === undefined) return [];
-  return output.split(/\r?\n/).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  const untracked = (await gitOutput(sourceRoot, ["-c", "core.quotepath=off", "ls-files", "--others", "--exclude-standard"])) ?? "";
+  const paths = `${output}\n${untracked}`.split(/\r?\n/).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  return [...new Set(paths)];
 }
 
 /**
@@ -307,7 +310,10 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
         evidence.push(`final message absent (${absentReason})`);
       }
       workerEvidence.push(`- ${source.missionId}: ${evidence.join("; ")}.`);
+      // The commit the source workspace is at, so a later `uh land` can require the branch to contain what was reviewed.
+      const sourceHead = (await gitOutput(sourceRoot, ["rev-parse", "HEAD"]))?.trim();
       sources.push({ mission_id: source.missionId, source_root: sourceRoot, files,
+        ...(sourceHead !== undefined && /^[0-9a-f]{40}$/.test(sourceHead) ? { source_head: sourceHead } : {}),
         reference_paths: mission.read_first,
         acceptance: mission.acceptance_criteria.map(criterion => ({ id: criterion.id, description: criterion.description })),
         checks: mission.verification.checks.map((check, index) => ({ id: `check-${index + 1}`, description: check })),

@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { stringify as stringifyYaml } from "yaml";
 import { MissionSchema } from "../src/schema/mission.js";
 import type { HiveFact } from "../src/schema/hive.js";
-import { buildDispatchContext, capProjectFacts } from "../src/harness/dispatch-context.js";
+import { PROJECT_FACTS_CHAR_LIMIT, buildDispatchContext, capProjectFacts } from "../src/harness/dispatch-context.js";
 import {
   appendFact,
   hiveFactsPath,
@@ -16,6 +16,7 @@ import {
   parseItemsMarkdown,
   readHive,
   readHiveFacts,
+  readVerifiedHiveFacts,
   renderHiveFacts,
   setItemStatus,
   type HivePacket,
@@ -186,9 +187,49 @@ describe("dispatch context hive wiring", () => {
     expect(withHive.projectFacts).toContain("### Hive facts");
     expect(withHive.projectFacts).toContain("A8 was implemented");
   });
+
+  test("a long brief never cuts the hive block: its closing fence survives (#265)", async () => {
+    const root = await makeRoot();
+    const mission = missionPacket(root);
+    const ev = await evidence(root, "src/a.ts", "export const a = 1;\n");
+    appendFact(root, { text: "A8 was implemented", evidence: ev, source: "land", item_ids: ["A8"] });
+    const brief = `${"A long project brief line.\n".repeat(400)}`;
+    const context = buildDispatchContext(mission, undefined, { projectBrief: brief });
+    const text = context.projectFacts ?? "";
+    expect(text.length).toBeLessThanOrEqual(PROJECT_FACTS_CHAR_LIMIT);
+    expect(text).toContain("[project brief truncated");
+    // The data block is whole: header, the fact, and the closing fence on the last line.
+    expect(text).toContain("### Hive facts");
+    expect(text).toContain("A8 was implemented");
+    expect(text.trimEnd().endsWith("```")).toBe(true);
+    expect(text.split("```").length - 1).toBe(2);
+  });
 });
 
 describe("hive feed from queue and land", () => {
+  test("every queue fact stays verifiable after later entries pass (#265)", async () => {
+    const root = await makeRoot();
+    const queueFile = path.join(root, "queue.yaml");
+    await writeFile(queueFile, stringifyYaml({
+      id: "q2",
+      entries: [
+        { id: "first", mission: "missions/a.yaml", runtime: "codex" },
+        { id: "second", mission: "missions/b.yaml", runtime: "codex" },
+        { id: "third", mission: "missions/c.yaml", runtime: "codex" },
+      ],
+    }), "utf8");
+    const launcher: QueueLauncher = async (request) => ({ run_id: `run-${request.entryId}`, settled: Promise.resolve({ status: "passed", exit_code: 0 }) });
+    await runQueue(queueFile, { root, launcher, freeMemoryBytes: () => PLENTY, maxOrchestrators: 1, notify: () => {} });
+
+    expect(readHive(root).facts).toHaveLength(3);
+    // Each cited artifact still hashes to what the fact recorded, so all three are injected, not only the last.
+    expect(readVerifiedHiveFacts(root).map((fact) => fact.text)).toEqual([
+      expect.stringContaining("entry first passed"),
+      expect.stringContaining("entry second passed"),
+      expect.stringContaining("entry third passed"),
+    ]);
+  });
+
   test("queue appends a fact and completes the item named in the entry id on pass", async () => {
     const root = await makeRoot();
     importItems(root, "- [ ] A8: queue work\n- [ ] B2: other work\n");
@@ -215,7 +256,8 @@ describe("hive feed from queue and land", () => {
     expect(hive.facts).toHaveLength(1);
     expect(hive.facts[0]?.source).toBe("queue");
     expect(hive.facts[0]?.item_ids).toEqual(["A8"]);
-    expect(hive.facts[0]?.evidence).toMatchObject({ kind: "run", ref: ".harness/queue/q1/state.json" });
+    // The fact cites a snapshot written once for this entry, never the queue state the next entry rewrites.
+    expect(hive.facts[0]?.evidence).toMatchObject({ kind: "run", ref: ".harness/queue/q1/evidence/A8-run-A8.json" });
     expect(hive.items.find((item) => item.id === "A8")?.status).toBe("done");
     expect(hive.items.find((item) => item.id === "B2")?.status).toBe("open");
   });

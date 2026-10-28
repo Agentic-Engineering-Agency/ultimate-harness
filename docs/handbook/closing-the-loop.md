@@ -22,6 +22,8 @@ The file is YAML or JSON, a list of checks:
   timeout_ms: 600000
 ```
 
+The same list may be wrapped as `{ schema_version: uh.post-checks.v0, checks: [...] }`; both shapes mean the same.
+
 - The file is read at launch. Its path and commands never reach the prompt, the runtime's environment or argv, or
   any artifact under the project root. Keep the file and anything it runs outside the tree the agent can read.
 - Each command runs after the runtime settles, with no window, in the run's working root (the sandbox worktree when
@@ -29,6 +31,10 @@ The file is YAML or JSON, a list of checks:
 - The console prints only the number of checks and the name of a failed one. Each check's output goes to a `logs`
   directory beside the checks file.
 - `runtime-result.yaml` records `post_checks` as names and outcomes.
+- A cancelled run is not graded: its post-checks do not run and its status stays `cancelled`. Ctrl-C or SIGTERM while a
+  check runs kills that check's whole process tree and leaves the run's status as it was. Each stream of a check's
+  output is capped at 1 MiB in its log, with a marker where it was cut, and UH warns when the logs would land inside
+  the project.
 - A failed, timed-out or unrunnable check fails the run with exit code `1` whatever the stop code, and the
   mission-level `runtime-result.yaml`, `latest.json` and the runs index show the failure. An error inside the
   post-check runner itself fails the run with `post-check runner failed`; `UH_RESULT` is still printed.
@@ -58,6 +64,7 @@ uh queue run evening.yaml --max-orchestrators 2
 uh queue status evening
 ```
 
+- **Sandbox routing.** An entry runs as `uh mission run` would run it: a mission with a bound sandbox runs in that sandbox, and a worker mission with none is refused. An entry that must run in the project root says `sandbox: false`; nothing else gives the queue that route.
 - **Memory floor.** A launch is held unless measured free memory covers one more run (1024 MB) above a 1024 MB
   reserve, through the same admission helper team workers use; memory is probed again after a short wait.
 - **Settlement.** Each entry settles from its run's recorded settlement through the same path as `uh wait`, never
@@ -136,6 +143,7 @@ git worktree keeps its own.
 uh hive import open-items.md   # seed items from a markdown checklist: '- [ ] A8: title', '[x]' means done
 uh hive show                   # items and facts; --json for machines
 uh hive verify                 # facts chain, intervention ledger chain and land decision index
+uh hive verify --repair        # re-link a chain forked by the old append bug (explicit; keeps the original)
 ```
 
 - **Only the controller writes facts.** `uh land`, `uh queue` and `uh verify` append a fact after a successful land,
@@ -144,7 +152,13 @@ uh hive verify                 # facts chain, intervention ledger chain and land
   match its evidence is refused. Agent statements go to `claims.ndjson`, never to facts.
 - **Tamper-evident.** Facts, the intervention ledger and the land decision index are hash-chained; `uh hive verify`
   reports the first broken line, and `uh land` and `uh queue` refuse to proceed on a broken chain. Unchained ledger
-  lines written before the chain existed are kept as a legacy prefix.
+  lines written before the chain existed are kept as a legacy prefix. One break is not a refusal: before the appends were
+  serialized, two writers could each link an entry to the same parent (a fork). `uh land` and `uh queue` go on with a
+  `[WARN]` that names `uh hive verify --repair`; `uh hive verify` reports it as `[FORK]` and exits `1`; recording new facts
+  stays paused until it is repaired. `--repair` re-links the forked entries, and each entry after them, to one chain,
+  keeps the original file beside the repaired one (`<file>.pre-repair-<time>`) and writes `<file>.repair-report-<time>.json`
+  listing every entry it re-linked with its old and new hashes. It never runs on its own, and it refuses a chain with any
+  other break (an edited, deleted or reordered entry) without touching it.
 - **Guarded.** Any agent write, edit or delete of the hive is a `guard_tamper` stop in the Command Code hook, the
   Claude Code hook and the oh-my-pi extension, and direct reads are denied in favour of `uh hive show`. A `.harness/hive`
   inside a worker's own scratch project is not the project's hive and stays allowed.
