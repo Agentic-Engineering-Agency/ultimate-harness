@@ -1644,6 +1644,73 @@ describe("runTeamMission — team worktree lifecycle", () => {
       replace: true,
     })).rejects.toThrow(liveRunId);
   });
+
+  /* --replace must never delete work it cannot prove is abandoned (#253). */
+
+  async function retainedTeam(): Promise<string[]> {
+    await initTeamRepo();
+    const first = await runTeamMission(mission(TEAM), ROOT, { runnerFor: fileWritingRunner(), retainOnSuccess: true });
+    await settleEveryRegisteredRun();
+    return first.workers.map((worker) => worker.plan.worktreePath);
+  }
+
+  async function writeControl(runId: string, heartbeatAgoMs: number): Promise<string> {
+    const controlPath = join(ROOT, ".harness", "missions", TEAM, "runs", runId, "runtime-control.json");
+    await mkdir(join(controlPath, ".."), { recursive: true });
+    const started = new Date(Date.now() - heartbeatAgoMs - 1000).toISOString();
+    await writeFile(controlPath, JSON.stringify({
+      schema_version: "uh.runtime-control.v0", mission_id: TEAM, run_id: runId, runtime: "hermes", controller_pid: process.pid,
+      started_at: started, heartbeat_at: new Date(Date.now() - heartbeatAgoMs).toISOString(), status: "running", turns: 0, denials: 0, inflight_tools: 0,
+    }), "utf-8");
+    return controlPath;
+  }
+
+  test("a run whose heartbeat is stale still blocks --replace: it is not proven dead", async () => {
+    const worktrees = await retainedTeam();
+    const runId = "20260922T101011Z-stale1";
+    const controlPath = await writeControl(runId, 3 * 60 * 60 * 1000);
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: TEAM, runtime: "hermes", controlPath, team: { mission_id: TEAM, role: "backend" } });
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true, replace: true })).rejects.toThrow(runId);
+    for (const worktree of worktrees) expect((await readdir(worktree)).length).toBeGreaterThan(0);
+  });
+
+  test("a run in an unknown state blocks --replace", async () => {
+    const worktrees = await retainedTeam();
+    const runId = "20260922T101012Z-unkn01";
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: TEAM, runtime: "hermes", status: "paused", team: { mission_id: TEAM, role: "backend" } });
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true, replace: true })).rejects.toThrow(runId);
+    for (const worktree of worktrees) expect((await readdir(worktree)).length).toBeGreaterThan(0);
+  });
+
+  test("an empty process table fails closed: every run would look orphaned, so --replace is refused", async () => {
+    const worktrees = await retainedTeam();
+    const runId = "20260922T101013Z-empty1";
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: TEAM, runtime: "hermes", team: { mission_id: TEAM, role: "backend" } });
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true, replace: true, processLister: async () => [] }))
+      .rejects.toThrow(/process table|cannot confirm/i);
+    for (const worktree of worktrees) expect((await readdir(worktree)).length).toBeGreaterThan(0);
+  });
+
+  test("a genuinely orphaned run (controller gone from a trustworthy process table) does not block --replace", async () => {
+    await retainedTeam();
+    const runId = "20260922T101014Z-orph01";
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: TEAM, runtime: "hermes", controllerPid: 2147483000, team: { mission_id: TEAM, role: "backend" } });
+    const table = async () => [{ pid: process.pid, ppid: 1, name: "node", command: "node" }];
+    const second = await runTeamMission(mission(TEAM), ROOT, { runnerFor: fileWritingRunner(), retainOnSuccess: true, replace: true, processLister: table });
+    expect(second.runId).toBeDefined();
+  });
+
+  test("--replace refuses to archive a worktree that holds uncommitted work, and leaves it in place", async () => {
+    const worktrees = await retainedTeam();
+    const dirty = join(worktrees[0], "src", "unsaved-work.ts");
+    await mkdir(join(dirty, ".."), { recursive: true });
+    await writeFile(dirty, "// the only copy\n", "utf-8");
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: fileWritingRunner(), retainOnSuccess: true, replace: true }))
+      .rejects.toThrow(/uncommitted/);
+    expect(await readFile(dirty, "utf-8")).toBe("// the only copy\n");
+    const branches = (await execFileP("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd: ROOT })).stdout;
+    expect(branches).not.toContain("uh/archive/");
+  });
 });
 
 /* ---------------------------------------------- worker session templates  */
