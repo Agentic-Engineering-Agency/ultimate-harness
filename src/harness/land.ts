@@ -1,4 +1,7 @@
-import { access, appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFileSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { access, appendFile, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { withChainLock } from "./chain-lock.js";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -13,6 +16,7 @@ import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
 import { assertHiveChainsIntact, recordLandCommit } from "./hive.js";
 import { harnessOwnerRoot } from "./hive-root.js";
 import { chainEntry, lastChainedHash, readJsonLines, sha256Hex, verifyChainedLines, type ChainBreak } from "./hash-chain.js";
+import { hooklessGitConfig } from "./harness-git.js";
 import { projectYaml } from "./paths.js";
 import { removeWorktreeLinks } from "./worktree-links.js";
 
@@ -42,7 +46,7 @@ const COMMAND_OUTPUT_CAP = 100_000;
 
 export const defaultLandGitRunner: LandGitRunner = async (args, cwd) => {
   try {
-    const { stdout, stderr } = await execFileP("git", ["-C", cwd, ...args], { maxBuffer: 32 * 1024 * 1024 });
+    const { stdout, stderr } = await execFileP("git", ["-C", cwd, ...hooklessGitConfig(), ...args], { maxBuffer: 32 * 1024 * 1024 });
     return { exitCode: 0, stdout: String(stdout), stderr: String(stderr) };
   } catch (err) {
     const e = err as { code?: number | string; stdout?: string | Buffer; stderr?: string | Buffer; message?: string };
@@ -158,7 +162,8 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   // Hive integrity is a precondition: a broken hive facts or ledger chain means
   // the shared state every agent trusts cannot be extended, so land refuses.
   try {
-    assertHiveChainsIntact(root);
+    // A fork from the old concurrent-append bug is a warning that names the repair command; any other break refuses.
+    for (const warning of assertHiveChainsIntact(root)) console.warn(`[WARN] ${warning}`);
   } catch (error) {
     throw new LandError("hive", `refusing to land on a broken hive chain: ${(error as Error).message}`);
   }
@@ -168,6 +173,14 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   const buildCommand = config.build ?? DEFAULT_LAND_BUILD;
 
   // ---- Step 1: gates (no git mutation happens here) ----------------------
+  const current = await git(["symbolic-ref", "--quiet", "--short", "HEAD"], root);
+  if (current.exitCode !== 0) {
+    throw new LandError("gates", `target worktree ${root} is not on a branch (detached HEAD or unreadable: ${reason(current)}); check out ${options.onto} there to land onto it`);
+  }
+  const currentBranch = current.stdout.trim();
+  if (currentBranch !== options.onto) {
+    throw new LandError("gates", `target worktree ${root} is on ${currentBranch}, not --onto ${options.onto}; check out ${options.onto} there to land onto it`);
+  }
   // `uh mission review-collect` writes the collected assessment in the project
   // that owns the worker worktrees (next to the review's review-request.json),
   // not in the worker worktree. Worker worktrees live inside that project's
@@ -184,7 +197,11 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     if (!worktree) {
       throw new LandError("gates", `no retained worktree found for worker branch ${branch}`);
     }
-    const missionIds = await requirePassedVerification(worktree.path, branch);
+    const claimedMissionIds = await requirePassedVerification(worktree.path, branch);
+    // For a team worker the controller's own team state says which mission the branch is; the worker's own
+    // verification file and directory names (which it can write) are only the fallback for a branch with no team state.
+    const recordedMissionIds = await teamStateMissionIds(reviewRoot, branch);
+    const missionIds = recordedMissionIds.length > 0 ? recordedMissionIds : claimedMissionIds;
     const tip = await git(["rev-parse", branch], root);
     if (tip.exitCode !== 0) {
       throw new LandError("gates", `cannot resolve the tip of worker branch ${branch}: ${reason(tip)}`);
@@ -192,6 +209,7 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     try {
       await requireCleanReview({
         branch,
+        worktreePath: worktree.path,
         tip: tip.stdout.trim(),
         missionIds,
         reviewRoot,
@@ -237,6 +255,8 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   const checkResults: Array<{ name: string; exit_code: number }> = [];
   let buildResult: { command: string; exit_code: number } = { command: buildCommand, exit_code: 0 };
   const fastForwarded: string[] = [];
+  /** Each fast-forwarded checkout's HEAD from before it moved, so a later failure can put it back. */
+  const forwardedFrom = new Map<string, string>();
   let commitId = "";
   try {
     for (const branch of options.workerBranches) {
@@ -281,7 +301,7 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     const committed = await git([
       "-c", `user.name=${authorName}`,
       "-c", `user.email=${authorEmail}`,
-      "commit", "-F", messageFile,
+      "commit", "--no-verify", "-F", messageFile,
     ], root);
     if (committed.exitCode !== 0) throw new LandError("commit", `git commit failed: ${reason(committed)}`);
     const newHead = await git(["rev-parse", "HEAD"], root);
@@ -297,6 +317,8 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
 
     // ---- Step 7: fast-forward the requested checkouts -------------------
     for (const checkout of options.fastForward ?? []) {
+      const before = await git(["rev-parse", "HEAD"], checkout);
+      if (before.exitCode === 0) forwardedFrom.set(checkout, before.stdout.trim());
       const merged = await git(["merge", "--ff-only", options.onto], checkout);
       if (merged.exitCode !== 0) {
         throw new LandError("fast-forward", `git merge --ff-only ${options.onto} failed in ${checkout}: ${reason(merged)}`);
@@ -305,6 +327,12 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     }
   } catch (err) {
     await restoreTarget(git, root, previousHead);
+    // The commit being discarded must not survive in a checkout that already moved to it. `--keep` refuses to touch
+    // anything the owner changed since, instead of discarding it.
+    for (const checkout of fastForwarded) {
+      const from = forwardedFrom.get(checkout);
+      if (from !== undefined) await git(["reset", "--keep", from], checkout);
+    }
     throw err;
   }
 
@@ -440,6 +468,30 @@ async function requirePassedVerification(worktreePath: string, branch: string): 
   return missionIds;
 }
 
+/**
+ * The mission a `uh/team/<team>/<role>` branch belongs to, from the controller's team state under the project:
+ * the worker's own mission id, else the team's. Empty when the branch is not a team branch or no state names it.
+ */
+async function teamStateMissionIds(projectRoot: string, branch: string): Promise<string[]> {
+  const match = /^uh\/team\/([^/]+)\/([^/]+)$/.exec(branch);
+  if (!match) return [];
+  const [, team, role] = match;
+  const runsRoot = path.join(projectRoot, ".harness", "missions", team, "runs");
+  const found: string[] = [];
+  for (const entry of await readdir(runsRoot).catch(() => [] as string[])) {
+    try {
+      const state = JSON.parse(await readFile(path.join(runsRoot, entry, "team-state.json"), "utf-8")) as { mission_id?: unknown; workers?: unknown };
+      for (const worker of Array.isArray(state.workers) ? state.workers : []) {
+        const record = worker as { role?: unknown; mission_id?: unknown };
+        if (record.role !== role) continue;
+        const id = typeof record.mission_id === "string" && record.mission_id.length > 0 ? record.mission_id : state.mission_id;
+        if (typeof id === "string" && id.length > 0 && !found.includes(id)) found.push(id);
+      }
+    } catch { /* no team state in this run */ }
+  }
+  return found;
+}
+
 /** The mission ids a retained verification result proves: its stated id, else its directory name. */
 function verificationMissionIds(file: string, record: Record<string, unknown>): string[] {
   const stated = record.mission_id;
@@ -467,6 +519,7 @@ type CollectedReview = {
 
 async function requireCleanReview(input: {
   branch: string;
+  worktreePath: string;
   tip: string;
   missionIds: string[];
   reviewRoot: string;
@@ -474,9 +527,18 @@ async function requireCleanReview(input: {
   git: LandGitRunner;
   root: string;
 }): Promise<void> {
-  const { branch, tip, missionIds, reviewRoot, reviews, git, root } = input;
-  const matched = reviews.filter((review) =>
-    review.request.sources.some((source) => missionIds.includes(source.mission_id)));
+  const { branch, worktreePath, tip, missionIds, reviewRoot, reviews, git, root } = input;
+  const workerRoot = await realpath(worktreePath);
+  const matched: Array<{ review: CollectedReview; source: IndependentReviewRequest["sources"][number] }> = [];
+  for (const review of reviews) {
+    for (const source of review.request.sources) {
+      if (!missionIds.includes(source.mission_id)) continue;
+      // Team workers share a mission id. The review's canonical source root
+      // identifies the particular retained worker that supplied its evidence.
+      const sourceRoot = await realpath(source.source_root).catch(() => undefined);
+      if (sourceRoot === workerRoot) matched.push({ review, source });
+    }
+  }
   if (matched.length === 0) {
     if (reviews.length === 0) {
       throw new ReviewGateError(
@@ -486,32 +548,44 @@ async function requireCleanReview(input: {
     }
     const first = reviews[0];
     throw new ReviewGateError(
-      `worker branch ${branch} has no collected independent review naming mission ${missionIds.join(", ")}; ` +
+      `worker branch ${branch} has no collected independent review naming mission ${missionIds.join(", ")} ` +
+        `from worktree ${workerRoot}; ` +
         `review ${first.reviewId} names ${first.request.sources.map((source) => source.mission_id).join(", ")} ` +
         `(first mismatching path: ${first.requestPath})`,
-      reviews.map((review) => review.reviewId),
+      // No collected review is about this branch, so an accepted override must not record any of them as reviewed.
+      [],
     );
   }
-  // Accept the branch as soon as one collected review is bound to it; a single
-  // unrelated or broken review must not mask a clean one.
-  let firstFailure: ReviewGateError | undefined;
-  for (const review of matched) {
+  // A review counts only if it is bound to this tip; a stale or unrelated one is set aside and cannot mask a
+  // clean one. Every review that is bound must be clean: a clean review does not outvote another review of the same
+  // tip that contradicts it or recommends against it (U-409).
+  let unbound: ReviewGateError | undefined;
+  const bound: CollectedReview[] = [];
+  for (const { review, source } of matched) {
     try {
-      await assertReviewBoundToTip(review, branch, tip, missionIds, git, root);
-      const contradicted = (review.assessment.claims ?? []).filter((claim) => claim.verdict === "contradicted");
-      if (contradicted.length > 0) {
-        throw new ReviewGateError(
-          `contradicted claims in independent review ${review.reviewId}: ${contradicted.map((claim) => claim.claim).join("; ")}`,
-          [review.reviewId],
-        );
-      }
-      return;
+      await assertReviewBoundToTip(review, source, branch, tip, git, root, worktreePath);
+      bound.push(review);
     } catch (err) {
       if (!(err instanceof ReviewGateError)) throw err;
-      if (!firstFailure) firstFailure = err;
+      if (!unbound) unbound = err;
     }
   }
-  throw firstFailure!;
+  if (bound.length === 0) throw unbound!;
+  for (const review of bound) {
+    const contradicted = (review.assessment.claims ?? []).filter((claim) => claim.verdict === "contradicted");
+    if (contradicted.length > 0) {
+      throw new ReviewGateError(
+        `contradicted claims in independent review ${review.reviewId}: ${contradicted.map((claim) => claim.claim).join("; ")}`,
+        [review.reviewId],
+      );
+    }
+    if (review.assessment.recommendation !== "pass") {
+      throw new ReviewGateError(
+        `independent review ${review.reviewId} recommends ${review.assessment.recommendation}, not pass`,
+        [review.reviewId],
+      );
+    }
+  }
 }
 
 /**
@@ -522,11 +596,12 @@ async function requireCleanReview(input: {
  */
 async function assertReviewBoundToTip(
   review: CollectedReview,
+  source: IndependentReviewRequest["sources"][number],
   branch: string,
   tip: string,
-  missionIds: string[],
   git: LandGitRunner,
   root: string,
+  worktreePath: string,
 ): Promise<void> {
   const requestBytes = await readFile(review.requestPath, "utf-8");
   if (review.assessment.request_sha256 !== sha256Hex(requestBytes)) {
@@ -536,30 +611,70 @@ async function assertReviewBoundToTip(
       [review.reviewId],
     );
   }
-  for (const source of review.request.sources) {
-    if (!missionIds.includes(source.mission_id)) continue;
-    for (const file of source.files) {
-      if (file.kind !== "output" && file.kind !== "changed") continue;
-      if (file.state !== "present") continue;
-      const originalPath = file.original_path.replaceAll("\\", "/").replace(/^\.\/+/, "");
-      const shown = await git(["show", `${tip}:${originalPath}`], root);
-      if (shown.exitCode !== 0) {
-        throw new ReviewGateError(
-          `review ${review.reviewId} captures ${originalPath}, which ${branch} does not contain ` +
-            `(first mismatching path: ${originalPath})`,
-          [review.reviewId],
-        );
-      }
-      const actual = sha256Hex(shown.stdout);
-      if (file.sha256 !== actual) {
-        throw new ReviewGateError(
-          `review ${review.reviewId} captured ${originalPath} at sha256 ${String(file.sha256)}, but ${branch} holds ${actual} ` +
-            `(first mismatching path: ${originalPath})`,
-          [review.reviewId],
-        );
-      }
+  const bindable = source.files.filter((file) => (file.kind === "output" || file.kind === "changed") && file.state === "present");
+  // A review that captured nothing of the worker's would bind to any branch at all.
+  if (bindable.length === 0) {
+    throw new ReviewGateError(
+      `review ${review.reviewId} captured no output or changed file of ${branch}, so it binds to nothing ` +
+        `(first mismatching path: ${review.requestPath})`,
+      [review.reviewId],
+    );
+  }
+  // The commit the review looked at must be part of the branch being landed.
+  if (source.source_head !== undefined) {
+    const ancestor = await git(["merge-base", "--is-ancestor", source.source_head, tip], root);
+    if (ancestor.exitCode !== 0) {
+      throw new ReviewGateError(
+        `review ${review.reviewId} was of commit ${source.source_head}, which is not part of ${branch} ` +
+          `(it is not an ancestor of ${tip}) (first mismatching path: ${review.requestPath})`,
+        [review.reviewId],
+      );
     }
   }
+  for (const file of bindable) {
+    const originalPath = file.original_path.replaceAll("\\", "/").replace(/^\.\/+/, "");
+    const held = await branchFileDigests(worktreePath, root, tip, originalPath);
+    if (held === undefined) {
+      throw new ReviewGateError(
+        `review ${review.reviewId} captures ${originalPath}, which ${branch} does not contain ` +
+          `(first mismatching path: ${originalPath})`,
+        [review.reviewId],
+      );
+    }
+    if (!held.includes(String(file.sha256))) {
+      throw new ReviewGateError(
+        `review ${review.reviewId} captured ${originalPath} at sha256 ${String(file.sha256)}, but ${branch} holds ${held[0]} ` +
+          `(first mismatching path: ${originalPath})`,
+        [review.reviewId],
+      );
+    }
+  }
+}
+
+/**
+ * sha256 of a file as the branch holds it, from the bytes git stores (never from decoded text, which changes a file
+ * that is not valid UTF-8) and, when it differs, as git writes it into a work tree (line endings and other filters
+ * from `.gitattributes`), which is what a review of the worker's checkout hashed. `undefined` when the branch does
+ * not contain the path. The stored form comes first.
+ */
+async function branchFileDigests(worktreePath: string, root: string, tip: string, relativePath: string): Promise<string[] | undefined> {
+  const read = async (cwd: string, args: string[]): Promise<Buffer | undefined> => {
+    try {
+      const { stdout } = await execFileP("git", ["-C", cwd, ...args], { encoding: "buffer", maxBuffer: 256 * 1024 * 1024 });
+      return stdout as unknown as Buffer;
+    } catch {
+      return undefined;
+    }
+  };
+  const stored = await read(root, ["cat-file", "blob", `${tip}:${relativePath}`]);
+  if (stored === undefined) return undefined;
+  const digests = [createHash("sha256").update(stored).digest("hex")];
+  const filtered = await read(worktreePath, ["cat-file", "--filters", `${tip}:${relativePath}`]);
+  if (filtered !== undefined) {
+    const digest = createHash("sha256").update(filtered).digest("hex");
+    if (!digests.includes(digest)) digests.push(digest);
+  }
+  return digests;
 }
 
 /** Enumerate `.harness/missions/<id>/<fileName>` under `root`; empty when none. */
@@ -643,18 +758,39 @@ export function landDecisionsPath(root: string): string {
  */
 export async function appendLandDecisionIndex(root: string, entry: { file: string; sha256: string }): Promise<void> {
   const indexFile = landDecisionsPath(root);
-  await mkdir(path.dirname(indexFile), { recursive: true });
-  const chained = chainEntry(lastChainedHash(readJsonLines(indexFile)), {
-    at: new Date().toISOString(),
-    file: path.relative(path.resolve(root), entry.file).replaceAll("\\", "/"),
-    sha256: entry.sha256,
+  // Reading the last hash and appending are one exclusive step (#257), as for the hive and the ledger.
+  withChainLock(indexFile, () => {
+    const chained = chainEntry(lastChainedHash(readJsonLines(indexFile)), {
+      at: new Date().toISOString(),
+      file: path.relative(path.resolve(root), entry.file).replaceAll("\\", "/"),
+      sha256: entry.sha256,
+    });
+    appendFileSync(indexFile, `${JSON.stringify(chained)}\n`, "utf-8");
   });
-  await appendFile(indexFile, `${JSON.stringify(chained)}\n`, "utf-8");
 }
 
 /** The first break in the land decision index chain, or undefined when intact. */
 export function verifyLandDecisionChain(root: string): ChainBreak | undefined {
-  return verifyChainedLines(readJsonLines(landDecisionsPath(root)));
+  return verifyChainedLines(readJsonLines(landDecisionsPath(root))) ?? verifyLandDecisionReceipts(root);
+}
+
+/**
+ * The first listed receipt that is missing or no longer hashes to what the index recorded, or undefined. The chain
+ * alone only proves the index itself was not edited; a receipt rewritten or deleted after the fact would still pass.
+ */
+export function verifyLandDecisionReceipts(root: string): ChainBreak | undefined {
+  const lines = readJsonLines(landDecisionsPath(root));
+  for (const [index, line] of lines.entries()) {
+    if (line.trim().length === 0) continue;
+    let entry: { file?: unknown; sha256?: unknown };
+    try { entry = JSON.parse(line) as { file?: unknown; sha256?: unknown }; } catch { continue; }
+    if (typeof entry.file !== "string" || typeof entry.sha256 !== "string") continue;
+    let content: string;
+    try { content = readFileSync(path.resolve(root, entry.file), "utf-8"); }
+    catch { return { line: index + 1, reason: `the receipt ${entry.file} is missing` }; }
+    if (sha256Hex(content) !== entry.sha256) return { line: index + 1, reason: `the receipt ${entry.file} does not match the sha256 the index recorded` };
+  }
+  return undefined;
 }
 
 async function writeLandDecision(

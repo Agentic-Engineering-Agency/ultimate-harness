@@ -13,13 +13,24 @@ import path from "node:path";
  * heavier modules into a snapshot.
  */
 
-/** The owning project for `root` when `root` lies inside another project's `.harness`, else undefined. */
+/**
+ * The owning project for `root` when `root` lies inside a worker layout UH creates under that project's `.harness`
+ * (`missions/<id>/team/...`, `sandboxes/<id>/...`), else undefined. A `.harness` folder that is merely an ancestor (a
+ * project that lives under `~/.harness/projects/x`) does not make the folder above it an owner, and the folder name
+ * is compared without regard to case only on Windows.
+ */
 export function mainCheckoutRoot(root: string): string | undefined {
   const parts = path.resolve(root).split(path.sep);
-  const index = parts.findIndex((part) => part.toLowerCase() === ".harness");
-  if (index <= 0) return undefined;
-  const owner = parts.slice(0, index).join(path.sep);
-  return owner.length === 0 || owner.endsWith(":") ? `${owner}${path.sep}` : owner;
+  const fold = (value: string): string => (process.platform === "win32" ? value.toLowerCase() : value);
+  for (let index = 1; index < parts.length; index += 1) {
+    if (fold(parts[index]) !== ".harness") continue;
+    const area = fold(parts[index + 1] ?? "");
+    const workerLayout = (area === "missions" && fold(parts[index + 3] ?? "") === "team") || area === "sandboxes";
+    if (!workerLayout) continue;
+    const owner = parts.slice(0, index).join(path.sep);
+    return owner.length === 0 || owner.endsWith(":") ? `${owner}${path.sep}` : owner;
+  }
+  return undefined;
 }
 
 /** The project that owns `.harness` state for `root`: its enclosing project, or `root` itself. */

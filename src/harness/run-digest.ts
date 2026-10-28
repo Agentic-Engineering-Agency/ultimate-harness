@@ -856,7 +856,8 @@ export class RunDigestBuilder {
       if (messageId !== undefined && !this.claudeMessageIds.has(messageId)) {
         this.claudeMessageIds.add(messageId);
         this.closeClaudeTurn();
-        this.turns += 1;
+        // A sub-agent's messages carry the `parent_tool_use_id` of the call that started it; they are not the run's turns.
+        if (!(typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id.length > 0)) this.turns += 1;
         this.claudeTurnOpen = true;
       }
       const usage = record(message.usage);

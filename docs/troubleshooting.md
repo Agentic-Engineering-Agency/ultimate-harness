@@ -58,7 +58,7 @@ uh mission put team.yaml worker-a.yaml worker-b.yaml
 uh land --worker-branch <branch> --onto <target> --message-file <file> --review-root <project>
 ```
 
-A review counts only when it names the branch's team mission and its captured file hashes match the branch tip; after any change to a reviewed file, collect a new review. `uh land` also refuses a dirty target worktree and a worker branch without a retained worktree; run teams with `--retain`.
+A review counts only when it names the branch's team mission and its captured file hashes match the branch tip; after any change to a reviewed file, collect a new review. `uh land` also refuses a target worktree that is not on `--onto` (another branch or a detached `HEAD`; check out the target branch there first), a dirty target worktree, and a worker branch without a retained worktree; run teams with `--retain`.
 
 ## Command Code Exits With `write EOF`
 

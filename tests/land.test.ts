@@ -81,10 +81,16 @@ function sha256(text: string): string {
 type ReviewFixture = {
   reviewId: string;
   missionId: string;
+  sourceRoot: string;
   changedPath: string;
   changedSha256: string;
   requestSha256?: string;
+  recommendation?: "pass" | "needs-attention" | "needs-remediation";
   verdicts: string[];
+  /** A review that captured no output or changed file at all. */
+  omitChanged?: boolean;
+  /** The commit the review's source workspace was at (`source_head` in the request). */
+  sourceHead?: string;
 };
 
 /**
@@ -99,14 +105,15 @@ async function writeCollectedReview(root: string, fixture: ReviewFixture): Promi
     review_id: fixture.reviewId,
     sources: [{
       mission_id: fixture.missionId,
-      source_root: root,
+      source_root: fixture.sourceRoot,
       files: [
         { kind: "contract", state: "present",
           original_path: `.harness/missions/${fixture.missionId}/mission.yaml`,
           snapshot_path: "inputs/contract.yaml", sha256: "0".repeat(64) },
-        { kind: "changed", state: "present", original_path: fixture.changedPath,
-          snapshot_path: "inputs/changed-0.txt", sha256: fixture.changedSha256 },
+        ...(fixture.omitChanged ? [] : [{ kind: "changed", state: "present", original_path: fixture.changedPath,
+          snapshot_path: "inputs/changed-0.txt", sha256: fixture.changedSha256 }]),
       ],
+      ...(fixture.sourceHead !== undefined ? { source_head: fixture.sourceHead } : {}),
       reference_paths: [],
       acceptance: [],
       checks: [],
@@ -119,7 +126,7 @@ async function writeCollectedReview(root: string, fixture: ReviewFixture): Promi
     review_id: fixture.reviewId,
     run_id: "run-1",
     request_sha256: fixture.requestSha256 ?? sha256(requestText),
-    recommendation: fixture.verdicts.includes("contradicted") ? "needs-remediation" : "pass",
+    recommendation: fixture.recommendation ?? (fixture.verdicts.includes("contradicted") ? "needs-remediation" : "pass"),
     human_acceptance_required: true,
     claims: fixture.verdicts.map((verdict, index) => ({
       source: fixture.missionId, claim: `claim ${index}`, verdict, evidence_source: "out/report.json",
@@ -148,6 +155,7 @@ type SetupOptions = {
   reviewRequestSha256?: string;
   reviewChangedPath?: string;
   reviewInWorktree?: boolean;
+  reviewRecommendation?: ReviewFixture["recommendation"];
 };
 
 async function setup(options: SetupOptions = {}): Promise<{ worktree: string; messageFile: string; missionId: string; reviewId: string }> {
@@ -167,9 +175,11 @@ async function setup(options: SetupOptions = {}): Promise<{ worktree: string; me
     await writeCollectedReview(options.reviewInWorktree ? worktree : ROOT, {
       reviewId,
       missionId: options.reviewMissionId ?? missionId,
+      sourceRoot: await realpath(worktree),
       changedPath,
       changedSha256,
       requestSha256: options.reviewRequestSha256,
+      recommendation: options.reviewRecommendation,
       verdicts: options.reviewVerdicts ?? ["supported"],
     });
   }
@@ -218,6 +228,33 @@ afterEach(async () => {
 });
 
 describe("uh land", () => {
+  test("refuses when the target worktree is on a branch other than --onto", async () => {
+    const { messageFile, worktree } = await setup();
+    await gitQuiet(ROOT, ["checkout", "-q", "-b", "other"]);
+    const before = await head(ROOT);
+    const main = (await git(ROOT, ["rev-parse", "main"])).trim();
+
+    await expect(runLand({ messageFile })).rejects.toThrow(/step "gates".*is on other, not --onto main/);
+
+    expect(await head(ROOT)).toBe(before);
+    expect((await git(ROOT, ["rev-parse", "main"])).trim()).toBe(main);
+    expect((await git(ROOT, ["symbolic-ref", "--short", "HEAD"])).trim()).toBe("other");
+    expect(await status(ROOT)).toBe("");
+    expect(await fileExists(worktree)).toBe(true);
+  });
+
+  test("refuses when the target worktree has a detached HEAD", async () => {
+    const { messageFile, worktree } = await setup();
+    await gitQuiet(ROOT, ["checkout", "-q", "--detach", "main"]);
+    const before = await head(ROOT);
+
+    await expect(runLand({ messageFile })).rejects.toThrow(/step "gates".*is not on a branch/);
+
+    expect(await head(ROOT)).toBe(before);
+    expect(await status(ROOT)).toBe("");
+    expect(await fileExists(worktree)).toBe(true);
+  });
+
   test("refuses when the worker worktree has no passed verification", async () => {
     const { messageFile } = await setup({ verificationStatus: null });
     const before = await head(ROOT);
@@ -236,6 +273,42 @@ describe("uh land", () => {
 
     expect(await head(ROOT)).toBe(before);
     expect(await status(ROOT)).toBe("");
+  });
+
+  test("refuses a non-passing review even when all its claims are supported", async () => {
+    const { messageFile } = await setup({ reviewRecommendation: "needs-attention" });
+    const before = await head(ROOT);
+
+    await expect(runLand({ messageFile })).rejects.toThrow(/recommends needs-attention, not pass/i);
+
+    expect(await head(ROOT)).toBe(before);
+    expect(await status(ROOT)).toBe("");
+  });
+
+  test("U-409: a clean review does not outvote another review of the same tip that contradicts it", async () => {
+    const { messageFile, worktree, missionId } = await setup({ reviewVerdicts: ["supported"] });
+    const changedSha256 = sha256(await git(ROOT, ["show", "work:feature.txt"]));
+    await writeCollectedReview(ROOT, {
+      reviewId: "review-b", missionId, sourceRoot: await realpath(worktree),
+      changedPath: "feature.txt", changedSha256, verdicts: ["supported", "contradicted"],
+    });
+    const before = await head(ROOT);
+
+    await expect(runLand({ messageFile })).rejects.toThrow(/contradicted/i);
+
+    expect(await head(ROOT)).toBe(before);
+  });
+
+  test("U-409: a review of an older tip does not block a clean review of this one", async () => {
+    const { messageFile, worktree, missionId } = await setup({ reviewVerdicts: ["supported"] });
+    await writeCollectedReview(ROOT, {
+      reviewId: "review-old", missionId, sourceRoot: await realpath(worktree),
+      changedPath: "feature.txt", changedSha256: "f".repeat(64), verdicts: ["contradicted"],
+    });
+    const before = await head(ROOT);
+    const result = await runLand({ messageFile });
+    expect(result.accepted_review).toBeUndefined();
+    expect(await head(ROOT)).not.toBe(before);
   });
 
   test("--accept-review records the decision file and lands past a contradicted review", async () => {
@@ -258,6 +331,20 @@ describe("uh land", () => {
     expect(entries).toHaveLength(2);
     expect(entries).toContain("decisions.ndjson");
     expect(verifyLandDecisionChain(ROOT)).toBeUndefined();
+  });
+
+  test("the decision index re-hashes the receipts it lists: an edited or deleted receipt breaks it (#265)", async () => {
+    const { messageFile } = await setup({ reviewVerdicts: ["contradicted"] });
+    const result = await runLand({ messageFile, acceptReview: "reviewed by hand; accepted" });
+    const receipt = result.accepted_review!.path;
+    expect(verifyLandDecisionChain(ROOT)).toBeUndefined();
+
+    const original = await readFile(receipt, "utf-8");
+    await writeFile(receipt, original.replace("reviewed by hand; accepted", "nothing to see here"), "utf-8");
+    expect(verifyLandDecisionChain(ROOT)?.reason).toMatch(/does not match/i);
+
+    await rm(receipt, { force: true });
+    expect(verifyLandDecisionChain(ROOT)?.reason).toMatch(/missing/i);
   });
 
   test("a forbidden pattern in the diff restores the target byte-for-byte", async () => {
@@ -355,7 +442,7 @@ describe("uh land", () => {
     for (const [dir, id] of [[backend, "backend"], [frontend, "frontend"]]) {
       await writeVerification(dir, id, "passed");
       await writeCollectedReview(ROOT, {
-        reviewId: `review-${id}`, missionId: id, changedPath: `${id}.txt`,
+        reviewId: `review-${id}`, missionId: id, sourceRoot: dir, changedPath: `${id}.txt`,
         changedSha256: sha256(await git(ROOT, ["show", `uh/team/t1/${id}:${id}.txt`])), verdicts: ["supported"],
       });
     }
@@ -382,6 +469,130 @@ describe("uh land", () => {
     expect(await head(mirror)).toBe(await head(ROOT));
   });
 
+  test("a failed fast-forward of a later checkout puts every earlier checkout back, not just the target (#263)", async () => {
+    const { messageFile } = await setup();
+    const first = join(WORK, "mirror-first");
+    const second = join(WORK, "mirror-second");
+    await gitQuiet(ROOT, ["worktree", "add", "-q", "-b", "mirror-first", first, "main"]);
+    await gitQuiet(ROOT, ["worktree", "add", "-q", "-b", "mirror-second", second, "main"]);
+    // The second checkout has its own commit, so it cannot fast-forward to the landed target.
+    await writeFile(join(second, "local.txt"), "local\n", "utf-8");
+    await gitQuiet(second, ["add", "local.txt"]);
+    await gitQuiet(second, ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "local work"]);
+    const before = { root: await head(ROOT), first: await head(first), second: await head(second) };
+
+    await expect(runLand({ messageFile, fastForward: [first, second] })).rejects.toThrow(/fast-forward/i);
+
+    expect(await head(ROOT)).toBe(before.root);
+    expect(await head(first)).toBe(before.first);
+    expect(await head(second)).toBe(before.second);
+  });
+
+  test("a worker file that is not valid UTF-8 binds to a review of its exact bytes (#264)", async () => {
+    const { worktree, messageFile, missionId } = await setup({ reviewVerdicts: null });
+    const bytes = Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x81, 0xc3, 0x28]);
+    await writeFile(join(worktree, "blob.bin"), bytes);
+    await gitQuiet(worktree, ["add", "blob.bin"]);
+    await gitQuiet(worktree, ["commit", "-q", "-m", "binary"]);
+    await writeCollectedReview(ROOT, {
+      reviewId: "review-bin", missionId, sourceRoot: await realpath(worktree),
+      changedPath: "blob.bin", changedSha256: createHash("sha256").update(bytes).digest("hex"), verdicts: ["supported"],
+    });
+    const result = await runLand({ messageFile });
+    expect(result.status).toBe("landed");
+  });
+
+  test("a file git writes with CRLF in the worker's tree binds to a review of those bytes (#264)", async () => {
+    const { worktree, messageFile, missionId } = await setup({
+      reviewVerdicts: null,
+      diffFiles: { "feature.txt": "feature\n", ".gitattributes": "*.crlf text eol=crlf\n", "doc.crlf": "a\nb\n" },
+    });
+    // The worker's checkout holds CRLF, because of the attribute; the branch's blob holds LF.
+    await rm(join(worktree, "doc.crlf"), { force: true });
+    await gitQuiet(worktree, ["checkout", "--", "doc.crlf"]);
+    const onDisk = await readFile(join(worktree, "doc.crlf"));
+    expect(onDisk.toString("latin1")).toBe("a\r\nb\r\n");
+    await writeCollectedReview(ROOT, {
+      reviewId: "review-crlf", missionId, sourceRoot: await realpath(worktree),
+      changedPath: "doc.crlf", changedSha256: createHash("sha256").update(onDisk).digest("hex"), verdicts: ["supported"],
+    });
+    const result = await runLand({ messageFile });
+    expect(result.status).toBe("landed");
+  });
+
+  test("a review that captured no file binds to nothing and is refused (#264)", async () => {
+    const { worktree, messageFile, missionId } = await setup({ reviewVerdicts: null });
+    await writeCollectedReview(ROOT, {
+      reviewId: "review-empty", missionId, sourceRoot: await realpath(worktree),
+      changedPath: "feature.txt", changedSha256: "0".repeat(64), verdicts: ["supported"], omitChanged: true,
+    });
+    await expect(runLand({ messageFile })).rejects.toThrow(/captured no output or changed file|binds to nothing/i);
+  });
+
+  test("a review of a commit that is not part of the branch is refused, one of an ancestor or the tip binds (#264)", async () => {
+    const { worktree, messageFile, missionId } = await setup({ reviewVerdicts: null });
+    const changed = sha256(await git(ROOT, ["show", "work:feature.txt"]));
+    const sourceRoot = await realpath(worktree);
+    const review = (reviewId: string, sourceHead: string) => writeCollectedReview(ROOT, {
+      reviewId, missionId, sourceRoot, changedPath: "feature.txt", changedSha256: changed, verdicts: ["supported"], sourceHead,
+    });
+    await review("review-elsewhere", "1".repeat(40));
+    await expect(runLand({ messageFile })).rejects.toThrow(/not part of|is not an ancestor/i);
+    const tip = (await git(ROOT, ["rev-parse", "work"])).trim();
+    await rm(join(ROOT, ".harness", "missions", "review-elsewhere"), { recursive: true, force: true });
+    await review("review-tip", tip);
+    expect((await runLand({ messageFile })).status).toBe("landed");
+  });
+
+  test("--accept-review records no review ids when none of the collected reviews names this mission (#264)", async () => {
+    const { messageFile } = await setup({ reviewMissionId: "some-other-mission" });
+    const result = await runLand({ messageFile, acceptReview: "reviewed by hand; accepted" });
+    expect(result.status).toBe("landed");
+    const decision = JSON.parse(await readFile(result.accepted_review!.path, "utf-8")) as { review_ids: string[] };
+    expect(decision.review_ids).toEqual([]);
+  });
+
+  describe("which mission a team worker's branch belongs to (#264)", () => {
+    /** A team branch whose worktree's own verification.yaml names `claimedMission`, as a worker could write it. */
+    async function teamBranch(claimedMission: string) {
+      await initRepo(ROOT);
+      const branch = "uh/team/team-a/backend";
+      await makeWorkerBranch(ROOT, branch, { "feature.txt": "feature\n" }, "feat: add feature");
+      const worktree = join(ROOT, ".harness", "missions", "team-a", "team", "workers", "wt-backend");
+      await gitQuiet(ROOT, ["worktree", "add", "-q", worktree, branch]);
+      await writeVerification(worktree, claimedMission, "passed");
+      // The controller's own record of the team, which a worker cannot reach.
+      const runDir = join(ROOT, ".harness", "missions", "team-a", "runs", "run-1");
+      await mkdir(runDir, { recursive: true });
+      await writeFile(join(runDir, "team-state.json"), JSON.stringify({
+        schema_version: "uh.team-run.v0", mission_id: "team-a",
+        workers: [{ id: "backend", role: "backend", mission_id: "worker-backend" }],
+      }), "utf-8");
+      const messageFile = join(WORK, "message.txt");
+      await writeFile(messageFile, "feat: land worker\n", "utf-8");
+      const changedSha256 = sha256(await git(ROOT, ["show", `${branch}:feature.txt`]));
+      return { branch, worktree, messageFile, changedSha256 };
+    }
+
+    test("a review of a mission the worker only claims in its own verification file does not bind", async () => {
+      const { branch, worktree, messageFile, changedSha256 } = await teamBranch("evil-mission");
+      await writeCollectedReview(ROOT, {
+        reviewId: "review-evil", missionId: "evil-mission", sourceRoot: await realpath(worktree),
+        changedPath: "feature.txt", changedSha256, verdicts: ["supported"],
+      });
+      await expect(runLand({ messageFile, workerBranches: [branch] })).rejects.toThrow(/worker-backend/);
+    });
+
+    test("a review of the mission the team state names binds, whatever the worker's file says", async () => {
+      const { branch, worktree, messageFile, changedSha256 } = await teamBranch("evil-mission");
+      await writeCollectedReview(ROOT, {
+        reviewId: "review-real", missionId: "worker-backend", sourceRoot: await realpath(worktree),
+        changedPath: "feature.txt", changedSha256, verdicts: ["supported"],
+      });
+      expect((await runLand({ messageFile, workerBranches: [branch] })).status).toBe("landed");
+    });
+  });
+
   test("lands when the collected review names the worker's mission", async () => {
     const { messageFile } = await setup();
 
@@ -403,6 +614,7 @@ describe("uh land", () => {
     await writeCollectedReview(project, {
       reviewId: "review-a",
       missionId: "mission-a",
+      sourceRoot: worktree,
       changedPath: "feature.txt",
       changedSha256: sha256(await git(ROOT, ["show", "work:feature.txt"])),
       verdicts: ["supported"],
@@ -424,6 +636,27 @@ describe("uh land", () => {
     expect(error).toBeInstanceOf(ReviewGateError);
     expect((error as Error).message).toContain(reviewId);
     expect((error as Error).message).toContain("other-mission");
+    expect(await head(ROOT)).toBe(before);
+    expect(await status(ROOT)).toBe("");
+  });
+
+  test("refuses another worker's review even when the team mission and changed bytes match", async () => {
+    const { messageFile, missionId } = await setup({ reviewVerdicts: null });
+    await makeWorkerBranch(ROOT, "other-worker", { "feature.txt": "feature\n" }, "feat: same feature");
+    const otherWorktree = join(WORK, "other-worker");
+    await gitQuiet(ROOT, ["worktree", "add", "-q", otherWorktree, "other-worker"]);
+    await writeCollectedReview(ROOT, {
+      reviewId: "review-other-worker",
+      missionId,
+      sourceRoot: otherWorktree,
+      changedPath: "feature.txt",
+      changedSha256: sha256(await git(ROOT, ["show", "other-worker:feature.txt"])),
+      verdicts: ["supported"],
+    });
+    const before = await head(ROOT);
+
+    await expect(runLand({ messageFile })).rejects.toThrow(/no collected independent review.*worktree/i);
+
     expect(await head(ROOT)).toBe(before);
     expect(await status(ROOT)).toBe("");
   });

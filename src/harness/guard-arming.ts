@@ -113,7 +113,27 @@ async function invokeSubprocessHook(
   return interpretSubprocessOutput(result.stdout);
 }
 
-async function invokeExtensionHook(
+/**
+ * Extension probes point two process-wide environment variables at their own policy and log for the length of one
+ * call, so two of them must never overlap: a concurrent team would otherwise judge one worker's probe against another
+ * worker's policy. Each probe waits for the one before it.
+ */
+let extensionProbeQueue: Promise<unknown> = Promise.resolve();
+function serializeExtensionProbe<T>(operation: () => Promise<T>): Promise<T> {
+  const run = extensionProbeQueue.then(operation, operation);
+  extensionProbeQueue = run.catch(() => undefined);
+  return run;
+}
+
+function invokeExtensionHook(
+  input: GuardArmingInput,
+  env: NodeJS.ProcessEnv,
+  probe: ProbeCall,
+): Promise<ProbeDecision> {
+  return serializeExtensionProbe(() => invokeExtensionHookNow(input, env, probe));
+}
+
+async function invokeExtensionHookNow(
   input: GuardArmingInput,
   env: NodeJS.ProcessEnv,
   probe: ProbeCall,

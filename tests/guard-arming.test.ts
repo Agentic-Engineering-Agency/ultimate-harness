@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -311,6 +311,7 @@ afterEach(async () => {
 
 /** Corrupt the real policy file between the adapter's write and the arming check. */
 const corruptPolicy = async (input: GuardArmingInput): Promise<GuardArmingResult> => {
+  await chmod(input.policyPath, 0o600);
   await writeFile(input.policyPath, "{ not json", "utf8");
   return await armGuard(input);
 };
@@ -409,6 +410,41 @@ describe("oh-my-pi guard supervision", () => {
       expect(run.guardArmed).toBe(false);
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("arming Pi and oh-my-pi guards concurrently (#261)", () => {
+  test("each extension probe sees its own policy and log, never another worker's", async () => {
+    const directories = await Promise.all([1, 2, 3, 4].map(index => mkdtemp(path.join(tmpdir(), `uh-arm-concurrent-${index}-`))));
+    try {
+      const observed: Array<{ label: string; policy: string | undefined; log: string | undefined }> = [];
+      const inputs: Array<{ input: GuardArmingInput; policyPath: string; logPath: string }> = [];
+      for (const [index, directory] of directories.entries()) {
+        const { policyPath } = await writePolicy(directory);
+        const logPath = path.join(directory, "arm.log");
+        const label = `worker-${index}`;
+        const loadHookModule = async () => ({
+          default: (pi: { on: (event: string, handler: (event: unknown) => unknown) => void }) => {
+            pi.on("tool_call", async () => {
+              // The real extension reads its paths from the environment at call time, after its own awaits.
+              await new Promise(resolve => setTimeout(resolve, 20 + index * 5));
+              observed.push({ label, policy: process.env.UH_TOOL_GUARD_POLICY, log: process.env.UH_TOOL_GUARD_LOG });
+              return undefined;
+            });
+          },
+        });
+        inputs.push({ input: { runtime: "oh-my-pi", policyPath, logPath, hookModulePath: "stub", loadHookModule }, policyPath, logPath });
+      }
+      await Promise.all(inputs.map(({ input }) => armGuard(input)));
+      expect(observed.length).toBeGreaterThanOrEqual(8);
+      for (const record of observed) {
+        const own = inputs[Number(record.label.split("-")[1])];
+        expect(record.policy, record.label).toBe(own.policyPath);
+        expect(record.log, record.label).toBe(own.logPath);
+      }
+    } finally {
+      await Promise.all(directories.map(directory => rm(directory, { recursive: true, force: true })));
     }
   });
 });

@@ -473,6 +473,37 @@ describe("uh queue run", () => {
     expect(notices[0].reason).toBe("wait-timeout");
   });
 
+  test("a child that exits 0 with no run record to be found fails as launch-failed after a short grace, without spinning (#263)", async () => {
+    const root = await makeRoot();
+    const { spawner, children } = fakeChildSpawner();
+    const { notices, notify } = noticeCounter();
+    const file = await writeQueue(root, {
+      id: "exit-clean-no-record",
+      entries: [{ id: "a", mission: "missions/a.yaml", runtime: "codex" }],
+    });
+    let calls = 0;
+    const missing: NonNullable<QueueLauncherDeps["wait"]> = async () => {
+      calls += 1;
+      throw new WaitError("no run matching the launch is discoverable yet", "unknown_target");
+    };
+    const pending = runQueue(file, {
+      root,
+      launcher: createQueueLauncher({ spawner, wait: missing, settleTimeoutMs: 20_000 }),
+      freeMemoryBytes: () => PLENTY,
+      maxOrchestrators: 1,
+      notify,
+    });
+    await waitForCondition(async () => children.length === 1);
+    children[0].emit("exit", 0);
+    const started = Date.now();
+    const result = await pending;
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(result.entries[0]).toMatchObject({ status: "failed" });
+    expect(notices[0].reason).toBe("launch-failed");
+    // One read per pause, not one per turn of the event loop.
+    expect(calls).toBeLessThan(40);
+  }, 30_000);
+
   test("fails a child that exits non-zero before any run record as launch-failed", async () => {
     const root = await makeRoot();
     const { spawner, children } = fakeChildSpawner();
@@ -498,5 +529,57 @@ describe("uh queue run", () => {
     expect(result.entries[0]).toMatchObject({ status: "failed", exit_code: 1 });
     expect(notices).toHaveLength(1);
     expect(notices[0].reason).toBe("launch-failed");
+  });
+});
+
+describe("the default queue launcher's argv (#255)", () => {
+  /** What the launcher would spawn for one entry, without spawning anything. */
+  async function launchedArgs(request: Partial<Parameters<ReturnType<typeof createQueueLauncher>>[0]> = {}): Promise<string[]> {
+    let captured: string[] = [];
+    const spawner: NonNullable<QueueLauncherDeps["spawner"]> = (_command, args) => {
+      captured = args;
+      return new EventEmitter() as unknown as ChildProcess;
+    };
+    const launcher = createQueueLauncher({ spawner, cliEntry: "cli.js", settle: async () => ({ status: "passed", exit_code: 0 }) });
+    await launcher({ queueId: "q", entryId: "a", missionPath: "/p/missions/a.yaml", runtime: "codex", root: "/p", ...request });
+    return captured;
+  }
+
+  test("a queued mission runs where `uh mission run` would put it: no --no-sandbox by default", async () => {
+    expect(await launchedArgs()).not.toContain("--no-sandbox");
+  });
+
+  test("an entry that opts out with sandbox: false runs in the project root and says so on the command line", async () => {
+    expect(await launchedArgs({ sandbox: false })).toContain("--no-sandbox");
+  });
+
+  test("an entry that says sandbox: true is routed like the default", async () => {
+    expect(await launchedArgs({ sandbox: true })).not.toContain("--no-sandbox");
+  });
+
+  test("the entry schema accepts sandbox booleans and rejects anything else", () => {
+    const base = { id: "a", mission: "missions/a.yaml", runtime: "codex" };
+    expect(() => validateQueueFile({ id: "q", entries: [{ ...base, sandbox: false }] })).not.toThrow();
+    expect(() => validateQueueFile({ id: "q", entries: [{ ...base, sandbox: "no" }] })).toThrow();
+  });
+
+  test("the scheduler hands the entry's sandbox choice to the launcher", async () => {
+    const root = await makeRoot();
+    const seen: Array<boolean | undefined> = [];
+    const file = await writeQueue(root, {
+      id: "opt",
+      entries: [
+        { id: "a", mission: "missions/a.yaml", runtime: "codex" },
+        { id: "b", mission: "missions/b.yaml", runtime: "codex", sandbox: false },
+      ],
+    });
+    await runQueue(file, {
+      root,
+      launcher: async (request) => { seen.push(request.sandbox); return { run_id: `run-${request.entryId}`, settled: Promise.resolve({ status: "passed", exit_code: 0 }) }; },
+      freeMemoryBytes: () => PLENTY,
+      maxOrchestrators: 1,
+      notify: () => undefined,
+    });
+    expect(seen).toEqual([undefined, false]);
   });
 });

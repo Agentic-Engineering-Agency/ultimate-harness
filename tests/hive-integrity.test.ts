@@ -19,12 +19,14 @@ import {
   hiveClaimsPath,
   hiveFactsPath,
   readHiveClaims,
+  readVerifiedHiveFacts,
   renderHiveFacts,
   renderVerifiedHiveFacts,
   verifyHiveChain,
   type HiveFactInput,
 } from "../src/harness/hive.js";
 import { runQueue } from "../src/harness/queue.js";
+import { chainEntry } from "../src/harness/hash-chain.js";
 import { harnessHiveDir } from "../src/harness/hive-root.js";
 import { interventionsPath, readLedger, recordIntervention, verifyLedgerChain } from "../src/harness/interventions.js";
 import { landWorkerBranches } from "../src/harness/land.js";
@@ -188,6 +190,45 @@ describe("hive facts hash chain", () => {
 /* -------------------------------------------------------------------------- */
 /* Claims vs facts, and injection escaping                                     */
 /* -------------------------------------------------------------------------- */
+
+describe("only facts the controller recorded are injected", () => {
+  test("a chained entry without the controller's mac stays in the chain but is never injected", async () => {
+    const root = await makeRoot();
+    try {
+      await initRepo(root);
+      await seedFacts(root, 1);
+      const ev = await evidence(root, "out/other.yaml", "status: passed\n");
+      const lines = await readLines(hiveFactsPath(root));
+      const last = JSON.parse(lines.at(-1)!) as { hash: string };
+      const body = { id: "fact-added", at: "2026-10-28T00:00:00.000Z", text: "added outside the controller", evidence: ev, source: "manual" };
+      const entry = chainEntry(last.hash, { ...body, mac: "0".repeat(64) });
+      await writeFile(hiveFactsPath(root), `${[...lines, JSON.stringify(entry)].join("\n")}\n`, "utf-8");
+
+      expect(verifyHiveChain(root)).toBeUndefined();
+      expect(readVerifiedHiveFacts(root).map((fact) => fact.text)).toEqual(["fact number 1"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("evidence that is absolute or leaves the project never verifies", async () => {
+    const root = await makeRoot();
+    const outside = await makeRoot("uh-hive-outside-");
+    try {
+      await initRepo(root);
+      const content = "status: passed\n";
+      await writeFile(path.join(outside, "verification.yaml"), content, "utf-8");
+      const absolute = { kind: "verification" as const, ref: path.join(outside, "verification.yaml"), sha256: sha256(content) };
+      const escaping = { ...absolute, ref: path.relative(root, path.join(outside, "verification.yaml")) };
+      expect(evidenceMatches(root, absolute)).toBe(false);
+      expect(evidenceMatches(root, escaping)).toBe(false);
+      expect(() => appendFact(root, { text: "outside evidence", evidence: absolute, source: "manual" })).toThrow(/mismatch/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("injection is verified facts only", () => {
   test("claims are stored separately and never injected", async () => {
@@ -385,6 +426,39 @@ describe("intervention ledger chain", () => {
 });
 
 describe("controller-only hive writes", () => {
+  test("launcher, utility and interpreter forms on hive records are tamper stops", async () => {
+    const { root, factsPath, hiveDir, policyPath, logPath } = await guardFixture();
+    try {
+      const forms = [
+        `/bin/rm -f "${factsPath}"`,
+        `env rm -f "${factsPath}"`,
+        `command rm "${factsPath}"`,
+        `sudo -u someone rm "${factsPath}"`,
+        `/bin/cp /tmp/other "${factsPath}"`,
+        `find "${hiveDir}" -delete`,
+        `find "${hiveDir}" -name x -exec rm {} \\;`,
+        `sed -i s/a/b/ "${factsPath}"`,
+        `perl -pi -e s/a/b/ "${factsPath}"`,
+        `dd if=/dev/null of="${factsPath}"`,
+        `truncate -s 0 "${factsPath}"`,
+        `touch "${factsPath}"`,
+        `ln -sf "${root}/other" "${factsPath}"`,
+        `install /tmp/other "${factsPath}"`,
+        `sh -ec 'rm "${factsPath}"'`,
+        `node -e "require('fs').appendFileSync('${factsPath}', 'x')"`,
+        `python3 -c "open('${factsPath}', 'a')"`,
+      ];
+      for (const command of forms) {
+        const verdict = await runToolGuard({ policyPath, logPath, call: { tool: "bash", input: { command } } });
+        expect(verdict.class, command).toBe("guard_tamper");
+      }
+      const piped = await runToolGuard({ policyPath, logPath, call: { tool: "bash", input: { command: `echo "${factsPath}" | xargs rm` } } });
+      expect(piped.decision).toBe("deny");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test.each(["command-code", "oh-my-pi", "claude-code"])("%s: file and shell write/edit/delete on hive records are tamper stops", async (runtime) => {
     const { root, factsPath, hiveDir, policyPath, logPath } = await guardFixture();
     try {

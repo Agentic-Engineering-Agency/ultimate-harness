@@ -117,6 +117,10 @@ Applying a strict-containment template to a mission is refused with an error ide
 5. **Permits network clients**:
    Refused if `deny_network_clients === false`. Network access from client tools must remain disabled.
 
+### In a team
+
+A team worker's guard is the team mission's guard, narrowed in order by the worker's own mission packet, its session template and its own `guard` block, and written into the worker's packet (`contract.guard` in the team state). A layer can switch a restriction on (`deny_git_mutations`, `deny_package_installs`, `deny_network_clients`, `deny_unknown_tools`, `confine_reads`, `deny_shell`), take a permission away (`allow_native_subagents`, `allow_code_tools`, `allow_unconfined`), shrink `write_roots` to a subset of the parent's, and add `agent_clients` to deny. It can never switch a restriction off, grant a permission, or name a write or read root outside the parent's; that is refused before any worktree exists, naming the worker. A `containment: strict` template holds the narrowed guard to the strict rules above, the same check a single mission gets. Before this, a worker's template guard was dropped and its own `guard` block was never applied (only its write roots were read, for the audit).
+
 ## Run Index & Outcome Observability
 
 When a template is applied, the harness helper `describeAppliedTemplate(mission, template)` produces an applied template descriptor:

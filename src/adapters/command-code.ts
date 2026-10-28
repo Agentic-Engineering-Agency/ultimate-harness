@@ -28,7 +28,8 @@ import { settleNativeCap, reconcileNativeCapSettlement } from "../harness/runtim
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { captureDiffWithUntracked, diffCaptureFailureRecord } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
-import { getMissionArtifactContext, persistPromptAndSession, appendMissionEvent, writeArtifactFile } from "./_artifact-context.js";
+import { assertOrchestratorWriteRoots } from "../harness/orchestrator-write-roots.js";
+import { getMissionArtifactContext, persistPromptAndSession, appendMissionEvent, writeArtifactFile, writeReadOnlyArtifactFile } from "./_artifact-context.js";
 
 export const CommandCodeRuntimeConfigSchema = z.object({
   model: z.string().optional().default(""),
@@ -124,6 +125,8 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   if (config.role === "orchestrator" && !mission.guard) {
     throw new Error("Command Code orchestrator runs require a mission guard policy");
   }
+  // The orchestrator runs in the live project root, so only its write roots confine it.
+  if (config.role === "orchestrator") assertOrchestratorWriteRoots(controllerGuard(mission.guard).write_roots, "Command Code");
   const permissionMode = mission.guard ? "guard" as const : config.permission_mode ?? "prompt" as const;
   const reviewRequestSha256 = await assertIndependentReviewExecution(root, missionPath, mission, {
     canonicalRoot: options.artifactRoot ?? root, runtime: "command-code", model: config.model,
@@ -250,7 +253,7 @@ export async function runCommandCode(root: string, missionPath: string, options:
         ".commandcode/.gitignore": sha256Hex(gitignoreContent),
       },
     });
-    await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
+    await writeReadOnlyArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
     const arming = await (options.armGuard ?? armGuard)({
       runtime: "command-code",

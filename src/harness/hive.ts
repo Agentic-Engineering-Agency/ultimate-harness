@@ -16,15 +16,18 @@ import {
   type HiveItemStatus,
 } from "../schema/hive.js";
 import { harnessHiveDir, harnessOwnerRoot } from "./hive-root.js";
+import { withChainLock } from "./chain-lock.js";
 import {
   chainEntry,
   lastChainedHash,
   readJsonLines,
   sha256File,
   verifyChainedLines,
+  verifyChainedLinesTolerant,
   type ChainBreak,
 } from "./hash-chain.js";
-import { verifyLedgerChain } from "./interventions.js";
+import { interventionsPath, verifyLedgerChain } from "./interventions.js";
+import { entryMac, entryMacMatches } from "./controller-key.js";
 
 /**
  * UH hive behaviour — load, validate, import, append, and render the shared
@@ -241,6 +244,11 @@ export interface HiveFactInput {
  * chain refuses the append rather than extending it.
  */
 export function appendFact(root: string, input: HiveFactInput): HiveFact {
+  // Reading the last hash and appending are one exclusive step across processes (#257).
+  return withChainLock(hiveFactsPath(root), () => appendFactLocked(root, input));
+}
+
+function appendFactLocked(root: string, input: HiveFactInput): HiveFact {
   const at = input.at ?? new Date().toISOString();
   const evidence = HiveFactEvidenceSchema.parse(input.evidence);
   const lines = readJsonLines(hiveFactsPath(root));
@@ -257,7 +265,7 @@ export function appendFact(root: string, input: HiveFactInput): HiveFact {
     ...(input.paths !== undefined && input.paths.length > 0 ? { paths: [...input.paths] } : {}),
     source: input.source,
   };
-  const fact = HiveFactSchema.parse(chainEntry(lastChainedHash(lines), body));
+  const fact = HiveFactSchema.parse(chainEntry(lastChainedHash(lines), { ...body, mac: entryMac(body) }));
   const actual = evidenceHash(root, fact.evidence);
   if (actual === undefined || actual.toLowerCase() !== fact.evidence.sha256.toLowerCase()) {
     throw new Error(
@@ -306,8 +314,8 @@ function nextFactId(at: string): string {
  */
 export function evidenceHash(root: string, evidence: HiveFactEvidence): string | undefined {
   if (evidence.kind === "commit") return resolveCommitId(root, evidence.ref);
-  const file = path.isAbsolute(evidence.ref) ? evidence.ref : path.resolve(evidenceBase(root), evidence.ref);
-  if (!existsSync(file)) return undefined;
+  const file = evidenceFile(root, evidence.ref);
+  if (file === undefined || !existsSync(file)) return undefined;
   try {
     return sha256File(file);
   } catch {
@@ -322,6 +330,18 @@ export function evidenceHash(root: string, evidence: HiveFactEvidence): string |
  */
 export function evidenceBase(root: string): string {
   return harnessOwnerRoot(root);
+}
+
+/**
+ * The file an evidence ref names. Only a relative ref that stays inside
+ * {@link evidenceBase} names one; any other ref names nothing.
+ */
+function evidenceFile(root: string, ref: string): string | undefined {
+  if (path.isAbsolute(ref) || path.win32.isAbsolute(ref)) return undefined;
+  const base = evidenceBase(root);
+  const file = path.resolve(base, ref);
+  const relative = path.relative(base, file);
+  return relative === "" || relative.startsWith("..") || path.isAbsolute(relative) ? undefined : file;
 }
 
 /** A file path as an evidence ref: relative to {@link evidenceBase}, forward slashes. */
@@ -355,9 +375,10 @@ export function verifyHiveChain(root: string): ChainBreak | undefined {
 }
 
 /**
- * The facts the controller has proven: the chain is intact and every cited
- * artifact still hashes to its recorded value. A broken chain proves nothing,
- * so it yields no facts; a single fact whose evidence no longer matches is
+ * The facts the controller has proven: the chain is intact, the fact carries a
+ * `mac` this controller's key produced, and every cited artifact still hashes
+ * to its recorded value. A broken chain proves nothing, so it yields no facts; a
+ * single fact without a valid `mac` or whose evidence no longer matches is
  * dropped rather than injected.
  */
 export function readVerifiedHiveFacts(root: string): HiveFact[] {
@@ -368,22 +389,31 @@ export function readVerifiedHiveFacts(root: string): HiveFact[] {
     if (line.trim().length === 0) continue;
     const parsed = HiveFactSchema.safeParse(JSON.parse(line));
     if (!parsed.success) return [];
-    if (!evidenceMatches(root, parsed.data.evidence)) continue;
+    if (!entryMacMatches(parsed.data) || !evidenceMatches(root, parsed.data.evidence)) continue;
     facts.push(parsed.data);
   }
   return facts;
 }
 
-/** Throws when the hive facts chain or the intervention ledger chain is broken. */
-export function assertHiveChainsIntact(root: string): void {
-  const factsBreak = verifyHiveChain(root);
-  if (factsBreak !== undefined) {
-    throw new Error(`Hive facts chain is broken at line ${factsBreak.line}: ${factsBreak.reason}`);
+/**
+ * Throws when the hive facts chain or the intervention ledger chain is broken. The one break the old
+ * concurrent-append bug made, two entries linking to the same parent, is not a failure: it is returned as a
+ * warning that names the repair command, so land and queue go on while recording new facts stays paused.
+ * Every other break throws.
+ */
+export function assertHiveChainsIntact(root: string): string[] {
+  const warnings: string[] = [];
+  for (const [label, file, legacy] of [
+    ["Hive facts", hiveFactsPath(root), false],
+    ["Intervention ledger", interventionsPath(root), true],
+  ] as const) {
+    const { hard, forks } = verifyChainedLinesTolerant(readJsonLines(file), { allowLegacyPrefix: legacy });
+    if (hard !== undefined) throw new Error(`${label} chain is broken at line ${hard.line}: ${hard.reason}`);
+    if (forks.length > 0) {
+      warnings.push(`${label} chain has a fork at line ${forks.join(", ")} (two entries link to the same parent, from the old concurrent-append bug); run "uh hive verify --repair" to re-link it`);
+    }
   }
-  const ledgerBreak = verifyLedgerChain(root);
-  if (ledgerBreak !== undefined) {
-    throw new Error(`Intervention ledger chain is broken at line ${ledgerBreak.line}: ${ledgerBreak.reason}`);
-  }
+  return warnings;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -529,7 +559,17 @@ export interface QueuePassFactsInput {
  */
 export function recordQueuePass(root: string, input: QueuePassFactsInput): void {
   try {
-    const ref = evidenceRef(root, path.join(".harness", "queue", input.queueId, "state.json"));
+    // Cite a snapshot of this entry written once, not `state.json`: the queue rewrites that file on every entry, so a
+    // fact citing it stopped verifying as soon as the next entry settled.
+    const snapshot = path.join(".harness", "queue", input.queueId, "evidence", `${input.entryId}-${input.runId ?? "norun"}.json`);
+    const snapshotFile = path.resolve(root, snapshot);
+    if (!existsSync(snapshotFile)) {
+      mkdirSync(path.dirname(snapshotFile), { recursive: true });
+      writeFileSync(snapshotFile, `${JSON.stringify({
+        queue: input.queueId, entry: input.entryId, run_id: input.runId ?? null, status: "passed", recorded_at: new Date().toISOString(),
+      }, null, 2)}\n`, { encoding: "utf-8", flag: "wx" });
+    }
+    const ref = evidenceRef(root, snapshot);
     const sha256 = evidenceFilePathHash(root, ref);
     if (sha256 === undefined) return;
     const itemIds = itemIdsInText(readHiveItems(root), input.entryId);
@@ -620,8 +660,8 @@ export function recordVerificationPass(root: string, input: VerificationPassFact
 
 /** The content hash of a repo-relative evidence file, or undefined when absent. */
 function evidenceFilePathHash(root: string, ref: string): string | undefined {
-  const file = path.isAbsolute(ref) ? ref : path.resolve(evidenceBase(root), ref);
-  if (!existsSync(file)) return undefined;
+  const file = evidenceFile(root, ref);
+  if (file === undefined || !existsSync(file)) return undefined;
   try {
     return sha256File(file);
   } catch {
