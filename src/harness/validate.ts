@@ -22,6 +22,14 @@ import { CanonicalTeamStateSchema } from "../schema/team.js";
 import { LatestRunPointerSchema, RunsIndexSchema } from "../schema/runs.js";
 import { IndependentReviewRequestSchema, IndependentReviewReportSchema, IndependentReviewAssessmentSchema } from "../schema/independent-review.js";
 import { validateDecisionReceipt } from "../schema/decisions.js";
+import { validateAcceptanceEvidence, validateAcceptanceRegistry } from "../schema/acceptance.js";
+import { validateExperiment } from "../schema/experiment.js";
+import { OperatorPriceTableSchema } from "../schema/prices.js";
+import { QueueStateSchema } from "../schema/queue.js";
+import { RunDigestSchema } from "../schema/run-digest.js";
+import { InterventionSchema } from "../schema/intervention.js";
+import { validateSessionTemplate } from "../schema/session-template.js";
+import { RuntimeSteerRequestSchema, ToolGuardArtifactSchema } from "../schema/runtime-control.js";
 
 const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.project.v0": validateProject,
@@ -48,6 +56,16 @@ const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.resume-link.v0": data => ResumeLinkSchema.parse(data),
   "uh.reservation.v0": data => ReservationFileSchema.parse(data),
   "uh.post-checks.v0": data => PostCheckFileSchema.parse(data),
+  "uh.acceptance-registry.v0": validateAcceptanceRegistry,
+  "uh.acceptance-evidence.v0": validateAcceptanceEvidence,
+  "uh.experiment.v0": validateExperiment,
+  "uh.prices.v0": data => OperatorPriceTableSchema.parse(data),
+  "uh.queue.v0": data => QueueStateSchema.parse(data),
+  "uh.run-digest.v0": data => RunDigestSchema.parse(data),
+  "uh.intervention.v0": data => InterventionSchema.parse(data),
+  "uh.session-template.v0": validateSessionTemplate,
+  "uh.runtime-steer-request.v0": data => RuntimeSteerRequestSchema.parse(data),
+  "uh.tool-guard.v0": data => ToolGuardArtifactSchema.parse(data),
 };
 
 export type ValidationResult = {

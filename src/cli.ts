@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { settleOnSignal } from "./harness/cancel-on-signal.js";
 import { prepareIndependentReview, collectIndependentReview, retireIndependentReviewWorkspace } from "./harness/independent-review.js";
 import { Command } from "commander";
 import { z } from "zod";
@@ -270,21 +271,23 @@ async function installRuntimeCancelledEventHandler(
   runtime: string,
   runId: string,
   cancellationController: AbortController,
+  running: () => Promise<unknown> | undefined = () => undefined,
 ): Promise<() => void> {
   const mission = await loadMissionFile(missionPath);
   let handled = false;
   const onSignal = (signal: "SIGINT" | "SIGTERM"): void => {
     if (handled) return;
     handled = true;
-    cancellationController.abort();
-    finalizeRuntimeCancelledRun({
-      root: artifactRoot,
-      missionId: mission.id,
-      runtime,
-      signal,
-      runId,
+    // The run settles its own control file and the live-run registry on abort; the exit waits (bounded) for that.
+    void settleOnSignal({
+      abort: () => cancellationController.abort(),
+      finalize: () => {
+        finalizeRuntimeCancelledRun({ root: artifactRoot, missionId: mission.id, runtime, signal, runId });
+      },
+      running,
+      exit: (code) => process.exit(code),
+      code: 143,
     });
-    process.exit(143);
   };
   const onSigint = (): void => onSignal("SIGINT");
   const onSigterm = (): void => onSignal("SIGTERM");
@@ -1945,6 +1948,31 @@ missionCmd.command("review-collect")
   });
 
 missionCmd
+  .command("prune-runs")
+  .description("Archive a mission's oldest runs beyond a cap and remove their run directories")
+  .argument("<mission-id>", "Mission id")
+  .requiredOption("--keep <n>", "How many non-archived runs to keep (a positive integer)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit JSON")
+  .action(async (missionId: string, opts: { keep: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      assertSafeMissionId(missionId);
+      if (!/^[0-9]+$/.test(opts.keep) || Number.parseInt(opts.keep, 10) <= 0) {
+        throw new Error(`--keep must be a positive integer, got: ${opts.keep}`);
+      }
+      const keep = Number.parseInt(opts.keep, 10);
+      const { pruneOldRuns } = await import("./harness/run-id.js");
+      const pruned = await pruneOldRuns(root, missionId, keep);
+      if (opts.json) console.log(JSON.stringify({ mission_id: missionId, keep, pruned }));
+      else console.log(`pruned ${pruned} run(s) of ${missionId} (keeping ${keep})`);
+    } catch (err) {
+      console.error(`[FAIL] mission prune-runs: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+missionCmd
   .command("create")
   .description("Create a scaffold mission packet")
   .argument("<id>", "Mission id")
@@ -2552,11 +2580,14 @@ missionCmd
         root, runtime, runId, ...recovery, extraRuntimeConfigOverrides,
         cancellationSignal: cancellationController.signal,
         run: async (attempt) => {
-          const uninstall = await installRuntimeCancelledEventHandler(root, routing.missionPath, runtime, attempt.runId, cancellationController);
+          let inFlight: Promise<unknown> | undefined;
+          const uninstall = await installRuntimeCancelledEventHandler(root, routing.missionPath, runtime, attempt.runId, cancellationController, () => inFlight);
           try {
-            const runRes = await wiring.run(routing.effectiveRoot, routing.missionPath, {
+            const pending = wiring.run(routing.effectiveRoot, routing.missionPath, {
               ...attempt, artifactRoot: root, cancellationSignal: cancellationController.signal,
             });
+            inFlight = pending;
+            const runRes = await pending;
             return { ...runRes, runId: attempt.runId };
           } finally { uninstall(); }
         },
