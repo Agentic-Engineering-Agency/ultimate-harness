@@ -306,6 +306,20 @@ describe("uh land", () => {
     expect(verifyLandDecisionChain(ROOT)).toBeUndefined();
   });
 
+  test("the decision index re-hashes the receipts it lists: an edited or deleted receipt breaks it (#265)", async () => {
+    const { messageFile } = await setup({ reviewVerdicts: ["contradicted"] });
+    const result = await runLand({ messageFile, acceptReview: "reviewed by hand; accepted" });
+    const receipt = result.accepted_review!.path;
+    expect(verifyLandDecisionChain(ROOT)).toBeUndefined();
+
+    const original = await readFile(receipt, "utf-8");
+    await writeFile(receipt, original.replace("reviewed by hand; accepted", "nothing to see here"), "utf-8");
+    expect(verifyLandDecisionChain(ROOT)?.reason).toMatch(/does not match/i);
+
+    await rm(receipt, { force: true });
+    expect(verifyLandDecisionChain(ROOT)?.reason).toMatch(/missing/i);
+  });
+
   test("a forbidden pattern in the diff restores the target byte-for-byte", async () => {
     const { messageFile } = await setup({
       diffFiles: { "feature.txt": "feature\nCo-authored-by: Bot <bot@example.com>\n" },

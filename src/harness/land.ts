@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { access, appendFile, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { withChainLock } from "./chain-lock.js";
@@ -762,7 +762,26 @@ export async function appendLandDecisionIndex(root: string, entry: { file: strin
 
 /** The first break in the land decision index chain, or undefined when intact. */
 export function verifyLandDecisionChain(root: string): ChainBreak | undefined {
-  return verifyChainedLines(readJsonLines(landDecisionsPath(root)));
+  return verifyChainedLines(readJsonLines(landDecisionsPath(root))) ?? verifyLandDecisionReceipts(root);
+}
+
+/**
+ * The first listed receipt that is missing or no longer hashes to what the index recorded, or undefined. The chain
+ * alone only proves the index itself was not edited; a receipt rewritten or deleted after the fact would still pass.
+ */
+export function verifyLandDecisionReceipts(root: string): ChainBreak | undefined {
+  const lines = readJsonLines(landDecisionsPath(root));
+  for (const [index, line] of lines.entries()) {
+    if (line.trim().length === 0) continue;
+    let entry: { file?: unknown; sha256?: unknown };
+    try { entry = JSON.parse(line) as { file?: unknown; sha256?: unknown }; } catch { continue; }
+    if (typeof entry.file !== "string" || typeof entry.sha256 !== "string") continue;
+    let content: string;
+    try { content = readFileSync(path.resolve(root, entry.file), "utf-8"); }
+    catch { return { line: index + 1, reason: `the receipt ${entry.file} is missing` }; }
+    if (sha256Hex(content) !== entry.sha256) return { line: index + 1, reason: `the receipt ${entry.file} does not match the sha256 the index recorded` };
+  }
+  return undefined;
 }
 
 async function writeLandDecision(

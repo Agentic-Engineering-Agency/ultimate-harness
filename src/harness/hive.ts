@@ -545,7 +545,17 @@ export interface QueuePassFactsInput {
  */
 export function recordQueuePass(root: string, input: QueuePassFactsInput): void {
   try {
-    const ref = evidenceRef(root, path.join(".harness", "queue", input.queueId, "state.json"));
+    // Cite a snapshot of this entry written once, not `state.json`: the queue rewrites that file on every entry, so a
+    // fact citing it stopped verifying as soon as the next entry settled.
+    const snapshot = path.join(".harness", "queue", input.queueId, "evidence", `${input.entryId}-${input.runId ?? "norun"}.json`);
+    const snapshotFile = path.resolve(root, snapshot);
+    if (!existsSync(snapshotFile)) {
+      mkdirSync(path.dirname(snapshotFile), { recursive: true });
+      writeFileSync(snapshotFile, `${JSON.stringify({
+        queue: input.queueId, entry: input.entryId, run_id: input.runId ?? null, status: "passed", recorded_at: new Date().toISOString(),
+      }, null, 2)}\n`, { encoding: "utf-8", flag: "wx" });
+    }
+    const ref = evidenceRef(root, snapshot);
     const sha256 = evidenceFilePathHash(root, ref);
     if (sha256 === undefined) return;
     const itemIds = itemIdsInText(readHiveItems(root), input.entryId);
