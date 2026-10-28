@@ -216,3 +216,16 @@ describe("runtime-turns", () => {
     expect(records[0].turns).toBe(5);
   });
 });
+
+describe("Claude Code sub-agent messages (U-064, #266)", () => {
+  const assistant = (id: string, parent: string | null) => ({ type: "assistant", parent_tool_use_id: parent, message: { id, role: "assistant", content: [{ type: "text", text: "x" }] } });
+
+  test("are not the run's turns", () => {
+    const events = [assistant("m1", null), assistant("s1", "toolu_task"), assistant("s2", "toolu_task"), assistant("m2", null)];
+    expect(countRuntimeTurns("claude-code", events)).toBe(2);
+  });
+
+  test("a stream with no sub-agent is counted as before", () => {
+    expect(countRuntimeTurns("claude-code", [assistant("m1", null), assistant("m2", null), assistant("m2", null)])).toBe(2);
+  });
+});

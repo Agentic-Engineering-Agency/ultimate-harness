@@ -100,6 +100,8 @@ uh mission run-team <mission-id> --replace
 
 `--replace` removes the retained worktrees, renames each old branch to `uh/archive/<team>/<timestamp>/<role>` (unmerged work is kept, never deleted), and renames the old `.harness/missions/<team>/team` directory to `team.<timestamp>` before relaunching.
 
+`--replace` only replaces what it can show is abandoned. It refuses while a registered run of the team is `live`, `stale` (alive but quiet) or in an unknown state, and it refuses when the registry or the host's process table cannot be read, or the table does not even list the controller process itself: an empty table would make every run look dead. Only a settled run, or one whose controller is missing from a table it can trust, is replaced. It also refuses when a retained worktree holds uncommitted changes outside the harness's own folders, because removing the worktree deletes them; commit or move that work first.
+
 ## Resource waves
 
 Team workers run in resource-admitted waves. `team.resources` controls admission:

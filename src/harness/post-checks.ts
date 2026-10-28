@@ -21,6 +21,8 @@ import { appendRunsIndexEntry, mirrorRuntimeResultToLatest, readLatestPointer, w
 
 export const POST_CHECK_DEFAULT_TIMEOUT_MS = 900_000;
 const TIMEOUT_KILL_GRACE_MS = 100;
+/** Most bytes of one check's output kept in memory and in its log, per stream. A check that prints more is cut with a marker. */
+export const POST_CHECK_LOG_CAP_BYTES = 1024 * 1024;
 
 /**
  * Stable, path-free marker recorded when the runner itself fails (e.g. the logs
@@ -56,6 +58,12 @@ export type PostChecksOutcome = {
   results: PostCheckResult[];
   /** `post-check <name> failed` for each failed, timed-out or unrunnable check. */
   errors: string[];
+  /** Why no check ran, when none did on purpose (a cancelled run is not graded). */
+  skipped?: string;
+  /** True when an abort signal stopped the checks; the run keeps the status it had. */
+  aborted?: boolean;
+  /** Things the operator should fix that do not fail the run, such as logs written inside the project. */
+  warnings?: string[];
 };
 
 export type RunPostChecksOptions = {
@@ -70,6 +78,10 @@ export type RunPostChecksOptions = {
   root: string;
   /** Working root the checks run in (the bound sandbox worktree when routed). */
   cwd: string;
+  /** The run's status as the runtime settled it. A `cancelled` run is not graded: no check runs and its status stays. */
+  runStatus?: string;
+  /** Stops the checks (Ctrl-C, SIGTERM): the running check's whole process tree is killed and the rest are skipped. */
+  signal?: AbortSignal;
 };
 
 /**
@@ -106,6 +118,8 @@ type SingleCheckOutcome = {
   result: PostCheckResult;
   stdout: string;
   stderr: string;
+  /** True when the abort signal ended this check; its result is then not a verdict. */
+  aborted?: boolean;
 };
 
 /**
@@ -121,6 +135,10 @@ export async function runPostChecks(options: RunPostChecksOptions): Promise<Post
   if (options.checks.length === 0) {
     return { results: [], errors: [] };
   }
+  // A run the operator stopped is not a run to grade, and "cancelled" must not become "failed".
+  if (options.runStatus === "cancelled") {
+    return { results: [], errors: [], skipped: "the run was cancelled, so its post-checks were not run" };
+  }
 
   const runDir = path.resolve(options.runDir);
   const env: NodeJS.ProcessEnv = {
@@ -133,12 +151,20 @@ export async function runPostChecks(options: RunPostChecksOptions): Promise<Post
 
   const results: PostCheckResult[] = [];
   const errors: string[] = [];
+  const warnings: string[] = [];
+  let aborted = false;
   try {
     const logsDir = path.join(path.dirname(path.resolve(options.checksFile)), "logs");
+    const relativeToRoot = path.relative(path.resolve(options.root), logsDir);
+    if (relativeToRoot === "" || (!relativeToRoot.startsWith("..") && !path.isAbsolute(relativeToRoot))) {
+      warnings.push(`post-check logs are written inside the project (${logsDir}); keep the checks file and its logs outside the tree the agent can read`);
+    }
     await mkdir(logsDir, { recursive: true });
 
     for (const check of options.checks) {
-      const outcome = await runSingleCheck(check, options.cwd, env);
+      if (options.signal?.aborted) { aborted = true; break; }
+      const outcome = await runSingleCheck(check, options.cwd, env, options.signal);
+      if (outcome.aborted) { aborted = true; break; }
       results.push(outcome.result);
       const logPath = path.join(logsDir, `${options.missionId}-${options.runId}-${check.name}.log`);
       await writeFile(logPath, `${outcome.stdout}${outcome.stderr}`, "utf-8");
@@ -160,7 +186,7 @@ export async function runPostChecks(options: RunPostChecksOptions): Promise<Post
     runId: options.runId,
     failed: errors.length > 0,
   });
-  return { results, errors };
+  return { results, errors, ...(aborted ? { aborted } : {}), ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
 /**
@@ -261,12 +287,23 @@ async function recordPostChecks(resultPath: string, results: PostCheckResult[], 
   await writeFile(resultPath, stringify(validated.data), "utf-8");
 }
 
-function runSingleCheck(check: PostCheckEntry, cwd: string, env: NodeJS.ProcessEnv): Promise<SingleCheckOutcome> {
+const TRUNCATION_MARKER = `\n[output truncated at ${POST_CHECK_LOG_CAP_BYTES} bytes]\n`;
+
+/** Append `chunk` to `current` without letting it pass the cap; the cut is marked once, when more output arrives past it. */
+function appendCapped(current: string, chunk: string): string {
+  if (current.endsWith(TRUNCATION_MARKER)) return current;
+  const room = POST_CHECK_LOG_CAP_BYTES - current.length;
+  if (chunk.length <= room) return current + chunk;
+  return `${current}${chunk.slice(0, Math.max(room, 0))}${TRUNCATION_MARKER}`;
+}
+
+function runSingleCheck(check: PostCheckEntry, cwd: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<SingleCheckOutcome> {
   return new Promise<SingleCheckOutcome>((resolve) => {
     const startedAt = Date.now();
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let abortedBySignal = false;
     let timedOut = false;
     let spawnError = false;
     let timeoutTimer: NodeJS.Timeout | undefined;
@@ -304,7 +341,9 @@ function runSingleCheck(check: PostCheckEntry, cwd: string, env: NodeJS.ProcessE
       if (settled) return;
       settled = true;
       clearTimers();
+      signal?.removeEventListener("abort", onAbort);
       resolve({
+        ...(abortedBySignal ? { aborted: true } : {}),
         result: {
           name: check.name,
           passed: !timedOut && !spawnError && exitCode === 0,
@@ -318,8 +357,8 @@ function runSingleCheck(check: PostCheckEntry, cwd: string, env: NodeJS.ProcessE
 
     child.stdout?.setEncoding("utf-8");
     child.stderr?.setEncoding("utf-8");
-    child.stdout?.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr?.on("data", (chunk: string) => { stderr += chunk; });
+    child.stdout?.on("data", (chunk: string) => { stdout = appendCapped(stdout, chunk); });
+    child.stderr?.on("data", (chunk: string) => { stderr = appendCapped(stderr, chunk); });
 
     child.on("error", (err) => {
       spawnError = true;
@@ -329,6 +368,18 @@ function runSingleCheck(check: PostCheckEntry, cwd: string, env: NodeJS.ProcessE
     child.on("close", (code) => {
       finish(timedOut ? null : (code ?? 1));
     });
+
+    // Ctrl-C or SIGTERM on the CLI: kill this check's whole tree now, so nothing keeps running after the CLI is gone.
+    function onAbort(): void {
+      abortedBySignal = true;
+      killTree("SIGTERM");
+      killTimer = setTimeout(() => {
+        killTree("SIGKILL");
+        finish(null);
+      }, TIMEOUT_KILL_GRACE_MS);
+    }
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
 
     timeoutTimer = setTimeout(() => {
       timedOut = true;
