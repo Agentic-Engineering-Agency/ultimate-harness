@@ -428,6 +428,25 @@ describe("uh land", () => {
     expect(await head(mirror)).toBe(await head(ROOT));
   });
 
+  test("a failed fast-forward of a later checkout puts every earlier checkout back, not just the target (#263)", async () => {
+    const { messageFile } = await setup();
+    const first = join(WORK, "mirror-first");
+    const second = join(WORK, "mirror-second");
+    await gitQuiet(ROOT, ["worktree", "add", "-q", "-b", "mirror-first", first, "main"]);
+    await gitQuiet(ROOT, ["worktree", "add", "-q", "-b", "mirror-second", second, "main"]);
+    // The second checkout has its own commit, so it cannot fast-forward to the landed target.
+    await writeFile(join(second, "local.txt"), "local\n", "utf-8");
+    await gitQuiet(second, ["add", "local.txt"]);
+    await gitQuiet(second, ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "local work"]);
+    const before = { root: await head(ROOT), first: await head(first), second: await head(second) };
+
+    await expect(runLand({ messageFile, fastForward: [first, second] })).rejects.toThrow(/fast-forward/i);
+
+    expect(await head(ROOT)).toBe(before.root);
+    expect(await head(first)).toBe(before.first);
+    expect(await head(second)).toBe(before.second);
+  });
+
   test("a worker file that is not valid UTF-8 binds to a review of its exact bytes (#264)", async () => {
     const { worktree, messageFile, missionId } = await setup({ reviewVerdicts: null });
     const bytes = Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x81, 0xc3, 0x28]);

@@ -1,5 +1,7 @@
+import { appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { access, appendFile, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { withChainLock } from "./chain-lock.js";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -159,7 +161,8 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   // Hive integrity is a precondition: a broken hive facts or ledger chain means
   // the shared state every agent trusts cannot be extended, so land refuses.
   try {
-    assertHiveChainsIntact(root);
+    // A fork from the old concurrent-append bug is a warning that names the repair command; any other break refuses.
+    for (const warning of assertHiveChainsIntact(root)) console.warn(`[WARN] ${warning}`);
   } catch (error) {
     throw new LandError("hive", `refusing to land on a broken hive chain: ${(error as Error).message}`);
   }
@@ -243,6 +246,8 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
   const checkResults: Array<{ name: string; exit_code: number }> = [];
   let buildResult: { command: string; exit_code: number } = { command: buildCommand, exit_code: 0 };
   const fastForwarded: string[] = [];
+  /** Each fast-forwarded checkout's HEAD from before it moved, so a later failure can put it back. */
+  const forwardedFrom = new Map<string, string>();
   let commitId = "";
   try {
     for (const branch of options.workerBranches) {
@@ -303,6 +308,8 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
 
     // ---- Step 7: fast-forward the requested checkouts -------------------
     for (const checkout of options.fastForward ?? []) {
+      const before = await git(["rev-parse", "HEAD"], checkout);
+      if (before.exitCode === 0) forwardedFrom.set(checkout, before.stdout.trim());
       const merged = await git(["merge", "--ff-only", options.onto], checkout);
       if (merged.exitCode !== 0) {
         throw new LandError("fast-forward", `git merge --ff-only ${options.onto} failed in ${checkout}: ${reason(merged)}`);
@@ -311,6 +318,12 @@ export async function landWorkerBranches(options: LandOptions): Promise<LandResu
     }
   } catch (err) {
     await restoreTarget(git, root, previousHead);
+    // The commit being discarded must not survive in a checkout that already moved to it. `--keep` refuses to touch
+    // anything the owner changed since, instead of discarding it.
+    for (const checkout of fastForwarded) {
+      const from = forwardedFrom.get(checkout);
+      if (from !== undefined) await git(["reset", "--keep", from], checkout);
+    }
     throw err;
   }
 
@@ -736,13 +749,15 @@ export function landDecisionsPath(root: string): string {
  */
 export async function appendLandDecisionIndex(root: string, entry: { file: string; sha256: string }): Promise<void> {
   const indexFile = landDecisionsPath(root);
-  await mkdir(path.dirname(indexFile), { recursive: true });
-  const chained = chainEntry(lastChainedHash(readJsonLines(indexFile)), {
-    at: new Date().toISOString(),
-    file: path.relative(path.resolve(root), entry.file).replaceAll("\\", "/"),
-    sha256: entry.sha256,
+  // Reading the last hash and appending are one exclusive step (#257), as for the hive and the ledger.
+  withChainLock(indexFile, () => {
+    const chained = chainEntry(lastChainedHash(readJsonLines(indexFile)), {
+      at: new Date().toISOString(),
+      file: path.relative(path.resolve(root), entry.file).replaceAll("\\", "/"),
+      sha256: entry.sha256,
+    });
+    appendFileSync(indexFile, `${JSON.stringify(chained)}\n`, "utf-8");
   });
-  await appendFile(indexFile, `${JSON.stringify(chained)}\n`, "utf-8");
 }
 
 /** The first break in the land decision index chain, or undefined when intact. */

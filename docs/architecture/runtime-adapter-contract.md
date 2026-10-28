@@ -221,7 +221,8 @@ Mission packets may declare `capabilities: [...]` using the same ids.
 the selected runtime adapter's declared capabilities before dispatch.
 Since v0.10.0 (UH-138) a mismatch emits a `[WARN]` per unmet tag and the
 run proceeds; pass `--strict` to treat mismatches as a hard error, or
-`--force` to bypass the check entirely. Missions without `capabilities`
+`--force` to bypass the check entirely (it prints a `[WARN]` line saying so, so
+a bypass is never silent). Missions without `capabilities`
 preserve the legacy no-op behavior. This is distinct from
 `runtime_requirements`, which are typed preconditions and **always** hard
 errors (never relaxed by warn mode).
