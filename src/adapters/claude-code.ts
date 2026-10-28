@@ -28,6 +28,7 @@ import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides
 import { runtimeRegistry } from "../harness/registry.js";
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { runRuntimeProcess, type RuntimeProcessInput, type RuntimeProcessOutput } from "../harness/runtime-process.js";
+import { assertOrchestratorWriteRoots } from "../harness/orchestrator-write-roots.js";
 import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
 import { armGuard, guardArmStopReceipt, GUARD_ARM_LOG_NAME, type GuardArmingFailure, type GuardArmingInput, type GuardArmingResult } from "../harness/guard-arming.js";
 import {
@@ -181,15 +182,9 @@ function streamedClaudeUsage(events: Record<string, unknown>[], model?: string):
  * that would otherwise precede it.
  */
 function orchestratorWriteRules(roots: string[]): string[] {
+  assertOrchestratorWriteRoots(roots, "Claude Code");
   const patterns = roots.map(root => {
-    const slashed = root.replaceAll("\\", "/");
-    const segments = slashed.split("/").filter(segment => segment !== "" && segment !== ".");
-    if (slashed.startsWith("/") || /^[a-zA-Z]:/.test(slashed) || segments.includes("..")) {
-      throw new Error(`Claude Code orchestrator guard write root "${root}" is outside the mission checkout; declare roots inside the worker root`);
-    }
-    if (segments.length === 0) {
-      throw new Error(`Claude Code orchestrator guard write root "${root}" covers the whole repository; declare the roots the orchestrator writes, for example [out]`);
-    }
+    const segments = root.replaceAll("\\", "/").split("/").filter(segment => segment !== "" && segment !== ".");
     return `${segments.join("/")}/**`;
   });
   return [...new Set(patterns)];
