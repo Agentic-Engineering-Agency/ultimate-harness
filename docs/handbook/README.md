@@ -39,7 +39,7 @@ An operator drives UH as a loop. Each stage below names the handbook page that c
 | [acceptance.md](./acceptance.md) | The capability registry, running one capability or the fleet campaign, evidence records, freshness per commit, what "proven" means | `docs/runbooks/acceptance.md`, `acceptance/registry.yaml` |
 | [fleet.md](./fleet.md) | The command-code adapter, session templates and tiers, guard classes and their exact denial texts | `docs/tool-guard.md`, `docs/architecture/session-templates.md`, `docs/runtime-targets.md` |
 | [packet-rules.md](./packet-rules.md) | Rules for packets that survive the guard and the reviewer | `docs/architecture/mission-packet-schema.md`, `docs/tool-guard.md`, `docs/runbooks/independent-review.md`, `docs/runtime-targets.md` |
-
+| [intervention-ledger.md](./intervention-ledger.md) | The append-only intervention ledger (`uh note`, `uh ledger`), automatic capture triggers, cause/qualifier taxonomies, and landing countermeasures | `src/schema/intervention.ts`, `src/harness/interventions.ts`, `src/cli.ts` |
 ## Conventions used in this handbook
 
 - Commands are shown as they would be typed at a project root. Placeholders such as `<mission-id>`, `<run-id>`, or `<fresh-workspace>` stand for values you choose; none refer to a real run.

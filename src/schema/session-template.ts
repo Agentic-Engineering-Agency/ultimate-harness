@@ -37,6 +37,13 @@ export const SessionTemplateSchema = z
     limits: SessionTemplateLimitsSchema.default({}),
     recovery: RuntimeRecoveryPolicySchema.optional(),
     guard: ToolGuardFieldsSchema.optional(),
+    /**
+     * Optional short rules appended to the mission's constraints in the
+     * dispatch prompt, after the mission's own constraints. They carry the
+     * runtime's working guidance (for example "this runtime works in many
+     * small turns") that must reach the worker, not just its limits.
+     */
+    worker_rules: z.array(z.string().trim().min(1)).default([]),
     attempts: z.number().int().min(1).max(8).default(1),
     notes: z.string().optional(),
   })

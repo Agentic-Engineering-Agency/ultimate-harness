@@ -13,6 +13,84 @@ export const FleetPolicySchema = z.object({
 }).strict();
 export type FleetPolicy = z.infer<typeof FleetPolicySchema>;
 
+/**
+ * Notification sink filter: narrows which events reach a sink by terminal
+ * status and by mission id glob. An omitted dimension matches everything; a
+ * declared dimension only matches when the event carries that dimension.
+ */
+export const NotificationFilterSchema = z.object({
+  statuses: z.array(z.string().min(1)).optional(),
+  missions: z.array(z.string().min(1)).optional(),
+}).strict();
+export type NotificationFilter = z.infer<typeof NotificationFilterSchema>;
+
+/** Fields every sink shares: identity, the events it subscribes to, and its filter. */
+const NotificationSinkCommonFields = {
+  id: z.string().min(1),
+  events: z.array(z.string().min(1)).optional(),
+  filter: NotificationFilterSchema.optional(),
+} as const;
+
+/**
+ * A command sink: `argv` is spawned directly (never through a shell), the
+ * rendered message is written to stdin, and the event JSON is exported to the
+ * `env` variable (default `UH_NOTIFICATION_EVENT`). `{subject}` and `{event}`
+ * placeholders are substituted in every argv item.
+ */
+export const NotificationCommandSinkSchema = z.object({
+  ...NotificationSinkCommonFields,
+  kind: z.literal("command"),
+  argv: z.array(z.string().min(1)).min(1),
+  env: z.string().min(1).optional(),
+}).strict();
+
+/**
+ * A webhook sink: `headers` values are environment variable NAMES, resolved at
+ * delivery time, so no credential literal is ever stored in the file. The body
+ * is the event JSON unless `body: text` is set.
+ */
+export const NotificationWebhookSinkSchema = z.object({
+  ...NotificationSinkCommonFields,
+  kind: z.literal("webhook"),
+  url: z.string().min(1),
+  method: z.string().min(1).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  body: z.enum(["json", "text"]).optional(),
+}).strict();
+
+/** The built-in preset names; each expands to a command or webhook sink. */
+export const NOTIFICATION_PRESETS = ["hermes", "apprise", "ntfy", "windows-toast"] as const;
+export type NotificationPreset = (typeof NOTIFICATION_PRESETS)[number];
+
+/**
+ * A preset sink: a named, data-driven expansion of one of the two sink kinds.
+ * Which option fields are required depends on the preset (hermes needs `to`,
+ * apprise needs `urls`, ntfy needs `server` and `topic`; windows-toast needs
+ * none).
+ */
+export const NotificationPresetSinkSchema = z.object({
+  ...NotificationSinkCommonFields,
+  preset: z.enum(NOTIFICATION_PRESETS),
+  to: z.string().min(1).optional(),
+  urls: z.array(z.string().min(1)).min(1).optional(),
+  server: z.string().min(1).optional(),
+  topic: z.string().min(1).optional(),
+}).strict();
+export type NotificationPresetSink = z.infer<typeof NotificationPresetSinkSchema>;
+
+export const NotificationSinkSchema = z.union([
+  NotificationCommandSinkSchema,
+  NotificationWebhookSinkSchema,
+  NotificationPresetSinkSchema,
+]);
+export type NotificationSink = z.infer<typeof NotificationSinkSchema>;
+
+/** The `notifications` section of `.harness/project.yaml` (and of the user file). */
+export const NotificationsSchema = z.object({
+  sinks: z.array(NotificationSinkSchema).optional().default([]),
+}).strict();
+export type Notifications = z.infer<typeof NotificationsSchema>;
+
 export const ProjectSchema = z.object({
   schema_version: z.literal("uh.project.v0"),
   id: z.string().min(1),
@@ -31,6 +109,8 @@ export const ProjectSchema = z.object({
   default_workflow_profiles: z.array(z.string()).optional().default([]),
   artifact_schema_version: z.string().optional(),
   fleet: FleetPolicySchema.optional(),
+  /** Optional notification sinks; absent means nothing is ever sent. */
+  notifications: NotificationsSchema.optional(),
 });
 
 export type ProjectDocument = z.infer<typeof ProjectSchema>;

@@ -11,6 +11,7 @@ import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
 import { runCommandCode, planCommandCodeRun, dryRunCommandCode, checkCommandCode, buildCommandCodeProbeArgs, parseCommandCodeVersion, CommandCodeRuntimeConfigSchema } from "../src/adapters/command-code.js";
 import { validateAdapter, type AdapterDocument } from "../src/schema/adapter.js";
+import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "uh-command-code-"));
@@ -35,7 +36,7 @@ beforeEach(async () => {
   snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-command-code-snapshot-"));
   const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "cmdc-hook.js");
   await mkdir(path.dirname(hook), { recursive: true });
-  await writeFile(hook, "export default function () {}\n");
+  await writeGuardHookFixture(hook);
   previousDist = process.env.UH_HARNESS_DIST;
   previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
   process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");

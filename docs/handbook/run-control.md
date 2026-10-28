@@ -46,6 +46,35 @@ Live runs: 4 (orphaned: 0)
 - The project root is the nearest ancestor of an artifact root that holds `.harness/project.yaml`. A team worker's artifact root lives under `.harness/missions/<team-mission>/team/artifacts/<parent-run>/workers/<role>` and registers with its team mission id and role.
 - The registry directory is gitignored: it is local execution state, not a publication input. Terminal control facts discovered by `uh ps` are reconciled back into the registry.
 
+## Asking for a report
+
+`uh ps` says *which* runs exist; `uh report <run-id>` answers "what is this run
+doing right now?" for one run, from disk only, in under a second.
+
+```bash
+uh report <run-id>          # by id or a unique prefix
+uh report <run-id> --json   # machine-readable
+```
+
+The report renders from the run's `run-digest.json` when it exists (an older run
+without one is projected from `events.ndjson` once). Alongside identity, liveness,
+turns, denials, tokens, cost, current activity, the recent tool calls and the
+files written, a digest-backed report carries an **efficiency block** and the
+**long-running tool** signal:
+
+- **Efficiency** — context tokens at the first, sixth and last model request; the
+  share of turns with exactly one tool call; reads and re-reads, where a re-read
+  must repeat the same `(path, line range)` (a different range of one file is not
+  a re-read); tool output bytes by tool kind; and model time versus tool time. A
+  runtime that reports no per-request context (oh-my-pi) leaves the context fields
+  absent rather than showing `0`.
+- **Long-running tools** — a call still in flight with no end event and no output
+  for more than five minutes, shown as tool, target and minutes, so a hung child
+  pipeline is visible instead of reading as a long-but-productive call.
+
+`uh observatory runs --group-by model --json` folds these into per-group medians
+under `efficiency_medians` for a whole population of runs.
+
 ## Waiting for runs
 
 `uh wait` blocks until matched runs settle, so an orchestrator learns a run is

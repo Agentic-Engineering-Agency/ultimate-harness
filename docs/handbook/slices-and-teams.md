@@ -62,6 +62,7 @@ A team mission adds `shape: team` and a `team` block: `workers[]` with per-worke
 | Field | Meaning |
 | --- | --- |
 | `adapter` | Accepted adapter id (required). |
+| `template` | Optional session template id (`.harness/templates/<id>.yaml`). The worker's contract takes the template's `runtime_config_overrides`, `limits`, `recovery`, and `worker_rules` as defaults; the worker spec and the worker's own `mission_id` packet win. An unknown id fails the team before any worker starts. |
 | `role` | Non-empty, unique worker role (required). |
 | `mission_id` | Optional distinct worker mission: the worker's contract and runtime packet are resolved from that mission's `mission.yaml` instead of inheriting the parent packet. |
 | `objective` | Worker-specific objective, combined with the parent mission objective when present; the worker inherits the parent objective when omitted. |

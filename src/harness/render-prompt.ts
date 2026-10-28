@@ -21,6 +21,10 @@ export function renderPrompt(ctx: DispatchContext): string {
     }
   }
 
+  if (ctx.projectFacts && ctx.projectFacts.length > 0) {
+    prompt += `## Project facts\n${ctx.projectFacts}\n\n`;
+  }
+
   if (ctx.issues.length > 0) {
     prompt += "## Related Issues\n";
     for (const issue of ctx.issues) {

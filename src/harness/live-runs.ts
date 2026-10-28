@@ -7,6 +7,7 @@ import { RuntimeControlSchema, type RuntimeControl } from "../schema/runtime-con
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { assertValidRunId } from "./run-id.js";
+import { elapsedMs, notifyRunSettled } from "./notifications.js";
 import type { MissionArtifactContext } from "../adapters/_artifact-context.js";
 
 /**
@@ -514,6 +515,16 @@ export async function discoverRuns(
         settled_at: record.heartbeat_at,
         controller_pid: record.controller_pid,
       }).catch(() => undefined);
+      notifyRunSettled(projectRoot, {
+        run_id: record.run_id,
+        mission: record.mission_id,
+        runtime: record.runtime,
+        ...(record.model !== undefined ? { model: record.model } : {}),
+        status: record.status ?? "unknown",
+        ...(record.stop_code !== undefined ? { stop_code: record.stop_code } : {}),
+        duration_ms: elapsedMs(record.started_at, record.heartbeat_at ?? record.settled_at),
+        run_dir: path.dirname(path.resolve(projectRoot, record.control_path)),
+      });
     }
     seen.add(record.run_id);
     records.push(record);

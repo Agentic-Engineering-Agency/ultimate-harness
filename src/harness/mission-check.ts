@@ -1,7 +1,8 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { validateMission, type MissionDocument } from "../schema/mission.js";
+import { validateMission, resolveWorkerAdapter, type MissionDocument } from "../schema/mission.js";
+import { getSessionTemplate } from "./session-templates.js";
 import { planHermesRun } from "../adapters/hermes.js";
 import { planCodexRun } from "../adapters/codex.js";
 import { planOhMyPiRun } from "../adapters/oh-my-pi.js";
@@ -274,6 +275,20 @@ export async function checkMissionPackets(options: MissionCheckOptions): Promise
     const parentOverrides = mission.runtime_config_overrides ?? {};
     for (const worker of mission.team.workers) {
       const workerLabel = `worker ${worker.role}`;
+      // The effective adapter: an explicit worker adapter wins, otherwise the
+      // adopted session template's. The worker schema already rejects a worker
+      // that names neither, so a template load failure is the only new failure.
+      let workerAdapter: string | undefined = worker.adapter;
+      if (workerAdapter === undefined && worker.template !== undefined) {
+        try {
+          workerAdapter = resolveWorkerAdapter(worker, await getSessionTemplate(root, worker.template));
+        } catch (error) {
+          push("FAIL", `session template [${workerLabel}]`, (error as Error).message);
+        }
+      }
+      if (workerAdapter === undefined) {
+        push("FAIL", `runtime overrides [${workerLabel}]`, "worker declares neither an adapter nor a template");
+      }
       let workerPacket: MissionDocument | undefined;
       let workerPacketPath = missionPath;
       if (worker.mission_id) {
@@ -291,14 +306,16 @@ export async function checkMissionPackets(options: MissionCheckOptions): Promise
         ...(workerPacket?.runtime_config_overrides ?? {}),
         ...(worker.runtime_config_overrides ?? {}),
       };
-      await checkRuntimeOverrides(
-        push,
-        root,
-        workerPacket ? workerPacketPath : missionPath,
-        worker.adapter,
-        mergedOverrides,
-        `runtime overrides [${workerLabel}]`,
-      );
+      if (workerAdapter !== undefined) {
+        await checkRuntimeOverrides(
+          push,
+          root,
+          workerPacket ? workerPacketPath : missionPath,
+          workerAdapter,
+          mergedOverrides,
+          `runtime overrides [${workerLabel}]`,
+        );
+      }
       if (worker.expected_outputs) {
         const workerWriteRoots = worker.guard?.write_roots ?? parentWriteRoots;
         await checkExpectedOutputs(push, worker.expected_outputs.files, workerWriteRoots, ` [${workerLabel}]`);

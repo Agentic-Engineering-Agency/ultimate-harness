@@ -24,6 +24,7 @@ import { discardSandbox, resolveSandboxMissionRoot } from "./sandbox.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
 import { recordAcceptanceDecision } from "./decision-receipts.js";
+import { captureReview } from "./interventions.js";
 export interface PrepareIndependentReviewOptions {
   id: string;
   sources: Array<{ missionId: string; workspaceRoot?: string }>;
@@ -453,6 +454,15 @@ export async function collectIndependentReview(root: string, missionId: string) 
       return recommendation;
     },
   });
+  // A review that does not pass is itself an intervention, one entry per
+  // non-pass source. Best-effort: a ledger failure never fails the collection.
+  if (recommendation !== "pass") {
+    await captureReview(root, {
+      reviewMissionId: missionId,
+      runId: latest.run_id,
+      sources: report.sources.map((source) => ({ mission_id: source.mission_id, verdict: source.verdict })),
+    });
+  }
   const observations = report.sources.flatMap(source =>
     (source.observations ?? []).map(observation => ({ source: source.mission_id, ...observation })));
   // Preserve the reviewer's stated reasons on the canonical assessment: without

@@ -438,19 +438,30 @@ test.skipIf(process.platform !== "win32")("Windows-only guardian runs the worker
   const samples: WindowsProcessRow[][] = [];
   try {
     const topology = JSON.parse(await waitForFile(path.join(root, "tree.json"), text => Boolean(text.trim()))) as { guardian: number };
-    while (!(await Promise.race([running.then(() => true), delay(50).then(() => false)]))) {
-      samples.push(await listWindowsProcesses());
+    // The guardian's own pseudoconsole host is the only console host it may
+    // create, and it is headless; anything else in the tree allocated a console.
+    const isHeadlessHost = (row: WindowsProcessRow) =>
+      CONSOLE_HOST.test(row.name) && row.ppid === topology.guardian && row.command.includes("--headless");
+    // A single sample races the host's creation under machine load, so poll the
+    // process table every few hundred milliseconds until the host is seen or the
+    // run ends, then judge the union of every sample taken.
+    const observationDeadline = Date.now() + 45000;
+    for (;;) {
+      const sample = await listWindowsProcesses();
+      samples.push(sample);
+      if (sample.some(isHeadlessHost)) break;
+      if (await Promise.race([running.then(() => true), delay(50).then(() => false)])) break;
+      if (Date.now() >= observationDeadline) break;
+      await delay(250);
     }
     const result = await running;
     const tree = observedDescendants(topology.guardian, samples);
     // One row per distinct process, so repeated samples cannot inflate a report.
     const rows = [...new Map(samples.flat().filter(row => tree.has(row.pid))
       .map(row => [`${row.pid}|${row.ppid}|${row.name}`, row])).values()];
-    // The guardian's own pseudoconsole host is the only console host it may
-    // create, and it is headless; anything else in the tree allocated a console.
-    const headlessHosts = rows.filter(row => CONSOLE_HOST.test(row.name) && row.ppid === topology.guardian && row.command.includes("--headless"));
+    const headlessHosts = rows.filter(isHeadlessHost);
     const offenders = rows.filter(row => CONSOLE_HOST.test(row.name) && row.ppid !== topology.guardian);
-    expect(headlessHosts.length).toBeGreaterThan(0);
+    expect(headlessHosts.length, `No headless pseudoconsole host (conhost/OpenConsole --headless) parented by guardian ${topology.guardian} was observed across ${samples.length} sample(s) within the 45s observation window; the guardian must attach the worker tree to one windowless pseudoconsole`).toBeGreaterThan(0);
     expect(offenders).toEqual([]);
     expect(result.pseudoconsole).toBe(true);
     expect(result.stdout).toContain("HEADLESS_MARKER");

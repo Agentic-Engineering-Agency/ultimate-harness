@@ -213,6 +213,45 @@ describe("checkMissionPackets", () => {
     const line = failStartingWith(result, "expected_output lib/x.ts [worker backend]");
     expect(line?.reason).toMatch(/outside guard.write_roots/);
   });
+
+  async function writeWorkerTemplate(adapter: string): Promise<void> {
+    const templatesDir = join(root, ".harness", "templates");
+    await mkdir(templatesDir, { recursive: true });
+    await writeFile(join(templatesDir, "omp-worker.yaml"), [
+      "schema_version: uh.session-template.v0",
+      "id: omp-worker",
+      "title: OMP worker",
+      "tier: balanced",
+      `adapter: ${adapter}`,
+    ].join("\n") + "\n", "utf-8");
+  }
+
+  test("a team worker with only a template is validated against the template's adapter", async () => {
+    await writeWorkerTemplate("oh-my-pi");
+    const missionPath = await writeMission("team-template-worker", {
+      shape: "team",
+      team: {
+        workers: [{ role: "backend", template: "omp-worker" }],
+        leader: { adapter: "oh-my-pi" },
+      },
+    });
+    const result = await checkMissionPackets({ root, missionPath });
+    expect(result.ok, renderMissionCheckLines(result).join("\n")).toBe(true);
+    expect(result.checks.find((entry) => entry.name === "runtime overrides [worker backend]")?.status).toBe("PASS");
+  });
+
+  test("a team worker with neither an adapter nor a template fails schema validation", async () => {
+    const missionPath = await writeMission("team-no-adapter", {
+      shape: "team",
+      team: {
+        workers: [{ role: "backend" }],
+        leader: { adapter: "oh-my-pi" },
+      },
+    });
+    const result = await checkMissionPackets({ root, missionPath });
+    expect(result.ok).toBe(false);
+    expect(failStartingWith(result, "schema")?.reason).toMatch(/adapter, or a template/);
+  });
 });
 
 describe("extractChangeOnlyPaths", () => {

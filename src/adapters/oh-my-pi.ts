@@ -3,6 +3,7 @@ import { prepareRuntimeResume, recoveryPrompt, persistRuntimeRecovery, type Runt
 import { claimRuntimeAttempt } from "../harness/runtime-attempt.js";
 import { runRuntimeProcess, type RuntimeProcessInput } from "../harness/runtime-process.js";
 import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
+import { armGuard, guardArmStopReceipt, GUARD_ARM_LOG_NAME, type GuardArmingFailure, type GuardArmingInput, type GuardArmingResult } from "../harness/guard-arming.js";
 import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, RuntimeRouteSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode, type RuntimeRecoveryDeadline, type ToolGuardPolicy, DEFAULT_PROTECTED_PATHS, ToolGuardArtifactSchema } from "../schema/runtime-control.js";
 import { delegatedRouteMismatch, nativeRuntimeCompleted, nativeRuntimeRoute, runtimeRouteMismatch } from "../harness/runtime-supervision.js";
 import { execFile } from "node:child_process";
@@ -164,6 +165,8 @@ export interface PlanOhMyPiOptions {
 }
 export interface RunOhMyPiOptions {
   runner?: OhMyPiRunner;
+  /** Pre-launch guard arming seam; defaults to the real arming check. */
+  armGuard?: (input: GuardArmingInput) => Promise<GuardArmingResult>;
   timeoutMs?: number;
   limits?: RuntimeLimits;
   collectDiff?: DiffCollector;
@@ -612,6 +615,7 @@ export async function runOhMyPi(
   }
 
   let guardEnv: NodeJS.ProcessEnv | undefined;
+  let guardArmFailure: GuardArmingFailure | undefined;
   if (plan.guard && artifacts) {
     const effectiveLimits = { ...plan.limits, ...options.limits };
     const protectedPaths = effectiveLimits.protected_paths ?? DEFAULT_PROTECTED_PATHS;
@@ -625,6 +629,13 @@ export async function runOhMyPi(
     const logPath = path.join(artifacts.runDir, "tool-guard.log");
     await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
+    const arming = await (options.armGuard ?? armGuard)({
+      runtime: "oh-my-pi",
+      policyPath,
+      logPath: path.join(artifacts.runDir, GUARD_ARM_LOG_NAME),
+      hookModulePath: await snapshotGuardHook("extensions/tool-guard/omp.js"),
+    });
+    if (!arming.ok) guardArmFailure = arming;
   }
 
   const runner = options.runner ?? defaultOhMyPiRunner;
@@ -659,7 +670,29 @@ export async function runOhMyPi(
   let runnerResult: OhMyPiRunnerOutput;
   let collection: OhMyPiCollectOutput;
   try {
-    if (initializationError) {
+    if (guardArmFailure) {
+      if (artifacts) {
+        await writeArtifactFile(artifacts.missionDir, path.join(artifacts.runDir, "runtime-control.json"), JSON.stringify(guardArmStopReceipt({ missionId: plan.mission.id, runId, runtime: "oh-my-pi", reason: guardArmFailure.reason }), null, 2));
+      }
+      runnerResult = {
+        stdout: "",
+        stderr: "",
+        exitCode: 1,
+        timedOut: false,
+        spawnError: guardArmFailure.reason,
+        supervisionStopCode: "policy",
+      };
+      collection = await collectOhMyPiSession({
+        root: artifactRoot,
+        artifacts,
+        plan,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        runnerResult,
+        diff: { patch: "" },
+        eventsAlreadyPersisted: false,
+      });
+    } else if (initializationError) {
       runnerResult = {
         stdout: "",
         stderr: "",
@@ -684,6 +717,8 @@ export async function runOhMyPi(
           args: plan.args,
           cwd: root,
           env: guardEnv,
+          permissionMode: plan.guard ? "guard" : undefined,
+          guardLogPath: plan.guard && artifacts ? path.join(artifacts.runDir, "tool-guard.log") : undefined,
           timeoutMs: options.timeoutMs,
           limits: { ...plan.limits, ...options.limits },
           onDeadline: plan.grace ? undefined : plan.deadline,

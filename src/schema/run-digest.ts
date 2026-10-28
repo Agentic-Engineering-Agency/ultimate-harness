@@ -110,14 +110,60 @@ export const RunDigestUsageSchema = z
   .strict();
 export type RunDigestUsage = z.infer<typeof RunDigestUsageSchema>;
 
+/** A tool call that never completed and stopped reporting for longer than the stall window. */
+export const RunDigestLongRunningToolSchema = z
+  .object({
+    tool: z.string().min(1),
+    target: z.string(),
+    minutes: z.number().int().nonnegative(),
+  })
+  .strict();
+export type RunDigestLongRunningTool = z.infer<typeof RunDigestLongRunningToolSchema>;
+
 export const RunDigestLoopSignalsSchema = z
   .object({
     identical_repeats: z.number().int().nonnegative(),
     alternating_pairs: z.number().int().nonnegative(),
     distinct_targets: z.number().int().nonnegative(),
+    /** Calls still in flight with no end event and no output for more than five minutes. */
+    long_running_tools: z.array(RunDigestLongRunningToolSchema),
   })
   .strict();
 export type RunDigestLoopSignals = z.infer<typeof RunDigestLoopSignalsSchema>;
+
+/** Bytes of tool output attributed to one projection kind. */
+export const RunDigestToolOutputBytesSchema = z
+  .object({
+    read: z.number().int().nonnegative(),
+    write: z.number().int().nonnegative(),
+    shell: z.number().int().nonnegative(),
+    other: z.number().int().nonnegative(),
+  })
+  .strict();
+export type RunDigestToolOutputBytes = z.infer<typeof RunDigestToolOutputBytesSchema>;
+
+/**
+ * The efficiency view of a run. Every field is optional and is omitted rather
+ * than zero-filled when its measurement is unavailable: a runtime that reports
+ * no per-request context leaves the context fields absent, never `0`.
+ */
+export const RunDigestEfficiencySchema = z
+  .object({
+    /** Input tokens (context) at the first, sixth and last model request. */
+    context_tokens_first: z.number().int().nonnegative().optional(),
+    context_tokens_after_five: z.number().int().nonnegative().optional(),
+    context_tokens_last: z.number().int().nonnegative().optional(),
+    /** Fraction of recorded turns that carried exactly one tool call. */
+    single_tool_turn_share: z.number().min(0).max(1).optional(),
+    read_calls: z.number().int().nonnegative().optional(),
+    /** Read calls that repeated an earlier `(path, line range)`; a new range is not a re-read. */
+    re_read_calls: z.number().int().nonnegative().optional(),
+    tool_output_bytes: RunDigestToolOutputBytesSchema.optional(),
+    model_time_ms: z.number().nonnegative().optional(),
+    tool_time_ms: z.number().nonnegative().optional(),
+  })
+  .strict();
+export type RunDigestEfficiency = z.infer<typeof RunDigestEfficiencySchema>;
 
 export const RunDigestSchema = z
   .object({
@@ -131,6 +177,8 @@ export const RunDigestSchema = z
     denials: z.array(RunDigestDenialSchema),
     native_refusals: z.number().int().nonnegative(),
     usage: RunDigestUsageSchema,
+    /** The measured efficiency of the attempt; sparse, never zero-filled. */
+    efficiency: RunDigestEfficiencySchema,
     loop_signals: RunDigestLoopSignalsSchema,
     last_assistant_text: z.string().optional(),
   })

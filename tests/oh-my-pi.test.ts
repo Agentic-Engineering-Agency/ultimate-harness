@@ -19,6 +19,7 @@ import {
 } from "../src/adapters/oh-my-pi.js";
 import { recoveryPrompt } from "../src/harness/runtime-recovery.js";
 import { waitForTerminated } from "./process-state.js";
+import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
 const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-oh-my-pi-adapter-"));
 const SNAPSHOT_ROOT = join(TEST_ROOT, "snapshot");
@@ -38,7 +39,7 @@ function restoreSnapshotEnv() {
 async function writeSnapshotHook() {
   const hook = join(SNAPSHOT_DIST, "extensions", "tool-guard", "omp.js");
   await mkdir(path.dirname(hook), { recursive: true });
-  await writeFile(hook, "export default function () {}\n");
+  await writeGuardHookFixture(hook);
 }
 
 async function writeOhMyPiManifest(overrides = "", mode = "json") {

@@ -13,6 +13,7 @@ import { RUN_DIGEST_FILE, RunDigestBuilder } from "./run-digest.js";
 import { createLoopWatchdog, resolveLoopWatchdogMode, type LoopWatchdog } from "./loop-watchdog.js";
 import { resolveRuntimeCommand } from "./runtime-command.js";
 import type { RuntimeUsage } from "./usage.js";
+import { captureSettlement, harnessRootFor } from "./interventions.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -457,6 +458,14 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         const settledStatus = cancelled ? "cancelled" : nativeCompleted || exitCode === 0 ? "passed" : "failed";
         try { await persist(settledStatus); }
         catch { spawnError ??= "Runtime final state persistence failed"; }
+        // A supervised stop is an intervention. Best-effort: a ledger failure
+        // must never fail the run it records.
+        const effectiveStopCode = stopCode ?? supervisor.stopCode;
+        if (scope && effectiveStopCode) {
+          await captureSettlement(harnessRootFor(scope.directory), {
+            missionId: scope.missionId, runId: scope.runId, stopCode: effectiveStopCode, stopReason,
+          });
+        }
         if (temporaryJobDirectory) await rm(temporaryJobDirectory, { recursive: true, force: true }).catch(() => {});
         const reportedStreamFailure = streamError
           ? `Runtime artifact or stream callback failed: ${streamError}`

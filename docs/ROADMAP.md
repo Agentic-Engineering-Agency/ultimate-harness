@@ -4,7 +4,7 @@ Source of truth for issue state is [Linear](https://linear.app/agenticengineerin
 
 ## Now
 
-### 1.0 — Integrated execution lifecycle
+### v0.12.0 — Integrated execution lifecycle
 
 **In development; not release-ready.** Existing adapter, supervision, recovery,
 resource admission, verification, and review implementations must work together
@@ -13,73 +13,105 @@ end-to-end acceptance.
 
 #### Mission authoring and coordination
 
-- **Complete packet persistence:** `src/harness/propose.ts` constructs a subset of
-  the mission schema. The supported coordinator path must persist validated guard,
-  runtime override, recovery, shape, and team contracts without allowing workers
-  to write protected `.harness` state.
+- **Complete packet persistence:** `uh mission put` installs validated packets into
+  `.harness/missions/<id>/mission.yaml` atomically with audit event logging, and
+  `uh mission check` validates packet write roots and grounding claims. Persisting
+  full dynamic schemas directly from coordinator propose paths remains open.
+  Status: **in progress**.
 - **Prerequisite admission:** dispatch must consume valid required outputs, not
   merely observe that prerequisite processes exited. Missing or invalid reports
   must prevent dependent paid execution.
-- **Automatic monitoring and reconnect:** status and Observatory queries exist;
-  unattended controller-loss detection, reconnection, and duplicate-controller
-  prevention require integrated acceptance.
-- **Mid-run steering:** cancellation and saved-session recovery exist, but do not
-  provide a message channel to an active worker.
+  Status: **open**.
+- **Automatic monitoring and reconnect:** `uh ps`, `uh wait`, and `uh report` provide
+  model-free observation and synchronous settlement tracking; live run digests
+  (`uh.run-digest.v0`) update on heartbeat. Controller-loss detection and
+  duplicate-controller prevention are hardened; unattended reconnect remains open.
+  Status: **in progress**.
+- **Mid-run steering:** `uh steer` messages active runs by requesting the controller
+  to stop with `steered` and resume with the message injected without consuming
+  restart budgets; `uh note` and `uh ledger` track intervention records.
+  Status: **shipped**.
 - **Coordinator context:** limit inherited tools, integrations and task context
   according to explicit policy. Measure total consumption across coordinator,
   workers and retries; prompt length alone is not a sufficient measure.
+  Status: **open**.
 
 #### Runtime reliability and accounting
 
 - Resolve Claude context-suffix model identity without weakening route checks.
   Case and provider-prefix variants are reconciled; suffix variants are not.
-- Distinguish native permission refusal from UH hook denial. A hook allow does not
-  bypass native permissions; compound shell commands may still be refused.
+  Status: **open**.
+- Distinguish native permission refusal from UH hook denial: native refusals without
+  hook invocation are tracked as native refusals, consuming denial budgets without
+  disarming the guard or triggering missing-hook stops.
+  Status: **shipped**.
 - Validate Claude coordinator isolation against inherited settings, memory, skills
   and caller-supplied CLI arguments. Tool/MCP flags alone are not full isolation.
+  Status: **open**.
 - Replace repeated scans of accumulated Claude events with bounded incremental
-  accounting; verify missing starts, duplicate envelopes, truncation and interrupted
-  messages. Unobserved totals and unattributed model usage must remain unknown.
-- Define explicit consumption/context policy. Live usage fields currently report
-  measurements; they do not enforce token or context budgets.
+  accounting: `uh report` renders from `uh.run-digest.v0` and reads event tails;
+  bounded event accounting is active for live digests.
+  Status: **in progress**.
+- Define explicit consumption/context policy. Live usage fields report measurements
+  and unknown-cost admission policies manage wave entry; hard context caps remain open.
+  Status: **in progress**.
 - Complete live team accounting and test stale run-index/control combinations in
   the Observatory. Verify actual presentation, not only projected JSON.
+  Status: **open**.
 - Add stop-reason cost attribution without confusing runtime estimates with bills.
+  Status: **open**.
 - Derive per-worker memory limits from declared subprocess requirements where
   supported, while retaining pre-launch refusal on unsupported platforms.
+  Status: **open**.
 
 #### Governed decisions
 
 Current JEV integration covers verification and independent-review collection.
 The [progressive-decision specification](./architecture/progressive-decisions.md)
-also describes routing, scope-change and retry/stop flows that are not implemented.
+also describes routing, scope-change and retry/stop flows.
 
-- Add validated mission decision policy and enforce confidence/provider requirements.
+- Add validated mission decision policy and enforce confidence/provider requirements:
+  `DecisionPolicySchema` and progressive semantic routing shipped; shadow loop watchdog
+  evaluates retry/stop advisory receipts.
+  Status: **in progress**.
 - Bound provider requests independently of subprocess deadlines.
+  Status: **open**.
 - Validate the entire response envelope, including disabled-provider discrimination;
   distinguish transport failure, invalid JSON and malformed typed answers.
+  Status: **open**.
 - Hash submitted evidence before consumer mutation; bound provider metadata and
   account for judgment usage without persisting raw prompts or responses.
+  Status: **open**.
 - Define privacy and evidence-sufficiency rules for criterion descriptions and
   compact summaries. A judgment cannot establish facts omitted from its input.
-- Keep deterministic failure and human authority dominant. Receipt status alone
-  must not be treated as authorization for promotion, wider scope or new spend.
+  Status: **open**.
+- Keep deterministic failure and human authority dominant: failed required checks
+  dominate as deterministic failures and zero judged criteria cannot yield pass.
+  Status: **shipped**.
 
 #### Review, protection and output contracts
 
 - Extend independent review beyond one runtime/model per packet where multiple
   reviewers or model-family independence are required.
+  Status: **open**.
 - Reconcile promotion policies with verified approver authority; a nonempty
   `approved_by` string is not authenticated identity.
+  Status: **open**.
 - Complete credential scoping, isolated worker homes, deny-read protections and
-  preflight verification. Tool flags are not an operating-system security boundary.
-- Extend declared-output checks beyond nonempty files, JSON and configured markers
-  where secret detection or undeclared-output policy is required.
-- Define consistent completion semantics across runtime results and worker reports.
-  Partial artifacts must remain distinguishable from complete deliverables.
+  preflight verification: Tool Guard arms fail-closed, isolates write roots,
+  denies agent/network clients, and traps `guard_tamper` and `containment_escape`.
+  Status: **in progress**.
+- Extend declared-output checks beyond nonempty files, JSON and configured markers:
+  declared outputs under gitignored paths are force-staged, and salvage commits
+  strictly enforce write roots.
+  Status: **in progress**.
+- Define consistent completion semantics across runtime results and worker reports:
+  review-prepare captures worker runtime-final.txt, verification.yaml, and team
+  records with hash pinning.
+  Status: **in progress**.
 - Improve liveness diagnosis using pending tool-call structure as well as heartbeat
   freshness; an open terminal or recent event is not proof of forward progress.
-
+  Status: **open**.
 #### Release acceptance
 
 Exercise the connected paths below with explicit failure and recovery criteria.

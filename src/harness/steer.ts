@@ -26,6 +26,8 @@ import {
   type ResumeOrigin,
   type SteerRecord,
 } from "./runtime-recovery.js";
+import type { InterventionSource } from "../schema/intervention.js";
+import { captureSteer } from "./interventions.js";
 
 export { DEFAULT_OPERATOR_RESUME_NOTE, REPORT_REQUEST, steerNotes };
 /**
@@ -504,6 +506,8 @@ export async function resumeRun(
 
 export interface SteerOptions {
   report?: boolean;
+  /** Who is steering; recorded on the intervention ledger, defaulting to the orchestrator. */
+  source?: InterventionSource;
 }
 
 /**
@@ -544,11 +548,13 @@ export async function steerRun(
         message_digest: record.message_digest,
       };
     }
+    await captureSteer(root, { missionId: target.missionId, runId: target.runId, source: options.source, what: trimmed });
     return { ok: true, mode: "controller", sourceRunId: target.runId, missionId: target.missionId, runtime: target.runtime, report };
   }
   const cancelled = target.liveness !== "settled";
   if (cancelled) await deps.cancel(root, target.missionId, target.runId);
   const resume = await performResume(target, { notes: steerNotes(message, report), report, cancelled }, deps);
+  await captureSteer(root, { missionId: resume.missionId, runId: resume.sourceRunId, source: options.source, what: message.trim() });
   return {
     ok: true,
     mode: "fallback",
