@@ -1,3 +1,4 @@
+import { ReservationFileSchema } from "../schema/runtime-resources.js";
 import { freemem } from "node:os";
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -63,13 +64,6 @@ function reservationsDir(root: string): string {
   return path.join(workerAdmissionDir(root), "reservations");
 }
 
-const ReservationFileSchema = z.object({
-  reserved_mb: z.number().int().positive(),
-  created_at: z.string().datetime(),
-  release_after_ms: z.number().int().positive(),
-  pid: z.number().int().positive(),
-  worker: z.string().min(1).optional(),
-}).strict();
 
 export type WorkerReservation = { path: string; reserved_mb: number };
 
@@ -250,7 +244,7 @@ async function readActiveReservations(root: string, nowMs: number): Promise<Work
   const dir = reservationsDir(root);
   let entries;
   try { entries = await readdir(dir, { withFileTypes: true }); } catch { return []; }
-  const candidates: Array<{ path: string; reserved_mb: number; pid: number }> = [];
+  const candidates: Array<{ path: string; reserved_mb: number; pid: number; created_at: number }> = [];
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const file = path.join(dir, entry.name);
@@ -266,41 +260,51 @@ async function readActiveReservations(root: string, nowMs: number): Promise<Work
       await rm(file, { force: true }).catch(() => undefined);
       continue;
     }
-    candidates.push({ path: file, reserved_mb: parsed.data.reserved_mb, pid: parsed.data.pid });
+    candidates.push({ path: file, reserved_mb: parsed.data.reserved_mb, pid: parsed.data.pid, created_at: createdAt });
   }
   if (candidates.length === 0) return [];
   // A reservation ends as soon as its worker's runtime process has started and
   // reported; only an owner that has not yet reported (or crashed) still holds
   // memory that is invisible to `freemem()`, and it is bounded by the fallback.
+  // A team's workers share one controller pid, so a pid can hold several reservations. Each worker that has
+  // reported releases one of them (the oldest first), not all of them at the first heartbeat. The count is read
+  // fresh on every call, so a partly released set is left in place and skipped by position: deleting one per call
+  // would release another reservation on every poll.
   const reported = await reportedWorkerPids(root, nowMs);
+  const byPid = new Map<number, typeof candidates>();
+  for (const candidate of candidates) byPid.set(candidate.pid, [...(byPid.get(candidate.pid) ?? []), candidate]);
   const active: WorkerReservation[] = [];
-  for (const candidate of candidates) {
-    if (reported.has(candidate.pid)) {
-      await rm(candidate.path, { force: true }).catch(() => undefined);
+  for (const [pid, group] of byPid) {
+    group.sort((left, right) => left.created_at - right.created_at || left.path.localeCompare(right.path));
+    const released = Math.min(reported.get(pid) ?? 0, group.length);
+    // Every reservation of this controller is now a running worker's own memory: the files are no longer needed.
+    if (released === group.length) {
+      for (const candidate of group) await rm(candidate.path, { force: true }).catch(() => undefined);
       continue;
     }
-    active.push({ path: candidate.path, reserved_mb: candidate.reserved_mb });
+    for (const candidate of group.slice(released)) active.push({ path: candidate.path, reserved_mb: candidate.reserved_mb });
   }
   return active;
 }
 
 /**
- * Controller pids whose worker has started and reported: a project-root live-run
- * entry that has not settled and already carries a heartbeat (the runtime process
- * is running) or a measured peak memory (its memory is visible). A reservation
- * written by that process must not be subtracted a second time. Discovery is
+ * Per controller pid, how many workers have started and reported: project-root live-run
+ * entries that have not settled and already carry a heartbeat (the runtime process
+ * is running) or a measured peak memory (its memory is visible). One reservation of that
+ * controller per reported worker must not be subtracted a second time. Discovery is
  * best-effort and side-effect free (`persist: false`); a failure means no
  * reservation is released early and the 60 s fallback still applies.
  */
-async function reportedWorkerPids(root: string, nowMs: number): Promise<Set<number>> {
+async function reportedWorkerPids(root: string, nowMs: number): Promise<Map<number, number>> {
   let records: LiveRunRecord[];
   try { records = await discoverRuns(root, { persist: false, now: nowMs }); }
-  catch { return new Set(); }
-  const pids = new Set<number>();
+  catch { return new Map(); }
+  // How many workers of each controller have reported.
+  const pids = new Map<number, number>();
   for (const record of records) {
     if (record.settled_at !== undefined) continue;
     if (record.heartbeat_at !== undefined || record.peak_memory_bytes !== undefined) {
-      pids.add(record.controller_pid);
+      pids.set(record.controller_pid, (pids.get(record.controller_pid) ?? 0) + 1);
     }
   }
   return pids;
@@ -319,6 +323,7 @@ async function writeReservations(
   for (let index = 0; index < count; index++) {
     const file = path.join(dir, `res-${process.pid}-${randomUUID()}.json`);
     await writeFile(file, JSON.stringify({
+      schema_version: "uh.reservation.v0",
       reserved_mb: reservedMb,
       created_at: created,
       release_after_ms: WORKER_RESERVATION_RELEASE_MS,

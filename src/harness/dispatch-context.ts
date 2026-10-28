@@ -105,10 +105,10 @@ const PROJECT_FACTS_TRUNCATION_NOTE =
  * cut it to fit with an explicit truncation note. The returned string is never
  * longer than the limit.
  */
-export function capProjectFacts(text: string): string {
+export function capProjectFacts(text: string, limit: number = PROJECT_FACTS_CHAR_LIMIT): string {
   const trimmed = text.trim();
-  if (trimmed.length <= PROJECT_FACTS_CHAR_LIMIT) return trimmed;
-  const keep = Math.max(0, PROJECT_FACTS_CHAR_LIMIT - PROJECT_FACTS_TRUNCATION_NOTE.length);
+  if (trimmed.length <= limit) return trimmed;
+  const keep = Math.max(0, limit - PROJECT_FACTS_TRUNCATION_NOTE.length);
   return `${trimmed.slice(0, keep)}${PROJECT_FACTS_TRUNCATION_NOTE}`;
 }
 
@@ -158,8 +158,12 @@ export function buildDispatchContext(
   } catch {
     hiveFacts = "";
   }
+  // The two parts are budgeted apart: the brief gives way to the hive block, never the other way round, so a long
+  // brief cannot cut the data block's closing fence and leave the rest of the prompt inside it.
   const factsText = hiveFacts.length > 0
-    ? capProjectFacts(projectFacts !== undefined && projectFacts.length > 0 ? `${projectFacts}\n\n${hiveFacts}` : hiveFacts)
+    ? (projectFacts !== undefined && projectFacts.length > 0
+      ? `${capProjectFacts(projectFacts, Math.max(0, PROJECT_FACTS_CHAR_LIMIT - hiveFacts.length - 2))}\n\n${hiveFacts}`
+      : hiveFacts)
     : projectFacts;
   return {
     mission,

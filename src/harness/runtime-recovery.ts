@@ -1,3 +1,4 @@
+import { SteerRecordSchema, type SteerRecord } from "../schema/steer.js";
 import { validateMission } from "../schema/mission.js";
 import { runtimeRegistry } from "./registry.js";
 import { mergeRuntimeConfigOverrides } from "./runtime-config-overrides.js";
@@ -94,20 +95,7 @@ export async function prepareRuntimeResume(root: string, missionId: string, runI
   return { sourceRunId: runId, sessionId: control.session_id, notes: combinedNotes, sourceStopCode: control.stop_code, sourceStopReason, grace, origin };
 }
 
-/** Explicit record of a steer request outcome. */
-export const SteerRecordSchema = z
-  .object({
-    schema_version: z.literal("uh.steer-record.v0").default("uh.steer-record.v0"),
-    mission_id: z.string().min(1),
-    run_id: z.string().min(1),
-    status: z.literal("not_applied"),
-    reason: z.string().min(1),
-    message_digest: z.string().min(1),
-    digest: z.string().min(1).optional(),
-    recorded_at: z.string(),
-  })
-  .strict();
-export type SteerRecord = z.infer<typeof SteerRecordSchema>;
+export { SteerRecordSchema, type SteerRecord };
 
 /** Read a pending steer request next to runtime-control.json without consuming it. */
 export async function readSteerRequest(root: string, missionId: string, runId: string): Promise<RuntimeSteerRequest | undefined> {

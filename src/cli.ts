@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { settleOnSignal } from "./harness/cancel-on-signal.js";
+import { ownerOnlyRefusal } from "./harness/owner-only.js";
 import { prepareIndependentReview, collectIndependentReview, retireIndependentReviewWorkspace } from "./harness/independent-review.js";
 import { Command } from "commander";
 import { z } from "zod";
@@ -50,6 +52,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { readFile as readFileAsync, writeFile as writeFileAsync, readdir, mkdir } from "node:fs/promises";
 import { exitCodeForRun } from "./harness/exit-codes.js";
+import { drainNotifications, elapsedMs, notifyRunSettled } from "./harness/notifications.js";
 import { indexRuns, summarizeRuns, paretoFrontier } from "./harness/experience-store.js";
 import { BEST_OF_N_CAP, MIN_ARM_RUNS, attemptsToMatch, bestOfN, compareArms } from "./harness/run-comparison.js";
 import { exportRunToOtlp, type OtlpTraceExport } from "./harness/otel-export.js";
@@ -270,21 +273,23 @@ async function installRuntimeCancelledEventHandler(
   runtime: string,
   runId: string,
   cancellationController: AbortController,
+  running: () => Promise<unknown> | undefined = () => undefined,
 ): Promise<() => void> {
   const mission = await loadMissionFile(missionPath);
   let handled = false;
   const onSignal = (signal: "SIGINT" | "SIGTERM"): void => {
     if (handled) return;
     handled = true;
-    cancellationController.abort();
-    finalizeRuntimeCancelledRun({
-      root: artifactRoot,
-      missionId: mission.id,
-      runtime,
-      signal,
-      runId,
+    // The run settles its own control file and the live-run registry on abort; the exit waits (bounded) for that.
+    void settleOnSignal({
+      abort: () => cancellationController.abort(),
+      finalize: () => {
+        finalizeRuntimeCancelledRun({ root: artifactRoot, missionId: mission.id, runtime, signal, runId });
+      },
+      running,
+      exit: (code) => process.exit(code),
+      code: 143,
     });
-    process.exit(143);
   };
   const onSigint = (): void => onSignal("SIGINT");
   const onSigterm = (): void => onSignal("SIGTERM");
@@ -297,6 +302,21 @@ async function installRuntimeCancelledEventHandler(
 }
 
 const program = new Command();
+// `uh ledger confirm` is the owner's: refuse it, before any command logic, in a guarded worker or with no terminal.
+program.hook("preAction", (_command, action) => {
+  const names: string[] = [];
+  for (let current: Command | null = action; current?.parent; current = current.parent) names.unshift(current.name());
+  const refusal = ownerOnlyRefusal(process.env, names, Boolean(process.stdin.isTTY && process.stdout.isTTY));
+  if (refusal) {
+    console.error(`[BLOCKED] ${refusal}`);
+    process.exit(exitCodeForRun("blocked"));
+  }
+});
+/** Let settlement notifications still being delivered finish (bounded), then exit: `process.exit` straight after a fire-and-forget delivery drops it. */
+async function exitDelivered(code: number): Promise<never> {
+  await drainNotifications();
+  return process.exit(code);
+}
 
 program
   .name("uh")
@@ -527,7 +547,7 @@ program
       } else {
         console.log(formatLiveRuns(records));
       }
-      process.exit(liveRunsExitCode(records));
+      await exitDelivered(liveRunsExitCode(records));
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
@@ -573,7 +593,7 @@ program
       });
       if (opts.json) console.log(JSON.stringify(report, null, 2));
       else console.log(formatKillReport(report));
-      process.exit(report.exit_code);
+      await exitDelivered(report.exit_code);
     } catch (err) {
       console.error(`[FAIL] kill error:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -649,7 +669,7 @@ program
       });
       if (opts.json) console.log(JSON.stringify(report, null, 2));
       else console.log(formatWaitReport(report));
-      process.exit(report.exit_code);
+      await exitDelivered(report.exit_code);
     } catch (err) {
       const code = (err as { code?: string }).code;
       console.error(`[FAIL] wait error:`);
@@ -698,6 +718,7 @@ program
         { run: runOperatorResumedAttempt, cancel: (cancelRoot, missionId, id) => cancelLocalMissionRun(cancelRoot, missionId, id) });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
       else if (result.status === "not_applied") console.log(`Steer not applied to ${result.sourceRunId}: ${result.reason}`);
+      else if (result.status === "pending") console.log(`Steer requested for ${result.sourceRunId}, not yet taken: ${result.reason}; check again with \`uh ps\``);
       else if (result.mode === "controller") console.log(`Steered ${result.sourceRunId}; its controller will resume the session`);
       else console.log(`Steered ${result.sourceRunId} into ${result.runId}`);
     } catch (err) {
@@ -1944,6 +1965,31 @@ missionCmd.command("review-collect")
   });
 
 missionCmd
+  .command("prune-runs")
+  .description("Archive a mission's oldest runs beyond a cap and remove their run directories")
+  .argument("<mission-id>", "Mission id")
+  .requiredOption("--keep <n>", "How many non-archived runs to keep (a positive integer)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit JSON")
+  .action(async (missionId: string, opts: { keep: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      assertSafeMissionId(missionId);
+      if (!/^[0-9]+$/.test(opts.keep) || Number.parseInt(opts.keep, 10) <= 0) {
+        throw new Error(`--keep must be a positive integer, got: ${opts.keep}`);
+      }
+      const keep = Number.parseInt(opts.keep, 10);
+      const { pruneOldRuns } = await import("./harness/run-id.js");
+      const pruned = await pruneOldRuns(root, missionId, keep);
+      if (opts.json) console.log(JSON.stringify({ mission_id: missionId, keep, pruned }));
+      else console.log(`pruned ${pruned} run(s) of ${missionId} (keeping ${keep})`);
+    } catch (err) {
+      console.error(`[FAIL] mission prune-runs: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+missionCmd
   .command("create")
   .description("Create a scaffold mission packet")
   .argument("<id>", "Mission id")
@@ -2551,11 +2597,14 @@ missionCmd
         root, runtime, runId, ...recovery, extraRuntimeConfigOverrides,
         cancellationSignal: cancellationController.signal,
         run: async (attempt) => {
-          const uninstall = await installRuntimeCancelledEventHandler(root, routing.missionPath, runtime, attempt.runId, cancellationController);
+          let inFlight: Promise<unknown> | undefined;
+          const uninstall = await installRuntimeCancelledEventHandler(root, routing.missionPath, runtime, attempt.runId, cancellationController, () => inFlight);
           try {
-            const runRes = await wiring.run(routing.effectiveRoot, routing.missionPath, {
+            const pending = wiring.run(routing.effectiveRoot, routing.missionPath, {
               ...attempt, artifactRoot: root, cancellationSignal: cancellationController.signal,
             });
+            inFlight = pending;
+            const runRes = await pending;
             return { ...runRes, runId: attempt.runId };
           } finally { uninstall(); }
         },
@@ -2642,6 +2691,14 @@ missionCmd
     // failed and its exit code uses exitCodeForRun("failed").
     let postChecksFailed = false;
     if (postChecks && postChecks.length > 0 && postChecksPath) {
+      // Ctrl-C or SIGTERM while a check runs stops that check's whole process tree before the CLI goes, and the run
+      // keeps the status it had instead of being rewritten to failed.
+      const postAbort = new AbortController();
+      let interruptedBy: "SIGINT" | "SIGTERM" | undefined;
+      const onPostSigint = (): void => { interruptedBy ??= "SIGINT"; postAbort.abort(); };
+      const onPostSigterm = (): void => { interruptedBy ??= "SIGTERM"; postAbort.abort(); };
+      process.once("SIGINT", onPostSigint);
+      process.once("SIGTERM", onPostSigterm);
       try {
         const post = await runPostChecks({
           checks: postChecks,
@@ -2651,7 +2708,17 @@ missionCmd
           runDir,
           root: path.resolve(root),
           cwd: routing.effectiveRoot,
+          runStatus: status ?? undefined,
+          signal: postAbort.signal,
         });
+        process.removeListener("SIGINT", onPostSigint);
+        process.removeListener("SIGTERM", onPostSigterm);
+        if (post.skipped) console.log(`[SKIP] ${post.skipped}`);
+        for (const warning of post.warnings ?? []) console.log(`[WARN] ${warning}`);
+        if (post.aborted) {
+          console.log(`[CANCELLED] post-checks stopped by ${interruptedBy ?? "a signal"}; the run keeps its status`);
+          process.exit(interruptedBy === "SIGTERM" ? 143 : 130);
+        }
         if (post.errors.length > 0) {
           status = "failed";
           postChecksFailed = true;
@@ -2660,6 +2727,8 @@ missionCmd
           }
         }
       } catch {
+        process.removeListener("SIGINT", onPostSigint);
+        process.removeListener("SIGTERM", onPostSigterm);
         // Last guard: the runner settles its own failures, but if it still
         // throws the run fails cleanly rather than aborting unsettled, so
         // UH_RESULT is printed and the exit code is exitCodeForRun("failed").
@@ -2702,7 +2771,16 @@ missionCmd
       run_dir: relativeRunDir,
     };
     console.log(`UH_RESULT ${JSON.stringify(settlementPayload)}`);
-    process.exit(runExitCode);
+    // A run that settles normally announces itself, and the announcement finishes before the process exits.
+    notifyRunSettled(root, {
+      run_id: finalRunId,
+      mission: missionId,
+      runtime,
+      status,
+      ...(finalStopCode ? { stop_code: finalStopCode } : {}),
+      run_dir: path.resolve(root, relativeRunDir),
+    });
+    await exitDelivered(runExitCode);
   });
 
 missionCmd
@@ -2957,7 +3035,7 @@ missionCmd
         : result.status === "blocked"
           ? 2
           : 1;
-      process.exit(exit);
+      await exitDelivered(exit);
     } catch (err) {
       console.error(`[FAIL] mission run-team error:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -3021,29 +3099,35 @@ hiveCmd
 
 hiveCmd
   .command("verify")
-  .description("Verify the hive facts chain, the intervention ledger chain and the land decision index")
+  .description("Verify the hive facts chain, the intervention ledger chain and the land decision index; --repair re-links a fork left by the old append bug")
   .option("--json", "Emit JSON")
+  .option("--repair", "Re-link chains forked by the old concurrent-append bug (two entries linking to the same parent); any other break is refused. Keeps the original and writes a report")
   .option("--root <path>", "Root directory (default: cwd)")
-  .action(async (opts: { json?: boolean; root?: string }) => {
+  .action(async (opts: { json?: boolean; repair?: boolean; root?: string }) => {
     const root = resolveRoot(opts.root);
     try {
-      const { verifyHiveChain } = await import("./harness/hive.js");
-      const { verifyLedgerChain } = await import("./harness/interventions.js");
-      const { verifyLandDecisionChain } = await import("./harness/land.js");
-      const checks = [
-        { name: "hive.facts", file: ".harness/hive/facts.ndjson", first_broken: verifyHiveChain(root) ?? null },
-        { name: "ledger.interventions", file: ".harness/ledger/interventions.ndjson", first_broken: verifyLedgerChain(root) ?? null },
-        { name: "land.decisions", file: ".harness/land/decisions.ndjson", first_broken: verifyLandDecisionChain(root) ?? null },
-      ];
-      const ok = checks.every((entry) => entry.first_broken === null);
+      const { verifyHiveChains, repairHiveChains } = await import("./harness/hive-verify.js");
+      const repairs = opts.repair === true ? await repairHiveChains(root) : [];
+      const checks = verifyHiveChains(root);
+      const ok = checks.every((entry) => entry.first_broken === null && entry.forks.length === 0);
       if (opts.json === true) {
-        console.log(JSON.stringify({ ok, checks }, null, 2));
-      } else if (ok) {
-        console.log("hive chains intact");
+        console.log(JSON.stringify({ ok, checks, ...(opts.repair === true ? { repairs } : {}) }, null, 2));
       } else {
-        for (const entry of checks) {
-          if (entry.first_broken !== null) {
-            console.log(`[BROKEN] ${entry.name} ${entry.file} line ${entry.first_broken.line}: ${entry.first_broken.reason}`);
+        for (const repair of repairs) {
+          if (repair.outcome.repaired) {
+            const lines = repair.outcome.relinked.map((entry) => entry.line).join(", ");
+            console.log(`[REPAIRED] ${repair.name} ${repair.file}: re-linked ${repair.outcome.relinked.length} entries (lines ${lines}); original kept at ${repair.outcome.backup}; report ${repair.outcome.report}`);
+          }
+        }
+        if (ok) {
+          console.log("hive chains intact");
+        } else {
+          for (const entry of checks) {
+            if (entry.first_broken !== null) {
+              console.log(`[BROKEN] ${entry.name} ${entry.file} line ${entry.first_broken.line}: ${entry.first_broken.reason}`);
+            } else if (entry.forks.length > 0) {
+              console.log(`[FORK] ${entry.name} ${entry.file} line ${entry.forks.join(", ")}: two entries link to the same parent (the old concurrent-append bug); run "uh hive verify --repair" to re-link it`);
+            }
           }
         }
       }

@@ -104,7 +104,7 @@ UH emits these at its settlement points:
 - **`run.orphaned`** — a run's controller process is gone and the run was closed as lost.
 - **`alert`** — a supervision stop, raised with stop code `policy`, `stall`, `repeated_failure`, `denial_budget`, or `controller_lost` (in addition to the run's own settlement event).
 
-The settlement points are `settleLiveRun`'s callers (`src/harness/runtime-settlement.ts`, `src/harness/kill.ts`, `src/harness/live-runs.ts`) and `runTeamMission` (`src/harness/team-run.ts`).
+The settlement points are the end of `uh mission run` (a run that settles normally), `settleLiveRun`'s callers (`src/harness/runtime-settlement.ts`, `src/harness/kill.ts`, `src/harness/live-runs.ts`) and `runTeamMission` (`src/harness/team-run.ts`). Delivery is not part of the settlement, but a command that is about to exit (`uh mission run`, `run-team`, `kill`, `ps`, `wait`) lets the deliveries it started finish first, for at most 5 seconds, so a slow or hung sink delays the exit by that long at most and never fails it.
 
 ## Delivery guarantees
 

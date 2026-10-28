@@ -137,6 +137,9 @@ test("a separate native review produces an advisory assessment, never owner appr
   try {
     const { workspace, missionPath } = await executeFixture(root);
     const assessment = await collectIndependentReview(root, "review");
+    // The request pins the commit the source workspace was at, so `uh land` can require the branch to contain it (#264).
+    const request = JSON.parse(await readFile(path.join(root, ".harness", "missions", "review", "review-request.json"), "utf8")) as { sources: Array<{ source_head?: string }> };
+    expect(request.sources[0].source_head).toBe(execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim());
     expect(assessment).toMatchObject({ recommendation: "pass", human_acceptance_required: true });
     expect(assessment.observations).toEqual([
       { source: "source", title: "Captured output inspected in full", evidence: "42", relates_to: "ac-1", severity: "info" },

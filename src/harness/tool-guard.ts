@@ -403,6 +403,8 @@ function inPlaceTargets(verb: string, argv: string[]): string[] | undefined {
  */
 function uhControllerInvoked(args: string[]): boolean {
   const positional = args.filter(t => !t.startsWith("-")).map(t => t.toLowerCase());
+  // `uh ledger confirm` records the owner's verification; an agent, an orchestrator included, never runs it.
+  if (positional[0] === "ledger" && positional[1] === "confirm") return true;
   if (positional[0] === "mission") return UH_CONTROLLER_MISSION_OPERATIONS.has(positional[1] ?? "");
   if (positional[0] === "acceptance") return positional[1] === "run";
   return UH_CONTROLLER_OPERATIONS.has(positional[0] ?? "");
@@ -906,6 +908,12 @@ const CONTROLLER_OPERATIONS = new Set([
 
 function isControllerCommand(command: string): boolean {
   if (!command || /[\r\n;&|`<>]/.test(command)) return false;
+  // A shell expands `$` (substitution, variables) anywhere outside single quotes, and PowerShell evaluates a
+  // parenthesised group or a script block outside quotes, so what runs is not what was checked. A controller command
+  // carries none of them unquoted.
+  const unquoted = command.replace(/'[^']*'/g, "''");
+  if (/\$/.test(unquoted)) return false;
+  if (/[(){}]/.test(unquoted.replace(/"[^"]*"/g, '""'))) return false;
   const commandTokens = tokens(command);
   if (commandTokens[0] === "&") commandTokens.shift();
   if (!commandTokens.length) return false;

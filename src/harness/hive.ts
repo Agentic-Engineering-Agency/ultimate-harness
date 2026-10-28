@@ -16,15 +16,17 @@ import {
   type HiveItemStatus,
 } from "../schema/hive.js";
 import { harnessHiveDir, harnessOwnerRoot } from "./hive-root.js";
+import { withChainLock } from "./chain-lock.js";
 import {
   chainEntry,
   lastChainedHash,
   readJsonLines,
   sha256File,
   verifyChainedLines,
+  verifyChainedLinesTolerant,
   type ChainBreak,
 } from "./hash-chain.js";
-import { verifyLedgerChain } from "./interventions.js";
+import { interventionsPath, verifyLedgerChain } from "./interventions.js";
 import { entryMac, entryMacMatches } from "./controller-key.js";
 
 /**
@@ -242,6 +244,11 @@ export interface HiveFactInput {
  * chain refuses the append rather than extending it.
  */
 export function appendFact(root: string, input: HiveFactInput): HiveFact {
+  // Reading the last hash and appending are one exclusive step across processes (#257).
+  return withChainLock(hiveFactsPath(root), () => appendFactLocked(root, input));
+}
+
+function appendFactLocked(root: string, input: HiveFactInput): HiveFact {
   const at = input.at ?? new Date().toISOString();
   const evidence = HiveFactEvidenceSchema.parse(input.evidence);
   const lines = readJsonLines(hiveFactsPath(root));
@@ -388,16 +395,25 @@ export function readVerifiedHiveFacts(root: string): HiveFact[] {
   return facts;
 }
 
-/** Throws when the hive facts chain or the intervention ledger chain is broken. */
-export function assertHiveChainsIntact(root: string): void {
-  const factsBreak = verifyHiveChain(root);
-  if (factsBreak !== undefined) {
-    throw new Error(`Hive facts chain is broken at line ${factsBreak.line}: ${factsBreak.reason}`);
+/**
+ * Throws when the hive facts chain or the intervention ledger chain is broken. The one break the old
+ * concurrent-append bug made, two entries linking to the same parent, is not a failure: it is returned as a
+ * warning that names the repair command, so land and queue go on while recording new facts stays paused.
+ * Every other break throws.
+ */
+export function assertHiveChainsIntact(root: string): string[] {
+  const warnings: string[] = [];
+  for (const [label, file, legacy] of [
+    ["Hive facts", hiveFactsPath(root), false],
+    ["Intervention ledger", interventionsPath(root), true],
+  ] as const) {
+    const { hard, forks } = verifyChainedLinesTolerant(readJsonLines(file), { allowLegacyPrefix: legacy });
+    if (hard !== undefined) throw new Error(`${label} chain is broken at line ${hard.line}: ${hard.reason}`);
+    if (forks.length > 0) {
+      warnings.push(`${label} chain has a fork at line ${forks.join(", ")} (two entries link to the same parent, from the old concurrent-append bug); run "uh hive verify --repair" to re-link it`);
+    }
   }
-  const ledgerBreak = verifyLedgerChain(root);
-  if (ledgerBreak !== undefined) {
-    throw new Error(`Intervention ledger chain is broken at line ${ledgerBreak.line}: ${ledgerBreak.reason}`);
-  }
+  return warnings;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -543,7 +559,17 @@ export interface QueuePassFactsInput {
  */
 export function recordQueuePass(root: string, input: QueuePassFactsInput): void {
   try {
-    const ref = evidenceRef(root, path.join(".harness", "queue", input.queueId, "state.json"));
+    // Cite a snapshot of this entry written once, not `state.json`: the queue rewrites that file on every entry, so a
+    // fact citing it stopped verifying as soon as the next entry settled.
+    const snapshot = path.join(".harness", "queue", input.queueId, "evidence", `${input.entryId}-${input.runId ?? "norun"}.json`);
+    const snapshotFile = path.resolve(root, snapshot);
+    if (!existsSync(snapshotFile)) {
+      mkdirSync(path.dirname(snapshotFile), { recursive: true });
+      writeFileSync(snapshotFile, `${JSON.stringify({
+        queue: input.queueId, entry: input.entryId, run_id: input.runId ?? null, status: "passed", recorded_at: new Date().toISOString(),
+      }, null, 2)}\n`, { encoding: "utf-8", flag: "wx" });
+    }
+    const ref = evidenceRef(root, snapshot);
     const sha256 = evidenceFilePathHash(root, ref);
     if (sha256 === undefined) return;
     const itemIds = itemIdsInText(readHiveItems(root), input.entryId);
