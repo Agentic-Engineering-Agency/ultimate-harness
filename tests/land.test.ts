@@ -228,6 +228,33 @@ afterEach(async () => {
 });
 
 describe("uh land", () => {
+  test("refuses when the target worktree is on a branch other than --onto", async () => {
+    const { messageFile, worktree } = await setup();
+    await gitQuiet(ROOT, ["checkout", "-q", "-b", "other"]);
+    const before = await head(ROOT);
+    const main = (await git(ROOT, ["rev-parse", "main"])).trim();
+
+    await expect(runLand({ messageFile })).rejects.toThrow(/step "gates".*is on other, not --onto main/);
+
+    expect(await head(ROOT)).toBe(before);
+    expect((await git(ROOT, ["rev-parse", "main"])).trim()).toBe(main);
+    expect((await git(ROOT, ["symbolic-ref", "--short", "HEAD"])).trim()).toBe("other");
+    expect(await status(ROOT)).toBe("");
+    expect(await fileExists(worktree)).toBe(true);
+  });
+
+  test("refuses when the target worktree has a detached HEAD", async () => {
+    const { messageFile, worktree } = await setup();
+    await gitQuiet(ROOT, ["checkout", "-q", "--detach", "main"]);
+    const before = await head(ROOT);
+
+    await expect(runLand({ messageFile })).rejects.toThrow(/step "gates".*is not on a branch/);
+
+    expect(await head(ROOT)).toBe(before);
+    expect(await status(ROOT)).toBe("");
+    expect(await fileExists(worktree)).toBe(true);
+  });
+
   test("refuses when the worker worktree has no passed verification", async () => {
     const { messageFile } = await setup({ verificationStatus: null });
     const before = await head(ROOT);
