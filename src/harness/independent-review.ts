@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, realpath, rm, lstat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -12,15 +14,17 @@ import { assertWritableArtifact } from "../adapters/_artifact-context.js";
 import { IndependentReviewAssessmentSchema, IndependentReviewBindingSchema, IndependentReviewReportSchema, IndependentReviewRequestSchema,
   type IndependentReviewBinding, type IndependentReviewReport, type IndependentReviewRequest } from "../schema/independent-review.js";
 import { DEFAULT_PROTECTED_PATHS, RuntimeControlSchema } from "../schema/runtime-control.js";
-import { validateRuntimeResult, type VerdictValue } from "../schema/artifacts.js";
+import { validateRuntimeResult, VerificationStatusSchema, VerificationResultSchema, type VerdictValue } from "../schema/artifacts.js";
 import { loadMissionFile } from "./capabilities.js";
 import { assertSafeMissionId, isPathWithin, requireInitializedProject, requireWorkflowProfile, rejectSymlinkIfExists } from "./mission.js";
 import { proposeMission } from "./propose.js";
 import { readLatestPointer } from "./run-id.js";
-import { resolveSandboxMissionRoot } from "./sandbox.js";
+import { resolveTeamWorkerArtifactRoot } from "./team-run.js";
+import { discardSandbox, resolveSandboxMissionRoot } from "./sandbox.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { verifyExpectedArtifact } from "./output-verification.js";
 import { recordAcceptanceDecision } from "./decision-receipts.js";
+import { captureReview } from "./interventions.js";
 export interface PrepareIndependentReviewOptions {
   id: string;
   sources: Array<{ missionId: string; workspaceRoot?: string }>;
@@ -76,19 +80,97 @@ async function fileDigest(file: string): Promise<string> {
 }
 
 
-async function snapshotFile(sourceRoot: string, original: string, destination: string): Promise<string | undefined> {
-  const candidate = path.resolve(sourceRoot, original);
-  if (!isPathWithin(candidate, sourceRoot)) throw new Error(`Review input escapes its source workspace: ${original}`);
+const execFileP = promisify(execFile);
+
+/** Best-effort git read: any failure (not a checkout, missing ref) yields undefined. */
+async function gitOutput(cwd: string, args: string[]): Promise<string | undefined> {
+  try {
+    return String((await execFileP("git", ["-C", cwd, ...args])).stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Protected roots whose changed files are never captured into a review packet. */
+const PROTECTED_CHANGED_ROOTS = [".harness", ".commandcode", ".omp", ".git"] as const;
+
+function isProtectedChangedPath(target: string): boolean {
+  const normalized = path.posix.normalize(target.trim().replaceAll("\\", "/")).replace(/^\.\/+/, "");
+  return PROTECTED_CHANGED_ROOTS.some((root) => normalized === root || normalized.startsWith(`${root}/`));
+}
+
+/**
+ * The ref a worker branched from, resolved from git alone: the branch's own
+ * configured fork point (`branch.<name>.base`) when present, else the
+ * repository default branch. Returns undefined when none resolves.
+ */
+async function reviewBaseRef(worktree: string): Promise<string | undefined> {
+  const branch = (await gitOutput(worktree, ["rev-parse", "--abbrev-ref", "HEAD"]))?.trim();
+  if (branch && branch !== "HEAD") {
+    const configured = (await gitOutput(worktree, ["config", "--get", `branch.${branch}.base`]))?.trim();
+    if (configured) return configured;
+  }
+  for (const candidate of ["origin/HEAD", "main", "master"]) {
+    if ((await gitOutput(worktree, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]))?.trim()) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Every path the worker changed since its merge-base with its base ref:
+ * committed, staged and unstaged changes, and new files git does not ignore.
+ * Empty when the source workspace is not a git checkout or no base ref resolves.
+ */
+export async function changedGitPaths(sourceRoot: string): Promise<string[]> {
+  if ((await gitOutput(sourceRoot, ["rev-parse", "--is-inside-work-tree"]))?.trim() !== "true") return [];
+  const baseRef = await reviewBaseRef(sourceRoot);
+  if (!baseRef) return [];
+  const mergeBase = (await gitOutput(sourceRoot, ["merge-base", baseRef, "HEAD"]))?.trim();
+  if (!mergeBase) return [];
+  // Against the work tree, not HEAD, so uncommitted edits count; new files are listed separately.
+  const output = await gitOutput(sourceRoot, ["-c", "core.quotepath=off", "diff", "--name-only", mergeBase]);
+  if (output === undefined) return [];
+  const untracked = (await gitOutput(sourceRoot, ["-c", "core.quotepath=off", "ls-files", "--others", "--exclude-standard"])) ?? "";
+  const paths = `${output}\n${untracked}`.split(/\r?\n/).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  return [...new Set(paths)];
+}
+
+/**
+ * Copy an absolute file into the packet under `containmentRoot`, hashing it in
+ * the same pass. `undefined` when the file does not exist; containment is
+ * enforced on both the requested path and its realpath.
+ */
+async function snapshotWithin(containmentRoot: string, candidate: string, destination: string): Promise<string | undefined> {
+  const absolute = path.resolve(candidate);
+  if (!isPathWithin(absolute, containmentRoot)) throw new Error(`Review input escapes its source workspace: ${candidate}`);
   let resolved: string;
-  try { resolved = await realpath(candidate); }
+  try { resolved = await realpath(absolute); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-  if (!isPathWithin(resolved, sourceRoot)) throw new Error(`Review input resolves outside its source workspace: ${original}`);
-  if (!(await lstat(candidate)).isFile()) return undefined;
+  if (!isPathWithin(resolved, containmentRoot)) throw new Error(`Review input resolves outside its source workspace: ${candidate}`);
+  if (!(await lstat(absolute)).isFile()) return undefined;
   const hash = createHash("sha256");
   await pipeline(createReadStream(resolved), new Transform({
     transform(chunk, _encoding, callback) { hash.update(chunk); callback(null, chunk); },
   }), createWriteStream(destination, { flags: "wx" }));
   return hash.digest("hex");
+}
+
+async function snapshotFile(sourceRoot: string, original: string, destination: string): Promise<string | undefined> {
+  return snapshotWithin(sourceRoot, path.resolve(sourceRoot, original), destination);
+}
+
+/**
+ * What `uh verify` concluded in the source workspace, read back from the
+ * snapshot just taken. An unreadable result is surfaced as `blocked` with its
+ * cause rather than dropped: the reviewer must see the file and know why it
+ * carries no trustworthy status.
+ */
+async function verificationEvidence(snapshot: string): Promise<{ status: z.infer<typeof VerificationStatusSchema>; reason?: string }> {
+  try {
+    return { status: VerificationResultSchema.parse(parse(await readFile(snapshot, "utf8"))).status };
+  } catch {
+    return { status: "blocked", reason: "the captured verification.yaml does not parse as a uh.verification-result.v0 document" };
+  }
 }
 
 /** Emit a complete UH mission; preparation never starts a model or another controller. */
@@ -119,6 +201,7 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
   try {
     const sources: IndependentReviewRequest["sources"] = [];
     const readFirst: string[] = [requestRelative];
+    const workerEvidence: string[] = [];
     for (const source of options.sources) {
       const canonicalContract = path.join(root, ".harness", "missions", source.missionId, "mission.yaml");
       await assertWritableArtifact(path.dirname(canonicalContract), canonicalContract);
@@ -144,7 +227,93 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
           ...(hash ? { snapshot_path: relativeArtifactPath(root, snapshot), sha256: hash } : {}) });
         if (hash) readFirst.push(relativeArtifactPath(root, snapshot));
       }
+      // Workers legitimately touch companion files outside their declared
+      // outputs. When the source workspace is a git worktree, capture the real
+      // diff so the review judges those files too. Protected roots and files
+      // already captured above are never duplicated.
+      const captured = new Set(files.map(file => file.original_path.replaceAll("\\", "/")));
+      for (const [index, changedPath] of (await changedGitPaths(sourceRoot)).entries()) {
+        const normalized = changedPath.replaceAll("\\", "/");
+        if (isProtectedChangedPath(normalized) || captured.has(normalized)) continue;
+        captured.add(normalized);
+        const snapshot = path.join(inputDir, `changed-${index}-${path.basename(normalized)}`);
+        const hash = await snapshotFile(sourceRoot, normalized, snapshot);
+        if (hash) {
+          files.push({ kind: "changed", original_path: normalized, state: "present",
+            snapshot_path: relativeArtifactPath(root, snapshot), sha256: hash });
+          readFirst.push(relativeArtifactPath(root, snapshot));
+        } else {
+          files.push({ kind: "changed", original_path: normalized, state: "absent" });
+        }
+      }
+      // The worker's own evidence lives under `.harness`, which the protected
+      // path rules keep out of the changed-file walk above, so both files are
+      // captured explicitly by name. A missing one is recorded with a reason:
+      // reviewers must be able to tell "the worker never produced it" from "the
+      // packet did not look".
+      const evidence: string[] = [];
+      const verificationOriginal = path.posix.join(".harness", "missions", source.missionId, "verification.yaml");
+      const verificationSnapshot = path.join(inputDir, "verification.yaml");
+      const verificationHash = await snapshotFile(sourceRoot, verificationOriginal, verificationSnapshot);
+      if (verificationHash) {
+        const snapshotRelative = relativeArtifactPath(root, verificationSnapshot);
+        const status = await verificationEvidence(verificationSnapshot);
+        files.push({ kind: "verification", original_path: verificationOriginal, state: "present",
+          snapshot_path: snapshotRelative, sha256: verificationHash, ...status });
+        readFirst.push(snapshotRelative);
+        evidence.push(`verification ${snapshotRelative} with status ${status.status}${status.reason ? ` (${status.reason})` : ""}`);
+      } else {
+        const reason = "the source workspace has no verification.yaml, so uh verify has never run there";
+        files.push({ kind: "verification", original_path: verificationOriginal, state: "absent", reason });
+        evidence.push(`verification absent (${reason})`);
+      }
+      const finalSnapshot = path.join(inputDir, "runtime-final.txt");
+      const latestRun = await readLatestPointer(sourceRoot, source.missionId);
+      // A team worker writes its run records outside its own worktree, under
+      // the team's artifact root; resolve that root through the team's run
+      // pointer and team-state.json, never by guessing the newest directory. A
+      // standalone source keeps reading its own workspace.
+      const teamLookup = latestRun ? undefined : await resolveTeamWorkerArtifactRoot(sourceRoot);
+      let finalOriginal: string;
+      let finalHash: string | undefined;
+      let absentReason: string;
+      if (latestRun) {
+        finalOriginal = path.posix.join(".harness", "missions", source.missionId, "runs", latestRun.run_id, "runtime-final.txt");
+        finalHash = await snapshotFile(sourceRoot, finalOriginal, finalSnapshot);
+        absentReason = `the latest run ${latestRun.run_id} wrote no runtime-final.txt`;
+      } else if (teamLookup && "artifactRoot" in teamLookup) {
+        const artifactLatest = await readLatestPointer(teamLookup.artifactRoot, source.missionId);
+        const artifactFinal = artifactLatest
+          ? path.join(teamLookup.artifactRoot, ".harness", "missions", source.missionId, "runs", artifactLatest.run_id, "runtime-final.txt")
+          : path.join(teamLookup.artifactRoot, ".harness", "missions", source.missionId, "latest.json");
+        finalOriginal = relativeArtifactPath(root, artifactFinal);
+        if (artifactLatest) {
+          finalHash = await snapshotWithin(teamLookup.artifactRoot, artifactFinal, finalSnapshot);
+          absentReason = `the latest run ${artifactLatest.run_id} wrote no runtime-final.txt`;
+        } else {
+          absentReason = "the worker artifact root has no latest.json run pointer, so no run's final message can be located";
+        }
+      } else {
+        finalOriginal = path.posix.join(".harness", "missions", source.missionId, "latest.json");
+        absentReason = teamLookup
+          ? teamLookup.reason
+          : "the source workspace has no latest.json run pointer, so no run's final message can be located";
+      }
+      if (finalHash) {
+        const snapshotRelative = relativeArtifactPath(root, finalSnapshot);
+        files.push({ kind: "report", original_path: finalOriginal, state: "present",
+          snapshot_path: snapshotRelative, sha256: finalHash });
+        readFirst.push(snapshotRelative);
+        evidence.push(`final message ${snapshotRelative}`);
+      } else {
+        files.push({ kind: "report", original_path: finalOriginal, state: "absent", reason: absentReason });
+        evidence.push(`final message absent (${absentReason})`);
+      }
+      workerEvidence.push(`- ${source.missionId}: ${evidence.join("; ")}.`);
+      // The commit the source workspace is at, so a later `uh land` can require the branch to contain what was reviewed.
+      const sourceHead = (await gitOutput(sourceRoot, ["rev-parse", "HEAD"]))?.trim();
       sources.push({ mission_id: source.missionId, source_root: sourceRoot, files,
+        ...(sourceHead !== undefined && /^[0-9a-f]{40}$/.test(sourceHead) ? { source_head: sourceHead } : {}),
         reference_paths: mission.read_first,
         acceptance: mission.acceptance_criteria.map(criterion => ({ id: criterion.id, description: criterion.description })),
         checks: mission.verification.checks.map((check, index) => ({ id: `check-${index + 1}`, description: check })),
@@ -162,7 +331,7 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
     const requiredIds = sources.map(source => `- ${source.mission_id}: acceptance: ${idClause(source.acceptance.map(item => item.id))}; checks: ${idClause(source.checks.map(item => item.id))}.`).join("\n");
     const packet = await proposeMission(root, {
       id: options.id, title: `Independent review: ${options.sources.map(source => source.missionId).join(", ")}`, workflow,
-      objective: `Independently assess the captured contracts and outputs in ${binding.request_path}. Read every captured contract and available output in full. Check claims against sources, cover exactly the ids listed below once each, and report missing or unverifiable evidence honestly. The report must contain exactly these ids per source, each exactly once:\n${requiredIds}\nAnything you verified that no listed id covers goes into observations, never into acceptance or checks. Write ${binding.report_path} conforming to the supplied JSON schema and bind it to request_sha256 ${binding.request_sha256}. Missing outputs require needs-remediation; unverified required evidence cannot receive pass. This is an advisory recommendation, not Main/owner acceptance.`,
+      objective: `Independently assess the captured contracts and outputs in ${binding.request_path}. Read every captured contract and available output in full. Check claims against sources, cover exactly the ids listed below once each, and report missing or unverifiable evidence honestly. The report must contain exactly these ids per source, each exactly once:\n${requiredIds}\nAnything you verified that no listed id covers goes into observations, never into acceptance or checks. Worker-side evidence captured per source:\n${workerEvidence.join("\n")}\nGrade a required check against the captured verification result and the captured outputs; the worker's own final message is a claim to compare against that evidence, never proof of it. An absent capture is missing evidence to report, not a failure to invent. Write ${binding.report_path} conforming to the supplied JSON schema and bind it to request_sha256 ${binding.request_sha256}. Missing outputs require needs-remediation; unverified required evidence cannot receive pass. This is an advisory recommendation, not Main/owner acceptance.`,
       readFirst, expectedOutputs: [binding.report_path], sandboxBackend: "directory", promotionPolicy: "human-approved",
       constraints: ["Do not edit source worker outputs or captured review inputs.", "Do not delegate, spawn subagents, or reuse a worker session.",
         "Reference paths are relative to each source_root; captured snapshots, not later source changes, define this review."],
@@ -174,7 +343,9 @@ export async function prepareIndependentReview(root: string, options: PrepareInd
       deny_git_mutations: true, deny_package_installs: true, deny_network_clients: true,
     } };
     await writeFile(packet.path, stringify(guardedMission), "utf-8");
-    return { missionPath: packet.path, requestPath, reportPath, requestSha256: binding.request_sha256 };
+    // `reportPath` is reported relative to the review workspace (and so to the
+    // sandbox worktree the reviewer runs in), never as an absolute project path.
+    return { missionPath: packet.path, requestPath, reportPath: binding.report_path, requestSha256: binding.request_sha256 };
   } catch (error) {
     await rm(missionDir, { recursive: true, force: true });
     throw error;
@@ -187,6 +358,29 @@ function exactIds(expected: string[], actual: string[], label: string): void {
   }
 }
 
+/**
+ * Evidence that cannot support a pass: a contradicted claim, a required
+ * acceptance or check entry that did not pass, or an error finding. An
+ * unverified claim no required entry covers is not required evidence and is
+ * deliberately absent here, so it is kept in the report as recorded.
+ */
+function passBlockers(reviewed: IndependentReviewReport["sources"][number]): string[] {
+  const blockers: string[] = [];
+  for (const claim of reviewed.claims_checked) {
+    if (claim.verdict === "contradicted") blockers.push(`contradicted claim "${claim.claim}"`);
+  }
+  for (const entry of reviewed.acceptance) {
+    if (entry.status !== "passed") blockers.push(`acceptance criterion ${entry.id} is ${entry.status}, not passed`);
+  }
+  for (const entry of reviewed.checks) {
+    if (entry.status !== "passed") blockers.push(`required check ${entry.id} is ${entry.status}, not passed`);
+  }
+  for (const finding of reviewed.findings) {
+    if (finding.severity === "error") blockers.push(`error finding "${finding.detail}"`);
+  }
+  return blockers;
+}
+
 export function validateIndependentReviewReport(request: IndependentReviewRequest, report: IndependentReviewReport): VerdictValue {
   exactIds(request.sources.map(source => source.mission_id), report.sources.map(source => source.mission_id), "source mission");
   let recommendation: VerdictValue = "pass";
@@ -195,11 +389,17 @@ export function validateIndependentReviewReport(request: IndependentReviewReques
     exactIds(source.acceptance.map(item => item.id), reviewed.acceptance.map(item => item.id), "acceptance criterion");
     exactIds(source.checks.map(item => item.id), reviewed.checks.map(item => item.id), "required check");
     const missing = source.files.some(file => file.state === "missing" || (file.kind === "output" && file.verification?.status !== "passed"));
-    const unsupported = reviewed.claims_checked.some(claim => claim.verdict !== "supported") ||
-      [...reviewed.acceptance, ...reviewed.checks].some(check => check.status !== "passed") ||
-      reviewed.findings.some(finding => finding.severity === "error");
     if (missing && reviewed.verdict !== "needs-remediation") throw new Error("Missing or invalid review inputs require needs-remediation");
-    if (unsupported && reviewed.verdict === "pass") throw new Error("Unverified or contradicted evidence cannot receive pass");
+    // A pass must agree with the required evidence. Rather than discard a whole
+    // review, lower just the offending source and state why: the review is still
+    // recorded, and the lowered verdict names the source it applies to.
+    const blockers = passBlockers(reviewed);
+    if (blockers.length > 0 && reviewed.verdict === "pass") {
+      reviewed.verdict = "needs-attention";
+      reviewed.findings.push({ severity: "error",
+        detail: `Recorded pass for ${source.mission_id} is inconsistent with its evidence (${blockers.join("; ")}); the verdict was lowered to needs-attention`,
+        evidence: `The captured evidence for ${source.mission_id} contradicts a pass` });
+    }
     if (reviewed.verdict === "needs-remediation" || (reviewed.verdict === "needs-attention" && recommendation === "pass")) recommendation = reviewed.verdict;
   }
   return recommendation;
@@ -244,7 +444,7 @@ export async function collectIndependentReview(root: string, missionId: string) 
   if (await fileDigest(workspaceRequest) !== binding.request_sha256) throw new Error("Independent review request changed in its workspace");
   for (const source of request.sources) {
     for (const file of source.files) {
-      if (file.state === "missing") continue;
+      if (file.state !== "present") continue;
       for (const scope of new Set([root, route.effectiveRoot])) {
         const snapshot = path.resolve(scope, file.snapshot_path!);
         await assertWritableArtifact(path.join(scope, ".harness", "missions", missionId), snapshot);
@@ -289,13 +489,56 @@ export async function collectIndependentReview(root: string, missionId: string) 
       return recommendation;
     },
   });
+  // A review that does not pass is itself an intervention, one entry per
+  // non-pass source. Best-effort: a ledger failure never fails the collection.
+  if (recommendation !== "pass") {
+    await captureReview(root, {
+      reviewMissionId: missionId,
+      runId: latest.run_id,
+      sources: report.sources.map((source) => ({ mission_id: source.mission_id, verdict: source.verdict })),
+    });
+  }
   const observations = report.sources.flatMap(source =>
     (source.observations ?? []).map(observation => ({ source: source.mission_id, ...observation })));
+  // Preserve the reviewer's stated reasons on the canonical assessment: without
+  // these a needs-attention/needs-remediation recommendation carries no cause.
+  const findings = report.sources.flatMap(source =>
+    source.findings.map(finding => ({ source: source.mission_id, severity: finding.severity, detail: finding.detail, evidence: finding.evidence })));
+  const claims = report.sources.flatMap(source =>
+    source.claims_checked.map(claim => ({ source: source.mission_id, claim: claim.claim, verdict: claim.verdict, evidence_source: claim.source })));
   const assessment = IndependentReviewAssessmentSchema.parse({ schema_version: "uh.independent-review-assessment.v0", review_id: missionId,
     run_id: latest.run_id, request_sha256: binding.request_sha256, recommendation, human_acceptance_required: true,
-    ...(observations.length > 0 ? { observations } : {}) });
+    ...(observations.length > 0 ? { observations } : {}),
+    ...(findings.length > 0 ? { findings } : {}),
+    ...(claims.length > 0 ? { claims } : {}) });
   const assessmentPath = path.join(missionDir, "review-assessment.json");
   await assertWritableArtifact(missionDir, assessmentPath);
   await writeAtomicArtifact(assessmentPath, JSON.stringify(assessment, null, 2));
   return assessment;
+}
+
+/**
+ * Discard a collected review's workspace. Once the assessment is written in
+ * the project, the sandbox the reviewer ran in has no further use; keeping it
+ * leaves one worktree per review behind. The reviewer's raw report is copied
+ * beside the assessment first, as `review-report.json`. Returns the discarded
+ * sandbox id, or undefined when no sandbox is bound to the review.
+ */
+export async function retireIndependentReviewWorkspace(root: string, missionId: string): Promise<string | undefined> {
+  assertSafeMissionId(missionId);
+  root = await realpath(root);
+  const missionDir = path.join(root, ".harness", "missions", missionId);
+  const missionPath = path.join(missionDir, "mission.yaml");
+  const binding = (await loadMissionFile(missionPath)).independent_review;
+  if (!binding) throw new Error("Mission is not an independent review packet");
+  const route = await resolveSandboxMissionRoot(root, missionPath, true);
+  if (route.error) throw new Error(route.error);
+  if (!route.sandbox) return undefined;
+  const sandboxReport = path.resolve(route.effectiveRoot, binding.report_path);
+  if (!isPathWithin(sandboxReport, route.effectiveRoot)) throw new Error("Review report path escapes its workspace");
+  const keptReport = path.join(missionDir, "review-report.json");
+  await assertWritableArtifact(missionDir, keptReport);
+  await writeAtomicArtifact(keptReport, await readFile(sandboxReport, "utf8"));
+  await discardSandbox(root, route.sandbox.id, { force: true });
+  return route.sandbox.id;
 }

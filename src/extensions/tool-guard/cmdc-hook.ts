@@ -1,42 +1,67 @@
-import { appendFile, readFile } from "node:fs/promises";
-import { decideToolCall, toolTargetForLog } from "../../harness/tool-guard.js";
-import { ToolGuardPolicySchema } from "../../schema/runtime-control.js";
+import { runToolGuard, toolGuardFailClosedReason } from "./core.js";
 
-type AppliedPolicy = ReturnType<typeof ToolGuardPolicySchema.parse> & { worker_root: string; protected_paths?: string[] };
+/**
+ * Command Code `PreToolUse` wrapper around the shared guard core.
+ *
+ * Command Code feeds one JSON request on stdin and reads a JSON decision on
+ * stdout. A denial is always the same shape; an allowed call writes nothing.
+ * The top-level handler denies on any error so an uncaught throw can never be
+ * mistaken for a non-blocking hook failure.
+ *
+ * Command Code 1.62.1 exits without a terminal result when a `read_file`
+ * returns a whole file of roughly 107K characters, so this wrapper is the only
+ * one that opts into the read-window rule: a `read_file` of a file over 40000
+ * bytes with no line window is denied and told to read in windows of at most
+ * 600 lines.
+ */
 
-async function main(): Promise<void> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-  let request: Record<string, unknown> = {};
-  try { request = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>; } catch { return; }
-  const policyPath = process.env.UH_TOOL_GUARD_POLICY;
-  if (!policyPath) return;
-  let raw: Record<string, unknown>;
-  try { raw = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>; } catch { return; }
-  const { schema_version: _schema, worker_root, protected_paths, controller_commands: controllerCommands, ...fields } = raw;
-  const policy = {
-    ...ToolGuardPolicySchema.parse(fields),
-    worker_root: String(worker_root ?? process.cwd()),
-    protected_paths: Array.isArray(protected_paths) ? protected_paths.map(String) : undefined,
-  } as AppliedPolicy;
-  const tool = typeof request.tool_name === "string" ? request.tool_name : "";
-  const input = request.tool_input;
-  const logPath = process.env.UH_TOOL_GUARD_LOG;
-  const callId = typeof request.tool_call_id === "string" ? request.tool_call_id : typeof request.toolCallId === "string" ? request.toolCallId : undefined;
-  const decision = decideToolCall(policy, tool, input, policy.worker_root, { allowControllerCommands: controllerCommands === true });
-  const logEntry = decision.deny
-    ? { ts: new Date().toISOString(), call_id: callId, tool, class: decision.deny.class, target: decision.deny.target ?? toolTargetForLog(tool, input), reason: decision.deny.reason }
-    : { ts: new Date().toISOString(), call_id: callId, tool, class: "allow", target: toolTargetForLog(tool, input) };
-  let logged = false;
-  if (logPath) {
-    try { await appendFile(logPath, `${JSON.stringify(logEntry)}\n`, "utf8"); logged = true; } catch { logged = false; }
-  }
-  if (!logged) {
-    process.stdout.write(JSON.stringify({ continue: true, hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "CONTRACT: guard log could not be written; refusing to continue with permissions enabled." } }));
-    return;
-  }
-  if (!decision.deny) return;
-  process.stdout.write(JSON.stringify({ continue: true, hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.deny.reason } }));
+/** The whole-file read this runtime cannot survive, denied in favour of windows. */
+const READ_WINDOW = { maxBytes: 40000, maxLines: 600 };
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-await main();
+function deny(reason: string): void {
+  process.stdout.write(JSON.stringify({
+    continue: true,
+    hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason },
+  }));
+}
+
+function callIdOf(request: Record<string, unknown> | undefined): string | undefined {
+  for (const key of ["tool_use_id", "tool_call_id", "toolCallId"]) {
+    const value = request?.[key];
+    if (typeof value === "string" && value) return value;
+  }
+  return undefined;
+}
+
+async function readRequest(): Promise<Record<string, unknown> | undefined> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  try {
+    return record(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+  } catch {
+    return undefined;
+  }
+}
+
+async function main(): Promise<void> {
+  const request = await readRequest();
+  const verdict = await runToolGuard({
+    policyPath: process.env.UH_TOOL_GUARD_POLICY,
+    logPath: process.env.UH_TOOL_GUARD_LOG,
+    readWindow: READ_WINDOW,
+    call: {
+      tool: typeof request?.tool_name === "string" ? request.tool_name : "",
+      input: request?.tool_input,
+      callId: callIdOf(request),
+    },
+  });
+  if (verdict.decision === "deny") deny(verdict.reason ?? "UH tool guard denied the tool call");
+}
+
+await main().catch((error) => {
+  deny(toolGuardFailClosedReason(error));
+});

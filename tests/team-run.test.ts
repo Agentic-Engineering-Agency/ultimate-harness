@@ -14,8 +14,10 @@ import { join, resolve, basename } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { promisify } from "node:util";
 import {
+  checkWorktreePathLength,
   planTeamRun,
-  runTeamMission,
+  runTeamMission as runTeamMissionRaw,
+  WINDOWS_MAX_PATH,
   type GitOps,
   type MergeOutcome,
   type TeamMission,
@@ -23,9 +25,11 @@ import {
   type VerifyMissionLike,
   type WorkerOutcome,
 } from "../src/harness/team-run.js";
+import type { TeamResourceLimits } from "../src/schema/runtime-control.js";
 import { projectDeliveryObservatory } from "../src/harness/delivery-observatory/project.js";
 import { verifyMission, warnConstraintsAreAdvisory } from "../src/harness/verify.js";
 import { initializeHarness } from "../src/harness/init.js";
+import { listLiveRuns, registerLiveRun, settleLiveRun } from "../src/harness/live-runs.js";
 
 const execFileP = promisify(execFile);
 
@@ -74,6 +78,21 @@ beforeEach(async () => {
 afterEach(async () => {
   if (ROOT) await rm(ROOT, { recursive: true, force: true });
 });
+
+/**
+ * Every team run in this file admits workers with ample injected memory, so
+ * admission never reads the host's real free memory. A test that needs a
+ * specific reading passes its own `availableBytes`.
+ */
+const AMPLE_MEMORY_BYTES = 256 * 1024 * 1024 * 1024;
+
+function runTeamMission(
+  mission: TeamMission,
+  root: string,
+  options: Parameters<typeof runTeamMissionRaw>[2],
+): ReturnType<typeof runTeamMissionRaw> {
+  return runTeamMissionRaw(mission, root, { availableBytes: () => AMPLE_MEMORY_BYTES, ...options });
+}
 
 /* ---------------------------------------------------------------- planning  */
 
@@ -1071,11 +1090,14 @@ describe("runTeamMission — command-code worker cost admission", () => {
     };
   }
 
-  async function runThreeWorkerTeam(stream: string): Promise<{ dispatched: string[]; result: Awaited<ReturnType<typeof runTeamMission>> }> {
+  async function runThreeWorkerTeam(
+    stream: string,
+    resources: TeamResourceLimits = { max_parallel: 2, max_cost_usd: 2, worker_cost_reservation_usd: 1 },
+  ): Promise<{ dispatched: string[]; result: Awaited<ReturnType<typeof runTeamMission>> }> {
     const dispatched: string[] = [];
     const runner = commandCodeRunner(stream);
     const packet = mission("team-mission", { workers: [{ role: "worker", adapter: "command-code", count: 3 }] });
-    packet.team.resources = { max_parallel: 2, max_cost_usd: 2, worker_cost_reservation_usd: 1 };
+    packet.team.resources = resources;
     const result = await runTeamMission(packet, ROOT, {
       gitOps: fakeGitOps({ branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() }, { write: async () => undefined }),
       runnerFor: adapter => async (runtime, workerRoot, missionPath, context) => {
@@ -1089,6 +1111,14 @@ describe("runTeamMission — command-code worker cost admission", () => {
   }
 
   const usageStream = () => readFile(join(process.cwd(), "tests", "fixtures", "runtime-events", "command-code-usage.ndjson"), "utf-8");
+
+  async function readTeamState(runId: string): Promise<{
+    admission_blocked_reason?: string;
+    admission_notes?: string[];
+    status: string;
+  }> {
+    return JSON.parse(await readFile(join(ROOT, ".harness", "missions", "team-mission", "runs", runId, "team-state.json"), "utf-8"));
+  }
 
   test("a price table makes the third worker admissible on estimated cost", async () => {
     await writeFile(join(ROOT, ".harness", "prices.yaml"), pricesYaml, "utf-8");
@@ -1105,6 +1135,46 @@ describe("runTeamMission — command-code worker cost admission", () => {
     expect(third?.status).toBe("blocked");
     expect(third?.errorMessage).toMatch(/Completed worker cost is unknown/);
     expect(result.status).toBe("blocked");
+    const state = await readTeamState(result.runId!);
+    expect(state.admission_notes).toBeUndefined();
+  });
+
+  test("unknown_cost=admit dispatches the later wave and records the admission note", async () => {
+    const { dispatched, result } = await runThreeWorkerTeam(await usageStream(), {
+      max_parallel: 2, max_cost_usd: 2, worker_cost_reservation_usd: 1, unknown_cost: "admit",
+    });
+    expect(dispatched).toEqual(["worker-1", "worker-2", "worker-3"]);
+    expect(result.workers.every((w) => w.status === "succeeded")).toBe(true);
+    expect(result.status).toBe("passed");
+    const note = "wave 2 admitted with unknown cost by policy unknown_cost=admit";
+    const state = await readTeamState(result.runId!);
+    expect(state.admission_blocked_reason).toBeUndefined();
+    expect(state.admission_notes).toEqual([note]);
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain(note);
+  });
+
+  test("unknown_cost=admit does not stop known costs from exhausting the budget", async () => {
+    await writeFile(join(ROOT, ".harness", "prices.yaml"), [
+      "schema_version: uh.prices.v0",
+      "models:",
+      "  qwen/qwen3.8-flash:",
+      "    input_usd_per_million: 1000",
+      "    output_usd_per_million: 4000",
+      "    cache_read_usd_per_million: 500",
+      "    cache_write_usd_per_million: 1000",
+      '    source: "test placeholder, not a real price"',
+    ].join("\n") + "\n", "utf-8");
+    const { dispatched, result } = await runThreeWorkerTeam(await usageStream(), {
+      max_parallel: 2, max_cost_usd: 60, worker_cost_reservation_usd: 30, unknown_cost: "admit",
+    });
+    expect(dispatched).toEqual(["worker-1", "worker-2"]);
+    const third = result.workers.find((w) => w.plan.id === "worker-3");
+    expect(third?.status).toBe("blocked");
+    expect(third?.errorMessage).toMatch(/Remaining team cost budget cannot reserve another worker/);
+    expect(result.status).toBe("blocked");
+    const state = await readTeamState(result.runId!);
+    expect(state.admission_notes).toBeUndefined();
   });
 });
 
@@ -1180,6 +1250,29 @@ describe("runTeamMission — real git (smoke)", () => {
     const leaderB = await readFile(join(result.plan.leader.worktreePath, "src/b.ts"), "utf-8");
     expect(leaderA).toBe("// backend\n");
     expect(leaderB).toBe("// frontend\n");
+  });
+
+  test("a worker run that changes program-naming repository config is blocked and the config is restored", async () => {
+    await initGitRepo(ROOT);
+    await seedMissionPacket(ROOT, "team-mission");
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+
+    const runner = (_adapter: string) => async (_a: string, root: string, _missionPath: string) => {
+      const id = basename(root);
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", `${id}.ts`), `// ${id}\n`, "utf-8");
+      if (id === "backend") await execFileP("git", ["config", "core.hooksPath", join(root, "hooks")], { cwd: root });
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+    const result = await runTeamMission(mission("team-mission"), ROOT, { runnerFor: runner, retainOnSuccess: true });
+
+    const backend = result.workers.find((worker) => worker.plan.id === "backend")!;
+    expect(backend.status).toBe("blocked");
+    expect(backend.errorMessage).toMatch(/core\.hookspath/);
+    await expect(execFileP("git", ["config", "--get", "core.hooksPath"], { cwd: ROOT })).rejects.toThrow();
+    const { stdout } = await execFileP("git", ["log", "--oneline", backend.plan.branch], { cwd: ROOT });
+    expect(stdout).not.toMatch(/worker run/);
   });
 
   test("persists canonical parent and worker facts through non-retained cleanup", async () => {
@@ -1287,5 +1380,649 @@ describe("runTeamMission — real git (smoke)", () => {
       cost: { state: "known", value: 0.2 },
     });
     expect(snapshot.agents.filter((agent) => agent.operation === "succeeded")).toHaveLength(3);
+  });
+});
+
+/* ---------------------------------------- declared outputs under .gitignore  */
+
+describe("runTeamMission — declared outputs under an ignored directory", () => {
+  const PASSING_VERIFIER = async (): Promise<VerifyMissionLike> => ({
+    status: "passed",
+    path: "/fake/verification.yaml",
+    checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+    acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+  });
+
+  /** Files present in a branch's tree, in git's stable order. */
+  async function branchFiles(branch: string): Promise<string[]> {
+    const { stdout } = await execFileP("git", ["ls-tree", "-r", "--name-only", branch], { cwd: ROOT });
+    return stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+
+  /** A repo whose `.gitignore` lists `out/`, so an `out/` file is never dirty. */
+  async function seedIgnoredOutRepo(): Promise<void> {
+    await initGitRepo(ROOT);
+    await writeFile(join(ROOT, ".gitignore"), "out/\n", "utf-8");
+    await seedMissionPacket(ROOT, "team-mission");
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+  }
+
+  test("a declared output under an ignored directory is committed; an undeclared ignored file is not", async () => {
+    await seedIgnoredOutRepo();
+    const runner = (_adapter: string) => async (_a: string, root: string) => {
+      await mkdir(join(root, "out"), { recursive: true });
+      await writeFile(join(root, "out", "report.md"), "declared\n", "utf-8");
+      await writeFile(join(root, "out", "scratch.txt"), "stray\n", "utf-8");
+      const sentinelDir = join(root, ".harness", "missions", "team-mission");
+      await mkdir(sentinelDir, { recursive: true });
+      await writeFile(join(sentinelDir, "runtime-final.txt"), "done", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", expected_outputs: { files: ["out/report.md"] } }],
+    }), ROOT, { runnerFor: runner, verifier: PASSING_VERIFIER, retainOnSuccess: true });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("succeeded");
+
+    const files = await branchFiles(backend.plan.branch);
+    expect(files).toContain("out/report.md");
+    expect(files).not.toContain("out/scratch.txt");
+  });
+
+  test("a declared output that does not exist is not staged and still fails the declared-output check", async () => {
+    await seedIgnoredOutRepo();
+    const runner = (_adapter: string) => async (_a: string, root: string) => {
+      await mkdir(join(root, "out"), { recursive: true });
+      await writeFile(join(root, "out", "scratch.txt"), "stray\n", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", expected_outputs: { files: ["out/missing.md"] } }],
+    }), ROOT, { runnerFor: runner, verifier: PASSING_VERIFIER, retainOnSuccess: true });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("blocked");
+    expect(backend.errorMessage).toMatch(/^Declared output out\/missing\.md:/);
+
+    const files = await branchFiles(backend.plan.branch);
+    expect(files).not.toContain("out/missing.md");
+    expect(files).not.toContain("out/scratch.txt");
+  });
+
+  test("a stopped worker's declared ignored output reaches the salvage commit", async () => {
+    await seedIgnoredOutRepo();
+    const runner = (_adapter: string) => async (
+      _a: string,
+      root: string,
+      _missionPath: string,
+      context: { artifactRoot: string; runId: string; missionId?: string },
+    ) => {
+      await mkdir(join(root, "out"), { recursive: true });
+      await writeFile(join(root, "out", "artifact.txt"), "complete\n", "utf-8");
+      const missionId = context.missionId ?? "team-mission";
+      const runDir = join(context.artifactRoot, ".harness", "missions", missionId, "runs", context.runId);
+      await mkdir(runDir, { recursive: true });
+      await writeFile(join(runDir, "runtime-control.json"), JSON.stringify({
+        schema_version: "uh.runtime-control.v0",
+        mission_id: missionId,
+        run_id: context.runId,
+        runtime: "hermes",
+        controller_pid: 4242,
+        started_at: "2026-01-01T00:00:00.000Z",
+        heartbeat_at: "2026-01-01T00:00:01.000Z",
+        status: "failed",
+        stop_code: "turn_limit",
+        turns: 3,
+        denials: 0,
+        inflight_tools: 0,
+      }), "utf-8");
+      return { exitCode: 1, stdout: "", stderr: "", result: { status: "failed" } };
+    };
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", expected_outputs: { files: ["out/artifact.txt"] } }],
+    }), ROOT, { runnerFor: runner, verifier: PASSING_VERIFIER, retainOnSuccess: true });
+
+    const backend = result.workers[0];
+    expect(backend.status).toBe("failed");
+    expect(backend.salvage).toMatchObject({ eligible: true, outputs_passed: true, checks_passed: true });
+
+    const files = await branchFiles(backend.plan.branch);
+    expect(files).toContain("out/artifact.txt");
+  });
+});
+
+/* ------------------------------------------- team worktree lifecycle (R3)  */
+
+describe("runTeamMission — team worktree lifecycle", () => {
+  const TEAM = "team-mission";
+
+  async function initTeamRepo(): Promise<void> {
+    await initGitRepo(ROOT);
+    await seedMissionPacket(ROOT, TEAM);
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+  }
+
+  /** A runner that writes one distinct file per worker and settles as passed. */
+  function fileWritingRunner() {
+    return (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      const id = basename(root);
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", `${id}.ts`), `// ${id}\n`, "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+  }
+
+  /** A runner that touches nothing (so a fresh worktree stays clean). */
+  function silentRunner() {
+    return (_adapter: string) => async (): Promise<TeamRuntimeRunResult> =>
+      ({ exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } });
+  }
+
+  /**
+   * The team runner registers each attempt live and the real adapters settle
+   * their own entries; a test double does not, so settle them here. Relaunch
+   * checks only refuse on a *live* run — an orphaned/settled entry is fine.
+   */
+  async function settleEveryRegisteredRun(): Promise<void> {
+    const { records } = await listLiveRuns(ROOT, { persist: false });
+    for (const record of records) {
+      await settleLiveRun(ROOT, record.run_id, { status: "succeeded", settled_at: new Date().toISOString() });
+    }
+  }
+
+  test("every worker and the leader record the same resolved base commit in config and team state", async () => {
+    await initTeamRepo();
+    const head = (await execFileP("git", ["rev-parse", "HEAD"], { cwd: ROOT })).stdout.trim();
+
+    const result = await runTeamMission(mission(TEAM), ROOT, {
+      runnerFor: fileWritingRunner(),
+      retainOnSuccess: true,
+    });
+
+    for (const branch of [...result.workers.map((worker) => worker.plan.branch), result.plan.leader.branch]) {
+      const { stdout } = await execFileP("git", ["config", "--get", `branch.${branch}.base`], { cwd: ROOT });
+      expect(stdout.trim()).toBe(head);
+    }
+    const state = JSON.parse(await readFile(
+      join(ROOT, ".harness", "missions", TEAM, "runs", result.runId!, "team-state.json"),
+      "utf-8",
+    )) as { workers: Array<{ base_commit?: string }> };
+    expect(state.workers.map((worker) => worker.base_commit)).toEqual([head, head]);
+  });
+
+  test("deleting a worker branch also removes its base config section", async () => {
+    await initTeamRepo();
+    const runner = (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      const id = basename(root);
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", `${id}.ts`), `// ${id}\n`, "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+    // A full PASS with the default cleanup removes each worker worktree and
+    // branch — and `git branch -D` leaves `branch.<name>` behind, so the
+    // harness must drop the section itself.
+    const result = await runTeamMission(mission(TEAM), ROOT, {
+      runnerFor: runner,
+      verifier: async () => ({
+        status: "passed", path: "/fake/verification.yaml", checks_total: 1, checks_passed: 1, checks_failed: 0, checks_blocked: 0,
+        acceptance_total: 0, acceptance_passed: 0, acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+      }),
+    });
+    expect(result.retained).toBe(false);
+    for (const branch of result.workers.map((worker) => worker.plan.branch)) {
+      const stillConfigured = await execFileP("git", ["config", "--get", `branch.${branch}.base`], { cwd: ROOT })
+        .then(() => true, () => false);
+      expect(stillConfigured).toBe(false);
+    }
+  });
+
+  test("a fresh worker worktree reports a clean tree though the repo tracks .commandcode/settings.json", async () => {
+    await initGitRepo(ROOT);
+    await seedMissionPacket(ROOT, TEAM);
+    await mkdir(join(ROOT, ".commandcode"), { recursive: true });
+    await writeFile(join(ROOT, ".commandcode", "settings.json"), "{ \"version\": 1 }\n", "utf-8");
+    await execFileP("git", ["add", "-A"], { cwd: ROOT });
+    await execFileP("git", ["commit", "-m", "seed mission"], { cwd: ROOT });
+
+    const runner = (_adapter: string) => async (_a: string, root: string): Promise<TeamRuntimeRunResult> => {
+      // The Command Code adapter rewrites the hook config with local absolute
+      // paths: harness-owned churn, not the worker's own change.
+      await writeFile(join(root, ".commandcode", "settings.json"), "{ \"version\": 2 }\n", "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+    const result = await runTeamMission(mission(TEAM), ROOT, { runnerFor: runner, retainOnSuccess: true });
+
+    for (const worker of result.workers) {
+      const { stdout } = await execFileP("git", ["status", "--porcelain"], { cwd: worker.plan.worktreePath });
+      expect(stdout.trim()).toBe("");
+    }
+  });
+
+  test("a relaunch without --replace is refused and names the flag", async () => {
+    await initTeamRepo();
+    await runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true });
+    await settleEveryRegisteredRun();
+
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true }))
+      .rejects.toThrow(/--replace/);
+  });
+
+  test("--replace archives the retained branch under uh/archive and relaunches", async () => {
+    await initTeamRepo();
+    const first = await runTeamMission(mission(TEAM), ROOT, { runnerFor: fileWritingRunner(), retainOnSuccess: true });
+    await settleEveryRegisteredRun();
+
+    const backendBranch = first.workers.find((worker) => worker.plan.id === "backend")!.plan.branch;
+    const oldSha = (await execFileP("git", ["rev-parse", `refs/heads/${backendBranch}`], { cwd: ROOT })).stdout.trim();
+
+    const second = await runTeamMission(mission(TEAM), ROOT, {
+      runnerFor: fileWritingRunner(),
+      retainOnSuccess: true,
+      replace: true,
+    });
+    expect(second.runId).not.toBe(first.runId);
+
+    // List every head and filter in JS: `for-each-ref` glob patterns do not
+    // cross `/`, so `refs/heads/uh/archive` would miss the nested archive refs.
+    const archived = (await execFileP(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+      { cwd: ROOT },
+    )).stdout.split("\n").map((line) => line.trim()).filter(Boolean)
+      .filter((entry) => entry.startsWith("uh/archive/"));
+    const archivedBackend = archived.find((entry) =>
+      entry.startsWith(`uh/archive/${TEAM}/`) && entry.endsWith("/backend"));
+    expect(archivedBackend).toBeDefined();
+    const archivedSha = (await execFileP("git", ["rev-parse", archivedBackend!], { cwd: ROOT })).stdout.trim();
+    expect(archivedSha).toBe(oldSha);
+
+    const missionDir = await readdir(join(ROOT, ".harness", "missions", TEAM));
+    expect(missionDir.some((entry) => entry.startsWith("team."))).toBe(true);
+  });
+
+  test("a relaunch while a live run of the team is registered is refused", async () => {
+    await initTeamRepo();
+    await runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true });
+    await settleEveryRegisteredRun();
+
+    const liveRunId = "20260922T101010Z-live01";
+    await registerLiveRun({
+      projectRoot: ROOT,
+      artifactRoot: ROOT,
+      runId: liveRunId,
+      missionId: TEAM,
+      runtime: "hermes",
+      team: { mission_id: TEAM, role: "backend" },
+    });
+
+    await expect(runTeamMission(mission(TEAM), ROOT, {
+      runnerFor: silentRunner(),
+      retainOnSuccess: true,
+      replace: true,
+    })).rejects.toThrow(liveRunId);
+  });
+
+  /* --replace must never delete work it cannot prove is abandoned (#253). */
+
+  async function retainedTeam(): Promise<string[]> {
+    await initTeamRepo();
+    const first = await runTeamMission(mission(TEAM), ROOT, { runnerFor: fileWritingRunner(), retainOnSuccess: true });
+    await settleEveryRegisteredRun();
+    return first.workers.map((worker) => worker.plan.worktreePath);
+  }
+
+  async function writeControl(runId: string, heartbeatAgoMs: number): Promise<string> {
+    const controlPath = join(ROOT, ".harness", "missions", TEAM, "runs", runId, "runtime-control.json");
+    await mkdir(join(controlPath, ".."), { recursive: true });
+    const started = new Date(Date.now() - heartbeatAgoMs - 1000).toISOString();
+    await writeFile(controlPath, JSON.stringify({
+      schema_version: "uh.runtime-control.v0", mission_id: TEAM, run_id: runId, runtime: "hermes", controller_pid: process.pid,
+      started_at: started, heartbeat_at: new Date(Date.now() - heartbeatAgoMs).toISOString(), status: "running", turns: 0, denials: 0, inflight_tools: 0,
+    }), "utf-8");
+    return controlPath;
+  }
+
+  test("a run whose heartbeat is stale still blocks --replace: it is not proven dead", async () => {
+    const worktrees = await retainedTeam();
+    const runId = "20260922T101011Z-stale1";
+    const controlPath = await writeControl(runId, 3 * 60 * 60 * 1000);
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: TEAM, runtime: "hermes", controlPath, team: { mission_id: TEAM, role: "backend" } });
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true, replace: true })).rejects.toThrow(runId);
+    for (const worktree of worktrees) expect((await readdir(worktree)).length).toBeGreaterThan(0);
+  });
+
+  test("a run in an unknown state blocks --replace", async () => {
+    const worktrees = await retainedTeam();
+    const runId = "20260922T101012Z-unkn01";
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: TEAM, runtime: "hermes", status: "paused", team: { mission_id: TEAM, role: "backend" } });
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true, replace: true })).rejects.toThrow(runId);
+    for (const worktree of worktrees) expect((await readdir(worktree)).length).toBeGreaterThan(0);
+  });
+
+  test("an empty process table fails closed: every run would look orphaned, so --replace is refused", async () => {
+    const worktrees = await retainedTeam();
+    const runId = "20260922T101013Z-empty1";
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: TEAM, runtime: "hermes", team: { mission_id: TEAM, role: "backend" } });
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: silentRunner(), retainOnSuccess: true, replace: true, processLister: async () => [] }))
+      .rejects.toThrow(/process table|cannot confirm/i);
+    for (const worktree of worktrees) expect((await readdir(worktree)).length).toBeGreaterThan(0);
+  });
+
+  test("a genuinely orphaned run (controller gone from a trustworthy process table) does not block --replace", async () => {
+    await retainedTeam();
+    const runId = "20260922T101014Z-orph01";
+    await registerLiveRun({ projectRoot: ROOT, artifactRoot: ROOT, runId, missionId: TEAM, runtime: "hermes", controllerPid: 2147483000, team: { mission_id: TEAM, role: "backend" } });
+    const table = async () => [{ pid: process.pid, ppid: 1, name: "node", command: "node" }];
+    const second = await runTeamMission(mission(TEAM), ROOT, { runnerFor: fileWritingRunner(), retainOnSuccess: true, replace: true, processLister: table });
+    expect(second.runId).toBeDefined();
+  });
+
+  test("--replace refuses to archive a worktree that holds uncommitted work, and leaves it in place", async () => {
+    const worktrees = await retainedTeam();
+    const dirty = join(worktrees[0], "src", "unsaved-work.ts");
+    await mkdir(join(dirty, ".."), { recursive: true });
+    await writeFile(dirty, "// the only copy\n", "utf-8");
+    await expect(runTeamMission(mission(TEAM), ROOT, { runnerFor: fileWritingRunner(), retainOnSuccess: true, replace: true }))
+      .rejects.toThrow(/uncommitted/);
+    expect(await readFile(dirty, "utf-8")).toBe("// the only copy\n");
+    const branches = (await execFileP("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd: ROOT })).stdout;
+    expect(branches).not.toContain("uh/archive/");
+  });
+});
+
+/* ---------------------------------------------- worker session templates  */
+
+describe("runTeamMission — worker session templates", () => {
+  const passingVerifier = async (): Promise<VerifyMissionLike> => ({
+    status: "passed", path: "/fake/verification.yaml", checks_total: 1, checks_passed: 1,
+    checks_failed: 0, checks_blocked: 0, acceptance_total: 0, acceptance_passed: 0,
+    acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+  });
+
+  async function writeWorkerTemplate(): Promise<void> {
+    const templatesDir = join(ROOT, ".harness", "templates");
+    await mkdir(templatesDir, { recursive: true });
+    await writeFile(join(templatesDir, "omp-worker.yaml"), [
+      "schema_version: uh.session-template.v0",
+      "id: omp-worker",
+      "title: OMP worker",
+      "tier: balanced",
+      "adapter: oh-my-pi",
+      "limits:",
+      "  max_turns: 260",
+      "worker_rules:",
+      "  - This runtime works in many small turns.",
+    ].join("\n") + "\n", "utf-8");
+  }
+
+  async function readTeamState(runId: string): Promise<{
+    workers: Array<{
+      adapter: string;
+      mission_id?: string;
+      contract?: { limits?: { max_turns?: number }; constraints?: string[] };
+    }>;
+  }> {
+    return JSON.parse(
+      await readFile(join(ROOT, ".harness", "missions", "team-mission", "runs", runId, "team-state.json"), "utf-8"),
+    );
+  }
+
+  beforeEach(async () => {
+    await seedMissionPacket(ROOT, "team-mission");
+  });
+
+  test("a worker with a template adopts the template's max_turns and worker rules", async () => {
+    await writeWorkerTemplate();
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const packets: Record<string, Record<string, unknown>> = {};
+    const baseRunner = makeRunner({ writes: { backend: { files: { "src/a.ts": "a\n" } } } }, repo);
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "oh-my-pi", template: "omp-worker" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        packets[basename(workerRoot)] = parseYaml(await readFile(missionPath, "utf-8")) as Record<string, unknown>;
+        return baseRunner(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].adapter).toBe("oh-my-pi");
+    expect(state.workers[0].contract?.limits?.max_turns).toBe(260);
+    expect(state.workers[0].contract?.constraints).toContain("This runtime works in many small turns.");
+
+    // The derived packet the runtime actually received carries both the
+    // template's limit and its worker rule.
+    expect(packets.backend.runtime_config_overrides).toMatchObject({ limits: { max_turns: 260 } });
+    expect(packets.backend.constraints).toContain("This runtime works in many small turns.");
+  });
+
+  test("a worker packet that states a limit wins over the template", async () => {
+    await writeWorkerTemplate();
+    const workerMissionDir = join(ROOT, ".harness", "missions", "omp-special");
+    await mkdir(workerMissionDir, { recursive: true });
+    await writeFile(join(workerMissionDir, "mission.yaml"), [
+      "schema_version: uh.mission.v0",
+      "id: omp-special",
+      "title: OMP special",
+      "workflow_profile: staged",
+      "objective: do the special work",
+      "runtime_config_overrides:",
+      "  limits:",
+      "    max_turns: 160",
+    ].join("\n") + "\n", "utf-8");
+
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const packets: Record<string, Record<string, unknown>> = {};
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "oh-my-pi", template: "omp-worker", mission_id: "omp-special" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        packets[basename(workerRoot)] = parseYaml(await readFile(missionPath, "utf-8")) as Record<string, unknown>;
+        return makeRunner({ writes: {} }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].mission_id).toBe("omp-special");
+    expect(state.workers[0].contract?.limits?.max_turns).toBe(160);
+    const derivedOverrides = packets.backend.runtime_config_overrides as { limits?: { max_turns?: number } };
+    expect(derivedOverrides.limits?.max_turns).toBe(160);
+  });
+
+  test("an unknown template id fails the team before any worker starts", async () => {
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const dispatched: string[] = [];
+
+    await expect(runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", template: "does-not-exist" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        dispatched.push(basename(workerRoot));
+        return makeRunner({ writes: {} }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+    })).rejects.toThrow(/session template not found/i);
+
+    expect(dispatched).toEqual([]);
+    expect(repo.branches.has("uh/team/team-mission/backend")).toBe(false);
+  });
+
+  test("a worker with only a template runs on the template's adapter", async () => {
+    await writeWorkerTemplate();
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const dispatchedAdapters: string[] = [];
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", template: "omp-worker" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        dispatchedAdapters.push(adapter);
+        return makeRunner({ writes: { backend: { files: { "src/a.ts": "a\n" } } } }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(dispatchedAdapters).toEqual(["oh-my-pi"]);
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].adapter).toBe("oh-my-pi");
+    expect(state.workers[0].contract?.limits?.max_turns).toBe(260);
+  });
+
+  test("an explicit worker adapter beats the template's adapter", async () => {
+    await writeWorkerTemplate();
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const dispatchedAdapters: string[] = [];
+
+    const result = await runTeamMission(mission("team-mission", {
+      workers: [{ role: "backend", adapter: "hermes", template: "omp-worker" }],
+    }), ROOT, {
+      runnerFor: adapter => async (runtime, workerRoot, missionPath) => {
+        dispatchedAdapters.push(adapter);
+        return makeRunner({ writes: { backend: { files: { "src/a.ts": "a\n" } } } }, repo)(adapter)(runtime, workerRoot, missionPath);
+      },
+      gitOps: fakeGitOps(repo, { write: async () => undefined }),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(dispatchedAdapters).toEqual(["hermes"]);
+    const state = await readTeamState(result.runId!);
+    expect(state.workers[0].adapter).toBe("hermes");
+  });
+});
+
+/* ------------------------------------------------ Windows long paths (UH)  */
+
+describe("runTeamMission — Windows long paths", () => {
+  const passingVerifier = async (): Promise<VerifyMissionLike> => ({
+    status: "passed", path: "/fake/verification.yaml", checks_total: 1, checks_passed: 1,
+    checks_failed: 0, checks_blocked: 0, acceptance_total: 0, acceptance_passed: 0,
+    acceptance_failed_block: 0, acceptance_warn_failed: 0, acceptance_blocked: 0,
+  });
+
+  beforeEach(async () => {
+    await seedMissionPacket(ROOT, "team-mission");
+  });
+
+  test("a git setup failure keeps git's stderr in the worker error and the report", async () => {
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const base = fakeGitOps(repo, { write: async () => undefined });
+    const stderr = "fatal: could not create work tree dir '<path>': Filename too long";
+    const gitOps: GitOps = {
+      ...base,
+      async addWorktree(root, branch, worktreePath, baseRef) {
+        if (worktreePath.endsWith("backend")) {
+          // Mimic `child_process`'s exec error: the message names only the
+          // command, while git's explanatory stderr lives on the property.
+          const err = new Error(
+            "Command failed: git worktree add --lock --reason uh:... -b uh/team/team-mission/backend <path> HEAD",
+          );
+          Object.assign(err, { stderr });
+          throw err;
+        }
+        return base.addWorktree(root, branch, worktreePath, baseRef);
+      },
+    };
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      gitOps,
+      runnerFor: makeRunner({ writes: { frontend: { files: { "src/b.ts": "b\n" } } } }, repo),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const failed = result.workers.find((worker) => worker.plan.id === "backend")!;
+    expect(failed.status).toBe("error");
+    expect(failed.errorMessage).toContain(stderr);
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain(stderr);
+  });
+
+  test("the preflight fails a worker over the limit with both lengths named when long paths are unavailable", async () => {
+    const repo: FakeRepo = { branches: new Set(["HEAD"]), contents: new Map([["HEAD", new Map()]]), conflictsWith: new Map() };
+    const base = fakeGitOps(repo, { write: async () => undefined });
+    const tracked = "d".repeat(220);
+    const gitOps: GitOps = {
+      ...base,
+      longPathsEnabled: async () => false,
+      enableLongPaths: async () => { throw new Error("could not write core.longpaths to the repository config"); },
+      longestTrackedPath: async () => tracked,
+    };
+    const backendPath = planTeamRun(mission("team-mission"), ROOT).workers
+      .find((worker) => worker.id === "backend")!.worktreePath;
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      gitOps,
+      platform: "win32",
+      runnerFor: makeRunner({ writes: {} }, repo),
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const failed = result.workers.find((worker) => worker.plan.id === "backend")!;
+    expect(failed.status).toBe("error");
+    expect(failed.errorMessage).toContain(`${backendPath.length} characters`);
+    expect(failed.errorMessage).toContain(`${tracked.length} characters`);
+    expect(failed.errorMessage).toContain("over the Windows 260-character limit");
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain(`${backendPath.length} characters`);
+  });
+
+  test("on Windows the repository's core.longpaths is enabled and noted in the report", async () => {
+    // `beforeEach` has already written the mission packet, so the seed commit
+    // from `initGitRepo` carries it as the base ref.
+    await initGitRepo(ROOT);
+    const runner = (_adapter: string) => async (_a: string, root: string, _missionPath: string) => {
+      const id = basename(root);
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src", `${id}.ts`), `// ${id}\n`, "utf-8");
+      return { exitCode: 0, stdout: "", stderr: "", result: { status: "passed" } };
+    };
+
+    const result = await runTeamMission(mission("team-mission"), ROOT, {
+      platform: "win32",
+      runnerFor: runner,
+      verifier: passingVerifier,
+      retainOnSuccess: true,
+    });
+
+    const { stdout } = await execFileP("git", ["config", "--bool", "core.longpaths"], { cwd: ROOT });
+    expect(stdout.trim()).toBe("true");
+    const report = await readFile(result.integrationReportPath, "utf-8");
+    expect(report).toContain("Notice:");
+    expect(report).toContain("core.longpaths");
+  });
+
+  test("checkWorktreePathLength allows the last 259 total and rejects 260 without long paths", () => {
+    const tracked = "a".repeat(6);
+    const base = { label: "worker w", longestTrackedPath: tracked, longPathsOk: false, platform: "win32" as const };
+    const atLimit = "w".repeat(WINDOWS_MAX_PATH - 1 - tracked.length);
+    expect(checkWorktreePathLength({ ...base, worktreePath: atLimit })).toBeNull();
+    const over = checkWorktreePathLength({ ...base, worktreePath: `${atLimit}w` });
+    expect(over).toContain("260 total");
+    expect(over).toContain("over the Windows 260-character limit");
+    expect(checkWorktreePathLength({ ...base, worktreePath: "w".repeat(500), longPathsOk: true })).toBeNull();
+    expect(checkWorktreePathLength({ ...base, worktreePath: "w".repeat(500), platform: "linux" })).toBeNull();
   });
 });

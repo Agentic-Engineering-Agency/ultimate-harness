@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from "vitest";
+import { nativeToolFailure } from "../src/harness/native-tool-result.js";
 import { DEFAULT_TYPESAFE_MODEL } from "../src/harness/typesafe.js";
 import {
   LOOP_PROBE_QUESTIONS,
@@ -38,6 +39,8 @@ function fixture(name: string): unknown[] {
 
 const commandCodeHealthy = () => fixture("command-code-healthy.ndjson");
 const commandCodeDenied = () => fixture("command-code-denied-retries.ndjson");
+const commandCodeRepeatedShellFailure = () => fixture("command-code-repeated-shell-failure.ndjson");
+const commandCodeExitCodeInStdout = () => fixture("command-code-shell-exit-code-in-stdout.ndjson");
 const ohMyPiHealthy = () => fixture("oh-my-pi-healthy.ndjson");
 
 type CapturedBody = {
@@ -286,6 +289,95 @@ describe("projectActivity", () => {
       ["bun", false, "nonzero_exit"],
     ]);
     expect(window.calls.every(call => call.tool === "write_file" || call.tool === "bash")).toBe(true);
+  });
+
+  test("projects a Command Code shell failure reported only as `Exit code: 1` result text", () => {
+    const window = projectActivity(commandCodeRepeatedShellFailure(), { workingDirectory: WORKING_DIRECTORY });
+
+    expect(window.source).toBe("command-code");
+    expect(window.calls).toEqual([
+      { tool: "shell_command", kind: "shell", target: "node", ok: false, error_class: "nonzero_exit" },
+      { tool: "shell_command", kind: "shell", target: "node", ok: false, error_class: "nonzero_exit" },
+      { tool: "shell_command", kind: "shell", target: "node", ok: false, error_class: "nonzero_exit" },
+    ]);
+    expect(deterministicLoopSignals(window)).toEqual({
+      // Three identical failing calls: two repeats after the first, no alternation.
+      identical_repeats: 2,
+      alternating_pairs: 0,
+      distinct_targets: 1,
+    });
+    // Reading the result text to classify it never publishes it.
+    const serialized = JSON.stringify(window);
+    expect(serialized).not.toContain("stderr");
+    expect(serialized).not.toContain("process.exit");
+    expect(serialized).not.toContain("/outside/path");
+  });
+
+  test("keeps a Command Code shell call whose stdout mentions an exit code in a later line successful", () => {
+    const window = projectActivity(commandCodeExitCodeInStdout(), { workingDirectory: WORKING_DIRECTORY });
+
+    expect(window.calls).toEqual([
+      { tool: "shell_command", kind: "shell", target: "node", ok: true, error_class: "none" },
+    ]);
+  });
+
+  test("keeps a real Command Code healthy run free of failures", () => {
+    const window = projectActivity(commandCodeHealthy(), { workingDirectory: WORKING_DIRECTORY });
+
+    expect(window.calls.every(call => call.ok && call.error_class === "none")).toBe(true);
+  });
+
+  test("agrees with the parser supervision uses on every completed call in the fixtures", () => {
+    const streams: Record<string, unknown[]> = {
+      "command-code-healthy.ndjson": commandCodeHealthy(),
+      "command-code-denied-retries.ndjson": commandCodeDenied(),
+      "command-code-repeated-shell-failure.ndjson": commandCodeRepeatedShellFailure(),
+      "command-code-shell-exit-code-in-stdout.ndjson": commandCodeExitCodeInStdout(),
+      "command-code-usage.ndjson": fixture("command-code-usage.ndjson"),
+      "command-code-native-turn-cap.ndjson": fixture("command-code-native-turn-cap.ndjson"),
+      "oh-my-pi-healthy.ndjson": ohMyPiHealthy(),
+    };
+    const endTypes = new Set(["tool_completed", "tool_execution_end"]);
+    const blockTypes = new Set(["tool_hook_blocked", "tool_call_blocked", "tool_denied"]);
+    const startTypes = new Set(["tool_queued", "tool_running", "tool_execution_start"]);
+
+    for (const [name, values] of Object.entries(streams)) {
+      // Replay the pairing `projectActivity` does, so a projected call and the
+      // event that produced it are compared position by position.
+      const pending = new Set<string>();
+      const endings: Record<string, unknown>[] = [];
+      for (const value of values) {
+        const outer = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+        const event = (typeof outer.event === "object" && outer.event !== null ? outer.event : outer) as Record<string, unknown>;
+        const type = String(event.type ?? "");
+        const id = String(event.toolCallId ?? event.tool_call_id ?? event.id ?? "");
+        if (startTypes.has(type)) {
+          if (id) pending.add(id);
+          continue;
+        }
+        if ((endTypes.has(type) || blockTypes.has(type)) && id && pending.has(id)) {
+          pending.delete(id);
+          endings.push(event);
+        }
+      }
+
+      const window = projectActivity(values, { window: Number.MAX_SAFE_INTEGER, workingDirectory: WORKING_DIRECTORY });
+      expect(window.calls, name).toHaveLength(endings.length);
+
+      endings.forEach((event, index) => {
+        const call = window.calls[index];
+        if (blockTypes.has(String(event.type))) {
+          expect(call.error_class, name).toBe("denied");
+          return;
+        }
+        const outcome = nativeToolFailure(event);
+        expect(call.ok, name).toBe(!outcome.failed);
+        if (outcome.exit_code !== undefined && outcome.exit_code !== 0) {
+          expect(call.error_class, name).toBe("nonzero_exit");
+        }
+        if (!outcome.failed) expect(call.error_class, name).toBe("none");
+      });
+    }
   });
 
   test("keeps the last `window` completed calls and ignores starts without ends", () => {

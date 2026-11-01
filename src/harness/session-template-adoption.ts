@@ -16,12 +16,30 @@ import type { SessionTemplate } from "../schema/session-template.js";
  * `runtime_config_overrides` keys, plus `limits` and `recovery` when the
  * template (or mission) stated them. Callers spread an explicit
  * `--runtime-config-overrides` on top so the command line still wins.
+ *
+ * `workerRules` is the template's own `worker_rules` list; `constraints` is the
+ * mission's constraints with those rules appended after them, so a dispatch
+ * prompt built from the adopted mission carries the template's guidance.
  */
 export interface SessionTemplateAdoption {
   template: SessionTemplate;
   runtime: string;
   description: AppliedTemplateDescription;
   runtimeConfigOverrides: Record<string, unknown>;
+  workerRules: string[];
+  constraints: string[];
+}
+
+/**
+ * Append a template's `worker_rules` to a mission's existing constraints, in
+ * order, without mutating either input. Shared by CLI template adoption and by
+ * team worker contract resolution so both paths render the same prompt.
+ */
+export function appendWorkerRules(
+  constraints: readonly string[],
+  workerRules: readonly string[],
+): string[] {
+  return [...constraints, ...workerRules];
 }
 
 /**
@@ -64,10 +82,18 @@ export async function adoptSessionTemplate(input: {
     runtimeConfigOverrides.recovery = applied.recovery;
   }
 
+  const missionConstraints = Array.isArray(mission.constraints)
+    ? mission.constraints.filter((item): item is string => typeof item === "string")
+    : [];
+  const workerRules = [...template.worker_rules];
+  const constraints = appendWorkerRules(missionConstraints, workerRules);
+
   return {
     template,
     runtime: input.explicitRuntime ?? template.adapter,
     description: describeAppliedTemplate(mission, template),
     runtimeConfigOverrides,
+    workerRules,
+    constraints,
   };
 }

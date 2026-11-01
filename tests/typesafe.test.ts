@@ -239,7 +239,8 @@ describe("three-verdict composition", () => {
   test.each([
     { name: "a deterministic failure dominating a confident model pass", deterministicFailure: true, criterionNouls: [0.99], reportNouls: [0.01], expected: "needs-remediation" },
     { name: "a criterion below the remediation threshold", deterministicFailure: false, criterionNouls: [0.49], reportNouls: [0.01], expected: "needs-remediation" },
-    { name: "no criteria at all", deterministicFailure: false, criterionNouls: [], reportNouls: [0.01], expected: "pass" },
+    { name: "no criteria at all", deterministicFailure: false, criterionNouls: [], reportNouls: [0.01], expected: "needs-attention" },
+    { name: "no criteria with a deterministic failure", deterministicFailure: true, criterionNouls: [], reportNouls: [0.01], expected: "needs-remediation" },
     { name: "every criterion exactly at the pass threshold", deterministicFailure: false, criterionNouls: [0.8, 0.95], reportNouls: [0.01], expected: "pass" },
     { name: "a criterion between the thresholds", deterministicFailure: false, criterionNouls: [0.79], reportNouls: [0.01], expected: "needs-attention" },
     { name: "a report flag below the pass threshold", deterministicFailure: false, criterionNouls: [0.99], reportNouls: [0.5], expected: "needs-attention" },
@@ -312,11 +313,62 @@ describe("evaluateThreeVerdict", () => {
   test("takes tamper from the deterministic state and defaults to false", async () => {
     process.env.TYPESAFE_API_KEY = "environment-key";
 
+    // No criteria at all: the model answers only the report battery, so the
+    // verdict over no criterion is non-discriminating and never a pass.
     const clean = await evaluateThreeVerdict({ contract: {} }, undefined, { fetch: respondWith(0.1), delay: noDelay });
-    expect(clean).toMatchObject({ kind: "ok", tamper: false, verdict: "pass" });
+    expect(clean).toMatchObject({
+      kind: "ok", tamper: false, verdict: "needs-attention", confidence: 0, criteria_judged: 0, deterministic_failure: false,
+    });
 
     const flagged = await evaluateThreeVerdict({ contract: {}, tamper: true }, undefined, { fetch: respondWith(0.1), delay: noDelay });
     expect(flagged).toMatchObject({ kind: "ok", tamper: true });
+  });
+
+  test("never passes and reports zero confidence when no criterion is asked", async () => {
+    process.env.TYPESAFE_API_KEY = "environment-key";
+
+    // Low report answers used to yield a confident vacuous `pass`; with no
+    // criterion judged the confidence must be 0 and the verdict non-passing.
+    const result = await evaluateThreeVerdict({ contract: {} }, undefined, {
+      fetch: respondWith((name) => (name.startsWith("criteria[") ? 0.9 : 0)),
+      delay: noDelay,
+    });
+
+    expect(result).toMatchObject({
+      kind: "ok", verdict: "needs-attention", confidence: 0, criteria_judged: 0, deterministic_failure: false,
+    });
+  });
+
+  test("a caller-supplied deterministic failure is authoritative with no criteria", async () => {
+    process.env.TYPESAFE_API_KEY = "environment-key";
+
+    const result = await evaluateThreeVerdict({ contract: {}, deterministicFailure: true }, undefined, {
+      fetch: respondWith(0.99),
+      delay: noDelay,
+    });
+
+    expect(result).toMatchObject({
+      kind: "ok", verdict: "needs-remediation", confidence: 0, criteria_judged: 0, deterministic_failure: true,
+    });
+  });
+
+  test("the independent-review projection asks no criterion, so its judgment cannot pass", async () => {
+    process.env.TYPESAFE_API_KEY = "environment-key";
+    // The shape `collectIndependentReview` builds: sources and a review
+    // recommendation, but no `criteria`, so only the report battery is asked.
+    const reviewState: SystemOneState = {
+      contract: { human_acceptance_required: true, sources: [{ index: 0, acceptance: [], checks: [] }] },
+      outputs: { recommendation: "pass", sources: [{ index: 0, verdict: "pass" }] },
+    };
+
+    const result = await evaluateThreeVerdict(reviewState, "Assess the review disposition.", {
+      fetch: respondWith(0),
+      delay: noDelay,
+    });
+
+    expect(result).toMatchObject({
+      kind: "ok", verdict: "needs-attention", confidence: 0, criteria_judged: 0, deterministic_failure: false,
+    });
   });
 
   test("returns provider conditions instead of throwing", async () => {

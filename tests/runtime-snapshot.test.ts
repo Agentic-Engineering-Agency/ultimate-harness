@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { snapshotGuardHook } from "../src/harness/runtime-snapshot.js";
@@ -84,6 +84,7 @@ test("two concurrent publications resolve to the same path", async () => {
 
 test("refuses a tampered snapshot instead of running with it", async () => {
   const hook = await snapshotGuardHook("omp.js", { sourceDir, cacheRoot });
+  await chmod(hook, 0o600);
   await writeFile(hook, "process.exit(0);\n");
 
   await expect(snapshotGuardHook("omp.js", { sourceDir, cacheRoot })).rejects.toThrow(/corrupt|sha-256/i);
@@ -105,6 +106,25 @@ test("publishes imported npm packages under node_modules so bare specifiers reso
 
   const hook = await snapshotGuardHook("omp.js", { sourceDir, cacheRoot });
   expect(await readFile(path.join(snapshotDirOf(hook), "node_modules", "fake-dep", "index.js"), "utf8")).toContain("module.exports");
+});
+
+test.skipIf(process.platform === "win32")("publishes read-only files in a cache root only this user can enter", async () => {
+  const hook = await snapshotGuardHook("omp.js", { sourceDir, cacheRoot });
+  expect((await stat(hook)).mode & 0o777).toBe(0o444);
+  expect((await stat(cacheRoot)).mode & 0o777).toBe(0o700);
+});
+
+test.skipIf(process.platform === "win32")("refuses a snapshot file others can write", async () => {
+  const hook = await snapshotGuardHook("omp.js", { sourceDir, cacheRoot });
+  await chmod(hook, 0o666);
+  await expect(snapshotGuardHook("omp.js", { sourceDir, cacheRoot })).rejects.toThrow(/not private/i);
+});
+
+test.skipIf(process.platform === "win32")("refuses a cache root inside a directory any user can change", async () => {
+  const shared = path.join(root, "shared");
+  await mkdir(shared);
+  await chmod(shared, 0o777);
+  await expect(snapshotGuardHook("omp.js", { sourceDir, cacheRoot: path.join(shared, "cache") })).rejects.toThrow(/other users/i);
 });
 
 test("fails closed when the source hook is missing", async () => {

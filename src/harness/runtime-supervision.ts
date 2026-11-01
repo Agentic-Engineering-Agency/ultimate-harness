@@ -150,11 +150,24 @@ export function delegatedRouteMismatch(value: unknown, expected: RuntimeRoute | 
 }
 
 /**
+ * The canonical identity of a provider or model name, for places that need
+ * one string to stand for one model (for example grouping run records):
+ * trimmed, lowercased (locale-independent), and with any `provider/` prefix
+ * removed, so the key is the part after the last "/".
+ */
+export function canonicalRouteIdentifier(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+}
+
+/**
  * Whether two provider or model identifiers name the same route. Comparison
  * trims and lowercases (locale-independent), and reconciles an optional
  * `provider/model` prefix: when exactly one side is prefixed, only the part
- * after its last "/" is compared. Nothing else is normalized; there is no
- * alias table and no partial or substring matching.
+ * after its last "/" is compared (the `canonicalRouteIdentifier` of that
+ * side). Nothing else is normalized; there is no alias table and no partial
+ * or substring matching.
  */
 export function sameRouteIdentifier(a: string, b: string): boolean {
   const left = a.trim().toLowerCase();
@@ -163,7 +176,7 @@ export function sameRouteIdentifier(a: string, b: string): boolean {
   const leftSlash = left.lastIndexOf("/");
   const rightSlash = right.lastIndexOf("/");
   if ((leftSlash >= 0) === (rightSlash >= 0)) return false;
-  return leftSlash >= 0 ? left.slice(leftSlash + 1) === right : right.slice(rightSlash + 1) === left;
+  return leftSlash >= 0 ? canonicalRouteIdentifier(left) === right : left === canonicalRouteIdentifier(right);
 }
 
 export function runtimeRouteMismatch(observed: RuntimeRoute | undefined, expected: RuntimeRoute | undefined): boolean {
@@ -316,21 +329,29 @@ function guardTamperEvent(event: Event): boolean {
   return guardTamperRecord(event);
 }
 
-function guardLogEntries(logPath: string): { lines: number; tamper: boolean } {
-  if (!existsSync(logPath)) return { lines: 0, tamper: false };
+type GuardEvidenceEntry = { call_id?: string };
+
+function guardLogEntries(logPath: string): { lines: number; tamper: boolean; entries: GuardEvidenceEntry[] } {
+  if (!existsSync(logPath)) return { lines: 0, tamper: false, entries: [] };
   try {
-    const entries = readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean);
-    return {
-      lines: entries.length,
-      tamper: entries.some(line => {
-        try { return guardTamperRecord(JSON.parse(line), 0); } catch { return false; }
-      }),
-    };
+    const lines = readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean);
+    const entries: GuardEvidenceEntry[] = [];
+    let tamper = false;
+    for (const line of lines) {
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (guardTamperRecord(parsed, 0)) tamper = true;
+        const item = record(parsed);
+        entries.push({
+          call_id: typeof item?.call_id === "string" && item.call_id ? item.call_id : undefined,
+        });
+      } catch { entries.push({}); }
+    }
+    return { lines: lines.length, tamper, entries };
   } catch {
-    return { lines: 0, tamper: false };
+    return { lines: 0, tamper: false, entries: [] };
   }
 }
-
 
 function claudeNativeEvents(event: Event): Event[] {
   const derived: Event[] = [];
@@ -384,9 +405,12 @@ export class RuntimeSupervision {
   private readonly guardCompletedCalls = new Set<string>();
   private readonly countedDenials = new Set<string>();
   private readonly protectedChecks = new Set<string>();
+  private readonly assistantMessageIds = new Set<string>();
   guardArmed?: boolean;
   turns = 0;
   denials = 0;
+  /** Calls the runtime denied natively without invoking the guard hook; also counted in `denials`. */
+  nativeRefusals = 0;
   readyAt?: number;
   sessionId?: string;
   terminal = false;
@@ -509,14 +533,19 @@ export class RuntimeSupervision {
     return this.failure;
   }
 
-  private countDenial(id: string, reason: string | undefined, now: number): void {
+  private countDenial(id: string, reason: string | undefined, now: number, native = false): void {
     if (id && this.countedDenials.has(id)) return;
     if (id) this.countedDenials.add(id);
     this.denials++;
+    if (native) this.nativeRefusals++;
     if (id && reason) this.hookBlocks.set(id, reason);
     this.markProgress(now);
     if (this.limits.max_denials && this.denials >= this.limits.max_denials) {
       const name = id ? this.toolNames.get(id) : undefined;
+      if (native) {
+        this.stop(`${this.denials} denied calls; last: ${reason ?? `native refusal of ${name ?? "unknown tool"}`}`, "denial_budget");
+        return;
+      }
       const target = id ? this.toolTargets.get(id) : undefined;
       const block = id ? this.hookBlocks.get(id) : undefined;
       const details = [name, target].filter(Boolean).join(" ");
@@ -528,17 +557,23 @@ export class RuntimeSupervision {
   private verifyGuardInvocation(id: string): void {
     if (this.permissionMode !== "guard" || !id || this.guardCompletedCalls.has(id)) return;
     this.guardCompletedCalls.add(id);
-    const evidence = this.guardLogPath ? guardLogEntries(this.guardLogPath) : { lines: 0, tamper: false };
+    const evidence = this.guardLogPath ? guardLogEntries(this.guardLogPath) : { lines: 0, tamper: false, entries: [] as GuardEvidenceEntry[] };
     if (evidence.tamper) {
       this.stop("Guard tamper attempted", "policy");
       return;
     }
-    if (evidence.lines < this.guardCompletedCalls.size) {
+    // When log lines carry call IDs, evidence matches the call by call_id: a
+    // completed, runtime-executed call is missing evidence only if no line has its
+    // call id. When lines carry no call ids (older hooks), fall back to comparing
+    // totals (native refusals are excluded because they are never added to guardCompletedCalls).
+    const hasCallIds = evidence.entries.some(entry => entry.call_id !== undefined);
+    const hasCallEvidence = !hasCallIds || evidence.entries.some(entry => entry.call_id === id);
+    if (evidence.lines >= this.guardCompletedCalls.size && hasCallEvidence) {
+      this.guardArmed = true;
+    } else {
       this.guardArmed = false;
       const reason = this.hookCalls.has(id) ? "Guard hook ran but could not log" : "Guard hook did not run";
       this.stop(`${reason}; refusing to continue with permissions enabled`, "policy");
-    } else {
-      this.guardArmed = true;
     }
   }
   private stop(reason: string, code: RuntimeStopCode): string {
@@ -608,7 +643,9 @@ export class RuntimeSupervision {
     }
     const nativeTurns = event.num_turns ?? record(event.result)?.num_turns;
     if (typeof nativeTurns === "number" && Number.isInteger(nativeTurns) && nativeTurns >= 0) {
-      this.turns = Math.max(this.turns, nativeTurns);
+      // The runtime's own count in its final record is the turn count; the message ids counted along the way can
+      // overshoot it, so at the terminal event it replaces them. Before then it can only raise the count.
+      this.turns = type === "result" ? nativeTurns : Math.max(this.turns, nativeTurns);
       if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
     }
     if (this.failure) {
@@ -671,8 +708,18 @@ export class RuntimeSupervision {
     } else if (type === "tool_hook_blocked" || type === "tool_call_blocked" || type === "tool_denied") {
       this.inflight.delete(id);
       this.commands.delete(id);
-      this.verifyGuardInvocation(id);
-      this.countDenial(id, id ? this.hookBlocks.get(id) : undefined, now);
+      const name = toolName(event);
+      if (id && name) this.toolNames.set(id, name);
+      if (type === "tool_hook_blocked" || (id !== "" && this.hookCalls.has(id))) {
+        this.verifyGuardInvocation(id);
+        this.countDenial(id, id ? this.hookBlocks.get(id) : undefined, now);
+      } else {
+        // A native refusal: the runtime denied the call itself (for example a
+        // tool name it does not have) without ever invoking the guard hook, so
+        // no guard-log line is expected and the guard stays as it is. It still
+        // consumes the denial budget.
+        this.countDenial(id, name ? `native refusal of ${name}` : undefined, now, true);
+      }
     } else if (type === "turn_start") {
       this.markProgress(now);
       const deadline = this.deadlineReason(now);
@@ -683,6 +730,19 @@ export class RuntimeSupervision {
       this.markProgress(now);
       if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
     } else if (type === "assistant" || (type === "system" && event.subtype === "init")) {
+      // Claude Code: one turn per distinct assistant message id.
+      // A sub-agent's messages carry the `parent_tool_use_id` of the call that started it; they are not this run's turns.
+      const subAgentMessage = typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id.length > 0;
+      if (type === "assistant" && !subAgentMessage) {
+        const message = record(event.message);
+        if (typeof message?.id === "string" && message.id.length > 0 && !this.assistantMessageIds.has(message.id)) {
+          this.assistantMessageIds.add(message.id);
+          this.turns++;
+          // This branch counts turns but never checked the cap: a run past `limits.max_turns` kept going and could
+          // finish cleanly. The cap is enforced as it is for `turn_end` runtimes.
+          if (this.limits.max_turns && this.turns > this.limits.max_turns) this.stop("Turn limit exceeded", "turn_limit");
+        }
+      }
       this.readyAt ??= now;
       this.markProgress(now);
     } else if (type === "model_request_start" || type === "model_request_end" ||

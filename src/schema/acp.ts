@@ -108,6 +108,40 @@ export const AcpSessionUpdateSchema = z.object({
 }).passthrough();
 
 /**
+ * A `session/new` MCP server. stdio servers carry a command/args/env triple;
+ * http servers carry a URL and headers. Strict so an unknown key in an entry is
+ * rejected rather than silently dropped. Values are never persisted to artifacts.
+ */
+export const AcpMcpServerStdioSchema = z.object({
+  name: z.string().min(1),
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  env: z.record(z.string(), z.string()).default({}),
+}).strict();
+
+export const AcpMcpServerHttpSchema = z.object({
+  type: z.literal("http"),
+  name: z.string().min(1),
+  url: z.string().min(1),
+  headers: z.record(z.string(), z.string()).default({}),
+}).strict();
+
+export const AcpMcpServerSchema = z.union([AcpMcpServerHttpSchema, AcpMcpServerStdioSchema]);
+export type AcpMcpServer = z.infer<typeof AcpMcpServerSchema>;
+
+/**
+ * A `drop` entry is an exact variable name or a `NAME_PREFIX*` pattern; no other
+ * glob syntax is accepted.
+ */
+export const ACP_ENV_DROP_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*\*?$/;
+
+export const AcpEnvPolicySchema = z.object({
+  set: z.record(z.string(), z.string()).default({}),
+  drop: z.array(z.string().regex(ACP_ENV_DROP_PATTERN, "Expected an exact variable name or a NAME_PREFIX* pattern")).default([]),
+}).strict();
+export type AcpEnvPolicy = z.infer<typeof AcpEnvPolicySchema>;
+
+/**
  * Strict schema for `.harness/adapters/acp.yaml` → `config.runtime_config`.
  *
  * Strict so typos at adapter-load or mission-override time raise a Zod error
@@ -119,6 +153,8 @@ export const AcpRuntimeConfigSchema = z.object({
   model: z.string().optional(),
   timeout_ms: z.number().int().positive().default(600_000),
   protocol_version: AcpProtocolVersionSchema.default(1),
+  mcp_servers: z.array(AcpMcpServerSchema).default([]),
+  env: AcpEnvPolicySchema.default({ set: {}, drop: [] }),
 }).strict();
 
 export type AcpRuntimeConfig = z.infer<typeof AcpRuntimeConfigSchema>;

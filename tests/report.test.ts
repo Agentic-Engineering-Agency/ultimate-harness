@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -14,6 +15,7 @@ import {
   sanitizeReportText,
   type RunReport,
 } from "../src/harness/report.js";
+import { projectRunDigest, runDigestPath } from "../src/harness/run-digest.js";
 import { registerLiveRun, type NativeProcess } from "../src/harness/live-runs.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -239,9 +241,9 @@ describe("uh report — oh-my-pi window", () => {
   });
 });
 
-/* ---------------------------------------------------------- tail-only read */
+/* ----------------------------------------------------- whole-file reading */
 
-describe("uh report — tail-only reading", () => {
+describe("uh report — whole-file reading without a digest", () => {
   const fillerLine = JSON.stringify({ type: "message_delta", text: "x".repeat(80), timestamp: iso(NOW - 10_000) });
   function largeLog(): string {
     const head = [
@@ -256,14 +258,72 @@ describe("uh report — tail-only reading", () => {
     return [...head, ...filler, ...tail].join("\n") + "\n";
   }
 
-  test("reads only the last 256 KB unless --full, which recovers the head", async () => {
+  test("recovers calls older than any byte window", async () => {
     const { runId } = await seedRun("", { events: largeLog(), control: { turns: 1 } });
 
-    const tailOnly = await reportRun(ROOT, runId, { now: NOW, processes: liveProcesses() });
-    expect(tailOnly.files_written).toEqual(["tail/late.txt"]);
+    const report = await reportRun(ROOT, runId, { now: NOW, processes: liveProcesses() });
+    expect(report.files_written).toEqual(["head/early.txt", "tail/late.txt"]);
+  });
+});
 
-    const full = await reportRun(ROOT, runId, { now: NOW, processes: liveProcesses(), full: true });
-    expect(full.files_written).toEqual(["head/early.txt", "tail/late.txt"]);
+/* ------------------------------------------------------------------ digest */
+
+describe("uh report — live run digest", () => {
+  async function writeDigest(runDir: string, events: readonly unknown[], runtime = "command-code"): Promise<RunReport> {
+    const digest = projectRunDigest(events, { runtime, workingDirectory: ROOT, now: NOW });
+    await writeFile(runDigestPath(runDir), JSON.stringify(digest), "utf-8");
+    return reportRun(ROOT, "20260101T000000Z-aaaaaa", { now: NOW, processes: liveProcesses() });
+  }
+
+  function readEvents(runDir: string): unknown[] {
+    return readFileSync(path.join(runDir, "events.ndjson"), "utf-8")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as unknown);
+  }
+
+  test("renders every projection from run-digest.json instead of the event stream", async () => {
+    const { runDir } = await seedRun("command-code-healthy.ndjson", { model: "m", control: { turns: 10 } });
+    const digest = projectRunDigest(readEvents(runDir), { runtime: "command-code", workingDirectory: ROOT, now: NOW });
+    await writeFile(runDigestPath(runDir), JSON.stringify(digest), "utf-8");
+
+    const report = await reportRun(ROOT, "20260101T000000Z-aaaaaa", { now: NOW, processes: liveProcesses() });
+
+    expect(report.current_activity).toEqual(digest.current_activity);
+    expect(report.turns).toBe(digest.turns);
+    expect(report.loop_signals).toEqual(digest.loop_signals);
+    expect(report.files_written).toEqual(digest.files_written.files);
+    expect(report.activity.calls.map((call) => call.tool)).toEqual(digest.recent_calls.map((call) => call.tool));
+    expect(report.activity.source).toBe("command-code");
+    // Legacy-only runs never carry this field; a digest run always does.
+    expect("current_activity" in report).toBe(true);
+    // No absolute path reaches any report field.
+    expect(JSON.stringify(report)).not.toMatch(/[A-Za-z]:[\\/]/);
+  });
+
+  test("reports 'reasoning since' and keeps the completed tool call under 30,000 deltas", async () => {
+    const { runDir } = await seedRun("", { events: "", control: { turns: 1 } });
+    const base = NOW - 60_000;
+    const events: unknown[] = [
+      { type: "tool_queued", toolCallId: "c1", toolName: "read_file", input: { paths: ["src/a.ts"] }, timestamp: iso(base) },
+      { type: "tool_completed", toolCallId: "c1", toolName: "read_file", result: [{ type: "text", text: "x" }], timestamp: iso(base + 1_000) },
+      ...Array.from({ length: 30_000 }, (_, index) => ({ type: "thinking_delta", delta: "x", timestamp: iso(base + 2_000 + index) })),
+    ];
+    const report = await writeDigest(runDir, events);
+
+    const text = formatRunReport(report);
+    expect(text).toContain("reasoning since");
+    expect(text).toContain("30,000 chars");
+    expect(text).toContain("read_file");
+    expect(report.activity.calls.some((call) => call.tool === "read_file" && call.target === "src/a.ts")).toBe(true);
+  });
+
+  test("a legacy run without a digest omits the digest-only fields", async () => {
+    const report = await makeReport("command-code-healthy.ndjson");
+    expect("current_activity" in report).toBe(false);
+    expect(report.current_activity).toBeUndefined();
+    expect(report.denials.native_refusals).toBeUndefined();
   });
 });
 

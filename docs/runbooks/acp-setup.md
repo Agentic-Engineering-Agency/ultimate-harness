@@ -39,6 +39,32 @@ config:
 * `server_args` (string[], default: `[]`): Command line arguments passed to the ACP server.
 * `protocol_version` (integer, default: `1`): ACP protocol version (v1).
 * `timeout_ms` (integer, default: `600000`): Per-request timeout in milliseconds.
+* `mcp_servers` (array, default: `[]`): MCP servers advertised to the agent in `session/new`. Each entry is either a stdio server (`{ name, command, args?, env? }`) or an HTTP server (`{ type: "http", name, url, headers? }`). UH maps these to the ACP v1 wire shape and never writes server `env` or `headers` values into any artifact.
+* `env` (object, default: `{ set: {}, drop: [] }`): Environment policy for the agent process. `drop` removes exact variable names or `NAME_PREFIX*` patterns from a copy of `process.env`; `set` then adds/replaces values, so `set` wins over `drop`. Names compare case-insensitively on Windows. Values are never written into any artifact.
+
+A value in `mcp_servers` headers or env, or in `env.set`, may contain `${NAME}`, which UH replaces from the environment when the run starts. Keep tokens that way: the adapter file then names the variable and never holds the secret, and a variable that is not set stops the run with a message naming it. Set the variable in your shell, not in a file under the project.
+
+```yaml
+config:
+  server_command: prime-agent
+  server_args: ["--mode", "acp"]
+  mcp_servers:
+    - name: files
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem"]
+      env:
+        FS_ROOT: .
+    - type: http
+      name: remote
+      url: https://example.test/mcp
+      headers:
+        Authorization: "Bearer ${ACP_MCP_TOKEN}"
+  env:
+    set:
+      DO_NOT_TRACK: "1"
+    drop:
+      - "ORCA_*"
+```
 
 ---
 

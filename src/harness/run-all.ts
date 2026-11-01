@@ -122,10 +122,9 @@ export async function runMissionAcrossRuntimes(
   const now = options.now ?? (() => Date.now());
   const sandboxIdSuffix = options.sandboxIdSuffix ?? defaultSandboxIdSuffix;
 
-  // Sandbox creation goes through `harness/sandbox.ts`, which performs an
-  // unlocked read-modify-write on the shared `sandboxes/index.yaml`.
-  // Creating in parallel would race the index. Serialize creation, then
-  // dispatch adapter runs in parallel (where the win is).
+  // Sandbox creation goes through `harness/sandbox.ts`, which serializes
+  // index mutations with an exclusive lock file (stale-owner breaking
+  // prevents a stalled holder from blocking forever).
   interface PreparedSandbox {
     runtime: string;
     sandboxId: string;

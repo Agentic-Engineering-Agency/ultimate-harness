@@ -46,6 +46,10 @@ A route is a provider and a model. A mission pins one; the run is held to it.
   run on which adapter in which role. A run outside it, or with no assigned
   model, is refused before spawn. `--force` does not bypass spend authorization.
 
+## An orchestrator in the project root
+
+An orchestrator (`runtime_config.role: orchestrator`, Claude Code or Command Code) runs in the live project root without a sandbox, so its guard's write roots are all that confine it. Both adapters refuse, at planning and before any process starts, a guard whose write roots are empty or `.` (the whole repository), absolute, or climb out with `..`; an empty guard resolves to `.`, so an orchestrator must declare the folders it writes, for example `write_roots: [out]`.
+
 ## The working directory
 
 Reading anywhere is allowed. Writing is allowed only under the mission's write
@@ -75,6 +79,19 @@ routes that leave that tree are denied as `containment_escape`:
 `nohup`. Windows nests job objects, so a harness run started inside another
 harness run stays inside the outer job and its limits can only be tighter.
 
+On Windows the guardian also attaches the worker to a headless pseudoconsole
+(`CreatePseudoConsole`, carried through `STARTUPINFOEX` and
+`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`), so the worker and every descendant that
+inherits a console run in one console that has no window and is never handed to
+a default terminal — without it, an implicit console allocation is what a
+default terminal such as Windows Terminal turns into a visible window. The
+pseudoconsole's output is drained and discarded, and the worker's stdout and
+stderr stay on the pipes the supervisor already reads. The guardian receipt
+records whether the pseudoconsole was used and falls back to `CREATE_NO_WINDOW`
+when the API is unavailable. A descendant that itself requests a new console
+(for example through `windowsHide`/`CREATE_NO_WINDOW`) still allocates one, which
+no parent can override.
+
 In a container without an init process, orphaned descendants are never reaped.
 Run the harness under an init (`docker run --init` or tini).
 
@@ -101,6 +118,10 @@ strict because losing them loses evidence.
   unlocked before removal. The harness never runs a global `git worktree prune`,
   because it deletes the registration of any worktree whose directory is missing
   at that moment, including ones owned by another controller.
+- Before removing a worktree, the harness deletes every link and junction inside
+  it without following them. Git for Windows' `git worktree remove` recurses into
+  a junction and deletes its target, so a `node_modules` junction would otherwise
+  empty the checkout it points at.
 - `uh mission run` refuses to run in the project root unless `--no-sandbox` is
   explicit. A lost sandbox registration must not turn into edits of the live tree.
 - A worker's commit contains only the worker's own work. Protected roots are

@@ -8,10 +8,12 @@ import {
   realpath,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { join, normalize } from "node:path";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { parse, stringify } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { getSandboxBackend, listSandboxBackends, runOpenSandboxCommand } from "../src/harness/sandbox-backends.js";
@@ -21,6 +23,9 @@ import {
   discardSandbox,
   getSandboxStatus,
   listSandboxes,
+  listSandboxIndexLockBreaks,
+  repairSandboxes,
+  withSandboxesIndexMutation,
 } from "../src/harness/sandbox.js";
 
 let TEST_ROOT: string;
@@ -444,6 +449,207 @@ describe("sandbox index resilience", () => {
   });
 });
 
+describe("sandbox index concurrency and repair", () => {
+  const indexPath = () => join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+
+  test("eight concurrent createSandbox calls all register (no lost update)", async () => {
+    const ids = Array.from({ length: 8 }, (_, index) => `race-${index}`);
+
+    const records = await Promise.all(
+      ids.map((id) => createSandbox(TEST_ROOT, { id, missionId: "demo" })),
+    );
+    expect(records).toHaveLength(8);
+
+    const list = await listSandboxes(TEST_ROOT);
+    expect(list.map((entry) => entry.id).sort()).toEqual([...ids].sort());
+
+    const indexDoc = parse(await readFile(indexPath(), "utf-8")) as {
+      schema_version: string;
+      sandboxes: Array<{ id: string }>;
+    };
+    expect(indexDoc.schema_version).toBe("uh.sandboxes-index.v0");
+    expect(indexDoc.sandboxes).toHaveLength(8);
+    expect(indexDoc.sandboxes.some((entry) => entry.id === "race-3")).toBe(true);
+
+    // Each registration survived with its own worktree on disk.
+    for (const id of ids) {
+      await expect(stat(join(TEST_ROOT, ".harness", "sandboxes", id, "worktree"))).resolves.toBeTruthy();
+    }
+  });
+
+  test("a stale index lock whose owner process is gone is broken and recorded", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    // A pid the OS will not hand out (probe returns ESRCH), so it is provably gone.
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: 2147483647, nonce: "stale-nonce", acquired_at: new Date(0).toISOString() }),
+      "utf-8",
+    );
+    const ancient = new Date(Date.now() - 120_000);
+    await utimes(lockPath, ancient, ancient);
+
+    const before = listSandboxIndexLockBreaks().length;
+    const record = await createSandbox(TEST_ROOT, { id: "after-stale", missionId: "demo" });
+
+    expect(record.id).toBe("after-stale");
+    expect(await listSandboxes(TEST_ROOT)).toHaveLength(1);
+
+    const breaks = listSandboxIndexLockBreaks();
+    expect(breaks.length).toBeGreaterThan(before);
+    expect(breaks[breaks.length - 1]).toMatchObject({
+      lock_file: lockPath,
+      owner_pid: 2147483647,
+    });
+
+    // The broken lock is released, never left behind.
+    await expect(stat(lockPath)).rejects.toThrow();
+  });
+
+  test("repairSandboxes re-registers a directory whose index entry was removed", async () => {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "repair-me");
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(
+      join(missionDir, "mission.yaml"),
+      stringify({
+        schema_version: "uh.mission.v0",
+        id: "repair-me",
+        title: "Repair mission",
+        workflow_profile: "spec-first-feature",
+      }),
+      "utf-8",
+    );
+
+    const record = await createSandbox(TEST_ROOT, { id: "repair-target", missionId: "repair-me" });
+    const worktreeAbs = join(TEST_ROOT, record.path);
+
+    // Simulate the live race outcome: the worktree exists, the entry is gone.
+    const doc = parse(await readFile(indexPath(), "utf-8")) as { sandboxes: Array<{ id: string }> };
+    doc.sandboxes = doc.sandboxes.filter((entry) => entry.id !== "repair-target");
+    await writeFile(indexPath(), stringify(doc), "utf-8");
+
+    expect(await listSandboxes(TEST_ROOT)).toEqual([]);
+    await expect(stat(worktreeAbs)).resolves.toBeTruthy();
+
+    const repaired = await repairSandboxes(TEST_ROOT);
+    expect(repaired).toMatchObject([
+      { id: "repair-target", mission_id: "repair-me", backend: "git-worktree", branch: "sandbox/repair-target" },
+    ]);
+
+    const list = await listSandboxes(TEST_ROOT);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      id: "repair-target",
+      mission_id: "repair-me",
+      path: ".harness/sandboxes/repair-target/worktree",
+    });
+
+    // A second repair has nothing left to do and reports nothing.
+    expect(await repairSandboxes(TEST_ROOT)).toEqual([]);
+  });
+
+  test("repairSandboxes leaves a corrupt index untouched", async () => {
+    await writeFile(indexPath(), "schema_version: uh.sandboxes-index.v0\nsandboxes: not-a-list\n", "utf-8");
+    const before = await readFile(indexPath());
+
+    const orphanDir = join(TEST_ROOT, ".harness", "sandboxes", "orphan", "worktree");
+    await mkdir(join(orphanDir, ".harness", "missions", "m1"), { recursive: true });
+    await writeFile(
+      join(orphanDir, ".harness", "missions", "m1", "mission.yaml"),
+      stringify({ schema_version: "uh.mission.v0", id: "m1", title: "M1", workflow_profile: "research-docs" }),
+      "utf-8",
+    );
+
+    await expect(repairSandboxes(TEST_ROOT)).rejects.toThrow(/Sandboxes index is invalid/);
+    expect((await readFile(indexPath())).equals(before)).toBe(true);
+  });
+
+  test("a mutation that loses its lock to a takeover does not release the new owner's lock", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    // While the mutation holds the lock, a second process takes over by
+    // replacing the lock file with its own token (foreign pid and nonce).
+    const foreign = {
+      pid: process.pid + 1,
+      nonce: "foreign-nonce",
+      acquired_at: new Date().toISOString(),
+    };
+
+    const result = await withSandboxesIndexMutation(TEST_ROOT, async (index) => {
+      const held = JSON.parse(await readFile(lockPath, "utf-8")) as { pid: number; nonce: string };
+      expect(held.pid).toBe(process.pid);
+
+      await writeFile(lockPath, JSON.stringify(foreign), "utf-8");
+      await utimes(lockPath, new Date(), new Date());
+
+      index.sandboxes.push({
+        id: "kept",
+        mission_id: "demo",
+        backend: "git-worktree",
+        status: "created",
+      });
+      return "mutation-completed";
+    });
+
+    // The mutation still completed and its write landed...
+    expect(result).toBe("mutation-completed");
+    expect((await listSandboxes(TEST_ROOT)).map((entry) => entry.id)).toContain("kept");
+
+    // ...and the release saw a foreign owner, so the lock survived untouched.
+    const after = parse(await readFile(lockPath, "utf-8")) as { pid: number; nonce: string };
+    expect(after).toMatchObject(foreign);
+  });
+
+  test("a normal mutation releases its own lock", async () => {
+    const lockPath = `${indexPath()}.lock`;
+
+    const result = await withSandboxesIndexMutation(TEST_ROOT, () => "done");
+    expect(result).toBe("done");
+
+    await expect(stat(lockPath)).rejects.toThrow();
+  });
+
+  test("a stale lock written without a nonce is not broken while its pid is alive", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    // An older build's lock carries only a pid. It is stale by age, but that pid
+    // (ours, hence alive) must be honored rather than broken out from under it.
+    await writeFile(lockPath, JSON.stringify({ pid: process.pid }), "utf-8");
+    const ancient = new Date(Date.now() - 120_000);
+    await utimes(lockPath, ancient, ancient);
+
+    const before = listSandboxIndexLockBreaks().length;
+    const mutation = withSandboxesIndexMutation(TEST_ROOT, () => "ok");
+    const raced = await Promise.race([
+      mutation.then(() => "completed" as const),
+      delay(750).then(() => "waited" as const),
+    ]);
+    expect(raced).toBe("waited");
+
+    // Honored: still present, still ours, and no break was recorded.
+    expect(JSON.parse(await readFile(lockPath, "utf-8"))).toMatchObject({ pid: process.pid });
+    expect(listSandboxIndexLockBreaks().length).toBe(before);
+
+    // Release the lock ourselves so the pending mutation can finish.
+    await rm(lockPath, { force: true });
+    await expect(mutation).resolves.toBe("ok");
+  });
+
+  test("a stale lock written without a nonce whose owner is gone is broken and records the pid", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    const deadPid = 2147483647; // an unallocatable pid: the OS probe returns ESRCH
+    await writeFile(lockPath, JSON.stringify({ pid: deadPid }), "utf-8");
+    const ancient = new Date(Date.now() - 120_000);
+    await utimes(lockPath, ancient, ancient);
+
+    const before = listSandboxIndexLockBreaks().length;
+    const record = await createSandbox(TEST_ROOT, { id: "after-nonce-less-stale", missionId: "demo" });
+    expect(record.id).toBe("after-nonce-less-stale");
+
+    const breaks = listSandboxIndexLockBreaks();
+    expect(breaks.length).toBeGreaterThan(before);
+    expect(breaks[breaks.length - 1]).toMatchObject({ lock_file: lockPath, owner_pid: deadPid });
+    await expect(stat(lockPath)).rejects.toThrow();
+  });
+});
+
 describe("uh sandbox CLI", () => {
   test("create + list + status + discard end-to-end", async () => {
     const createOut = await runUh([
@@ -539,6 +745,40 @@ describe("uh sandbox CLI", () => {
     ]);
     expect(forced.stdout).toContain("[DISCARDED] cli-dirty");
     await expect(stat(worktreeAbs)).rejects.toThrow();
+  });
+
+  test("uh sandbox repair re-registers a directory whose index entry was removed", async () => {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "cli-repair");
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(
+      join(missionDir, "mission.yaml"),
+      stringify({
+        schema_version: "uh.mission.v0",
+        id: "cli-repair",
+        title: "CLI repair mission",
+        workflow_profile: "spec-first-feature",
+      }),
+      "utf-8",
+    );
+
+    await runUh(["sandbox", "create", "cli-lost", "--mission", "cli-repair", "--root", TEST_ROOT]);
+
+    const indexPath = join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+    const doc = parse(await readFile(indexPath, "utf-8")) as { sandboxes: Array<{ id: string }> };
+    doc.sandboxes = doc.sandboxes.filter((entry) => entry.id !== "cli-lost");
+    await writeFile(indexPath, stringify(doc), "utf-8");
+
+    const emptyRepair = await runUh(["sandbox", "repair", "--root", TEST_ROOT]);
+    expect(emptyRepair.stderr).toBe("");
+    expect(emptyRepair.stdout).toContain("[REPAIRED] cli-lost");
+    expect(emptyRepair.stdout).toContain("mission: cli-repair");
+
+    const listOut = await runUh(["sandbox", "list", "--root", TEST_ROOT]);
+    expect(listOut.stdout).toContain("cli-lost");
+    expect(listOut.stdout).toContain("mission=cli-repair");
+
+    const secondRepair = await runUh(["sandbox", "repair", "--root", TEST_ROOT]);
+    expect(secondRepair.stdout).toContain("No sandbox registrations repaired.");
   });
 });
 

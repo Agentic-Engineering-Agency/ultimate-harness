@@ -17,7 +17,7 @@ uh ps --json
 uh ps --all
 ```
 
-Each line carries the run id, mission, team role (for team workers), runtime and model, verdict, turns, denials, heartbeat age, the last tool and its age, and the native pids in the controller's process tree. `uh status` prints a single summary line from the same function:
+Each line carries the run id, mission, team role (for team workers), runtime and model, verdict, turns, denials, heartbeat age, the last tool and its age, a `STALLED tool=<name> <minutes>m` segment when a tool call has produced no output for five minutes, and the native pids in the controller's process tree. `uh status` prints a single summary line from the same function:
 
 ```
 Live runs: 4 (orphaned: 0)
@@ -45,6 +45,77 @@ Live runs: 4 (orphaned: 0)
 - Registry: `.harness/live-runs/<run-id>.json` under the project root, schema `uh.live-run.v0`, recording `run_id`, `mission_id`, `runtime`, optional `model`, optional `team: { mission_id, role }`, `artifact_root`, `control_path`, `controller_pid`, `started_at`, and optional `status`, `stop_code`, `settled_at`.
 - The project root is the nearest ancestor of an artifact root that holds `.harness/project.yaml`. A team worker's artifact root lives under `.harness/missions/<team-mission>/team/artifacts/<parent-run>/workers/<role>` and registers with its team mission id and role.
 - The registry directory is gitignored: it is local execution state, not a publication input. Terminal control facts discovered by `uh ps` are reconciled back into the registry.
+
+## Asking for a report
+
+`uh ps` says *which* runs exist; `uh report <run-id>` answers "what is this run
+doing right now?" for one run, from disk only, in under a second.
+
+```bash
+uh report <run-id>          # by id or a unique prefix
+uh report <run-id> --json   # machine-readable
+```
+
+The report renders from the run's `run-digest.json` when it exists (an older run
+without one is projected from `events.ndjson` once). Alongside identity, liveness,
+turns, denials, tokens, cost, current activity, the recent tool calls and the
+files written, a digest-backed report carries an **efficiency block** and the
+**long-running tool** signal:
+
+- **Efficiency** — context tokens at the first, sixth and last model request; the
+  share of turns with exactly one tool call; reads and re-reads, where a re-read
+  must repeat the same `(path, line range)` (a different range of one file is not
+  a re-read); tool output bytes by tool kind; and model time versus tool time. A
+  runtime that reports no per-request context (oh-my-pi) leaves the context fields
+  absent rather than showing `0`.
+- **Long-running tools** — a call still in flight with no end event and no output
+  for more than five minutes, shown as tool, target and minutes, so a hung child
+  pipeline is visible instead of reading as a long-but-productive call.
+
+`uh observatory runs --group-by model --json` folds these into per-group medians
+under `efficiency_medians` for a whole population of runs.
+
+## Waiting for runs
+
+`uh wait` blocks until matched runs settle, so an orchestrator learns a run is
+done from the command's own exit code instead of polling `uh ps` one model turn
+at a time. Targets resolve with the same semantics as `uh kill`: a run id (or
+unique prefix), `--mission <id>`, or `--team <id>`. The registry is polled every
+~2 s with no model involvement until every matched run is `settled` or
+`orphaned`, or `--timeout-ms` (default 30 minutes) passes.
+
+```bash
+# One run, by id or unique prefix.
+uh wait <run-id> --root <project>
+
+# Every live run of a mission or a team.
+uh wait --mission <mission-id> --root <project>
+uh wait --team <team-mission-id> --root <project>
+
+# Give up after 10 minutes, machine-readable.
+uh wait <run-id> --timeout-ms 600000 --json
+```
+
+Output is one line per matched run (id, mission, final status, stop code) plus
+one summary line:
+
+```
+run-01  wave-a  passed  stop=-
+matched=1 settled=1 passed=1 failed=0 orphaned=0 timed_out=0 elapsed=2044ms
+```
+
+| Exit | Meaning |
+|---|---|
+| `0` | Every matched run settled `passed`. |
+| `1` | At least one matched run settled with a failing status (`failed`, `blocked`, `cancelled`). |
+| `2` | Nothing matched (unknown or ambiguous run id, no live run for the mission/team, no target given). |
+| `3` | At least one matched run is orphaned — the same verdict that makes `uh ps` exit `3`. |
+| `4` | The timeout passed with a run still unsettled. |
+
+Waiting never touches a process: an orphaned run stays open only for the
+verdict, and, like `uh kill`, an unreadable (empty) process table is never
+treated as proof that controllers died — the run simply stays open until it
+settles or the timeout hits.
 
 ## Cancelling an owned run
 

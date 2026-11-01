@@ -1,0 +1,9 @@
+{"event":"runtime.started","runtime":"acp","mission_id":"m-test","run_id":"r-test","timestamp":"2026-09-23T00:00:00.000Z"}
+{"event":"acp.session/update","timestamp":"2026-09-23T00:00:01.000Z","sessionId":"sess-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"analyzing"}}}
+{"event":"acp.session/update","timestamp":"2026-09-23T00:00:02.000Z","sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reading files"}}}
+{"event":"acp.session/update","timestamp":"2026-09-23T00:00:03.000Z","sessionId":"sess-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","name":"read_file","parameters":{"path":"a.txt"}}}
+{"event":"acp.session/update","timestamp":"2026-09-23T00:00:04.000Z","sessionId":"sess-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-2","name":"read_file","parameters":{"path":"b.txt"}}}
+{"event":"acp.session/update","timestamp":"2026-09-23T00:00:05.000Z","sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","result":"a"}}
+{"event":"acp.session/update","timestamp":"2026-09-23T00:00:06.000Z","sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-2","status":"completed","result":"b"}}
+{"event":"acp.session/update","timestamp":"2026-09-23T00:00:07.000Z","sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}
+{"event":"runtime.finished","runtime":"acp","mission_id":"m-test","run_id":"r-test","timestamp":"2026-09-23T00:00:08.000Z"}

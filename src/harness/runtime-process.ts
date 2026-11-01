@@ -9,8 +9,11 @@ import { promisify } from "node:util";
 import { renameWithRetry, writeAtomicArtifact } from "./artifact-transaction.js";
 import { RuntimeCancelRequestSchema, RuntimeControlSchema, RuntimeLimitsSchema, RuntimeRouteSchema, WindowsJobResultSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode } from "../schema/runtime-control.js";
 import { RuntimeSupervision } from "./runtime-supervision.js";
+import { RUN_DIGEST_FILE, RunDigestBuilder } from "./run-digest.js";
+import { createLoopWatchdog, resolveLoopWatchdogMode, type LoopWatchdog } from "./loop-watchdog.js";
 import { resolveRuntimeCommand } from "./runtime-command.js";
 import type { RuntimeUsage } from "./usage.js";
+import { captureSettlement, harnessRootFor } from "./interventions.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -118,6 +121,8 @@ export interface RuntimeProcessInput {
   command: string;
   args: string[];
   cwd: string;
+  /** Payload fed once to the worker's standard input, then closed. */
+  stdin?: string;
   timeoutMs?: number;
   limits?: RuntimeLimits;
   onDeadline?: { grace_turns: number; grace_timeout_ms: number };
@@ -147,6 +152,8 @@ export interface RuntimeProcessOutput {
   nativeTerminal?: boolean;
   nativeTerminalFailure?: string;
   supervisionStopCode?: RuntimeStopCode;
+  /** Windows only: whether the guardian attached a windowless pseudoconsole instead of the CREATE_NO_WINDOW fallback. */
+  pseudoconsole?: boolean;
 }
 
 /** Only accepts the ChildProcess handle allocated by this runner; never searches by title/PID. */
@@ -175,7 +182,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
   let outputLimitReached = false;
   let timedOut = false, cancelled = false, stopReason: string | undefined;
   let stopCode: RuntimeStopCode | undefined;
-  let peakMemoryBytes: number | undefined, settlementConfirmed: boolean | undefined;
+  let peakMemoryBytes: number | undefined, settlementConfirmed: boolean | undefined, pseudoconsole: boolean | undefined;
   let writes = Promise.resolve();
   let streamError: string | undefined;
   let lastHeartbeat = 0;
@@ -194,6 +201,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       stop_code: stopCode ?? supervisor.stopCode ?? (cancelled ? "cancelled" : supervisor.terminalFailure ? "runtime_error" : undefined),
       ready_at: supervisor.readyAt === undefined ? undefined : new Date(supervisor.readyAt).toISOString(),
       session_id: supervisor.sessionId, turns: supervisor.turns, denials: supervisor.denials,
+      native_refusals: supervisor.nativeRefusals,
       expected_route: expectedRoute,
       review_request_sha256: input.reviewRequestSha256,
       guardian: guardianInfo,
@@ -210,12 +218,32 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       heartbeatPersistenceFailures += 1;
     }
   };
+  // The live run digest is the same native events supervision already consumes,
+  // reduced incrementally. It is written best-effort on the heartbeat cadence
+  // and at settlement — never per event, and never a reason to fail a run.
+  const digest = scope
+    ? new RunDigestBuilder({ runtime: scope.runtime, workingDirectory: input.cwd, startedAt: started })
+    : undefined;
+  let digestWrites: Promise<void> = Promise.resolve();
+  const persistDigest = async (): Promise<void> => {
+    if (!scope || !digest) return;
+    try {
+      await (input.persistArtifact ?? writeAtomicArtifact)(
+        path.join(scope.directory, RUN_DIGEST_FILE),
+        JSON.stringify(digest.snapshot(now())),
+      );
+    } catch {
+      // A digest is a convenience index; a write failure must not fail the run.
+    }
+  };
+  const queueDigest = (): void => { digestWrites = digestWrites.then(persistDigest); };
   if (scope) {
     await mkdir(scope.directory, { recursive: true });
     // Existing attempts must not have their evidence truncated by an accidental retry.
     await writeFile(path.join(scope.directory, "runtime.stdout.log"), "", { flag: "wx" });
     await writeFile(path.join(scope.directory, "runtime.stderr.log"), "", { flag: "wx" });
     await persist("running");
+    await persistDigest();
   }
   if (input.cancellationSignal?.aborted) {
     cancelled = true;
@@ -225,6 +253,31 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
   }
   if (limits.memory_mb && process.platform !== "win32") {
     throw new Error("A committed process-tree memory cap requires the Windows Job backend; no unenforced fallback is permitted");
+  }
+  // Shadow loop watchdog: a pure observer of the same native events supervision
+  // already consumes. Its mode comes from the mission (`runtime_config.loop_watchdog`)
+  // and every failure below is swallowed, so it can never fail the run.
+  let watchdog: LoopWatchdog | undefined;
+  if (scope) {
+    try {
+      const missionDir = path.dirname(path.dirname(scope.directory));
+      const mode = await resolveLoopWatchdogMode(path.join(missionDir, "mission.yaml"));
+      if (mode === "shadow") {
+        watchdog = createLoopWatchdog({
+          mode,
+          source: scope.runtime === "command-code" ? "command-code" : "oh-my-pi",
+          workingDirectory: input.cwd,
+          missionDir,
+          missionId: scope.missionId,
+          runId: scope.runId,
+          appendEvent: async (event) => {
+            await appendFile(path.join(scope.directory, "events.ndjson"), `${JSON.stringify(event)}\n`, "utf-8");
+          },
+        });
+      }
+    } catch {
+      watchdog = undefined;
+    }
   }
   const executable = await resolveRuntimeCommand(input.command, input.args, input.env);
   const temporaryJobDirectory = process.platform === "win32" && !scope ? await mkdtemp(path.join(tmpdir(), "uh-job-")) : undefined;
@@ -256,6 +309,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       resultPath: path.join(jobDirectory!, "windows-job-result.json"),
       stopPath: path.join(jobDirectory!, ".windows-job-stop"),
       controlPath: scope ? path.join(scope.directory, "runtime-control.json") : undefined,
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
     }),
   } : { ...executable, env: input.env };
   return new Promise<RuntimeProcessOutput>((resolve) => {
@@ -265,7 +319,9 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
     child.stdin?.on("error", () => { /* Spawn errors and early process exits are handled below. */ });
-    child.stdin?.end("specification" in launch ? launch.specification : undefined);
+    // On Windows the guardian carries the payload inside its spec and feeds the
+    // worker; elsewhere the payload is the child's stdin directly.
+    child.stdin?.end("specification" in launch ? launch.specification : input.stdin);
     const stop = (reason: string, code: RuntimeStopCode = "controller_error"): void => {
       if (!stopReason || code === "policy") { stopReason = reason; stopCode = code; }
       timedOut ||= code === "timeout" || code === "startup" || code === "stall";
@@ -297,9 +353,28 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
       });
       return writes;
     };
+    const nativeEvents: unknown[] = [];
+    let watchdogWork: Promise<void> = Promise.resolve();
+    // One observation waits at a time, and it reads the event list as it is when it runs, so a burst of lines costs one pass.
+    let watchdogQueued = false;
     const observe = (line: string): void => {
       try {
-        const reason = supervisor.observe(JSON.parse(line), now());
+        const parsed = JSON.parse(line);
+        nativeEvents.push(parsed);
+        if (watchdog) {
+          const active = watchdog;
+          // Chained and swallowed: a shadow evaluation never blocks or fails the run.
+          if (!watchdogQueued) {
+            watchdogQueued = true;
+            watchdogWork = watchdogWork.then(() => { watchdogQueued = false; return active.observe(nativeEvents); }).catch(() => {});
+          }
+        }
+        if (digest) {
+          // Fed from the same loop as supervision; a digest projection fault is
+          // isolated here so it can never disturb supervision or the run.
+          try { digest.observe(parsed, now()); } catch { /* A digest is best-effort. */ }
+        }
+        const reason = supervisor.observe(parsed, now());
         if (reason) stop(reason, supervisor.stopCode);
       } catch { /* Preserve malformed and partial bytes; the adapter classifies them. */ }
     };
@@ -349,6 +424,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         if (!finished && now() - lastHeartbeat >= 1000) {
           lastHeartbeat = now();
           enqueue(persistHeartbeat);
+          queueDigest();
         }
       })().catch(() => stop("Runtime supervision failed")).finally(() => { polling = false; });
     }, 100);
@@ -363,11 +439,17 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         await activePoll;
         await writes;
         await stopWrite;
+        // Let any pending shadow evaluation settle before the run resolves.
+        await watchdogWork;
+        // Drain the queued heartbeat digests, then write the settled snapshot.
+        await digestWrites;
+        await persistDigest();
         if (process.platform === "win32") {
           try {
             const job = WindowsJobResultSchema.parse(JSON.parse((await readFile(path.join(jobDirectory!, "windows-job-result.json"), "utf8")).replace(/^\uFEFF/, "")));
             peakMemoryBytes = job.peak_memory_bytes;
             settlementConfirmed = job.settled;
+            pseudoconsole = job.pseudoconsole === true;
           } catch { settlementConfirmed = false; }
           if (!settlementConfirmed) {
             stopReason = "Owned process-tree settlement was not confirmed";
@@ -382,6 +464,14 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         const settledStatus = cancelled ? "cancelled" : nativeCompleted || exitCode === 0 ? "passed" : "failed";
         try { await persist(settledStatus); }
         catch { spawnError ??= "Runtime final state persistence failed"; }
+        // A supervised stop is an intervention. Best-effort: a ledger failure
+        // must never fail the run it records.
+        const effectiveStopCode = stopCode ?? supervisor.stopCode;
+        if (scope && effectiveStopCode) {
+          await captureSettlement(harnessRootFor(scope.directory), {
+            missionId: scope.missionId, runId: scope.runId, stopCode: effectiveStopCode, stopReason,
+          });
+        }
         if (temporaryJobDirectory) await rm(temporaryJobDirectory, { recursive: true, force: true }).catch(() => {});
         const reportedStreamFailure = streamError
           ? `Runtime artifact or stream callback failed: ${streamError}`
@@ -389,7 +479,7 @@ export async function runRuntimeProcess(input: RuntimeProcessInput): Promise<Run
         resolve({ stdout, stderr, exitCode: spawnError && exitCode === 0 ? 1 : exitCode, timedOut,
           cancelled, spawnError: spawnError ?? (stopCode === "policy" ? stopReason : reportedStreamFailure ?? stopReason), sessionId: supervisor.sessionId, peakMemoryBytes, settlementConfirmed,
           outputTruncated: outputLimitReached, nativeTerminal: supervisor.terminal, nativeTerminalFailure: supervisor.terminalFailure,
-          supervisionStopCode: supervisor.stopCode });
+          supervisionStopCode: supervisor.stopCode, pseudoconsole });
       })();
     });
   });

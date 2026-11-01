@@ -3,11 +3,12 @@ import { prepareRuntimeResume, recoveryPrompt, persistRuntimeRecovery, type Runt
 import { claimRuntimeAttempt } from "../harness/runtime-attempt.js";
 import { runRuntimeProcess, type RuntimeProcessInput } from "../harness/runtime-process.js";
 import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
+import { armGuard, guardArmStopReceipt, GUARD_ARM_LOG_NAME, type GuardArmingFailure, type GuardArmingInput, type GuardArmingResult } from "../harness/guard-arming.js";
 import { RuntimeLimitsSchema, RuntimeRecoveryPolicySchema, RuntimeRouteSchema, type RuntimeLimits, type RuntimeRoute, type RuntimeStopCode, type RuntimeRecoveryDeadline, type ToolGuardPolicy, DEFAULT_PROTECTED_PATHS, ToolGuardArtifactSchema } from "../schema/runtime-control.js";
 import { delegatedRouteMismatch, nativeRuntimeCompleted, nativeRuntimeRoute, runtimeRouteMismatch } from "../harness/runtime-supervision.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, appendFile, mkdtemp, writeFile } from "node:fs/promises";
+import { readFile, appendFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
   type MissionArtifactContext,
@@ -15,6 +16,7 @@ import {
   assertWritableArtifact,
   assertPathInsideMissionDir,
   writeArtifactFile,
+  writeReadOnlyArtifactFile,
   persistPromptAndSession,
   appendMissionEvent,
 } from "./_artifact-context.js";
@@ -69,6 +71,10 @@ export type DryRunResult = {
   command: string;
   args: string[];
   prompt: string;
+  /** Where the runtime reads the prompt from: a file for oh-my-pi, stdin for command-code. */
+  promptSource?: string;
+  /** Absolute path of the run's prompt.md handed to the runtime with the `@` prefix. */
+  promptPath?: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -79,6 +85,10 @@ export type OhMyPiRunPlan = {
   args: string[];
   /** Final prompt handed to the runtime (memory-enriched when honcho-memory is enabled). */
   prompt: string;
+  /** Where the runtime reads the prompt from: a file for oh-my-pi. */
+  promptSource?: string;
+  /** Absolute path of the run's prompt.md handed to the runtime with the `@` prefix. */
+  promptPath: string;
   /**
    * Pre-enrichment mission prompt — what `buildMissionPrompt` produced before
    * any extension touched it. Persisted to Honcho as the "user message" so
@@ -156,6 +166,8 @@ export interface PlanOhMyPiOptions {
 }
 export interface RunOhMyPiOptions {
   runner?: OhMyPiRunner;
+  /** Pre-launch guard arming seam; defaults to the real arming check. */
+  armGuard?: (input: GuardArmingInput) => Promise<GuardArmingResult>;
   timeoutMs?: number;
   limits?: RuntimeLimits;
   collectDiff?: DiffCollector;
@@ -235,12 +247,32 @@ runtimeRegistry.register("oh-my-pi", ohMyPiRuntimeChecker);
  *
  * Registered with the adapter-schema registry so manifests are validated at
  * load time; unknown keys raise a Zod error.
+ *
+ * `tools` (optional) restricts the set of omp tools a run may use. When set,
+ * `planOhMyPiRun` emits a single `--tools=<name>,<name>` argument immediately
+ * after the `--mode <mode>` pair. When absent, argv is unchanged.
  */
 export const OhMyPiRuntimeConfigSchema = z.object({
   mode: z
     .enum(["json", "text", "rpc", "rpc-ui"])
     .optional()
     .default("json"),
+  /**
+   * Optional allowlist of omp tool names. Requires at least one entry (an
+   * empty list is a validation error, never "no tools") and rejects duplicate
+   * names. Each name must match `/^[A-Za-z0-9_.-]+$/` so separators omp's
+   * `--tools` list cannot survive validation.
+   */
+  tools: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .regex(/^[A-Za-z0-9_.-]+$/, "tool names may contain only letters, digits, dot, underscore, and hyphen"),
+    )
+    .min(1, "tools must name at least one tool")
+    .refine((names) => new Set(names).size === names.length, "tools must not contain duplicate names")
+    .optional(),
   thinking: z
     .union([
       z.literal(""),
@@ -290,8 +322,9 @@ export async function checkOhMyPi(root?: string): Promise<CheckResult> {
 
 export async function dryRunOhMyPi(root: string, missionPath: string, options: { extraRuntimeConfigOverrides?: Record<string, unknown> } = {}): Promise<DryRunResult> {
   try {
-    const plan = await planOhMyPiRun(root, missionPath, options);
-    const artifacts = await getMissionArtifactContext(root, missionPath, generateRunId());
+    const runId = generateRunId();
+    const plan = await planOhMyPiRun(root, missionPath, { ...options, runId });
+    const artifacts = await getMissionArtifactContext(root, missionPath, runId);
     if (artifacts) {
       await persistPromptAndSession(artifacts, plan.prompt, {
         schema_version: "uh.runtime-session.v0",
@@ -306,6 +339,8 @@ export async function dryRunOhMyPi(root: string, missionPath: string, options: {
       command: plan.command,
       args: plan.args,
       prompt: plan.prompt,
+      promptSource: plan.promptSource,
+      promptPath: plan.promptPath,
       worktree: plan.worktree,
       session_id_passthrough: plan.session_id_passthrough,
       errors: plan.errors,
@@ -416,6 +451,11 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     : null;
   ctx.memoryBlock = memoryBlock ?? undefined;
   const prompt = renderPrompt(ctx) + (resume ? recoveryPrompt(resume) : "");
+  // The prompt leaves argv entirely: oh-my-pi reads `@<path>` from the run's
+  // prompt.md, which keeps a multi-KB packet off the Windows command line.
+  const runId = options.runId ?? generateRunId();
+  const artifactRoot = options.artifactRoot ?? root;
+  const promptPath = path.join(path.resolve(artifactRoot), ".harness", "missions", mission.id, "runs", runId, "prompt.md");
   const args = [
     "--print",
   ];
@@ -427,6 +467,9 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     args.push("--thinking", thinking);
   }
   args.push("--mode", mode);
+  if (runtimeConfig.tools) {
+    args.push(`--tools=${runtimeConfig.tools.join(",")}`);
+  }
   if (mission.guard) {
     args.push("-e", await snapshotGuardHook("extensions/tool-guard/omp.js"));
   }
@@ -440,7 +483,7 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
   if (!allowSkills) {
     args.push("--no-skills");
   }
-  args.push("--no-title", prompt);
+  args.push("--no-title", `@${promptPath}`);
 
   const deadline = runtimeConfig.recovery?.on_deadline;
   const limits: RuntimeLimits = {
@@ -453,6 +496,8 @@ export async function planOhMyPiRun(root: string, missionPath: string, options: 
     command: cliCommand,
     args,
     prompt,
+    promptPath,
+    promptSource: "file",
     basePrompt,
     worktree: false,
     session_id_passthrough: false,
@@ -513,17 +558,22 @@ export async function runOhMyPi(
   missionPath: string,
   options: RunOhMyPiOptions = {},
 ): Promise<RunOhMyPiResult> {
-  const plan = await planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides, artifactRoot: options.artifactRoot });
+  const runId = options.runId ?? generateRunId();
+  const plan = await planOhMyPiRun(root, missionPath, { extraRuntimeConfigOverrides: options.extraRuntimeConfigOverrides, artifactRoot: options.artifactRoot, runId });
   if (plan.errors.length > 0) {
     throw new Error(plan.errors.join("; "));
   }
 
-  const runId = options.runId ?? generateRunId();
   const startedAt = new Date().toISOString();
   const artifactRoot = options.artifactRoot ?? root;
   const artifactMissionPath = path.join(artifactRoot, ".harness", "missions", plan.mission.id, "mission.yaml");
   const artifacts = await getMissionArtifactContext(artifactRoot, artifactMissionPath, runId);
   if (artifacts) await claimRuntimeAttempt(artifacts);
+  else {
+    // A mission outside the harness tree still needs its prompt on disk for `@<path>`.
+    await mkdir(path.dirname(plan.promptPath), { recursive: true });
+    await writeFile(plan.promptPath, plan.prompt, "utf8");
+  }
   const overlayDir = artifacts?.runDir ?? await mkdtemp(path.join(tmpdir(), "uh-omp-overlay-"));
   const overlayPath = path.join(overlayDir, "omp-overlay.yml");
   if (artifacts) await writeArtifactFile(artifacts.missionDir, overlayPath, stringify(plan.runtimeOverlay));
@@ -589,6 +639,7 @@ export async function runOhMyPi(
   }
 
   let guardEnv: NodeJS.ProcessEnv | undefined;
+  let guardArmFailure: GuardArmingFailure | undefined;
   if (plan.guard && artifacts) {
     const effectiveLimits = { ...plan.limits, ...options.limits };
     const protectedPaths = effectiveLimits.protected_paths ?? DEFAULT_PROTECTED_PATHS;
@@ -600,8 +651,15 @@ export async function runOhMyPi(
     });
     const policyPath = path.join(artifacts.runDir, "tool-guard.json");
     const logPath = path.join(artifacts.runDir, "tool-guard.log");
-    await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
+    await writeReadOnlyArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
+    const arming = await (options.armGuard ?? armGuard)({
+      runtime: "oh-my-pi",
+      policyPath,
+      logPath: path.join(artifacts.runDir, GUARD_ARM_LOG_NAME),
+      hookModulePath: await snapshotGuardHook("extensions/tool-guard/omp.js"),
+    });
+    if (!arming.ok) guardArmFailure = arming;
   }
 
   const runner = options.runner ?? defaultOhMyPiRunner;
@@ -636,7 +694,29 @@ export async function runOhMyPi(
   let runnerResult: OhMyPiRunnerOutput;
   let collection: OhMyPiCollectOutput;
   try {
-    if (initializationError) {
+    if (guardArmFailure) {
+      if (artifacts) {
+        await writeArtifactFile(artifacts.missionDir, path.join(artifacts.runDir, "runtime-control.json"), JSON.stringify(guardArmStopReceipt({ missionId: plan.mission.id, runId, runtime: "oh-my-pi", reason: guardArmFailure.reason }), null, 2));
+      }
+      runnerResult = {
+        stdout: "",
+        stderr: "",
+        exitCode: 1,
+        timedOut: false,
+        spawnError: guardArmFailure.reason,
+        supervisionStopCode: "policy",
+      };
+      collection = await collectOhMyPiSession({
+        root: artifactRoot,
+        artifacts,
+        plan,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        runnerResult,
+        diff: { patch: "" },
+        eventsAlreadyPersisted: false,
+      });
+    } else if (initializationError) {
       runnerResult = {
         stdout: "",
         stderr: "",
@@ -661,6 +741,8 @@ export async function runOhMyPi(
           args: plan.args,
           cwd: root,
           env: guardEnv,
+          permissionMode: plan.guard ? "guard" : undefined,
+          guardLogPath: plan.guard && artifacts ? path.join(artifacts.runDir, "tool-guard.log") : undefined,
           timeoutMs: options.timeoutMs,
           limits: { ...plan.limits, ...options.limits },
           onDeadline: plan.grace ? undefined : plan.deadline,

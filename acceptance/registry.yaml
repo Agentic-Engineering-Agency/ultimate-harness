@@ -23,6 +23,12 @@ entries:
     shape: team
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/C1-cmdc/**
+      - acceptance/support/**
+      - src/harness/team-run.ts
+      - src/schema/team.ts
+      - src/adapters/command-code.ts
     expected:
       status: passed
       workers:
@@ -32,7 +38,7 @@ entries:
         worker-a: passed
         worker-b: passed
     freshness_days: 30
-    notes: Command Code port of C1 with identical per-worker contracts.
+    notes: Command Code port of C1 with identical per-worker contracts. Inputs cover the team scheduler, team schema, and command-code adapter that produce per-worker contracts; src/cli.ts is excluded because the probe asserts worker contract facts, not CLI parsing.
   S1:
     title: Resource wave baseline
     capability: S1
@@ -54,6 +60,12 @@ entries:
     shape: team
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/S1-cmdc/**
+      - acceptance/support/**
+      - src/harness/team-run.ts
+      - src/harness/runtime-resources.ts
+      - src/schema/team.ts
     expected:
       status: passed
       workers:
@@ -61,7 +73,7 @@ entries:
         worker-b: { status: succeeded }
         worker-c: { status: succeeded }
     freshness_days: 30
-    notes: Command Code port of S1 with identical wave scheduling.
+    notes: Command Code port of S1 with identical wave scheduling. Inputs cover the wave scheduler and resource limits that model max_parallel waves; src/cli.ts is excluded because the probe asserts wave scheduling, not CLI parsing.
   S2:
     title: Resource wave accounting
     capability: S2
@@ -83,6 +95,13 @@ entries:
     shape: team
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/S2-cmdc/**
+      - acceptance/support/**
+      - src/harness/team-run.ts
+      - src/harness/runtime-resources.ts
+      - src/harness/runtime-accounting.ts
+      - src/schema/team.ts
     expected:
       status: passed
       workers:
@@ -90,7 +109,7 @@ entries:
         worker-b: { status: succeeded }
         worker-c: { status: succeeded }
     freshness_days: 30
-    notes: Command Code port of S2 with identical cost accounting.
+    notes: Command Code port of S2 with identical cost accounting. Inputs cover the wave scheduler, resource limits, and cost accounting that model per-wave reservation; src/cli.ts is excluded because the probe asserts cost accounting, not CLI parsing.
   S3:
     title: Resource wave settlement
     capability: S3
@@ -112,6 +131,11 @@ entries:
     shape: team
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/S3-cmdc/**
+      - acceptance/support/**
+      - src/harness/team-run.ts
+      - src/harness/runtime-settlement.ts
     expected:
       status: passed
       workers:
@@ -119,7 +143,7 @@ entries:
         worker-b: { status: succeeded }
         worker-c: { status: succeeded }
     freshness_days: 30
-    notes: Command Code port of S3 with identical settlement facts.
+    notes: Command Code port of S3 with identical settlement facts. Inputs cover the team scheduler and runtime settlement that publish settled wave facts; src/cli.ts is excluded because the probe asserts settlement facts, not CLI parsing.
   G2:
     title: Denial budget
     capability: G2
@@ -144,6 +168,14 @@ entries:
     shape: single
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/G2-cmdc/**
+      - acceptance/support/**
+      - src/harness/tool-guard.ts
+      - src/extensions/tool-guard/**
+      - src/adapters/command-code.ts
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-process.ts
     expected:
       status: passed
       stop_code: denial_budget
@@ -155,7 +187,7 @@ entries:
         stop_code: last
         resumed: last
     freshness_days: 30
-    notes: The runtime hits its denial budget through three real guard denials (outside write, git commit, package install); the guard replaces the oh-my-pi denial wrapper.
+    notes: The runtime hits its denial budget through three real guard denials (outside write, git commit, package install); the guard replaces the oh-my-pi denial wrapper. Inputs cover the tool guard, its command-code hook, the command-code adapter, and the supervision/process layers that enforce the denial budget; src/cli.ts is excluded because the probe asserts guard denials, not CLI parsing.
   R5:
     title: Guardian ownership
     capability: R5
@@ -175,12 +207,20 @@ entries:
     shape: single
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/R5-cmdc/**
+      - acceptance/support/**
+      - src/harness/mission-cancel.ts
+      - src/harness/runtime-events.ts
+      - src/harness/runtime-settlement.ts
+      - src/harness/windows-job.ps1
+      - src/harness/windows-job.cs
     expected:
       status: cancelled
       settlement_confirmed: true
       guardian_receipt: true
     freshness_days: 30
-    notes: Command Code port of R5 with identical guardian settlement.
+    notes: Command Code port of R5 with identical guardian settlement. Inputs cover cancellation, runtime events, settlement, and the Windows job guardian that produce the guardian receipt; src/cli.ts is excluded because the probe asserts guardian settlement, not CLI parsing.
   policy:
     title: Protected-path policy stop
     capability: G3
@@ -200,12 +240,20 @@ entries:
     shape: single
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/policy-cmdc/**
+      - acceptance/support/**
+      - src/harness/tool-guard.ts
+      - src/extensions/tool-guard/**
+      - src/adapters/command-code.ts
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-process.ts
     expected:
       status: failed
       stop_code: policy
       resumed: false
     freshness_days: 30
-    notes: Command Code port of the G3 protected-path policy stop.
+    notes: Command Code port of the G3 protected-path policy stop. Inputs cover the tool guard, its command-code hook, and the adapter/supervision layers that stop a protected-path write; src/cli.ts is excluded because the probe asserts the policy stop, not CLI parsing.
   R10-stall:
     title: Stall recovery
     capability: R10
@@ -229,12 +277,18 @@ entries:
     model: qwen/qwen3.8-flash
     real_mission: not_applicable
     reason: Command Code print mode never idles without a tool in flight before the first response, so a real stall has no resumable native session.
+    inputs:
+      - acceptance/missions/R10-stall-cmdc/**
+      - acceptance/support/**
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-recovery.ts
+      - src/harness/runtime-process.ts
     expected:
       status: passed
       stop_code: stall
       resumed: true
     freshness_days: 30
-    notes: Fixture-only mechanism; no real mission evidence is claimed.
+    notes: Fixture-only mechanism; no real mission evidence is claimed. Inputs cover the supervision, recovery, and process layers that detect and resume a stall; src/cli.ts is excluded because the probe is fixture-only and asserts the stall mechanism, not CLI parsing.
   R10-controller-loss:
     title: Controller loss recovery
     capability: R10
@@ -258,6 +312,12 @@ entries:
     runtime: command-code
     model: qwen/qwen3.8-flash
     mission: missions/R10-controller-loss-cmdc/mission.yaml
+    inputs:
+      - acceptance/missions/R10-controller-loss-cmdc/**
+      - acceptance/support/**
+      - src/harness/runtime-recovery.ts
+      - src/harness/runtime-events.ts
+      - src/harness/runtime-attempt.ts
     expected:
       status: passed
       stop_code: controller_lost
@@ -267,7 +327,7 @@ entries:
         stop_code: first
         resumed: last
     freshness_days: 30
-    notes: Command Code port of R10 controller loss; the controller-loss wrapper supervises the harness controller, not the runtime.
+    notes: Command Code port of R10 controller loss; the controller-loss wrapper supervises the harness controller, not the runtime. Inputs cover runtime recovery, runtime events, and the attempt layer that resume a controller-lost attempt; src/cli.ts is excluded because the probe asserts controller-loss recovery, not CLI parsing.
   R7-turn-cap:
     title: Turn limit
     capability: R7
@@ -287,12 +347,18 @@ entries:
     shape: single
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/R7-turn-cap-cmdc/**
+      - acceptance/support/**
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-settlement.ts
+      - src/schema/runtime-control.ts
     expected:
       status: failed
       stop_code: turn_limit
       resumed: false
     freshness_days: 30
-    notes: Command Code port of the R7 turn limit.
+    notes: Command Code port of the R7 turn limit. Inputs cover supervision, settlement, and the runtime-control schema that enforce and report the turn cap; src/cli.ts is excluded because the probe asserts the turn limit, not CLI parsing.
   R7-repeated-failure:
     title: Repeated-failure stop and recovery
     capability: R7
@@ -316,6 +382,12 @@ entries:
     shape: single
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/R7-repeated-failure-cmdc/**
+      - acceptance/support/**
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-recovery.ts
+      - src/harness/runtime-settlement.ts
     expected:
       status: passed
       stop_code: repeated_failure
@@ -325,7 +397,7 @@ entries:
         stop_code: first
         resumed: last
     freshness_days: 30
-    notes: Command Code port of repeated-failure stop and bounded recovery.
+    notes: Command Code port of repeated-failure stop and bounded recovery. Inputs cover supervision, recovery, and settlement that stop on repeated failure and resume; src/cli.ts is excluded because the probe asserts repeated-failure recovery, not CLI parsing.
   C1-missing-output:
     title: Missing worker output
     capability: C1
@@ -348,6 +420,11 @@ entries:
     shape: team
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/C1-missing-output-cmdc/**
+      - acceptance/support/**
+      - src/harness/team-run.ts
+      - src/harness/output-verification.ts
     expected:
       status: passed_partial
       workers:
@@ -356,7 +433,7 @@ entries:
           blocked_reason: "Declared output out/missing.txt: Declared output is missing, unreadable, or outside the workspace"
         worker-good: { status: succeeded }
     freshness_days: 30
-    notes: Command Code port of the missing declared output contract.
+    notes: Command Code port of the missing declared output contract. Inputs cover the team scheduler and declared-output verification that block only the missing-output worker; src/cli.ts is excluded because the probe asserts worker output contracts, not CLI parsing.
   S3-budget-exhausted:
     title: Exhausted team budget
     capability: S3
@@ -380,6 +457,14 @@ entries:
     shape: team
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/S3-budget-exhausted-cmdc/**
+      - acceptance/support/**
+      - src/harness/team-run.ts
+      - src/harness/runtime-resources.ts
+      - src/schema/team.ts
+    real_mission: not_applicable
+    reason: Budget exhaustion needs known completed cost, which this fleet does not report; a command-code wave can only be refused for unknown cost or admitted under unknown_cost=admit, never priced down to an exhausted budget.
     expected:
       status: blocked
       workers:
@@ -389,7 +474,7 @@ entries:
       required_records:
         admission_blocked_reason: Remaining team cost budget cannot reserve another worker
     freshness_days: 30
-    notes: Command Code port of the exhausted team budget admission.
+    notes: Command Code port of the exhausted team budget admission. Inputs cover the team scheduler and resource limits that refuse admission once the cost budget is exhausted; src/cli.ts is excluded because the probe asserts budget admission, not CLI parsing.
   S3-unknown-cost:
     title: Unknown cost admission
     capability: S3
@@ -413,6 +498,12 @@ entries:
     shape: team
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/S3-unknown-cost-cmdc/**
+      - acceptance/support/**
+      - src/harness/team-run.ts
+      - src/harness/runtime-resources.ts
+      - src/harness/runtime-accounting.ts
     expected:
       status: blocked
       workers:
@@ -422,7 +513,7 @@ entries:
       required_records:
         admission_blocked_reason: Completed worker cost is unknown; refusing further paid admission
     freshness_days: 30
-    notes: The command-code costless wrapper strips runtime usage so completed worker cost stays unknown and the next paid wave is refused.
+    notes: The command-code costless wrapper strips runtime usage so completed worker cost stays unknown and the next paid wave is refused. Inputs cover the team scheduler, resource limits, and cost accounting that refuse paid admission on unknown cost; src/cli.ts is excluded because the probe asserts unknown-cost admission, not CLI parsing.
   R5-deep-path:
     title: Deep workspace path
     capability: R5
@@ -442,12 +533,19 @@ entries:
     shape: single
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/R5-deep-path-cmdc/**
+      - acceptance/support/**
+      - src/harness/windows-job.ps1
+      - src/harness/windows-job.cs
+      - src/harness/mission-cancel.ts
+      - src/harness/runtime-events.ts
     expected:
       status: passed
       settlement_confirmed: true
       guardian_receipt: true
     freshness_days: 30
-    notes: Command Code port of the deep workspace path settlement.
+    notes: Command Code port of the deep workspace path settlement. Inputs cover the Windows job guardian, cancellation, and runtime events that settle a deep-path run with a guardian receipt; src/cli.ts is excluded because the probe asserts deep-path settlement, not CLI parsing.
   G1-cmdc-guard:
     title: Command Code guard
     capability: G1
@@ -455,6 +553,14 @@ entries:
     shape: single
     runtime: command-code
     model: z-ai/glm-5.3-flash
+    inputs:
+      - acceptance/missions/G1-cmdc-guard/**
+      - acceptance/support/**
+      - src/harness/tool-guard.ts
+      - src/extensions/tool-guard/**
+      - src/adapters/command-code.ts
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-process.ts
     expected:
       status: passed
       required_files: [out/cmdc-guard-report.txt]
@@ -462,7 +568,7 @@ entries:
         denials: 3
         tool_guard_lines: 3
     freshness_days: 30
-    notes: Command Code denies an outside write, git commit, and package install while allowing the report. Run 20260922T040135Z-6c706a failed only because max_turns 12 was exhausted after the registered model spent 48 exploratory tool calls reading the workspace before the three denials; the budget was raised to 40 and the expected facts were not changed.
+    notes: Command Code denies an outside write, git commit, and package install while allowing the report. Run 20260922T040135Z-6c706a failed only because max_turns 12 was exhausted after the registered model spent 48 exploratory tool calls reading the workspace before the three denials; the budget was raised to 40 and the expected facts were not changed. Inputs cover the tool guard, its command-code hook, the command-code adapter, and the supervision/process layers that deny and count the three probes; src/cli.ts is excluded because the probe asserts guard denials, not CLI parsing.
   X1-paths:
     title: Forward-slash paths
     capability: X1
@@ -481,11 +587,17 @@ entries:
     shape: single
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/X1-paths-cmdc/**
+      - acceptance/support/**
+      - src/harness/artifact-paths.ts
+      - src/harness/team-run.ts
+      - src/adapters/command-code.ts
     expected:
       status: passed
       path_style: forward_slashes
     freshness_days: 30
-    notes: Command Code port of the canonical forward-slash path probe.
+    notes: Command Code port of the canonical forward-slash path probe. Inputs cover artifact path handling, the team scheduler, and the command-code adapter that write canonical forward-slash paths; src/cli.ts is excluded because the probe asserts artifact path style, not CLI parsing.
   R11-deadline-grace:
     title: Deadline grace delivery
     capability: R11
@@ -509,6 +621,14 @@ entries:
     shape: single
     runtime: command-code
     model: qwen/qwen3.8-flash
+    inputs:
+      - acceptance/missions/R11-deadline-grace-cmdc/**
+      - acceptance/support/**
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-process.ts
+      - src/harness/runtime-settlement.ts
+      - src/harness/runtime-recovery.ts
+      - src/harness/runtime-final-message.ts
     expected:
       status: passed
       stop_code: deadline
@@ -518,7 +638,7 @@ entries:
         completion: incomplete
         grace: true
     freshness_days: 30
-    notes: Command Code port of the deadline grace delivery probe.
+    notes: Command Code port of the deadline grace delivery probe. Inputs cover supervision, process deadlines, settlement, recovery, and final-message handling that deliver the grace report; src/cli.ts is excluded because the probe asserts deadline grace delivery, not CLI parsing.
   G1-cmdc-shell-policy:
     title: Command Code shell protected-path policy
     capability: G1
@@ -526,6 +646,14 @@ entries:
     shape: single
     runtime: command-code
     model: z-ai/glm-5.3-flash
+    inputs:
+      - acceptance/missions/G1-cmdc-shell-policy/**
+      - acceptance/support/**
+      - src/harness/tool-guard.ts
+      - src/extensions/tool-guard/**
+      - src/adapters/command-code.ts
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-process.ts
     expected:
       status: failed
       stop_code: policy
@@ -533,7 +661,7 @@ entries:
       required_records:
         guard_armed: true
     freshness_days: 30
-    notes: Guarded Command Code first runs pwd for hook evidence, then attempts rm under .harness; policy must stop before execution.
+    notes: Guarded Command Code first runs pwd for hook evidence, then attempts rm under .harness; policy must stop before execution. Inputs cover the tool guard, its command-code hook, and the adapter/supervision layers that stop the protected shell command before execution; src/cli.ts is excluded because the probe asserts the shell policy stop, not CLI parsing.
   G1-cmdc-hook-broken:
     title: Command Code broken guard hook
     capability: G1
@@ -542,6 +670,14 @@ entries:
     runtime: command-code
     model: z-ai/glm-5.3-flash
     support_shim: cmdc.cmd
+    inputs:
+      - acceptance/missions/G1-cmdc-hook-broken/**
+      - acceptance/support/**
+      - src/harness/tool-guard.ts
+      - src/extensions/tool-guard/**
+      - src/adapters/command-code.ts
+      - src/harness/runtime-supervision.ts
+      - src/harness/runtime-process.ts
     expected:
       status: failed
       stop_code: policy
@@ -549,4 +685,4 @@ entries:
       required_records:
         guard_armed: false
     freshness_days: 30
-    notes: The real run prepends acceptance/support/cmdc.cmd via PATH; cmdc-broken-hook.mjs rewrites the generated settings hook to a nonexistent file, exercising G1 fail-closed behavior and G3 protected-artifact tamper detection.
+    notes: The real run prepends acceptance/support/cmdc.cmd via PATH; cmdc-broken-hook.mjs rewrites the generated settings hook to a nonexistent file, exercising G1 fail-closed behavior and G3 protected-artifact tamper detection. Inputs cover the tool guard, its command-code hook, the adapter that generates the settings hook, and the supervision/process layers that fail closed when the hook is broken; src/cli.ts is excluded because the probe asserts fail-closed guard behaviour, not CLI parsing.

@@ -1,6 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,7 @@ import {
   planClaudeCodeRun,
   runClaudeCode,
 } from "../src/adapters/claude-code.js";
+import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
 const MODEL = DEFAULT_CLAUDE_CODE_MODEL;
 
@@ -52,7 +53,7 @@ beforeEach(async () => {
   snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-claude-code-snapshot-"));
   const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "claude-code-hook.js");
   await mkdir(path.dirname(hook), { recursive: true });
-  await writeFile(hook, "export default function () {}\n");
+  await writeGuardHookFixture(hook);
   previousDist = process.env.UH_HARNESS_DIST;
   previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
   process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");
@@ -102,6 +103,61 @@ test("worker plan embeds guard settings, exact model route, and stream flags", a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("plans -p without a prompt argument and frames the packet as a stream-json user message on stdin", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    const plan = await planClaudeCodeRun(root, missionPath);
+    expect(plan.promptSource).toBe("stdin");
+    expect(plan.args).toContain("-p");
+    // `-p` carries no query: the token after it is a flag, never the prompt.
+    expect(plan.args[plan.args.indexOf("-p") + 1]).not.toBe(plan.prompt);
+    expect(plan.args).not.toContain(plan.prompt);
+    expect(plan.args.join("\0")).not.toContain(plan.prompt);
+    // The documented print-mode input format that makes stdin the user's task.
+    expect(flag(plan.args, "--input-format")).toBe("stream-json");
+    expect(plan.stdin.endsWith("\n")).toBe(true);
+    expect(JSON.parse(plan.stdin)).toEqual({
+      type: "user", message: { role: "user", content: plan.prompt },
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("the runner receives the prompt as stdin and argv and the recorded session stay prompt-free", async () => {
+  const { root, missionPath } = await fixture();
+  try {
+    let seenArgs: string[] | undefined;
+    let seenStdin: string | undefined;
+    await runClaudeCode(root, missionPath, {
+      runId: "prompt-stdin",
+      runner: async input => { seenArgs = input.args; seenStdin = input.stdin; return okRunner(); },
+      collectDiff: noopDiff,
+    });
+    expect(seenArgs).toContain("-p");
+    expect(seenArgs).not.toContain(seenStdin);
+    expect(seenStdin).toBeDefined();
+    const message = JSON.parse(seenStdin!) as { type: string; message: { role: string; content: string } };
+    expect(message.type).toBe("user");
+    expect(message.message.role).toBe("user");
+    expect(message.message.content).toContain("Preserve outputs");
+    expect(seenArgs).not.toContain(message.message.content);
+    const session = parse(await readFile(path.join(path.dirname(missionPath), "runs", "prompt-stdin", "runtime-session.yaml"), "utf8")) as { args: string[] };
+    expect(session.args).not.toContain(message.message.content);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a prompt beyond the Windows command-line limit plans without error", async () => {
+  const longObjective = "x".repeat(50_000);
+  const { root, missionPath } = await fixture({}, mission => { mission.objective = longObjective; });
+  try {
+    const plan = await planClaudeCodeRun(root, missionPath);
+    expect(plan.prompt.length).toBeGreaterThanOrEqual(50_000);
+    expect(plan.args).not.toContain(plan.prompt);
+    // No single argv token approaches the 32,767-character Windows limit.
+    for (const arg of plan.args) expect(arg.length).toBeLessThan(32_767);
+    expect((JSON.parse(plan.stdin) as { message: { content: string } }).message.content).toBe(plan.prompt);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("worker runs refuse guard-less missions, non-default permission modes, and reserved flags", async () => {
   const { root, missionPath } = await fixture({ permission_mode: "dontAsk" });
   try {
@@ -121,11 +177,11 @@ test("worker runs refuse guard-less missions, non-default permission modes, and 
 });
 
 test("orchestrator role arms controller commands while keeping worker protections", async () => {
-  const { root, missionPath } = await fixture({ role: "orchestrator" }, mission => { delete mission.guard; });
+  const { root, missionPath } = await fixture({ role: "orchestrator" });
   try {
     const plan = await planClaudeCodeRun(root, missionPath);
     expect(plan.guard).toMatchObject({
-      write_roots: ["."], deny_git_mutations: true, deny_package_installs: true, controller_commands: true,
+      write_roots: ["out"], deny_git_mutations: true, deny_package_installs: true, controller_commands: true,
     });
     expect(plan.permission_mode).toBe("guard");
     const settings = JSON.parse(flag(plan.args, "--settings"));
@@ -140,8 +196,58 @@ test("orchestrator role arms controller commands while keeping worker protection
     const artifact = parse(await readFile(path.join(runDir, "tool-guard.json"), "utf8")) as Record<string, unknown>;
     expect(artifact.controller_commands).toBe(true);
     expect(artifact.deny_git_mutations).toBe(true);
+    expect(artifact.write_roots).toEqual(["out"]);
     expect(seenEnv?.UH_TOOL_GUARD_POLICY).toContain("tool-guard.json");
+    if (process.platform !== "win32") expect((await stat(path.join(runDir, "tool-guard.json"))).mode & 0o222).toBe(0);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("orchestrator write grants cover the guard write roots and nothing wider", async () => {
+  const { root, missionPath } = await fixture({ role: "orchestrator" });
+  try {
+    const plan = await planClaudeCodeRun(root, missionPath);
+    const settings = JSON.parse(flag(plan.args, "--settings"));
+    expect(settings.permissions.allow).toEqual([
+      "Bash(uh *)", "Bash(node *dist/cli.js*)", "Write(out/**)", "Edit(out/**)",
+    ]);
+    // The granted Edit tool has to be enabled, or the rule would be inert.
+    expect(flag(plan.args, "--tools")).toBe("Bash,Read,Write,Edit");
+    // A worker on the same mission is judged by the hook alone.
+    const worker = await fixture();
+    try {
+      const workerPlan = await planClaudeCodeRun(worker.root, worker.missionPath);
+      expect(JSON.parse(flag(workerPlan.args, "--settings")).permissions).toBeUndefined();
+      expect(workerPlan.args).not.toContain("--tools");
+    } finally { await rm(worker.root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+  const nested = await fixture({ role: "orchestrator" }, mission => {
+    mission.guard = { write_roots: ["out", path.join("reports", "settlement")] };
+  });
+  try {
+    const plan = await planClaudeCodeRun(nested.root, nested.missionPath);
+    const settings = JSON.parse(flag(plan.args, "--settings"));
+    expect(settings.permissions.allow).toEqual([
+      "Bash(uh *)", "Bash(node *dist/cli.js*)",
+      "Write(out/**)", "Edit(out/**)", "Write(reports/settlement/**)", "Edit(reports/settlement/**)",
+    ]);
+  } finally { await rm(nested.root, { recursive: true, force: true }); }
+});
+
+test("orchestrator write grants refuse repository-wide and escaping write roots", async () => {
+  const repositoryWide = await fixture({ role: "orchestrator" }, mission => { mission.guard = { write_roots: ["."] }; });
+  try {
+    await expect(planClaudeCodeRun(repositoryWide.root, repositoryWide.missionPath))
+      .rejects.toThrow(/whole repository/);
+  } finally { await rm(repositoryWide.root, { recursive: true, force: true }); }
+  const escaping = await fixture({ role: "orchestrator" }, mission => { mission.guard = { write_roots: ["../outside"] }; });
+  try {
+    await expect(planClaudeCodeRun(escaping.root, escaping.missionPath))
+      .rejects.toThrow(/outside the mission checkout/);
+  } finally { await rm(escaping.root, { recursive: true, force: true }); }
+  const guardless = await fixture({ role: "orchestrator" }, mission => { delete mission.guard; });
+  try {
+    await expect(planClaudeCodeRun(guardless.root, guardless.missionPath)).rejects.toThrow(/guard policy/);
+  } finally { await rm(guardless.root, { recursive: true, force: true }); }
 });
 
 test("orchestrator role preserves a mission-provided guard and its write roots", async () => {

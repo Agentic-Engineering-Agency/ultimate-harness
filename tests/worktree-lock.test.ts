@@ -10,7 +10,10 @@
  *   (a) create its worktrees locked (`git worktree add --lock --reason …`),
  *   (b) unlock + remove on teardown, and
  *   (c) never prune globally — when a worktree directory vanishes out of band
- *       it drops only that one registration and tolerates a refusal.
+ *       it drops only that one registration and tolerates a refusal, and
+ *   (e) never delete through a link — Git for Windows' `git worktree remove`
+ *       recurses into directory junctions and deletes their targets' contents
+ *       (a `node_modules` junction empties the main checkout's `node_modules`).
  *
  * These tests drive real `git` inside a throwaway repository (never the repo
  * under test) and assert the lock/registration guarantees end to end.
@@ -18,11 +21,12 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, normalize } from "node:path";
 import { tmpdir } from "node:os";
 import { defaultGitOps } from "../src/harness/team-run.js";
 import { GitWorktreeBackend } from "../src/harness/sandbox-backends.js";
+import { removeWorktreeLinks } from "../src/harness/worktree-links.js";
 
 const execFileP = promisify(execFile);
 
@@ -228,5 +232,70 @@ describe("worktree locking (d): teardown of a deleted worktree is safe and isola
 
     await rename(parked, sibling);
     expect((await git(sibling, ["status", "--porcelain"])).trim()).toBe("");
+  });
+});
+
+/** A directory link: a junction on Windows (no privilege needed), a symlink elsewhere. */
+async function linkDirectory(target: string, linkPath: string): Promise<void> {
+  await mkdir(dirname(linkPath), { recursive: true });
+  await symlink(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+}
+
+/** A directory outside the worktree, standing in for the main checkout's node_modules. */
+async function makeSharedModules(): Promise<string> {
+  const shared = join(ROOT, "shared_modules");
+  await mkdir(join(shared, "pkg"), { recursive: true });
+  await writeFile(join(shared, "pkg", "index.js"), "keep\n", "utf-8");
+  return shared;
+}
+
+describe("worktree locking (e): teardown never deletes through a link", () => {
+  test("removeWorktreeLinks removes only links, at any depth, and counts them", async () => {
+    const tree = join(ROOT, "tree");
+    await mkdir(join(tree, "src"), { recursive: true });
+    await writeFile(join(tree, "src", "own.ts"), "own\n", "utf-8");
+    const shared = await makeSharedModules();
+    await linkDirectory(shared, join(tree, "node_modules"));
+    await linkDirectory(shared, join(tree, "src", "deep", "node_modules"));
+
+    expect(await removeWorktreeLinks(tree)).toBe(2);
+
+    await expect(stat(join(tree, "node_modules"))).rejects.toThrow();
+    await expect(stat(join(tree, "src", "deep", "node_modules"))).rejects.toThrow();
+    expect(await readFile(join(tree, "src", "own.ts"), "utf-8")).toBe("own\n");
+    expect(await readFile(join(shared, "pkg", "index.js"), "utf-8")).toBe("keep\n");
+  });
+
+  test("GitWorktreeBackend.teardown leaves a linked directory's contents in place", async () => {
+    const worktreePath = join(ROOT, ".harness", "sandboxes", "linked", "worktree");
+    await makeParentDir(worktreePath);
+    const backend = new GitWorktreeBackend();
+    await backend.materialize({ root: ROOT, sandboxId: "linked", worktreePath, baseRef: "HEAD" });
+    const shared = await makeSharedModules();
+    await linkDirectory(shared, join(worktreePath, "node_modules"));
+    await linkDirectory(shared, join(worktreePath, "packages", "app", "node_modules"));
+
+    await backend.teardown(
+      { root: ROOT, worktreePath, branch: "sandbox/linked" },
+      { force: true, keepBranch: false },
+    );
+
+    expect(await readFile(join(shared, "pkg", "index.js"), "utf-8")).toBe("keep\n");
+    expect(findWorktree(await listWorktrees(ROOT), worktreePath)).toBeUndefined();
+    await expect(stat(worktreePath)).rejects.toThrow();
+  });
+
+  test("defaultGitOps.removeWorktree leaves a linked directory's contents in place", async () => {
+    const worktreePath = join(ROOT, "wt-team-linked");
+    await makeParentDir(worktreePath);
+    await defaultGitOps.addWorktree(ROOT, "uh/team/m/linked", worktreePath, "HEAD");
+    const shared = await makeSharedModules();
+    await linkDirectory(shared, join(worktreePath, "node_modules"));
+
+    await defaultGitOps.removeWorktree(ROOT, worktreePath);
+
+    expect(await readFile(join(shared, "pkg", "index.js"), "utf-8")).toBe("keep\n");
+    expect(findWorktree(await listWorktrees(ROOT), worktreePath)).toBeUndefined();
+    await expect(stat(worktreePath)).rejects.toThrow();
   });
 });

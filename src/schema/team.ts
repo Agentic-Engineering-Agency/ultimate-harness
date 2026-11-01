@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RuntimeLimitsSchema } from "./runtime-control.js";
+import { RuntimeLimitsSchema, ToolGuardFieldsSchema } from "./runtime-control.js";
 
 export const CanonicalTeamStatusSchema = z.enum([
   "running",
@@ -35,6 +35,8 @@ const CanonicalWorkerContractSchema = z.object({
     files: z.array(z.string().min(1)),
   }).strict().optional(),
   seed: z.number().int().nonnegative().optional(),
+  /** The worker's guard: the team mission's, narrowed by its packet, template and own block. */
+  guard: ToolGuardFieldsSchema.optional(),
 }).strict();
 
 const CanonicalWorkerOutputSchema = z.object({
@@ -56,6 +58,18 @@ const CanonicalWorkerSalvageSchema = z.object({
   outputs_passed: z.boolean(),
   checks_passed: z.boolean(),
   branch: z.string().min(1),
+  /** The commit the harness made for the salvaged work. */
+  commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+}).strict();
+
+/**
+ * Changed paths a worker left outside its resolved write roots (and that are
+ * not protected), so they were never staged into the worker commit. `paths` is
+ * capped for the canonical state; `total` is the true count.
+ */
+const CanonicalWorkerOutOfRootsSchema = z.object({
+  paths: z.array(z.string().min(1)),
+  total: z.number().int().nonnegative(),
 }).strict();
 
 export const CanonicalTeamWorkerSchema = z.object({
@@ -74,6 +88,22 @@ export const CanonicalTeamWorkerSchema = z.object({
   blocked_reason: z.string().optional(),
   outputs: z.array(CanonicalWorkerOutputSchema).optional(),
   salvage: CanonicalWorkerSalvageSchema.optional(),
+  /**
+   * Changed paths left unstaged because they fell outside the worker's write
+   * roots and declared outputs. Present only when such paths existed.
+   */
+  out_of_roots: CanonicalWorkerOutOfRootsSchema.optional(),
+  /**
+   * Commit id every worker (and the leader) branched from, resolved once per
+   * team run. Also written to `git config branch.<branch>.base` so independent
+   * review reads the exact fork point instead of a moving ref.
+   */
+  base_commit: z.string().min(1).optional(),
+  /**
+   * The commit the harness itself made for this worker's work. The acceptance check `no_worker_commits` allows
+   * exactly this commit; a commit that only carries the harness's message is a worker's.
+   */
+  commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 }).strict();
 
 export const CanonicalTeamLeaderSchema = z.object({
@@ -92,6 +122,8 @@ export const CanonicalTeamStateSchema = z.object({
   integration_report_path: z.string().min(1),
   verification_status: z.enum(["passed", "failed", "blocked", "waived"]).nullable(),
   admission_blocked_reason: z.string().min(1).optional(),
+  /** Waves admitted despite unknown completed cost, one explicit note each. */
+  admission_notes: z.array(z.string().min(1)).optional(),
   leader: CanonicalTeamLeaderSchema,
   workers: z.array(CanonicalTeamWorkerSchema),
 }).strict();

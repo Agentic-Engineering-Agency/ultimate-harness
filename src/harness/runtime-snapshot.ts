@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, chmod, lstat, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { renameWithRetry } from "./artifact-transaction.js";
@@ -43,10 +43,44 @@ function snapshotDefaultSourceDir(): string {
 function snapshotDefaultCacheRoot(): string {
   const override = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
   if (override) return override;
-  // Tests must stay hermetic; the per-user cache is not a temporary directory on
-  // Windows. Everything else mirrors the Windows guardian's cache base.
-  const base = process.env.VITEST ? tmpdir() : process.env.LOCALAPPDATA || tmpdir();
+  // Tests must stay hermetic. Otherwise the cache is the user's own: the local
+  // app data directory on Windows, the XDG cache directory elsewhere.
+  const base = process.env.VITEST
+    ? tmpdir()
+    : process.platform === "win32"
+      ? process.env.LOCALAPPDATA || tmpdir()
+      : process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache");
   return path.join(base, "ultimate-harness", "runtime-snapshots");
+}
+
+const POSIX = process.platform !== "win32";
+
+/** Whether a POSIX entry belongs to this user and no one else can write it. */
+function privateEntry(info: { uid: number; mode: number }): boolean {
+  const uid = process.getuid?.();
+  return (uid === undefined || info.uid === uid) && (info.mode & 0o022) === 0;
+}
+
+/**
+ * Create the cache root private to this user. On POSIX it must be a real
+ * directory this user owns, kept at mode 0700, inside a parent that only its
+ * owner (this user or root) can rename entries in.
+ */
+async function preparePrivateCacheRoot(cacheRoot: string): Promise<void> {
+  await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+  if (!POSIX) return;
+  const info = await lstat(cacheRoot);
+  const uid = process.getuid?.();
+  if (!info.isDirectory() || (uid !== undefined && info.uid !== uid)) {
+    throw new Error(`Runtime snapshot cache ${cacheRoot} is not a directory owned by the current user`);
+  }
+  if ((info.mode & 0o077) !== 0) await chmod(cacheRoot, 0o700);
+  const parent = await lstat(path.dirname(cacheRoot));
+  const parentOwnerOk = uid === undefined || parent.uid === uid || parent.uid === 0;
+  const parentShared = (parent.mode & 0o022) !== 0 && (parent.mode & 0o1000) === 0;
+  if (!parentOwnerOk || parentShared) {
+    throw new Error(`Runtime snapshot cache ${cacheRoot} sits in a directory other users can change`);
+  }
 }
 
 function toPosix(value: string): string {
@@ -181,7 +215,13 @@ function hashOf(content: Buffer): string {
 }
 
 async function verifySnapshot(root: string, contents: Map<string, Buffer>): Promise<void> {
-  const present = new Set((await walkFiles(root)).map(file => toPosix(path.relative(root, file))));
+  const files = await walkFiles(root);
+  if (POSIX) {
+    for (const entry of [root, ...files, ...new Set(files.map(file => path.dirname(file)))]) {
+      if (!privateEntry(await lstat(entry))) throw new Error(`Runtime snapshot ${root} is not private to the current user: ${entry}`);
+    }
+  }
+  const present = new Set(files.map(file => toPosix(path.relative(root, file))));
   for (const relative of contents.keys()) {
     if (!present.has(relative)) throw new Error(`Runtime snapshot ${root} is incomplete: missing ${relative}`);
   }
@@ -224,19 +264,19 @@ export async function snapshotGuardHook(hookFileName: string, options: SnapshotG
   const target = path.join(cacheRoot, digest.digest("hex"));
   const hookPath = path.join(target, toPosix(path.relative(layoutRoot, entry)));
 
+  await preparePrivateCacheRoot(cacheRoot);
   if (await pathExists(target)) {
     await verifySnapshot(target, contents);
     return hookPath;
   }
 
-  await mkdir(cacheRoot, { recursive: true });
   const temporary = path.join(cacheRoot, `${path.basename(target)}.${randomUUID()}.tmp`);
   try {
-    await mkdir(temporary, { recursive: true });
+    await mkdir(temporary, { recursive: true, mode: 0o700 });
     for (const relative of ordered) {
       const destination = path.join(temporary, relative);
-      await mkdir(path.dirname(destination), { recursive: true });
-      await writeFile(destination, contents.get(relative)!);
+      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      await writeFile(destination, contents.get(relative)!, POSIX ? { mode: 0o444 } : undefined);
     }
     try {
       await renameWithRetry(temporary, target);

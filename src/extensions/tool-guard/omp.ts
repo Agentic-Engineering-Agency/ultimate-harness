@@ -1,39 +1,36 @@
-import { appendFile, readFile } from "node:fs/promises";
-import { decideToolCall, toolTargetForLog } from "../../harness/tool-guard.js";
-import { ToolGuardPolicySchema } from "../../schema/runtime-control.js";
+import { runToolGuard, toolGuardFailClosedReason } from "./core.js";
 
-type ToolCallEvent = { toolName?: string; input?: unknown };
+/**
+ * oh-my-pi extension wrapper around the shared guard core.
+ *
+ * oh-my-pi fires a `tool_call` event before a tool runs and blocks it by
+ * returning `{ block: true, reason }`. The event carries the runtime's own
+ * `toolCallId`, which is the same identifier the JSON event stream reports on
+ * `tool_execution_start`/`tool_execution_end`, so the logged `call_id` matches
+ * what supervision sees. The handler denies on any error.
+ */
+
+type ToolCallEvent = { toolName?: string; input?: unknown; toolCallId?: string };
 type PiLike = { on(event: "tool_call", callback: (event: ToolCallEvent) => unknown): void };
-
-type AppliedPolicy = ReturnType<typeof ToolGuardPolicySchema.parse> & { worker_root: string; protected_paths?: string[] };
-let loadedPath = "";
-let loaded: AppliedPolicy | undefined;
-
-async function policy(): Promise<AppliedPolicy | undefined> {
-  const policyPath = process.env.UH_TOOL_GUARD_POLICY;
-  if (!policyPath) return undefined;
-  if (!loaded || loadedPath !== policyPath) {
-    const raw = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
-    const { schema_version: _schema, worker_root, protected_paths, controller_commands: _controllerCommands, ...fields } = raw;
-    loaded = { ...ToolGuardPolicySchema.parse(fields), worker_root: String(worker_root ?? process.cwd()), protected_paths: Array.isArray(protected_paths) ? protected_paths.map(String) : undefined };
-    loadedPath = policyPath;
-  }
-  return loaded;
-}
-
-async function record(tool: string, input: unknown, denial: NonNullable<ReturnType<typeof decideToolCall>["deny"]>): Promise<void> {
-  const logPath = process.env.UH_TOOL_GUARD_LOG;
-  if (!logPath) return;
-  await appendFile(logPath, `${JSON.stringify({ ts: new Date().toISOString(), tool, class: denial.class, target: denial.target ?? toolTargetForLog(tool, input), reason: denial.reason })}\n`, "utf8").catch(() => {});
-}
 
 export default function (pi: PiLike): void {
   pi.on("tool_call", async (event) => {
-    const applied = await policy();
-    if (!applied) return undefined;
-    const decision = decideToolCall(applied, event.toolName ?? "", event.input, applied.worker_root);
-    if (!decision.deny) return undefined;
-    await record(event.toolName ?? "", event.input, decision.deny);
-    return { block: true, reason: decision.deny.reason };
+    try {
+      const verdict = await runToolGuard({
+        policyPath: process.env.UH_TOOL_GUARD_POLICY,
+        logPath: process.env.UH_TOOL_GUARD_LOG,
+        call: {
+          tool: typeof event?.toolName === "string" ? event.toolName : "",
+          input: event?.input,
+          callId: typeof event?.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined,
+        },
+      });
+      if (verdict.decision === "deny") {
+        return { block: true, reason: verdict.reason ?? "UH tool guard denied the tool call" };
+      }
+      return undefined;
+    } catch (error) {
+      return { block: true, reason: toolGuardFailClosedReason(error) };
+    }
   });
 }

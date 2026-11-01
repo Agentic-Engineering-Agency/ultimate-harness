@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -884,6 +884,69 @@ describe("verify-then-promote auto-trigger (S6 #139)", () => {
     expect(result.status).toBe("passed");
     expect(result.promotion).toBeUndefined();
     expect(await fileExists(join(missionDir, "promotion.yaml"))).toBe(false);
+  });
+});
+
+describe("System One never passes over zero asked criteria", () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.TYPESAFE_API_KEY;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.TYPESAFE_API_KEY;
+    else process.env.TYPESAFE_API_KEY = originalKey;
+  });
+
+  /** A provider stub that answers every asked question with `noul`; never the real provider. */
+  function answerEveryQuestionWith(noul: number): void {
+    process.env.TYPESAFE_API_KEY = "synthetic-test-key";
+    globalThis.fetch = (async (_input, init) => {
+      const { questions } = JSON.parse(String(init?.body)) as { questions: Record<string, { type: string }> };
+      const answers: Record<string, unknown> = {};
+      for (const name of Object.keys(questions)) answers[name] = { noul };
+      return new Response(JSON.stringify({ model: "jev-test", answers }));
+    }) as typeof fetch;
+  }
+
+  async function readDecisionReceipt(missionDir: string) {
+    const files = await readdir(join(missionDir, "decision-receipts"));
+    expect(files).toHaveLength(1);
+    return JSON.parse(await readFile(join(missionDir, "decision-receipts", files[0]), "utf-8")) as Record<string, unknown>;
+  }
+
+  test("a failing required check with no acceptance criteria is never a passing judgment", async () => {
+    const missionDir = await writeMission("vacuous-pass", [{
+      name: "typecheck",
+      command: "node -e \"process.exit(1)\"",
+    }]);
+    answerEveryQuestionWith(0);
+
+    const result = await verifyMission(TEST_ROOT, "vacuous-pass", { useSandbox: false });
+
+    expect(result.status).toBe("failed");
+    const artifact = await readVerification("vacuous-pass");
+    const messages = (artifact.findings ?? []).map((f: { message: string }) => f.message);
+    expect(messages).toContain("TypeSafe System One: no non-deterministic criteria to judge");
+    expect(messages.some((message: string) => /System One verdict: pass/.test(message))).toBe(false);
+    // The deterministic check failure grounds the outcome, so the receipt is
+    // deliberate and available rather than the non-discriminating `uncertain`.
+    expect(await readDecisionReceipt(missionDir)).toMatchObject({
+      status: "advisory", provider_status: "available", applied: false,
+    });
+  });
+
+  test("no criteria and no deterministic failure records an uncertain, non-authorizing judgment", async () => {
+    const missionDir = await writeMission("vacuous-uncertain", [{ name: "ok", command: "node -e \"process.exit(0)\"" }]);
+    answerEveryQuestionWith(0);
+
+    const result = await verifyMission(TEST_ROOT, "vacuous-uncertain", { useSandbox: false });
+
+    expect(result.status).toBe("passed");
+    expect(await readDecisionReceipt(missionDir)).toMatchObject({
+      status: "uncertain", provider_status: "uncertain", applied: false, confidence: 0,
+    });
+    const artifact = await readVerification("vacuous-uncertain");
+    expect((artifact.findings ?? []).some((f: { message: string }) => /System One/.test(f.message))).toBe(false);
   });
 });
 

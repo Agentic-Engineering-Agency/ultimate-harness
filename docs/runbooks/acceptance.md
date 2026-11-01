@@ -18,11 +18,40 @@ done
 
 `R10-stall-cmdc` is fixture-only and prints `FIXTURE` without running; `G2-cmdc` hits its denial budget through real guard denials, and `S3-unknown-cost-cmdc` strips runtime usage through `acceptance/support/costless-wrapper-cmdc.mjs` so admission is refused on unknown cost.
 
-Inspect results with `uh acceptance status --json`, then generate a local report with `uh acceptance report`. Canonical runtime artifacts are stored in the selected workspace; generated evidence is written under ignored `acceptance/evidence/<capability>/`. Keep execution records in private local or CI storage, not in the public source repository.
+Inspect results with `uh acceptance status --json`, then generate a local report with `uh acceptance report`. Revalidate legacy evidence without rerunning any model with `uh acceptance rebind` (see below). Canonical runtime artifacts are stored in the selected workspace; generated evidence is written under ignored `acceptance/evidence/<capability>/`. Keep execution records in private local or CI storage, not in the public source repository.
 
 Evidence records include actual `fact_sources`; registry `expected.fact_sources` selects each field from the first or last sorted attempt and is not itself compared. A capability without fresh passing real-runtime evidence is **unproven**, whatever the test suite or fixture smoke says. A failed real run is retained as failed evidence; expectations must not be changed merely to make a run pass.
 
 Run the campaign at one harness commit before evaluating freshness. The report drift check compares the registry and available local evidence with the generated report. A clean checkout ships no local execution records, so its report does not claim live proof. Fixture-only capabilities render `fixture_only` without real evidence; attempted fixture missions retain their actual outcome. Review any generated report before publication: local run identifiers, timestamps, paths, transcripts and account information are not public documentation.
+
+## Input identity freshness
+
+Evidence freshness is tied to the files a probe asserts, not to the harness commit. Each registry entry declares `inputs` (repository-relative glob patterns); when absent the runner falls back to the conservative default of the entry's own mission directory under `acceptance/missions/`, `acceptance/support/**`, and `src/**`. Do not include `src/cli.ts` unless the probe asserts CLI behaviour; each entry's `notes` say why its list is sufficient. When evidence is written, the runner records:
+
+- `input_digest` — sha256 over the sorted `(relative path, sha256 of content)` list of every tracked file matching the entry's inputs, plus the runtime id, the runtime version when known, and the model. Line endings are normalized (CRLF to LF) so a commit blob and a checked-out working-tree file hash identically.
+- `inputs_resolved` — the number of files that matched.
+- `harness_commit` — retained as provenance only; it no longer drives freshness while `input_digest` is present.
+- `runtime_version` — the runtime version folded into the digest: Command Code reuses the adapter's check (`cmdc --version --no-auto-update`), oh-my-pi uses its `--version` command, and any other runtime uses `<runtime> --version`. The adapter manifest's `cli_command`/`cli_args` win when present. When the version cannot be read the runner records `"unknown"` and sets `observed.runtime_version_unreadable: true`, saying so in the evidence. Freshness reproduces the digest with the record's own `runtime_version`, so the version it was written with must accompany the digest.
+
+`uh acceptance status` classifies evidence with an `input_digest` as `stale` only when the current digest differs or the `freshness_days` age limit is exceeded, and names up to five changed input files as the reason. Evidence without an `input_digest` (written before this field existed) keeps the commit rule: it is stale when `harness_commit` differs from the current commit or the age limit is exceeded. A digest-bearing record classified without an explicit root resolves the root from the evidence location (`<root>/acceptance/evidence`, two levels up) and re-hashes there, rather than silently falling back to the commit rule.
+
+`uh acceptance rebind` revalidates legacy evidence without rerunning any model: for each record without an `input_digest` it computes the digest at the record's `harness_commit` (reading contents with `git show <commit>:<path>`) and at HEAD, and when the two are equal stamps `input_digest` and `rebound_from_commit` into the record. It prints one line per record — `rebound`, `changed` (with the changed files), or `skipped` (with the reason).
+
+## Invariants, exercised mechanisms, and injected actions
+
+Realistic missions are judged on what the harness guarantees, not only on what a model chose to do. An entry may declare `expected.invariants` (a strict list), `expected.exercised_report` (mechanism names), and an entry-level `inject` block.
+
+Each invariant produces one observed fact under `observed.invariants`: `true` when it holds, or the offending paths/lines when it does not, and a non-`true` value is a mismatch (`invariants.<name>`). An invariant that read no evidence — the mission artifact root is absent, a worker invariant finds no worker worktrees, `protected_paths_untouched` finds no recorded baseline, or `guard_log_consistent` finds no `runtime-control.json` — reports `unverifiable: <reason>`, which is a mismatch and never a pass. The five names are:
+
+- `no_writes_outside_roots` — every change in each worker worktree is inside that worker's guard write roots or its declared outputs. The change set is `git diff` against the worktree's base (the merge base of the worker branch and the run root's `HEAD`), untracked files (`git ls-files --others --exclude-standard`), and untracked *ignored* files (`git ls-files --others --ignored --exclude-standard`) — excluding only the harness-owned roots (`.harness`, `.commandcode`, `.omp`, `.pi`, `.git`) and `node_modules`, so a write into a gitignored path outside the roots is still caught.
+- `no_worker_commits` — no commit exists on a worker branch since its base other than the harness's own: at most one commit whose subject is exactly `team(<worker>): worker run` or `team(<worker>): salvaged worker run` (the harness commits under the repository's configured identity), plus any commit under the placeholder `uh-team@example.com` identity used when a repository has none.
+- `no_package_install` — no `node_modules` directory and no lockfile that was not already tracked at the base appeared in any worker worktree.
+- `protected_paths_untouched` — every policy file the harness wrote (`.commandcode/settings.json` and `.commandcode/.gitignore`) still matches the sha256 the adapter recorded for that worker root in the run's `tool-guard.json` (`written_files`). Comparing copies with each other is not the test: a file rewritten identically everywhere, present in only one copy, or missing everywhere fails against the recorded baseline, and a missing baseline is `unverifiable`.
+- `guard_log_consistent` — the denials counted in a run's `runtime-control.json` equal that run's non-allow `tool-guard.log` lines plus its `native_refusals`. Native refusals are counted in `runtime-control.json`, not the guard log: no hook runs for them, so no log line is written.
+
+`expected.exercised_report` records, in `observed.exercised`, whether each named mechanism actually fired: a mechanism fires when a guard-log line carries its class (with or without the `guard_` prefix) or a runtime-control receipt carries it as a stop code (`guard_package_install`, `guard_git_mutation`, `guard_write_outside`, `guard_tamper`, `denial_budget`, ...). These are reported, never mismatches, so a model that behaves well still passes while the report shows which mechanisms fired.
+
+An entry may `inject` a runner-side action into a live run: `cancel_after_ready: true` runs `uh mission cancel` once the run is ready, and `steer_after_ready: <message>` runs `uh steer <run-id> <message>`. Readiness is the run's first `runtime-control.json` with a `ready_at` (single-shape runs pin their run id via `--run-id`). The action and its outcome are recorded in `observed.injected` (`cancel_after_ready`/`steer_after_ready`; `ok`, `exit <code>`, `not_ready`, or `error: ...`).
 
 ## Campaign runtime snapshot and CLI outcome
 
@@ -33,6 +62,10 @@ Every evidence record stores the mission CLI outcome as `cli: { exit_code, stder
 `acceptance/support/costless-wrapper-cmdc.mjs` resolves a `.cmd` shim (Node 22 refuses to spawn `.cmd`/`.bat` without a shell) to the node entry point it wraps and spawns that directly, falling back to the Windows shell only for shims it cannot parse; the `S3-unknown-cost-cmdc` route therefore attests on Windows.
 
 The committed-report drift check renders the report against an empty evidence root (`renderAcceptanceReport(root, now, { evidenceRoot })`) and compares it with `docs/acceptance/README.md`, so local campaign records under `acceptance/evidence/` never fail the check; `uh acceptance report` keeps rendering local evidence for humans.
+
+## Capabilities with no verdict
+
+An entry whose mission CLI left no run record fails with reason `no_verdict` and a cause taken from the CLI's stderr or exit code; it never passes because nothing mismatched. An error while setting up or running one entry records `runner_error` evidence for that entry and the campaign continues. Every campaign ends with a `SUMMARY` of passed and failed capabilities and each failure's reason, and `uh acceptance run` exits `1` when any capability failed.
 
 ## Support shims and failed evidence
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-import { prepareIndependentReview, collectIndependentReview } from "./harness/independent-review.js";
+import { settleOnSignal } from "./harness/cancel-on-signal.js";
+import { ownerOnlyRefusal } from "./harness/owner-only.js";
+import { prepareIndependentReview, collectIndependentReview, retireIndependentReviewWorkspace } from "./harness/independent-review.js";
 import { Command } from "commander";
 import { z } from "zod";
 import type { RuntimeLimits } from "./schema/runtime-control.js";
@@ -24,7 +26,7 @@ import { dryRunAnthropic, runAnthropic } from "./adapters/anthropic.js";
 import { dryRunPi, runPi } from "./adapters/pi.js";
 import { dryRunAcp, runAcp } from "./adapters/acp.js";
 import { runtimeRegistry } from "./harness/registry.js";
-import { assertRuntimeCapabilities, loadMissionFile } from "./harness/capabilities.js";
+import { enforceCapabilities, formatCapabilityBypassLine, loadMissionFile } from "./harness/capabilities.js";
 import { assertRuntimeRequirements } from "./harness/runtime-requirements.js";
 import { assertFleetAdmission, loadFleetPolicy, authorizedFleetAdapters } from "./harness/fleet-policy.js";
 import { chooseAdapter, chooseSemanticRoute, formatAutoRouteExplain, formatSemanticRouteSummary, type SemanticRouteDecision } from "./harness/auto-route.js";
@@ -33,6 +35,8 @@ import { forecastCost } from "./harness/cost-forecast.js";
 import { probeHermesProxyCapabilities } from "./adapters/capabilities/hermes-proxy-probe.js";
 import { COST_CLASSES } from "./schema/adapter-capabilities.js";
 import { resolveSandboxMissionRoot, type SandboxMissionRoute } from "./harness/sandbox.js";
+import { isProjectBriefEnabled } from "./harness/dispatch-context.js";
+import { importItems, readHive } from "./harness/hive.js";
 import { finalizeRuntimeCancelledRun } from "./harness/runtime-events.js";
 import { cancelLocalMissionRun, cancelMissionRunViaPlugin, MissionCancelError } from "./harness/mission-cancel.js";
 import { parseRuntimeConfigOverridesJson } from "./harness/runtime-config-overrides.js";
@@ -40,6 +44,7 @@ import { adoptSessionTemplate, type SessionTemplateAdoption } from "./harness/se
 import { writeArtifactFile } from "./adapters/_artifact-context.js";
 import { parseScaffoldLang, scaffoldTestsFromSpec } from "./harness/test-scaffold.js";
 import { assertValidRunId, generateRunId } from "./harness/run-id.js";
+import { landWorkerBranches } from "./harness/land.js";
 import { parse as parseYaml } from "yaml";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -47,6 +52,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { readFile as readFileAsync, writeFile as writeFileAsync, readdir, mkdir } from "node:fs/promises";
 import { exitCodeForRun } from "./harness/exit-codes.js";
+import { drainNotifications, elapsedMs, notifyRunSettled } from "./harness/notifications.js";
 import { indexRuns, summarizeRuns, paretoFrontier } from "./harness/experience-store.js";
 import { BEST_OF_N_CAP, MIN_ARM_RUNS, attemptsToMatch, bestOfN, compareArms } from "./harness/run-comparison.js";
 import { exportRunToOtlp, type OtlpTraceExport } from "./harness/otel-export.js";
@@ -54,13 +60,16 @@ import { getSpecTemplate, listSpecTemplates } from "./harness/spec-templates.js"
 import { judgeSpecAdherence, oneShotOpenAI } from "./harness/spec-judge.js";
 import { installTelemetryHooks } from "./harness/telemetry.js";
 import { projectDeliveryObservatory } from "./harness/delivery-observatory/project.js";
-import { acceptanceStatus, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
+import { acceptanceStatus, rebindAcceptanceEvidence, runAcceptance, writeAcceptanceReport } from "./harness/acceptance.js";
+import { loadPostChecks, postCheckExitCode, runPostChecks, type PostCheckEntry } from "./harness/post-checks.js";
+import { createQueueLauncher, formatQueueState, readQueueState, runQueue } from "./harness/queue.js";
 
 import {
   createSandbox,
   discardSandbox,
   getSandboxStatus,
   listSandboxes,
+  repairSandboxes,
 } from "./harness/sandbox.js";
 import { addAdapter, listAdapterTemplates } from "./harness/adapter-add.js";
 import { addSkill, checkSkill, listSkills } from "./harness/skill.js";
@@ -105,6 +114,9 @@ type RuntimeDryRunResult = {
   command: string;
   args: string[];
   prompt: string;
+  /** How the runtime receives the prompt: `stdin` for command-code, or the file path for oh-my-pi. */
+  promptSource?: string;
+  promptPath?: string;
   worktree: boolean;
   session_id_passthrough: boolean;
   errors: string[];
@@ -143,14 +155,9 @@ const RUNTIME_WIRINGS: Record<string, RuntimeWiring> = {
 };
 
 
-async function enforceRuntimeCapabilities(
-  root: string,
-  missionPath: string,
-  runtime: string,
-  force: boolean,
-): Promise<void> {
-  if (force) return;
-  await assertRuntimeCapabilities(root, missionPath, runtime);
+interface PreflightOptions {
+  force: boolean;
+  strict: boolean;
 }
 
 /** Preflight after runtime is chosen (`--runtime` or post `--auto` routing). */
@@ -158,10 +165,15 @@ async function enforceRuntimePreflight(
   root: string,
   missionPath: string,
   runtime: string,
-  force: boolean,
+  { force, strict }: PreflightOptions,
 ): Promise<void> {
-  if (force) return;
-  await enforceRuntimeCapabilities(root, missionPath, runtime, false);
+  if (force) {
+    // --force bypasses BOTH the capability check and runtime_requirements.
+    const mission = await loadMissionFile(missionPath);
+    console.error(formatCapabilityBypassLine(mission.id, runtime));
+    return;
+  }
+  await enforceCapabilities(root, missionPath, runtime, strict ? "error" : "warn");
   await assertRuntimeRequirements(missionPath, runtime);
 }
 
@@ -205,15 +217,54 @@ async function evaluateSemanticRoute(options: {
 /**
  * The `Sandbox:` line that `mission run` and `mission dry-run` print, so the
  * routing decision is always visible. `useSandbox` is whether sandbox routing
- * was requested (i.e. `--no-sandbox` was absent).
+ * was requested (i.e. `--no-sandbox` was absent). `orchestratorRootRun` is the
+ * accepted root execution for an orchestrator mission: it runs in the project
+ * root without `--no-sandbox`, with writes limited to its guard's write roots.
  */
-function sandboxRouteLine(routing: SandboxMissionRoute, useSandbox: boolean): string {
+function sandboxRouteLine(routing: SandboxMissionRoute, useSandbox: boolean, orchestratorRootRun = false): string {
   if (routing.sandbox) {
     return `Sandbox: ${routing.sandbox.id} (${routing.sandbox.path})`;
   }
-  return useSandbox
-    ? "Sandbox: none (project root)"
-    : "Sandbox: none (project root, --no-sandbox)";
+  if (!useSandbox) {
+    return "Sandbox: none (project root, --no-sandbox)";
+  }
+  return orchestratorRootRun
+    ? "Sandbox: none (orchestrator in the project root; writes limited to its guard's write roots)"
+    : "Sandbox: none (project root)";
+}
+
+/**
+ * The runtime-config role a `mission run` resolves to for this mission: the
+ * mission's own `runtime_config_overrides` sit under the template and CLI
+ * overrides the run is about to pass. Only claude-code and command-code declare
+ * `role`, and only `orchestrator` changes the sandbox decision.
+ */
+async function resolveRuntimeConfigRole(
+  missionPath: string,
+  extra: Record<string, unknown> | undefined,
+): Promise<"worker" | "orchestrator"> {
+  let missionOverrides: Record<string, unknown> | undefined;
+  try {
+    missionOverrides = (await loadMissionFile(missionPath)).runtime_config_overrides;
+  } catch {
+    missionOverrides = undefined;
+  }
+  const role = (extra ?? {}).role ?? missionOverrides?.role;
+  return role === "orchestrator" ? "orchestrator" : "worker";
+}
+
+/**
+ * Whether a mission packet opts out of the project brief, so `mission dry-run`
+ * can print that the rendered prompt carries no Project facts section. A packet
+ * that cannot be loaded reports "not opted out"; the adapter's dry-run surfaces
+ * the load error itself.
+ */
+async function missionOptsOutOfProjectBrief(missionPath: string): Promise<boolean> {
+  try {
+    return !isProjectBriefEnabled(await loadMissionFile(missionPath));
+  } catch {
+    return false;
+  }
 }
 
 async function installRuntimeCancelledEventHandler(
@@ -222,21 +273,23 @@ async function installRuntimeCancelledEventHandler(
   runtime: string,
   runId: string,
   cancellationController: AbortController,
+  running: () => Promise<unknown> | undefined = () => undefined,
 ): Promise<() => void> {
   const mission = await loadMissionFile(missionPath);
   let handled = false;
   const onSignal = (signal: "SIGINT" | "SIGTERM"): void => {
     if (handled) return;
     handled = true;
-    cancellationController.abort();
-    finalizeRuntimeCancelledRun({
-      root: artifactRoot,
-      missionId: mission.id,
-      runtime,
-      signal,
-      runId,
+    // The run settles its own control file and the live-run registry on abort; the exit waits (bounded) for that.
+    void settleOnSignal({
+      abort: () => cancellationController.abort(),
+      finalize: () => {
+        finalizeRuntimeCancelledRun({ root: artifactRoot, missionId: mission.id, runtime, signal, runId });
+      },
+      running,
+      exit: (code) => process.exit(code),
+      code: 143,
     });
-    process.exit(143);
   };
   const onSigint = (): void => onSignal("SIGINT");
   const onSigterm = (): void => onSignal("SIGTERM");
@@ -249,6 +302,21 @@ async function installRuntimeCancelledEventHandler(
 }
 
 const program = new Command();
+// `uh ledger confirm` is the owner's: refuse it, before any command logic, in a guarded worker or with no terminal.
+program.hook("preAction", (_command, action) => {
+  const names: string[] = [];
+  for (let current: Command | null = action; current?.parent; current = current.parent) names.unshift(current.name());
+  const refusal = ownerOnlyRefusal(process.env, names, Boolean(process.stdin.isTTY && process.stdout.isTTY));
+  if (refusal) {
+    console.error(`[BLOCKED] ${refusal}`);
+    process.exit(exitCodeForRun("blocked"));
+  }
+});
+/** Let settlement notifications still being delivered finish (bounded), then exit: `process.exit` straight after a fire-and-forget delivery drops it. */
+async function exitDelivered(code: number): Promise<never> {
+  await drainNotifications();
+  return process.exit(code);
+}
 
 program
   .name("uh")
@@ -479,7 +547,7 @@ program
       } else {
         console.log(formatLiveRuns(records));
       }
-      process.exit(liveRunsExitCode(records));
+      await exitDelivered(liveRunsExitCode(records));
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
@@ -525,7 +593,7 @@ program
       });
       if (opts.json) console.log(JSON.stringify(report, null, 2));
       else console.log(formatKillReport(report));
-      process.exit(report.exit_code);
+      await exitDelivered(report.exit_code);
     } catch (err) {
       console.error(`[FAIL] kill error:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -536,6 +604,8 @@ program
 /** One resumed attempt for `uh resume` / `uh steer`, wired to the live CLI. */
 interface OperatorResumeRequest {
   artifactRoot: string;
+  /** Project root that owns `.harness/adapters`; a team worker's scope has none. */
+  adapterRoot: string;
   missionId: string;
   missionPath: string;
   runtime: string;
@@ -548,7 +618,9 @@ interface OperatorResumeRequest {
 async function runOperatorResumedAttempt(request: OperatorResumeRequest): Promise<{ runId?: string; result?: { status?: string } }> {
   const wiring = RUNTIME_WIRINGS[request.runtime];
   if (!wiring) throw new Error(`Unknown runtime: ${request.runtime}`);
-  const routing = await resolveSandboxMissionRoot(request.artifactRoot, request.missionPath, true);
+  // The adapter manifest, workflow and sandbox binding all live at the project
+  // root; a team worker's artifact scope is nested below it and holds neither.
+  const routing = await resolveSandboxMissionRoot(request.adapterRoot, request.missionPath, true);
   if (routing.error) throw new Error(routing.error);
   const recovery = await resolveRuntimeRecoveryPolicy(routing.effectiveRoot, routing.missionPath, request.runtime, {});
   return runWithRuntimeRecovery({
@@ -566,6 +638,45 @@ async function runOperatorResumedAttempt(request: OperatorResumeRequest): Promis
     },
   });
 }
+
+// uh wait — block until matched runs settle, so orchestrators do not poll `uh ps`.
+program
+  .command("wait")
+  .description("Block until a run (or a mission's or team's runs) settles or is orphaned (exit 0/1/3/4; 2 when nothing matches)")
+  .argument("[run-id]", "Run id, or a unique prefix of one")
+  .option("--mission <id>", "Every live run of this mission, including its team workers")
+  .option("--team <id>", "Every live run of this team")
+  .option("--timeout-ms <ms>", "Give up after this many milliseconds (default: 1800000)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the wait report as JSON")
+  .action(async (runId: string | undefined, opts: {
+    mission?: string; team?: string; timeoutMs?: string; root?: string; json?: boolean;
+  }) => {
+    const root = resolveRoot(opts.root);
+    const timeoutMs = opts.timeoutMs === undefined ? undefined : Number.parseInt(opts.timeoutMs, 10);
+    if (opts.timeoutMs !== undefined && (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+      console.error(`[FAIL] --timeout-ms must be a non-negative integer of milliseconds, got: ${opts.timeoutMs}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const { waitForRuns, formatWaitReport } = await import("./harness/wait.js");
+      const report = await waitForRuns(root, {
+        ...(runId !== undefined ? { runId } : {}),
+        ...(opts.mission !== undefined ? { missionId: opts.mission } : {}),
+        ...(opts.team !== undefined ? { teamId: opts.team } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      });
+      if (opts.json) console.log(JSON.stringify(report, null, 2));
+      else console.log(formatWaitReport(report));
+      await exitDelivered(report.exit_code);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      console.error(`[FAIL] wait error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(code === "no_target" || code === "unknown_target" || code === "ambiguous_target" ? 2 : 1);
+    }
+  });
 
 // uh resume — continue a settled run's native session as a new run.
 program
@@ -590,10 +701,10 @@ program
     }
   });
 
-// uh steer — cancel a live or settled run and resume it with a message.
+// uh steer — message a run; its owning controller stops and resumes it.
 program
   .command("steer")
-  .description("Cancel a run, then resume its native session with a message")
+  .description("Message a run: its controller stops the attempt (steered) and resumes the session")
   .argument("<run-id>", "Run id, or a unique prefix of one")
   .argument("<message>", "Message injected as the first instruction of the resumed turn")
   .option("--report", "Ask the worker to write a status report before continuing")
@@ -606,6 +717,9 @@ program
       const result = await steerRun(root, runId, message, { report: opts.report === true },
         { run: runOperatorResumedAttempt, cancel: (cancelRoot, missionId, id) => cancelLocalMissionRun(cancelRoot, missionId, id) });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else if (result.status === "not_applied") console.log(`Steer not applied to ${result.sourceRunId}: ${result.reason}`);
+      else if (result.status === "pending") console.log(`Steer requested for ${result.sourceRunId}, not yet taken: ${result.reason}; check again with \`uh ps\``);
+      else if (result.mode === "controller") console.log(`Steered ${result.sourceRunId}; its controller will resume the session`);
       else console.log(`Steered ${result.sourceRunId} into ${result.runId}`);
     } catch (err) {
       console.error(`[FAIL] steer error:`);
@@ -666,13 +780,14 @@ acceptanceCmd
       return;
     }
     try {
-      await runAcceptance(resolveRoot(opts.root), {
+      const results = await runAcceptance(resolveRoot(opts.root), {
         workspace: opts.workspace,
         runtime: opts.runtime,
         model: opts.model,
         keep: opts.keep,
         capabilities: capability ? [capability] : undefined,
       });
+      if (results.some((result) => result.outcome === "failed")) process.exitCode = 1;
     } catch (error) {
       console.error(`[FAIL] acceptance run: ${(error as Error).message}`);
       process.exit(1);
@@ -688,9 +803,30 @@ acceptanceCmd
     try {
       const summary = await acceptanceStatus(resolveRoot(opts.root));
       if (opts.json) console.log(JSON.stringify(summary, null, 2));
-      else console.log(`Acceptance evidence: proven ${summary.counts.proven}, stale ${summary.counts.stale}, failed ${summary.counts.failed}, unproven ${summary.counts.unproven}, fixture_only ${summary.counts.fixture_only}`);
+      else {
+        console.log(`Acceptance evidence: proven ${summary.counts.proven}, stale ${summary.counts.stale}, failed ${summary.counts.failed}, unproven ${summary.counts.unproven}, fixture_only ${summary.counts.fixture_only}`);
+        for (const [capability, reasons] of Object.entries(summary.reasons)) {
+          console.log(`  stale ${capability}: ${reasons.join(", ")}`);
+        }
+      }
     } catch (error) {
       console.error(`[FAIL] acceptance status: ${(error as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+acceptanceCmd
+  .command("rebind")
+  .description("Revalidate legacy evidence without rerunning models by stamping an input digest at its commit")
+  .option("--root <path>", "Harness repository root (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    try {
+      const outcomes = await rebindAcceptanceEvidence(resolveRoot(opts.root));
+      const summary = { rebound: 0, changed: 0, skipped: 0 } as Record<"rebound" | "changed" | "skipped", number>;
+      for (const outcome of outcomes) summary[outcome.outcome] += 1;
+      console.log(`Acceptance rebind: ${summary.rebound} rebound, ${summary.changed} changed, ${summary.skipped} skipped`);
+    } catch (error) {
+      console.error(`[FAIL] acceptance rebind: ${(error as Error).message}`);
       process.exit(1);
     }
   });
@@ -1334,6 +1470,38 @@ function collectRepeatedOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
+// uh land
+program
+  .command("land")
+  .description("Gated cherry-pick of verified worker branches into the target worktree")
+  .requiredOption("--worker-branch <branch>", "Worker branch to land; repeatable", collectRepeatedOption, [])
+  .requiredOption("--onto <branch>", "Target branch the worker commits land on")
+  .requiredOption("--message-file <path>", "File holding the commit message")
+  .option("--accept-review <reason>", "Accept a failing independent review and record the reason")
+  .option("--fast-forward <path>", "Checkout to fast-forward to the target; repeatable", collectRepeatedOption, [])
+  .option("--review-root <path>", "Main checkout holding collected reviews and land decisions (default: the target worktree's common git dir parent)")
+  .option("--keep-worktrees", "Keep the landed workers' worktrees (default: remove them, and a team's leader once no worker is left)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { workerBranch: string[]; onto: string; messageFile: string; acceptReview?: string; fastForward: string[]; reviewRoot?: string; keepWorktrees?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const summary = await landWorkerBranches({
+        root,
+        workerBranches: opts.workerBranch,
+        onto: opts.onto,
+        messageFile: opts.messageFile,
+        acceptReview: opts.acceptReview,
+        fastForward: opts.fastForward,
+        reviewRoot: opts.reviewRoot,
+        keepWorktrees: opts.keepWorktrees,
+      });
+      console.log(JSON.stringify(summary));
+    } catch (err) {
+      console.error(`[BLOCKED] ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
 // uh promote
 program
   .command("promote")
@@ -1755,7 +1923,9 @@ missionCmd.command("review-prepare")
     try {
       const sources = z.array(z.object({ missionId: z.string().min(1), workspaceRoot: z.string().min(1).optional() }).strict()).min(1).parse(JSON.parse(opts.sources));
       const runtime = z.enum(["oh-my-pi", "command-code", "claude-code"]).parse(opts.runtime);
-      console.log(JSON.stringify(await prepareIndependentReview(resolveRoot(opts.root), { id, sources, runtime, model: opts.model, workflow: opts.workflow }), null, 2));
+      const prepared = await prepareIndependentReview(resolveRoot(opts.root), { id, sources, runtime, model: opts.model, workflow: opts.workflow });
+      console.log(JSON.stringify(prepared, null, 2));
+      console.log(`Report: ${prepared.reportPath} (relative to the review workspace; the reviewer writes it inside the review sandbox)`);
     } catch (error) {
       console.error(`[FAIL] mission review-prepare: ${(error as Error).message}`);
       process.exitCode = 1;
@@ -1766,12 +1936,56 @@ missionCmd.command("review-collect")
   .description("Validate review provenance and evidence; never grants human acceptance or promotes source work")
   .argument("<id>", "Review mission id")
   .option("--root <path>", "Canonical project root (default: cwd)")
-  .action(async (id: string, opts: { root?: string }) => {
+  .option("--keep-workspace", "Keep the review's sandbox after collecting (default: discard it)")
+  .action(async (id: string, opts: { root?: string; keepWorkspace?: boolean }) => {
     try {
-      console.log(JSON.stringify(await collectIndependentReview(resolveRoot(opts.root), id), null, 2));
+      const root = resolveRoot(opts.root);
+      const assessment = await collectIndependentReview(root, id);
+      console.log(JSON.stringify(assessment, null, 2));
+      if (!opts.keepWorkspace) {
+        try {
+          const discarded = await retireIndependentReviewWorkspace(root, id);
+          if (discarded) console.log(`Review workspace ${discarded} discarded; the reviewer's report is kept at .harness/missions/${id}/review-report.json.`);
+        } catch (error) {
+          console.error(`[WARN] mission review-collect: review collected, but its workspace was not discarded: ${(error as Error).message}`);
+        }
+      }
+      const contradicted = (assessment.claims ?? []).filter(claim => claim.verdict === "contradicted");
+      const attention = (assessment.findings ?? []).filter(finding => finding.severity === "error" || finding.severity === "warning");
+      if (contradicted.length === 0 && attention.length === 0) {
+        console.log("No contradicted claims or warning/error findings.");
+        return;
+      }
+      for (const claim of contradicted) console.log(`Contradicted claim [${claim.source}]: ${claim.claim}`);
+      for (const finding of attention) console.log(`${finding.severity.toUpperCase()} finding [${finding.source}]: ${finding.detail}`);
     } catch (error) {
       console.error(`[FAIL] mission review-collect: ${(error as Error).message}`);
       process.exitCode = 1;
+    }
+  });
+
+missionCmd
+  .command("prune-runs")
+  .description("Archive a mission's oldest runs beyond a cap and remove their run directories")
+  .argument("<mission-id>", "Mission id")
+  .requiredOption("--keep <n>", "How many non-archived runs to keep (a positive integer)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit JSON")
+  .action(async (missionId: string, opts: { keep: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      assertSafeMissionId(missionId);
+      if (!/^[0-9]+$/.test(opts.keep) || Number.parseInt(opts.keep, 10) <= 0) {
+        throw new Error(`--keep must be a positive integer, got: ${opts.keep}`);
+      }
+      const keep = Number.parseInt(opts.keep, 10);
+      const { pruneOldRuns } = await import("./harness/run-id.js");
+      const pruned = await pruneOldRuns(root, missionId, keep);
+      if (opts.json) console.log(JSON.stringify({ mission_id: missionId, keep, pruned }));
+      else console.log(`pruned ${pruned} run(s) of ${missionId} (keeping ${keep})`);
+    } catch (err) {
+      console.error(`[FAIL] mission prune-runs: ${(err as Error).message}`);
+      process.exit(1);
     }
   });
 
@@ -1919,6 +2133,87 @@ missionCmd
     }
   });
 
+// uh mission check — validate a packet's read_first refs, write roots,
+// "Change only" constraints, grounding claims, and runtime_config_overrides
+// before anything is launched. Never starts a runtime and never writes to
+// .harness (see src/harness/mission-check.ts).
+missionCmd
+  .command("check")
+  .description("Validate a mission packet (paths, write roots, grounding, runtime overrides) without launching a runtime")
+  .argument("<file>", "Mission packet path (mission.yaml)")
+  .option("--runtime <runtime>", "Runtime id to validate runtime_config_overrides against (single-shape default: hermes)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the check results as JSON")
+  .action(async (file: string, opts: { runtime?: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const { checkMissionPackets, renderMissionCheckLines } = await import("./harness/mission-check.js");
+    let result: import("./harness/mission-check.js").MissionCheckResult;
+    try {
+      result = await checkMissionPackets({ root, missionPath: file, runtime: opts.runtime });
+    } catch (err) {
+      console.error(`[FAIL] mission check error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      for (const line of renderMissionCheckLines(result)) console.log(line);
+    }
+    if (!result.ok) {
+      process.exit(1);
+    }
+  });
+
+// uh mission put — the coordinator's allowed path to persist a whole packet.
+// An orchestrator may only run controller commands and may not write under
+// .harness (protected), so `mission create`/`new` and `propose` (a subset of
+// the fields) are not enough. This runs checkMissionPackets first and writes
+// nothing on failure, installs atomically, refuses an existing target without
+// --replace, and refuses --replace while a live run of the mission exists
+// (see src/harness/mission-put.ts).
+missionCmd
+  .command("put")
+  .description("Validate and install mission packet(s) into .harness/missions/<id>/mission.yaml")
+  .argument("<files...>", "Mission packet path(s) (mission.yaml)")
+  .option("--replace", "Overwrite an installed packet (refused while the mission has a live run)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the put result as JSON")
+  .action(async (files: string[], opts: { replace?: boolean; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    const { putMissionPackets } = await import("./harness/mission-put.js");
+    const { renderMissionCheckLines } = await import("./harness/mission-check.js");
+    let result: import("./harness/mission-put.js").PutMissionPacketsResult;
+    try {
+      result = await putMissionPackets({ root, packetPaths: files, replace: opts.replace === true });
+    } catch (err) {
+      console.error(`[FAIL] mission put error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+      return;
+    }
+    if (!result.ok) {
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        if (result.checks) for (const line of renderMissionCheckLines(result.checks)) console.log(line);
+        console.error(`[FAIL] mission put refused: ${result.reason}`);
+      }
+      process.exit(1);
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    for (const packet of result.installed) {
+      console.log(`Installed mission ${packet.mission_id}`);
+      console.log(`  path: ${packet.path}`);
+      console.log(`  sha256: ${packet.sha256}`);
+    }
+    console.log(`[OK] ${result.installed.length} packet(s) installed; ${result.auditLines.length} audit event(s) appended`);
+  });
+
 missionCmd
   .command("dry-run")
   .description("Show what command would be executed without running it")
@@ -1931,7 +2226,8 @@ missionCmd
   .option("--runtime-config-overrides <json>", "JSON object of runtime_config overrides applied on top of the template and mission file")
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; template?: string; runtimeConfigOverrides?: string; auto?: boolean; explain?: boolean }) => {
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; template?: string; runtimeConfigOverrides?: string; auto?: boolean; explain?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -2016,7 +2312,7 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, { force: opts.force === true, strict: opts.strict === true });
     } catch (err) {
       console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -2039,6 +2335,9 @@ missionCmd
     // Dry-run never blocks on a missing binding: it only shows where the run
     // would go before anything is spent.
     console.log(sandboxRouteLine(routing, opts.sandbox));
+    if (await missionOptsOutOfProjectBrief(routing.missionPath)) {
+      console.log("Project facts: off (context.project_brief: false)");
+    }
     if (templateAdoption) {
       const overridden = templateAdoption.description.overridden_by_mission;
       console.log(
@@ -2055,6 +2354,7 @@ missionCmd
       process.exit(1);
     }
     console.log(`Command: ${result.command} ${result.args.join(" ")}`);
+    console.log(`Prompt source: ${result.promptPath ?? result.promptSource ?? "argv"}`);
     console.log(`Worktree mode: ${result.worktree}`);
     console.log(`Session ID passthrough: ${result.session_id_passthrough}`);
     console.log("");
@@ -2080,7 +2380,9 @@ missionCmd
   .option("--auto", "Auto-select the cheapest installed adapter that satisfies the mission's runtime_requirements")
   .option("--explain", "With --auto, print the adapter decision matrix")
   .option("--quiet", "Do not print the runtime's stdout or stderr")
-  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean }) => {
+  .option("--post-checks <file>", "YAML or JSON list of operator checks run after the runtime settles; the agent never sees them")
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (file: string | undefined, opts: { runtime?: string; root?: string; sandbox: boolean; force?: boolean; runtimeConfigOverrides?: string; template?: string; runId?: string; auto?: boolean; explain?: boolean; quiet?: boolean; postChecks?: string; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const filePath = file || `${root}/examples/missions/documentation-spine.yaml`;
 
@@ -2161,7 +2463,7 @@ missionCmd
       return;
     }
     try {
-      await enforceRuntimePreflight(root, filePath, runtime, opts.force === true);
+      await enforceRuntimePreflight(root, filePath, runtime, { force: opts.force === true, strict: opts.strict === true });
     } catch (err) {
       console.error(`[BLOCKED] runtime preflight failed:`);
       console.error(`  error: ${(err as Error).message}`);
@@ -2181,10 +2483,31 @@ missionCmd
       process.exit(exitCodeForRun("blocked"));
       return;
     }
+    // An orchestrator is meant to drive `uh` from the project root, and its
+    // guard confines its writes to its declared write roots, so it runs in the
+    // project root without --no-sandbox. Every other mission still needs an
+    // explicit --no-sandbox: a guarded worker running in the project root edits
+    // the operator's live working tree. An orchestrator's guard and write roots
+    // are validated by the adapter's existing planning checks, not duplicated
+    // here; an orchestrator without a guard, or whose write roots cover the
+    // repository, is still refused.
+    let orchestratorRootRun = false;
     if (opts.sandbox && !routing.sandbox) {
-      // A guarded worker running in the project root edits the operator's live
-      // working tree, so root execution is only reachable through an explicit
-      // --no-sandbox. Refuse before any run directory or process exists.
+      let cliOverrides: Record<string, unknown> | undefined;
+      if (opts.runtimeConfigOverrides !== undefined) {
+        try {
+          cliOverrides = parseRuntimeConfigOverridesJson(opts.runtimeConfigOverrides);
+        } catch {
+          // The run path re-parses and reports a malformed override below.
+        }
+      }
+      orchestratorRootRun = (await resolveRuntimeConfigRole(
+        routing.missionPath,
+        { ...templateAdoption?.runtimeConfigOverrides, ...cliOverrides },
+      )) === "orchestrator";
+    }
+    if (opts.sandbox && !routing.sandbox && !orchestratorRootRun) {
+      // Refuse before any run directory or process exists.
       const blockedMissionId = routing.missionId ?? "unknown";
       console.error(`[BLOCKED] mission ${blockedMissionId} has no bound sandbox; create one with "uh sandbox create <sandbox-id> --mission ${blockedMissionId}" or pass --no-sandbox to run in the project root`);
       const blockedRunId = opts.runId ?? generateRunId();
@@ -2234,15 +2557,34 @@ missionCmd
       process.exit(exitCodeForRun("blocked"));
       return;
     }
+    // Operator post-checks are read and validated at launch, before any run
+    // directory or runtime process exists. The path resolves against the
+    // process cwd; a missing or malformed file blocks the run. Neither the
+    // path nor any command is echoed, persisted, or handed to the runtime.
+    let postChecks: PostCheckEntry[] | undefined;
+    let postChecksPath: string | undefined;
+    if (opts.postChecks !== undefined) {
+      try {
+        postChecksPath = path.resolve(opts.postChecks);
+        postChecks = await loadPostChecks(postChecksPath);
+      } catch {
+        console.error("[BLOCKED] post-checks file is missing or invalid");
+        process.exit(exitCodeForRun("blocked"));
+        return;
+      }
+    }
     console.log(`Running mission: ${filePath}`);
     console.log(`Runtime: ${runtime}`);
     if (opts.runId) {
       console.log(`Run id: ${opts.runId}`);
     }
-    console.log(sandboxRouteLine(routing, opts.sandbox));
+    console.log(sandboxRouteLine(routing, opts.sandbox, orchestratorRootRun));
     if (extraRuntimeConfigOverrides) {
       const keys = Object.keys(extraRuntimeConfigOverrides);
       console.log(`Runtime config overrides: ${keys.length} key(s) — ${keys.join(", ")}`);
+    }
+    if (postChecks) {
+      console.log(`Post-checks: ${postChecks.length}`);
     }
     const runId = opts.runId ?? generateRunId();
     console.log("");
@@ -2255,11 +2597,14 @@ missionCmd
         root, runtime, runId, ...recovery, extraRuntimeConfigOverrides,
         cancellationSignal: cancellationController.signal,
         run: async (attempt) => {
-          const uninstall = await installRuntimeCancelledEventHandler(root, routing.missionPath, runtime, attempt.runId, cancellationController);
+          let inFlight: Promise<unknown> | undefined;
+          const uninstall = await installRuntimeCancelledEventHandler(root, routing.missionPath, runtime, attempt.runId, cancellationController, () => inFlight);
           try {
-            const runRes = await wiring.run(routing.effectiveRoot, routing.missionPath, {
+            const pending = wiring.run(routing.effectiveRoot, routing.missionPath, {
               ...attempt, artifactRoot: root, cancellationSignal: cancellationController.signal,
             });
+            inFlight = pending;
+            const runRes = await pending;
             return { ...runRes, runId: attempt.runId };
           } finally { uninstall(); }
         },
@@ -2339,7 +2684,64 @@ missionCmd
     }
 
     const finalStopCode = controlStopCode ?? resultYamlStopCode;
-    const runExitCode = exitCodeForRun(status, finalStopCode);
+
+    // Operator post-checks run after the runtime settles, whatever its status,
+    // and after the CLI status is derived. They read the run's events.ndjson
+    // via UH_RUN_DIR; a failed, timed-out or unrunnable check makes the run
+    // failed and its exit code uses exitCodeForRun("failed").
+    let postChecksFailed = false;
+    if (postChecks && postChecks.length > 0 && postChecksPath) {
+      // Ctrl-C or SIGTERM while a check runs stops that check's whole process tree before the CLI goes, and the run
+      // keeps the status it had instead of being rewritten to failed.
+      const postAbort = new AbortController();
+      let interruptedBy: "SIGINT" | "SIGTERM" | undefined;
+      const onPostSigint = (): void => { interruptedBy ??= "SIGINT"; postAbort.abort(); };
+      const onPostSigterm = (): void => { interruptedBy ??= "SIGTERM"; postAbort.abort(); };
+      process.once("SIGINT", onPostSigint);
+      process.once("SIGTERM", onPostSigterm);
+      try {
+        const post = await runPostChecks({
+          checks: postChecks,
+          checksFile: postChecksPath,
+          missionId,
+          runId: finalRunId,
+          runDir,
+          root: path.resolve(root),
+          cwd: routing.effectiveRoot,
+          runStatus: status ?? undefined,
+          signal: postAbort.signal,
+        });
+        process.removeListener("SIGINT", onPostSigint);
+        process.removeListener("SIGTERM", onPostSigterm);
+        if (post.skipped) console.log(`[SKIP] ${post.skipped}`);
+        for (const warning of post.warnings ?? []) console.log(`[WARN] ${warning}`);
+        if (post.aborted) {
+          console.log(`[CANCELLED] post-checks stopped by ${interruptedBy ?? "a signal"}; the run keeps its status`);
+          process.exit(interruptedBy === "SIGTERM" ? 143 : 130);
+        }
+        if (post.errors.length > 0) {
+          status = "failed";
+          postChecksFailed = true;
+          for (const e of post.errors) {
+            console.log(`[FAIL] ${e}`);
+          }
+        }
+      } catch {
+        process.removeListener("SIGINT", onPostSigint);
+        process.removeListener("SIGTERM", onPostSigterm);
+        // Last guard: the runner settles its own failures, but if it still
+        // throws the run fails cleanly rather than aborting unsettled, so
+        // UH_RESULT is printed and the exit code is exitCodeForRun("failed").
+        status = "failed";
+        postChecksFailed = true;
+        console.log("[FAIL] post-check runner failed");
+      }
+    }
+
+    // A failed post-check settles the run as failed: the exit code is
+    // exitCodeForRun("failed") regardless of the runtime's stop code, which
+    // stays in UH_RESULT only as a record. Otherwise unchanged.
+    const runExitCode = postCheckExitCode(status, finalStopCode, postChecksFailed);
 
     if (wiring.surfaceBlocked && result.result?.status === "blocked") {
       console.log(`[BLOCKED] mission classified as blocked`);
@@ -2369,7 +2771,16 @@ missionCmd
       run_dir: relativeRunDir,
     };
     console.log(`UH_RESULT ${JSON.stringify(settlementPayload)}`);
-    process.exit(runExitCode);
+    // A run that settles normally announces itself, and the announcement finishes before the process exits.
+    notifyRunSettled(root, {
+      run_id: finalRunId,
+      mission: missionId,
+      runtime,
+      status,
+      ...(finalStopCode ? { stop_code: finalStopCode } : {}),
+      run_dir: path.resolve(root, relativeRunDir),
+    });
+    await exitDelivered(runExitCode);
   });
 
 missionCmd
@@ -2428,7 +2839,8 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--serial", "Run runtimes sequentially instead of in parallel")
   .option("--force", "Bypass mission capability matching and runtime_requirements for selected runtimes")
-  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean }) => {
+  .option("--strict", "Treat capability mismatches as errors instead of warnings (default: warn)")
+  .action(async (missionId: string, opts: { runtimes?: string; root?: string; serial?: boolean; force?: boolean; strict?: boolean }) => {
     const root = resolveRoot(opts.root);
     const requested = opts.runtimes ? opts.runtimes.split(",").map((s) => s.trim()).filter(Boolean) : await resolveActiveRuntimes(root);
     if (requested.length === 0) {
@@ -2453,10 +2865,15 @@ missionCmd
         return;
       }
     }
-    if (opts.force !== true) {
+    if (opts.force === true) {
+      const mission = await loadMissionFile(canonicalMissionPath);
+      for (const rt of requested) {
+        console.error(formatCapabilityBypassLine(mission.id, rt));
+      }
+    } else {
       for (const rt of requested) {
         try {
-          await enforceRuntimePreflight(root, canonicalMissionPath, rt, false);
+          await enforceRuntimePreflight(root, canonicalMissionPath, rt, { force: false, strict: opts.strict === true });
         } catch (err) {
           console.error(`[BLOCKED] runtime preflight failed for ${rt}:`);
           console.error(`  error: ${(err as Error).message}`);
@@ -2515,8 +2932,9 @@ missionCmd
   .option("--root <path>", "Root directory (default: cwd)")
   .option("--base-ref <ref>", "Base git ref for worker / leader worktrees (default: HEAD)")
   .option("--retain", "Preserve worktrees on success (default: cleanup on PASS, preserve on FAIL)")
+  .option("--replace", "Archive a previous run's worktrees, branches, and team directory, then relaunch (refused while a live run exists)")
   .option("--strategy <strategy>", "Leader integration strategy: merge|cherry-pick|rebase (default: merge)", "merge")
-  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean; strategy: string }) => {
+  .action(async (missionId: string, opts: { root?: string; baseRef?: string; retain?: boolean; replace?: boolean; strategy: string }) => {
     try {
       assertSafeMissionId(missionId);
     } catch (err) {
@@ -2593,6 +3011,7 @@ missionCmd
         verifier: async (workRoot, mid) => verifyMission(workRoot, mid, { useSandbox: false }),
         baseRef: opts.baseRef,
         retainOnSuccess: opts.retain === true,
+        replace: opts.replace === true,
         strategy: opts.strategy as "merge" | "cherry-pick" | "rebase",
       });
       // UH-127: PARTIAL is a non-blocking success — M<N workers landed but the
@@ -2616,10 +3035,234 @@ missionCmd
         : result.status === "blocked"
           ? 2
           : 1;
-      process.exit(exit);
+      await exitDelivered(exit);
     } catch (err) {
       console.error(`[FAIL] mission run-team error:`);
       console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+const LEDGER_CAUSES = ["tool", "info", "permission", "capability", "unclear-spec", "unknown"] as const;
+const LEDGER_QUALIFIERS = ["missing", "incorrect", "insufficient", "unknown"] as const;
+
+function ledgerEnum<T extends string>(name: string, value: string, allowed: readonly T[]): T {
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Error(`${name} must be one of ${allowed.join(" | ")}, got ${value}`);
+  }
+  return value as T;
+}
+
+// uh hive
+const hiveCmd = program
+  .command("hive")
+  .description("Shared blackboard: open items (.harness/hive/items.yaml) and proven facts (.harness/hive/facts.ndjson)");
+
+hiveCmd
+  .command("import")
+  .description("Import items from a markdown checklist, merging by id (a checked '[x]' line means done)")
+  .argument("<file>", "Markdown file with lines like '- [ ] A8: title'")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (file: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const markdown = await readFileAsync(file, "utf-8");
+      const items = importItems(root, markdown);
+      console.log(`imported ${items.length} hive item(s)`);
+    } catch (err) {
+      console.error(`[FAIL] hive import: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+hiveCmd
+  .command("show")
+  .description("Show the hive items and facts")
+  .option("--json", "Emit JSON")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { json?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const hive = readHive(root);
+      if (opts.json === true) {
+        console.log(JSON.stringify(hive, null, 2));
+        return;
+      }
+      console.log(`${hive.items.length} item(s):`);
+      for (const item of hive.items) console.log(`  [${item.status}] ${item.id}: ${item.title}`);
+      console.log(`${hive.facts.length} fact(s)`);
+    } catch (err) {
+      console.error(`[FAIL] hive show: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+hiveCmd
+  .command("verify")
+  .description("Verify the hive facts chain, the intervention ledger chain and the land decision index; --repair re-links a fork left by the old append bug")
+  .option("--json", "Emit JSON")
+  .option("--repair", "Re-link chains forked by the old concurrent-append bug (two entries linking to the same parent); any other break is refused. Keeps the original and writes a report")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { json?: boolean; repair?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { verifyHiveChains, repairHiveChains } = await import("./harness/hive-verify.js");
+      const repairs = opts.repair === true ? await repairHiveChains(root) : [];
+      const checks = verifyHiveChains(root);
+      const ok = checks.every((entry) => entry.first_broken === null && entry.forks.length === 0);
+      if (opts.json === true) {
+        console.log(JSON.stringify({ ok, checks, ...(opts.repair === true ? { repairs } : {}) }, null, 2));
+      } else {
+        for (const repair of repairs) {
+          if (repair.outcome.repaired) {
+            const lines = repair.outcome.relinked.map((entry) => entry.line).join(", ");
+            console.log(`[REPAIRED] ${repair.name} ${repair.file}: re-linked ${repair.outcome.relinked.length} entries (lines ${lines}); original kept at ${repair.outcome.backup}; report ${repair.outcome.report}`);
+          }
+        }
+        if (ok) {
+          console.log("hive chains intact");
+        } else {
+          for (const entry of checks) {
+            if (entry.first_broken !== null) {
+              console.log(`[BROKEN] ${entry.name} ${entry.file} line ${entry.first_broken.line}: ${entry.first_broken.reason}`);
+            } else if (entry.forks.length > 0) {
+              console.log(`[FORK] ${entry.name} ${entry.file} line ${entry.forks.join(", ")}: two entries link to the same parent (the old concurrent-append bug); run "uh hive verify --repair" to re-link it`);
+            }
+          }
+        }
+      }
+      if (!ok) process.exit(1);
+    } catch (err) {
+      console.error(`[FAIL] hive verify: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh note
+program
+  .command("note")
+  .description("Record an intervention on the ledger (a moment a run needed correction)")
+  .argument("<text>", "What the intervention was")
+  .option("--source <source>", "Who intervened: owner | orchestrator (default: owner)", "owner")
+  .option("--run <id>", "Related run id")
+  .option("--mission <id>", "Related mission id")
+  .option("--cause <cause>", `Cause category: ${LEDGER_CAUSES.join(" | ")} (default: unknown)`, "unknown")
+  .option("--qualifier <qualifier>", `Qualifier: ${LEDGER_QUALIFIERS.join(" | ")} (default: unknown)`, "unknown")
+  .option("--detection <text>", "How this was or can be detected")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (text: string, opts: { source: string; run?: string; mission?: string; cause: string; qualifier: string; detection?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const source = ledgerEnum("--source", opts.source, ["owner", "orchestrator"] as const);
+      const cause = ledgerEnum("--cause", opts.cause, LEDGER_CAUSES);
+      const qualifier = ledgerEnum("--qualifier", opts.qualifier, LEDGER_QUALIFIERS);
+      const { recordIntervention } = await import("./harness/interventions.js");
+      const entry = await recordIntervention(root, {
+        source, trigger: "note", cause, qualifier, what: text,
+        refs: { ...(opts.run !== undefined ? { run_id: opts.run } : {}), ...(opts.mission !== undefined ? { mission_id: opts.mission } : {}) },
+        detection: opts.detection ?? "recorded by hand",
+      });
+      console.log(`recorded ${entry.id}`);
+    } catch (err) {
+      console.error(`[FAIL] note: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh ledger
+const ledgerCmd = program
+  .command("ledger")
+  .description("Inspect and update the intervention ledger at .harness/ledger/interventions.ndjson");
+
+ledgerCmd
+  .command("list")
+  .description("List interventions (the latest state per id)")
+  .option("--open", "Only open interventions")
+  .option("--cause <cause>", `Filter by cause: ${LEDGER_CAUSES.join(" | ")}`)
+  .option("--mission <id>", "Filter by mission id")
+  .option("--json", "Emit JSON")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { open?: boolean; cause?: string; mission?: string; json?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const cause = opts.cause === undefined ? undefined : ledgerEnum("--cause", opts.cause, LEDGER_CAUSES);
+      const { listInterventions, formatInterventionList } = await import("./harness/interventions.js");
+      const entries = await listInterventions(root, { open: opts.open === true, cause, missionId: opts.mission });
+      console.log(opts.json === true ? JSON.stringify(entries, null, 2) : formatInterventionList(entries));
+    } catch (err) {
+      console.error(`[FAIL] ledger list: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+ledgerCmd
+  .command("summary")
+  .description("Summarize interventions per mission, by cause and qualifier, and countermeasure recurrence")
+  .option("--json", "Emit JSON")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { json?: boolean; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { readLedger, summarizeLedger, formatLedgerSummary } = await import("./harness/interventions.js");
+      const summary = summarizeLedger(await readLedger(root));
+      console.log(opts.json === true ? JSON.stringify(summary, null, 2) : formatLedgerSummary(summary));
+    } catch (err) {
+      console.error(`[FAIL] ledger summary: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+ledgerCmd
+  .command("land")
+  .description("Land an intervention: append a status change with its evidence")
+  .argument("<id>", "Intervention id")
+  .requiredOption("--evidence <text>", "Evidence that the fix landed")
+  .option("--countermeasure <id>", "Id of the rule, check, or gate this became")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { evidence: string; countermeasure?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { landIntervention } = await import("./harness/interventions.js");
+      const entry = await landIntervention(root, id, { evidence: opts.evidence, ...(opts.countermeasure !== undefined ? { countermeasure: opts.countermeasure } : {}) });
+      console.log(`landed ${entry.id}${entry.countermeasure ? ` -> countermeasure ${entry.countermeasure}` : ""}`);
+    } catch (err) {
+      console.error(`[FAIL] ledger land: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+ledgerCmd
+  .command("confirm")
+  .description("Confirm an intervention as verified by the owner (only the owner should run this)")
+  .argument("<id>", "Intervention id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (id: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { confirmIntervention } = await import("./harness/interventions.js");
+      const entry = await confirmIntervention(root, id);
+      console.log(`verified ${entry.id} by owner`);
+      console.log("Notice: only the owner should run `uh ledger confirm`; an agent may never set verified_by owner.");
+    } catch (err) {
+      console.error(`[FAIL] ledger confirm: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+ledgerCmd
+  .command("import")
+  .description("Import a predecessor corrections ledger (JSON lines: correction, status, evidence, confirmed_by_owner)")
+  .argument("<file>", "Path to the predecessor JSON lines file")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (file: string, opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { importPredecessorLedger } = await import("./harness/interventions.js");
+      const content = await readFileAsync(file, "utf-8");
+      const created = await importPredecessorLedger(root, content);
+      console.log(`imported ${created.length} intervention(s)`);
+    } catch (err) {
+      console.error(`[FAIL] ledger import: ${(err as Error).message}`);
       process.exit(1);
     }
   });
@@ -2736,6 +3379,35 @@ sandboxCmd
       }
     } catch (err) {
       console.error(`[FAIL] sandbox discard error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+sandboxCmd
+  .command("repair")
+  .description("Re-register sandbox directories whose index entry is missing")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (opts: { root?: string }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const repaired = await repairSandboxes(root);
+      if (repaired.length === 0) {
+        console.log("No sandbox registrations repaired.");
+        return;
+      }
+      for (const entry of repaired) {
+        console.log(`[REPAIRED] ${entry.id}`);
+        console.log(`  mission: ${entry.mission_id}`);
+        console.log(`  backend: ${entry.backend}`);
+        if (entry.branch) {
+          console.log(`  branch: ${entry.branch}`);
+        }
+        console.log(`  path: ${entry.path}`);
+        console.log(`  status: ${entry.status}`);
+      }
+    } catch (err) {
+      console.error(`[FAIL] sandbox repair error:`);
       console.error(`  error: ${(err as Error).message}`);
       process.exit(1);
     }
@@ -2967,6 +3639,175 @@ mcpCmd
       process.exit(0);
     } catch (err) {
       process.stderr.write(`uh mcp serve: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    }
+  });
+
+// uh queue — launch missions in order under an orchestrator cap and a
+// free-memory floor, resumable from `.harness/queue/<queue-id>/state.json`.
+const queueCmd = program
+  .command("queue")
+  .description("Launch a queue of missions in order under an orchestrator cap and a free-memory floor");
+
+queueCmd
+  .command("run")
+  .description("Run a queue file: launch entries whose dependencies passed, in order, resuming from state.json")
+  .argument("<file>", "Queue YAML file")
+  .option("--max-orchestrators <n>", "How many orchestrators may run at once (default: 2)")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .action(async (file: string, opts: { maxOrchestrators?: string; root?: string }) => {
+    const root = resolveRoot(opts.root);
+    const maxOrchestrators = opts.maxOrchestrators === undefined ? undefined : Number.parseInt(opts.maxOrchestrators, 10);
+    if (opts.maxOrchestrators !== undefined && (maxOrchestrators === undefined || !Number.isFinite(maxOrchestrators) || maxOrchestrators < 1)) {
+      console.error(`[FAIL] --max-orchestrators must be a positive integer, got: ${opts.maxOrchestrators}`);
+      process.exit(1);
+      return;
+    }
+    try {
+      const result = await runQueue(path.resolve(file), {
+        root,
+        launcher: createQueueLauncher(),
+        ...(maxOrchestrators !== undefined ? { maxOrchestrators } : {}),
+      });
+      console.log(formatQueueState({ schema_version: "uh.queue.v0", queue_id: result.queue_id, entries: result.entries }));
+      process.exit(result.status === "passed" ? 0 : 1);
+    } catch (err) {
+      console.error(`[FAIL] queue run error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+queueCmd
+  .command("status")
+  .description("Report per-entry queue state from .harness/queue/<queue-id>/state.json")
+  .argument("<queue-id>", "Queue id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the state as JSON")
+  .action(async (queueId: string, opts: { root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const state = await readQueueState(root, queueId);
+      if (state === undefined) {
+        console.error(`[FAIL] no queue state at .harness/queue/${queueId}/state.json under ${root}`);
+        process.exit(1);
+        return;
+      }
+      if (opts.json) console.log(JSON.stringify(state, null, 2));
+      else console.log(formatQueueState(state));
+    } catch (err) {
+      console.error(`[FAIL] queue status error:`);
+      console.error(`  error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+// uh notify — settlement notifications across the configured sinks.
+const notifyCmd = program
+  .command("notify")
+  .description("Inspect and test the configured run/team/alerts notification sinks");
+
+notifyCmd
+  .command("detect")
+  .description("Report which preset tools are installed and print a ready-to-paste config for each")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the detection report as JSON")
+  .action(async (opts: { root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { detectPresets, userNotificationsFile } = await import("./harness/notifications.js");
+      const { projectYaml } = await import("./harness/paths.js");
+      const detections = await detectPresets();
+      if (opts.json) {
+        console.log(JSON.stringify({ schema_version: "uh.notify.detect.v0", root, presets: detections }, null, 2));
+        return;
+      }
+      for (const detection of detections) {
+        console.log(`[${detection.available ? "OK" : "--"}] ${detection.preset}: ${detection.detail}`);
+      }
+      const found = detections.filter((detection) => detection.config !== undefined);
+      if (found.length === 0) {
+        console.log("");
+        console.log("No preset tools detected. A webhook sink needs only a URL; a command sink needs any argv.");
+        return;
+      }
+      console.log("");
+      console.log(`Add any of these under notifications.sinks in ${projectYaml(root)},`);
+      console.log(`or under a top-level sinks list in ${userNotificationsFile()}:`);
+      console.log("notifications:");
+      console.log("  sinks:");
+      for (const detection of found) {
+        for (const line of (detection.config ?? "").split("\n")) console.log(`    ${line}`);
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+notifyCmd
+  .command("list")
+  .description("List the configured notification sinks and their filters")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the configured sinks as JSON")
+  .action(async (opts: { root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { describeSink, loadNotificationConfig, refusedProjectSinks } = await import("./harness/notifications.js");
+      const sinks = await loadNotificationConfig(root);
+      const refused = await refusedProjectSinks(root);
+      if (opts.json) {
+        console.log(JSON.stringify({ schema_version: "uh.notify.list.v0", sinks, ...(refused.length > 0 ? { refused_project_sinks: refused } : {}) }, null, 2));
+        return;
+      }
+      for (const entry of refused) console.log(`Not used: ${entry.id} (${entry.reason})`);
+      if (sinks.length === 0) {
+        console.log("No notification sinks configured; nothing is sent. Add notifications.sinks in .harness/project.yaml.");
+        return;
+      }
+      console.log(`Notification sinks: ${sinks.length}`);
+      for (const sink of sinks) console.log(`- ${describeSink(sink)}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+notifyCmd
+  .command("test")
+  .description("Deliver a test event to every sink (or one with --sink) and print each outcome")
+  .option("--sink <id>", "Deliver only to this sink id")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--json", "Emit the outcomes as JSON")
+  .action(async (opts: { sink?: string; root?: string; json?: boolean }) => {
+    const root = resolveRoot(opts.root);
+    try {
+      const { buildTestEvent, dispatchEvent, loadNotificationConfig, reportAttempt } = await import("./harness/notifications.js");
+      const sinks = await loadNotificationConfig(root);
+      if (sinks.length === 0) {
+        console.error("No notification sinks configured; nothing to test.");
+        process.exit(1);
+        return;
+      }
+      if (opts.sink !== undefined && !sinks.some((sink) => sink.id === opts.sink)) {
+        console.error(`[FAIL] unknown sink id: ${opts.sink}`);
+        process.exit(1);
+        return;
+      }
+      const attempts = await dispatchEvent(root, buildTestEvent(), { only: opts.sink, ignoreDedupe: true });
+      if (opts.json) {
+        console.log(JSON.stringify({ schema_version: "uh.notify.test.v0", attempts }, null, 2));
+      } else if (attempts.length === 0) {
+        console.log("No sinks matched.");
+      } else {
+        for (const attempt of attempts) {
+          const report = reportAttempt(attempt);
+          console.log(`[${report.tag}] ${attempt.sink} (${attempt.transport}): ${report.message}`);
+        }
+      }
+      if (attempts.some((attempt) => attempt.outcome !== "ok")) process.exit(1);
+    } catch (err) {
+      console.error((err as Error).message);
       process.exit(1);
     }
   });

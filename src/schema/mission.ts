@@ -1,6 +1,7 @@
 import path from "node:path";
 import { TeamResourceLimitsSchema, RuntimeLimitsSchema, ToolGuardFieldsSchema, resolveToolGuardPolicy, type ToolGuardPolicy, DEFAULT_PROTECTED_PATHS } from "./runtime-control.js";
 import { z } from "zod";
+import { RelativePathSchema } from "./relative-path.js";
 import { CostClassSchema } from "./adapter-capabilities.js";
 import { IndependentReviewBindingSchema } from "./independent-review.js";
 
@@ -36,6 +37,20 @@ const RequiredCheckSchema = z.object({
   command: z.string().optional(),
 });
 
+/**
+ * A grounding claim: a falsifiable statement about the repository that the
+ * packet asserts is true right now. `path` is repo-relative and `contains`
+ * is a literal string (`uh mission check` passes the claim only when the file
+ * exists and its text contains that literal). Additive and strict: an entry
+ * with an unknown key is rejected rather than silently dropped.
+ */
+export const GroundingClaimSchema = z.object({
+  claim: z.string().min(1),
+  path: RelativePathSchema,
+  contains: z.string().min(1),
+}).strict();
+export type GroundingClaim = z.infer<typeof GroundingClaimSchema>;
+
 const DEFAULT_TEST_PATHS = [
   "tests/**",
   "test/**",
@@ -49,6 +64,13 @@ const DEFAULT_TEST_PATHS = [
   "**/*.spec.jsx",
   "**/__tests__/**",
 ];
+/**
+ * A single capability tag. Free-form, open string (NOT a closed enum): any
+ * label that matches the regex is accepted, and `:` is permitted so callers can
+ * namespace MCP-style tags (e.g. `mcp:playwright`). Capabilities are matched by
+ * set-containment against the resolved adapter manifest's declared
+ * `capabilities` (`adapter.document.capabilities`, also an open string[]).
+ */
 const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, {
   message: "Capability id must start with [A-Za-z0-9] and use only [A-Za-z0-9._:-]",
 });
@@ -62,8 +84,32 @@ const CapabilitySchema = z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/
 export const TEAM_ADAPTER_IDS = ["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi", "command-code", "claude-code", "acp"] as const;
 const AdapterIdSchema = z.enum(TEAM_ADAPTER_IDS);
 
+/** Session-template id referencing `.harness/templates/<id>.yaml`. */
+const WorkerTemplateIdSchema = z
+  .string()
+  .min(1, { message: "template id must not be empty" })
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, {
+    message: "template id must start with [a-zA-Z0-9] and use only [a-zA-Z0-9._-]",
+  })
+  .refine((id) => id !== "." && id !== "..", {
+    message: "template id must not be '.' or '..'",
+  });
+
 export const TeamWorkerSchema = z.object({
-  adapter: AdapterIdSchema,
+  /**
+   * Runtime the worker dispatches against. Optional only when `template` is
+   * set: the worker then adopts the template's adapter. An explicit adapter
+   * always wins over the template's. A worker with neither fails validation.
+   */
+  adapter: AdapterIdSchema.optional(),
+  /**
+   * Optional session template the worker adopts. The worker's contract takes
+   * the template's `adapter`, `runtime_config_overrides`, `limits`, `recovery`,
+   * and `worker_rules` as defaults; the worker spec and the worker's own packet
+   * win over the template. An unknown template id fails the team before any
+   * worker starts.
+   */
+  template: WorkerTemplateIdSchema.optional(),
   role: z.string().min(1),
   mission_id: z.string().min(1).optional(),
   count: z.number().int().positive().optional().default(1),
@@ -83,9 +129,30 @@ export const TeamWorkerSchema = z.object({
     files: z.array(z.string().min(1)),
   }).strict().optional(),
   seed: z.number().int().nonnegative().optional(),
-}).strict();
+}).strict().superRefine((worker, ctx) => {
+  if (worker.adapter === undefined && worker.template === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      message: "team worker requires an adapter, or a template that supplies one",
+      path: ["adapter"],
+    });
+  }
+});
 
 export type TeamWorker = z.input<typeof TeamWorkerSchema>;
+
+/**
+ * Effective adapter for a team worker: its explicit adapter wins, otherwise the
+ * adapter of the session template it adopts. Returns `undefined` when neither
+ * supplies one — a combination the worker schema rejects, so callers that have
+ * resolved the template may treat a defined result as the worker's runtime.
+ */
+export function resolveWorkerAdapter(
+  worker: { adapter?: string | undefined; template?: string | undefined },
+  template?: { adapter?: string | undefined } | undefined,
+): string | undefined {
+  return worker.adapter ?? template?.adapter;
+}
 
 const TeamLeaderSchema = z.object({
   adapter: AdapterIdSchema,
@@ -132,6 +199,18 @@ export const DecisionPolicySchema = z.object({
   fallback_model: z.string().min(1).optional(),
 }).strict();
 
+/**
+ * Optional governed runtime switches. `loop_watchdog` selects whether the
+ * shadow loop observer runs: `off`, the default, observes nothing and makes
+ * no provider call; `shadow` is an explicit opt-in that records advisory
+ * receipts and may ask TypeSafe System One when `TYPESAFE_API_KEY` is set.
+ * Additive and strict: a legacy mission that omits it runs with the watchdog off.
+ */
+export const RuntimeConfigSchema = z.object({
+  loop_watchdog: z.enum(["shadow", "off"]).default("off"),
+}).strict();
+export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
+
 const MissionInputSchema = z.object({
   schema_version: z.literal("uh.mission.v0"),
   id: z.string().min(1),
@@ -142,12 +221,27 @@ const MissionInputSchema = z.object({
   workflow_profile: z.string().min(1),
   priority: z.string().optional(),
   objective: z.string().optional().default(""),
+  /** Governed runtime switches. Additive and strict; absent means the defaults apply. */
+  runtime_config: RuntimeConfigSchema.optional(),
   context: z.object({
     repo_root: z.string().optional(),
+    /**
+     * Opt out of the project brief (`.harness/project-brief.md`): an explicit
+     * `false` suppresses the `## Project facts` section in the dispatch prompt.
+     * Absent (or any non-`false` value) keeps today's behaviour — the brief
+     * renders. An explicit `projectBrief` option from a caller still wins.
+     */
+    project_brief: z.boolean().optional(),
     read_first: z.array(z.string()).optional().default([]),
     source_links: z.array(z.string()).optional().default([]),
   }).optional().default({ read_first: [], source_links: [] }),
   constraints: z.array(z.string()).optional().default([]),
+  /**
+   * Additive grounding claims checked by `uh mission check`. Absent means no
+   * claims (legacy packets stay valid); each `{ claim, path, contains }` must
+   * resolve to an existing file whose text contains the literal.
+   */
+  grounding: z.array(GroundingClaimSchema).optional().default([]),
   skills: z.object({
     required: z.array(z.string()).optional().default([]),
     suggested: z.array(z.string()).optional().default([]),
@@ -158,6 +252,15 @@ const MissionInputSchema = z.object({
   completion_criteria: z.array(z.string()).optional().default([]),
   acceptance_criteria: z.array(AcceptanceCriterionSchema).optional().default([]),
   tdd: TddOptionsSchema.optional(),
+  /**
+   * Open string[] of free-form capability tags, matched by set-containment
+   * against the resolved adapter manifest's declared capabilities. Enforced
+   * WARN-by-default at `run` / `dry-run` / `run-all` preflight (a `[WARN]` line
+   * per unmet tag, then the run proceeds); `--strict` escalates each mismatch
+   * to a hard error; `--force` bypasses the check entirely. DISTINCT from
+   * `runtime_requirements` below, which are typed, hard preconditions that are
+   * ALWAYS errors (never relaxed by warn mode) and gate `--auto` routing.
+   */
   capabilities: z.array(CapabilitySchema).optional().default([]),
   runtime_requirements: RuntimeRequirementsSchema.optional(),
   decision_policy: DecisionPolicySchema.optional(),

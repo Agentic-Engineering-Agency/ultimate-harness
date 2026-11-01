@@ -14,6 +14,7 @@ Ultimate Harness is runtime-agnostic: mission packets and verification artifacts
 | Claude Code | `claude-code` | Native CLI with stream JSON | Worker guard required; integrated coordinator acceptance remains incomplete. |
 | Anthropic Messages API | `anthropic` | Local HTTP API | Native Anthropic Messages API adapter. |
 | Agent-Client Protocol | `acp` | Local stdio (JSON-RPC 2.0) | Standard ACP v1 runner for headless agent processes (OpenHands, Zed, custom). See [runbook](./runbooks/acp-setup.md). |
+| Prime Agent | `acp` (no dedicated adapter) | `prime-agent --mode acp` | Untested and incomplete; not in use. See [Prime Agent](#prime-agent-untested-incomplete). |
 
 Command Code print-mode missions must declare a `guard` block or an explicit `runtime_config.permission_mode`; without either, planning refuses before process spawn, including custom CLI commands. See [Tool Guard](./tool-guard.md) for the permission-mode and hook boundary.
 
@@ -26,10 +27,18 @@ remains owned by the installed Claude CLI; UH does not copy credentials into
 mission artifacts.
 
 Worker execution requires a mission guard and `permission_mode: default`.
-Coordinator execution uses `role: orchestrator`, a restricted native tool set and
-strict empty MCP configuration. This does not establish isolation from inherited
-memory, settings, skills or arbitrary caller flags. A UH hook allow also does not
-grant native shell permission.
+Coordinator execution uses `role: orchestrator`, a restricted native tool set
+(`Bash`, `Read`, `Write`, `Edit`) and strict empty MCP configuration. A coordinator
+run also requires a declared guard, because its native write grant is derived from
+that guard's `write_roots`: every root becomes exactly one `Write(<root>/**)` and
+one `Edit(<root>/**)` rule, so a mission that lets the orchestrator report under
+`out` grants nothing outside `out`. A root that names the worker root (`.`) or
+escapes it (`../x`, an absolute path) is refused while planning rather than
+widening the grant to the whole checkout. The UH `PreToolUse` hook still judges
+every call, so a natively allowed path can still be denied by policy; the rules
+only remove the print-mode denial that would otherwise happen before the hook runs.
+This does not establish isolation from inherited memory, settings, skills or
+arbitrary caller flags. A UH hook allow also does not grant native shell permission.
 
 Use an explicit supported model and inspect the planned command before execution.
 The current default includes a context suffix that can differ from native model
@@ -54,6 +63,35 @@ sets `allow_native_subagents: true` gets depth `1` on the same pinned roles. Cus
 the operator's settings are not known to UH; delegated-route attestation is the backstop for
 those. Behavior verified against oh-my-pi source at commit `3ed46dc`
 (`config/settings.ts` merge precedence, `task/types.ts` `canSpawnAtDepth`).
+
+`runtime_config.tools`, a list of omp tool names, is passed as `--tools=<comma list>` right after `--mode`,
+so a read-only mission can withhold tools such as `eval` and `python`, which bypass the guard's path checks. The list
+needs at least one entry, no duplicates and names from a restricted character set; without it the argv is unchanged.
+
+### Prime Agent (untested, incomplete)
+
+[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) was evaluated in September 2026 as an orchestrator
+harness and is not in use. The reason is cost: every provider it supports bills per token, and a Claude Pro/Max
+login used from a third-party harness draws on extra usage at per-token prices, not on plan limits (Prime Agent's
+own `docs/providers.md`). The integration is untested beyond one plumbing run and is incomplete.
+
+What was shown, once, with Prime Agent 0.9.5 and a free model on a throwaway project: `uh mission run --runtime acp`
+launched `prime-agent --mode acp`, and the agent ran `uh` commands through `bash()` from its Python kernel and wrote
+its report. Nothing else was exercised: no real mission, no worker role, no review, no paid model, no MCP.
+
+Known limits for anyone who picks this up:
+
+- Versions before 0.9.4 open visible console windows on Windows for every headless run (upstream issues #668 and
+  #869); use 0.9.4 or later. Windows is outside Prime Agent's official distribution.
+- The model-facing tool is a Python kernel with the user's permissions, so the UH tool guard cannot judge its calls;
+  only a post-run diff check could catch writes outside the guard's write roots.
+- `rlm.spawn` sub-agents run outside UH (no mission, guard, verification or receipt) and bill on Prime Agent's
+  providers.
+- Telemetry is on by default: launch with `DO_NOT_TRACK=1`. Globally installed extensions load unless
+  `--no-extensions` is passed.
+- The plumbing run needed workarounds in the `acp` adapter: on Windows the `prime-agent.cmd` shim cannot be the
+  server command (it had to be `node` plus the package's `dist/bundle/cli.js`), `session/new` always sends an empty
+  `mcpServers` list, and the agent inherits the harness's whole environment.
 
 ## Adapter Contracts
 
@@ -118,6 +156,10 @@ can request a typed three-verdict/tamper judgment from `jev-latest`.
 - Missing credentials preserve native verification. Provider timeout policy,
   complete response-envelope validation and privacy filtering for arbitrary
   criterion descriptions remain unresolved.
+
+The shadow loop watchdog asks JEV only for missions that opt in with
+`runtime_config.loop_watchdog: shadow`; the default is `off`, which makes no
+provider call. See [configuration](./configuration.md#mission-runtime_configloop_watchdog).
 
 This is not semantic runtime routing, scope approval or retry authorization.
 See [progressive decisions](./architecture/progressive-decisions.md) and the

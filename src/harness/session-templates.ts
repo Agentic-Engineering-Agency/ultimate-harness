@@ -134,6 +134,85 @@ export async function getSessionTemplate(
   throw new Error(`Session template not found: "${id}"`);
 }
 
+/** The guard fields strict containment looks at. */
+export type StrictContainmentGuard = {
+      write_roots?: string[];
+      allow_native_subagents?: boolean;
+      deny_network_clients?: boolean;
+      allow_unconfined?: boolean;
+      allow_code_tools?: boolean;
+      confine_reads?: boolean;
+      deny_git_mutations?: boolean;
+      deny_package_installs?: boolean;
+      deny_unknown_tools?: boolean;
+    };
+
+/**
+ * Strict containment verification: the guard a strict-containment template ends up with must be explicit, narrow and
+ * closed. Throws, naming the violated rule. Shared by `applySessionTemplate` and by team workers, whose guard is the
+ * parent mission's narrowed by their template and their own block.
+ */
+export function assertStrictContainment(guard: StrictContainmentGuard | undefined): void {
+
+  const writeRoots = guard?.write_roots;
+  if (!Array.isArray(writeRoots) || writeRoots.length === 0) {
+    throw new Error(
+      "Strict containment violation: mission ends up with no explicit guard.write_roots",
+    );
+  }
+
+  for (const root of writeRoots) {
+    const normalized = path.posix
+      .normalize(root.trim().replaceAll("\\", "/"))
+      .replace(/^\.\/+/, "");
+    if (normalized === "." || normalized === "") {
+      throw new Error(
+        'Strict containment violation: write root "." is not allowed in strict containment',
+      );
+    }
+    if (normalized === ".." || normalized.startsWith("../")) {
+      throw new Error(
+        `Strict containment violation: write root "${root}" leaves the worker's folder and is not allowed in strict containment`,
+      );
+    }
+    if (
+      path.isAbsolute(root) ||
+      root.startsWith("/") ||
+      root.startsWith("\\") ||
+      /^[a-zA-Z]:[/\\]/.test(root)
+    ) {
+      throw new Error(
+        `Strict containment violation: absolute write root "${root}" is not allowed in strict containment`,
+      );
+    }
+  }
+
+  if (guard?.allow_native_subagents === true) {
+    throw new Error(
+      "Strict containment violation: allow_native_subagents must not be true in strict containment",
+    );
+  }
+
+  if (guard?.deny_network_clients === false) {
+    throw new Error(
+      "Strict containment violation: deny_network_clients must not be false in strict containment",
+    );
+  }
+
+  // Guard fields that loosen the worker's containment have no place in a strict template.
+  const loosening: Array<[string, boolean]> = [
+    ["allow_unconfined", guard?.allow_unconfined === true],
+    ["allow_code_tools", guard?.allow_code_tools === true],
+    ["confine_reads: false", guard?.confine_reads === false],
+    ["deny_git_mutations: false", guard?.deny_git_mutations === false],
+    ["deny_package_installs: false", guard?.deny_package_installs === false],
+    ["deny_unknown_tools: false", guard?.deny_unknown_tools === false],
+  ];
+  for (const [field, present] of loosening) {
+    if (present) throw new Error(`Strict containment violation: ${field} must not be set in strict containment`);
+  }
+}
+
 /**
  * Merges a session template into a mission document.
  * Precedence, most specific wins: values the mission states explicitly,
@@ -208,53 +287,7 @@ export function applySessionTemplate<T extends Record<string, unknown>>(
   }
 
   // 7. Strict containment verification
-  if (template.containment === "strict") {
-    const guard = result.guard as {
-      write_roots?: string[];
-      allow_native_subagents?: boolean;
-      deny_network_clients?: boolean;
-    } | undefined;
-
-    const writeRoots = guard?.write_roots;
-    if (!Array.isArray(writeRoots) || writeRoots.length === 0) {
-      throw new Error(
-        "Strict containment violation: mission ends up with no explicit guard.write_roots",
-      );
-    }
-
-    for (const root of writeRoots) {
-      const normalized = path.posix
-        .normalize(root.trim().replaceAll("\\", "/"))
-        .replace(/^\.\/+/, "");
-      if (normalized === "." || normalized === "") {
-        throw new Error(
-          'Strict containment violation: write root "." is not allowed in strict containment',
-        );
-      }
-      if (
-        path.isAbsolute(root) ||
-        root.startsWith("/") ||
-        root.startsWith("\\") ||
-        /^[a-zA-Z]:[/\\]/.test(root)
-      ) {
-        throw new Error(
-          `Strict containment violation: absolute write root "${root}" is not allowed in strict containment`,
-        );
-      }
-    }
-
-    if (guard?.allow_native_subagents === true) {
-      throw new Error(
-        "Strict containment violation: allow_native_subagents must not be true in strict containment",
-      );
-    }
-
-    if (guard?.deny_network_clients === false) {
-      throw new Error(
-        "Strict containment violation: deny_network_clients must not be false in strict containment",
-      );
-    }
-  }
+  if (template.containment === "strict") assertStrictContainment(result.guard as StrictContainmentGuard | undefined);
 
   // Compute description for later index inspection
   const desc = describeAppliedTemplate(mission, template);

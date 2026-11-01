@@ -1,12 +1,18 @@
 import { execFile } from "node:child_process";
-import { access, mkdir, open, readFile, readdir } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { parse as parseYaml } from "yaml";
+import { RuntimeSessionSchema } from "../schema/artifacts.js";
 import { RuntimeControlSchema, type RuntimeControl } from "../schema/runtime-control.js";
+import type { RunDigestLongRunningTool } from "../schema/run-digest.js";
+import { countRuntimeTurns, runtimeTurnsCountableFromEvents } from "./runtime-turns.js";
 import { relativeArtifactPath } from "./artifact-paths.js";
 import { writeAtomicArtifact } from "./artifact-transaction.js";
 import { assertValidRunId } from "./run-id.js";
+import { readRunDigest } from "./run-digest.js";
+import { elapsedMs, notifyRunSettled } from "./notifications.js";
 import type { MissionArtifactContext } from "../adapters/_artifact-context.js";
 
 /**
@@ -100,6 +106,12 @@ export interface LiveRunRecord {
   peak_memory_bytes?: number;
   last_event_at?: string;
   last_tool?: string;
+  /**
+   * Tool calls the run's digest reports as stalled: in flight with no end
+   * event and no output beyond the digest's stall window. Absent, like the
+   * signal itself, whenever the digest carries none.
+   */
+  stalled_tools?: RunDigestLongRunningTool[];
 }
 
 export interface LiveRunView extends LiveRunRecord {
@@ -381,6 +393,98 @@ async function readEventsTail(
     await handle.close();
   }
 }
+async function resolveRunRuntime(runDir: string, fallback: string): Promise<string> {
+  try {
+    const parsed = RuntimeSessionSchema.safeParse(parseYaml(await readFile(path.join(runDir, "runtime-session.yaml"), "utf8")));
+    if (parsed.success) return parsed.data.runtime;
+  } catch {
+    // No readable session document.
+  }
+  return fallback;
+}
+
+/** Turn counts already computed from an events file, keyed by its path and valid while its size and modification time hold. */
+const eventsTurnCache = new Map<string, { size: number; mtimeMs: number; turns: number | undefined }>();
+
+async function resolveRunTurns(
+  projectRoot: string,
+  controlPathRel: string,
+  controlTurns: number | undefined,
+  fallbackRuntime: string,
+): Promise<number | undefined> {
+  const runDir = path.dirname(path.resolve(projectRoot, controlPathRel));
+  let digestTurns: number | undefined;
+  try {
+    const digest = await readRunDigest(runDir);
+    if (digest !== undefined && typeof digest.turns === "number" && digest.turns >= 0) {
+      digestTurns = digest.turns;
+    }
+  } catch {
+    // Unreadable or malformed digest.
+  }
+
+  const maxNonEvents = Math.max(
+    controlTurns !== undefined && controlTurns >= 0 ? controlTurns : 0,
+    digestTurns !== undefined && digestTurns >= 0 ? digestTurns : 0,
+  );
+
+  if (maxNonEvents > 0) {
+    return maxNonEvents;
+  }
+
+  // Only when neither gives a positive count, countRuntimeTurns over the run's whole events.ndjson, and only for a
+  // runtime whose turns can be counted from events, and only when the file changed since the last count.
+  try {
+    const runtime = await resolveRunRuntime(runDir, fallbackRuntime);
+    if (runtimeTurnsCountableFromEvents(runtime)) {
+      const eventsPath = path.join(runDir, "events.ndjson");
+      const info = await stat(eventsPath);
+      const cached = eventsTurnCache.get(eventsPath);
+      let computed: number | undefined;
+      if (cached !== undefined && cached.size === info.size && cached.mtimeMs === info.mtimeMs) {
+        computed = cached.turns;
+      } else {
+        const content = await readFile(eventsPath, "utf8");
+        const parsedEvents = content
+          .split("\n")
+          .filter((line) => line.trim().length > 0)
+          .flatMap((line) => {
+            try {
+              return [JSON.parse(line)];
+            } catch {
+              return [];
+            }
+          });
+        computed = countRuntimeTurns(runtime, parsedEvents);
+        eventsTurnCache.set(eventsPath, { size: info.size, mtimeMs: info.mtimeMs, turns: computed });
+      }
+      if (computed !== undefined && computed > 0) {
+        return computed;
+      }
+    }
+  } catch {
+    // Missing or unreadable events.ndjson or session yaml.
+  }
+
+  if (controlTurns !== undefined || digestTurns !== undefined) {
+    return maxNonEvents;
+  }
+
+  return undefined;
+}
+
+
+/**
+ * Stalled tool calls from the run's `run-digest.json`, which lives beside its
+ * `runtime-control.json`. A missing or malformed digest carries no signal.
+ */
+async function readStalledTools(
+  projectRoot: string,
+  controlPathRel: string,
+): Promise<RunDigestLongRunningTool[]> {
+  const digest = await readRunDigest(path.dirname(path.resolve(projectRoot, controlPathRel)));
+  return digest?.loop_signals.long_running_tools ?? [];
+}
 
 interface ScannedControl {
   runId: string;
@@ -432,6 +536,8 @@ async function scanForRuntimeControls(projectRoot: string): Promise<ScannedContr
 async function hydrateRegistryRecord(projectRoot: string, entry: LiveRunEntry): Promise<LiveRunRecord> {
   const control = await readControlFile(projectRoot, entry.control_path);
   const events = await readEventsTail(projectRoot, entry.control_path);
+  const stalledTools = await readStalledTools(projectRoot, entry.control_path);
+  const turns = await resolveRunTurns(projectRoot, entry.control_path, control?.turns, entry.runtime);
   return {
     source: "registry",
     run_id: entry.run_id,
@@ -451,13 +557,14 @@ async function hydrateRegistryRecord(projectRoot: string, entry: LiveRunEntry): 
       : (entry.stop_code !== undefined ? { stop_code: entry.stop_code } : {})),
     ...(control?.ready_at !== undefined ? { ready_at: control.ready_at } : {}),
     ...(control?.session_id !== undefined ? { session_id: control.session_id } : {}),
-    ...(control?.turns !== undefined ? { turns: control.turns } : {}),
+    ...(turns !== undefined ? { turns } : {}),
     ...(control?.denials !== undefined ? { denials: control.denials } : {}),
     ...(control?.inflight_tools !== undefined ? { inflight_tools: control.inflight_tools } : {}),
     ...(control?.peak_memory_bytes !== undefined ? { peak_memory_bytes: control.peak_memory_bytes } : {}),
     ...(entry.settled_at !== undefined ? { settled_at: entry.settled_at } : {}),
     ...(events.lastEventAt !== undefined ? { last_event_at: events.lastEventAt } : {}),
     ...(events.lastTool !== undefined ? { last_tool: events.lastTool } : {}),
+    ...(stalledTools.length > 0 ? { stalled_tools: stalledTools } : {}),
   };
 }
 
@@ -465,6 +572,8 @@ async function hydrateScannedRecord(projectRoot: string, found: ScannedControl):
   const control = await readControlFile(projectRoot, found.controlPathRel);
   if (control === undefined) return undefined;
   const events = await readEventsTail(projectRoot, found.controlPathRel);
+  const stalledTools = await readStalledTools(projectRoot, found.controlPathRel);
+  const turns = await resolveRunTurns(projectRoot, found.controlPathRel, control.turns, control.runtime);
   const team = teamFromArtifactRoot(projectRoot, found.artifactRootAbs);
   return {
     source: "scan",
@@ -480,13 +589,14 @@ async function hydrateScannedRecord(projectRoot: string, found: ScannedControl):
     heartbeat_at: control.heartbeat_at,
     ...(control.ready_at !== undefined ? { ready_at: control.ready_at } : {}),
     ...(control.session_id !== undefined ? { session_id: control.session_id } : {}),
-    turns: control.turns,
+    turns: turns ?? control.turns,
     denials: control.denials,
     inflight_tools: control.inflight_tools,
     ...(control.peak_memory_bytes !== undefined ? { peak_memory_bytes: control.peak_memory_bytes } : {}),
     ...(team !== undefined ? { team } : {}),
     ...(events.lastEventAt !== undefined ? { last_event_at: events.lastEventAt } : {}),
     ...(events.lastTool !== undefined ? { last_tool: events.lastTool } : {}),
+    ...(stalledTools.length > 0 ? { stalled_tools: stalledTools } : {}),
   };
 }
 
@@ -514,6 +624,16 @@ export async function discoverRuns(
         settled_at: record.heartbeat_at,
         controller_pid: record.controller_pid,
       }).catch(() => undefined);
+      notifyRunSettled(projectRoot, {
+        run_id: record.run_id,
+        mission: record.mission_id,
+        runtime: record.runtime,
+        ...(record.model !== undefined ? { model: record.model } : {}),
+        status: record.status ?? "unknown",
+        ...(record.stop_code !== undefined ? { stop_code: record.stop_code } : {}),
+        duration_ms: elapsedMs(record.started_at, record.heartbeat_at ?? record.settled_at),
+        run_dir: path.dirname(path.resolve(projectRoot, record.control_path)),
+      }, { projectSinks: false });
     }
     seen.add(record.run_id);
     records.push(record);
@@ -587,13 +707,22 @@ export function processChildren(controllerPid: number, processes: readonly Nativ
   return children;
 }
 
-/** Default process lister: Windows CIM, else POSIX `ps`. Never throws. */
-export async function defaultProcessLister(): Promise<NativeProcess[]> {
+/**
+ * The host's process table, or undefined when it could not be read. Callers that act on the absence of
+ * a process (a controller that looks dead) must tell a read failure from a real answer: an empty list
+ * from a failed `ps` makes every live run look orphaned.
+ */
+export async function listProcessesChecked(): Promise<NativeProcess[] | undefined> {
   try {
     return process.platform === "win32" ? await listWindowsProcesses() : await listPosixProcesses();
   } catch {
-    return [];
+    return undefined;
   }
+}
+
+/** Default process lister: Windows CIM, else POSIX `ps`. Never throws; a read failure is an empty list. */
+export async function defaultProcessLister(): Promise<NativeProcess[]> {
+  return (await listProcessesChecked()) ?? [];
 }
 
 async function listWindowsProcesses(): Promise<NativeProcess[]> {
@@ -716,8 +845,16 @@ export function formatLiveRuns(records: readonly LiveRunView[], options: { now?:
         `denials=${record.denials ?? 0}`,
         `hb=${heartbeat}`,
         `last=${record.last_tool ?? "-"} (${lastAge})`,
+        ...formatStalledTools(record.stalled_tools),
         `pids=${pids}`,
       ].join("  ");
     })
     .join("\n");
+}
+
+/** The stalled-call segment of a row: empty unless the run's digest reports one. */
+function formatStalledTools(stalled: readonly RunDigestLongRunningTool[] | undefined): string[] {
+  if (stalled === undefined || stalled.length === 0) return [];
+  const calls = stalled.map((call) => `tool=${call.tool} ${call.minutes}m`).join(",");
+  return [`STALLED ${calls}`];
 }

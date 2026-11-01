@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import type { MissionDocument } from "../schema/mission.js";
 import type { WorkflowDocument } from "../schema/workflow.js";
+import { hivePacketFromMission, renderVerifiedHiveFacts } from "./hive.js";
+import { harnessDir } from "./paths.js";
 import { runtimeFinalMessageInstruction } from "./runtime-final-message.js";
 
 /**
@@ -49,6 +53,12 @@ export interface DispatchContext {
   verificationChecks: string[];
   acceptanceCriteria: DispatchContextAcceptanceCriterion[];
   /**
+   * Optional verbatim project brief (`.harness/project-brief.md`) rendered as a
+   * `[Project facts]`-style section. Capped at {@link PROJECT_FACTS_CHAR_LIMIT}
+   * characters with a truncation note so the prompt stays bounded.
+   */
+  projectFacts?: string;
+  /**
    * Optional `[Persistent memory]` block prepended to the rendered prompt
    * before the final-message instruction. Adapters wire this in via
    * extensions (e.g. Honcho memory in oh-my-pi).
@@ -67,6 +77,63 @@ export interface BuildDispatchContextOptions {
   finalMessageInstruction?: string;
   /** Pre-seed the persistent-memory block. */
   memoryBlock?: string;
+  /**
+   * Root directory the project brief is read from when `projectBrief` is not
+   * given. Defaults to the mission's `context.repo_root`, then `process.cwd()`.
+   */
+  root?: string;
+  /**
+   * Explicit project-brief text. When set, no file is read, so callers that
+   * already have the brief (or tests) can inject it deterministically.
+   */
+  projectBrief?: string;
+  /**
+   * Template `worker_rules` appended to the mission's constraints, after the
+   * mission's own, so a single-run template reaches the dispatch prompt.
+   */
+  workerRules?: string[];
+}
+
+/** Hard cap on the rendered project brief so one brief cannot bloat a prompt. */
+export const PROJECT_FACTS_CHAR_LIMIT = 4000;
+
+const PROJECT_FACTS_TRUNCATION_NOTE =
+  `\n\n[project brief truncated to ${PROJECT_FACTS_CHAR_LIMIT} characters]`;
+
+/**
+ * Trim a project brief and, when it exceeds {@link PROJECT_FACTS_CHAR_LIMIT},
+ * cut it to fit with an explicit truncation note. The returned string is never
+ * longer than the limit.
+ */
+export function capProjectFacts(text: string, limit: number = PROJECT_FACTS_CHAR_LIMIT): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= limit) return trimmed;
+  const keep = Math.max(0, limit - PROJECT_FACTS_TRUNCATION_NOTE.length);
+  return `${trimmed.slice(0, keep)}${PROJECT_FACTS_TRUNCATION_NOTE}`;
+}
+
+/**
+ * Read `.harness/project-brief.md` from `root`, capped. Returns undefined when
+ * the file is missing, unreadable, or empty so no empty section is rendered.
+ */
+export function loadProjectFacts(root: string): string | undefined {
+  let text: string;
+  try {
+    text = readFileSync(path.join(harnessDir(root), "project-brief.md"), "utf-8");
+  } catch {
+    return undefined;
+  }
+  const capped = capProjectFacts(text);
+  return capped.length > 0 ? capped : undefined;
+}
+
+/**
+ * Whether the mission receives the project brief. `context.project_brief` is an
+ * opt-out: only an explicit `false` suppresses the `## Project facts` section;
+ * absent (or any other value) keeps today's behaviour — the brief renders.
+ */
+export function isProjectBriefEnabled(mission: MissionDocument): boolean {
+  return mission.context?.project_brief !== false;
 }
 
 export function buildDispatchContext(
@@ -74,6 +141,30 @@ export function buildDispatchContext(
   workflow?: WorkflowDocument,
   options: BuildDispatchContextOptions = {},
 ): DispatchContext {
+  const root = options.root ?? mission.context?.repo_root ?? process.cwd();
+  // An explicit caller-supplied brief always wins; otherwise the mission's
+  // `context.project_brief: false` opts out before any file is read.
+  const projectFacts = options.projectBrief !== undefined
+    ? capProjectFacts(options.projectBrief)
+    : isProjectBriefEnabled(mission)
+      ? loadProjectFacts(root)
+      : undefined;
+  // The hive blackboard appends its relevant, controller-verified facts after
+  // the brief. Only facts whose chain and evidence hash still hold are injected;
+  // best-effort: a malformed hive is ignored rather than failing the dispatch.
+  let hiveFacts = "";
+  try {
+    hiveFacts = renderVerifiedHiveFacts(root, hivePacketFromMission(mission, []));
+  } catch {
+    hiveFacts = "";
+  }
+  // The two parts are budgeted apart: the brief gives way to the hive block, never the other way round, so a long
+  // brief cannot cut the data block's closing fence and leave the rest of the prompt inside it.
+  const factsText = hiveFacts.length > 0
+    ? (projectFacts !== undefined && projectFacts.length > 0
+      ? `${capProjectFacts(projectFacts, Math.max(0, PROJECT_FACTS_CHAR_LIMIT - hiveFacts.length - 2))}\n\n${hiveFacts}`
+      : hiveFacts)
+    : projectFacts;
   return {
     mission,
     workflow,
@@ -83,7 +174,7 @@ export function buildDispatchContext(
       url: i.url,
     })),
     readFirst: [...mission.read_first],
-    constraints: [...mission.constraints],
+    constraints: [...mission.constraints, ...(options.workerRules ?? [])],
     expectedArtifacts: mission.expected_artifacts.map((a) => ({ path: a.path, type: a.type,
       ...(a.completion_marker !== undefined ? { completion_marker: a.completion_marker } : {}) })),
     verificationChecks: [...(mission.verification.checks ?? [])],
@@ -93,6 +184,7 @@ export function buildDispatchContext(
       ...(ac.check_command !== undefined ? { check_command: ac.check_command } : {}),
       severity: ac.severity,
     })),
+    ...(factsText !== undefined && factsText.length > 0 ? { projectFacts: factsText } : {}),
     memoryBlock: options.memoryBlock,
     finalMessageInstruction: options.finalMessageInstruction ?? runtimeFinalMessageInstruction(),
   };

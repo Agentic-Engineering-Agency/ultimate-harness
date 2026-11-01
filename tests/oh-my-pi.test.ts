@@ -19,6 +19,7 @@ import {
 } from "../src/adapters/oh-my-pi.js";
 import { recoveryPrompt } from "../src/harness/runtime-recovery.js";
 import { waitForTerminated } from "./process-state.js";
+import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
 const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-oh-my-pi-adapter-"));
 const SNAPSHOT_ROOT = join(TEST_ROOT, "snapshot");
@@ -38,7 +39,7 @@ function restoreSnapshotEnv() {
 async function writeSnapshotHook() {
   const hook = join(SNAPSHOT_DIST, "extensions", "tool-guard", "omp.js");
   await mkdir(path.dirname(hook), { recursive: true });
-  await writeFile(hook, "export default function () {}\n");
+  await writeGuardHookFixture(hook);
 }
 
 async function writeOhMyPiManifest(overrides = "", mode = "json") {
@@ -140,6 +141,9 @@ describe("uh mission dry-run --runtime oh-my-pi", () => {
     const runDir = join(runsDir, runDirs[0]);
     expect(await readFile(join(runDir, "prompt.md"), "utf-8")).toBe(result.prompt);
     expect(result.command).toBe("omp");
+    // The prompt rides a file reference, so argv carries the path, never the text.
+    expect(result.promptSource).toBe("file");
+    expect(result.promptPath).toBe(join(runDir, "prompt.md"));
     expect(result.args).toEqual([
       "--print",
       "--mode",
@@ -147,8 +151,9 @@ describe("uh mission dry-run --runtime oh-my-pi", () => {
       "--no-extensions",
       "--no-skills",
       "--no-title",
-      result.prompt,
+      `@${result.promptPath}`,
     ]);
+    expect(result.args).not.toContain(result.prompt);
     const sessionPath = join(runDir, "runtime-session.yaml");
     const sessionValidation = await validateFile(sessionPath);
     expect(sessionValidation).toMatchObject({ valid: true, schema_version: "uh.runtime-session.v0" });

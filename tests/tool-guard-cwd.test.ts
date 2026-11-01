@@ -29,6 +29,7 @@ describe("tool guard effective working directory", () => {
     ["pushd outside then Set-Content", "pushd C:\\other; Set-Content a.txt y", "write_outside"],
     ["unresolved environment directory", "Set-Location $env:TEMP; Set-Content a.txt y", "write_outside"],
     ["variable assigned from environment remains unresolved", "$d=$env:TEMP; cd $d; Set-Content a.txt y", "write_outside"],
+    ["unresolved environment variable in a redirect stays conservative", '$d=$env:TEMP; echo x > "$d"', "write_outside"],
     ["nested bash body tracks directory", "bash -c \"cd C:\\\\other && echo x > out/a.txt\"", "write_outside"],
     ["explicit cwd outside the root", "echo x > out/a.txt", "write_outside", { cwd: "C:\\other" }],
     ["delete follows cd", "cd C:\\other && Remove-Item out/a.txt", "delete_outside"],
@@ -55,5 +56,22 @@ describe("tool guard tamper denial", () => {
     if (policyPath) process.env.UH_TOOL_GUARD_POLICY = policyPath;
     if (logPath) process.env.UH_TOOL_GUARD_LOG = logPath;
     expect(classOf(command)).toBe("guard_tamper");
+  });
+
+  test.each([
+    ["powershell variable assigned from the policy environment", "$p=$env:UH_TOOL_GUARD_POLICY; Set-Content $p x"],
+    ["-Path read from the policy environment", "Set-Content -Path $env:UH_TOOL_GUARD_POLICY -Value x"],
+    ["literal variable holding a state path", '$p="C:/x/.harness/tool-guard/policy.json"; Set-Content $p x'],
+    ["bash assignment from the policy environment", 'p=$UH_TOOL_GUARD_POLICY; echo x > "$p"'],
+    ["bare environment reference in a redirect", 'echo x > "$UH_TOOL_GUARD_POLICY"'],
+  ] as const)("denies %s as tamper through a variable", (_name, command) => {
+    process.env.UH_TOOL_GUARD_POLICY = "C:\\private\\guard-policy.json";
+    expect(classOf(command)).toBe("guard_tamper");
+  });
+
+  test("reading the policy through the environment is still allowed", () => {
+    process.env.UH_TOOL_GUARD_POLICY = "C:\\private\\guard-policy.json";
+    expect(classOf("Get-Content $env:UH_TOOL_GUARD_POLICY")).toBeUndefined();
+    expect(classOf('p=$UH_TOOL_GUARD_POLICY; type "$p"')).toBeUndefined();
   });
 });

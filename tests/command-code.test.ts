@@ -1,5 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "vitest";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,6 +11,7 @@ import { initializeHarness } from "../src/harness/init.js";
 import { addAdapter } from "../src/harness/adapter-add.js";
 import { runCommandCode, planCommandCodeRun, dryRunCommandCode, checkCommandCode, buildCommandCodeProbeArgs, parseCommandCodeVersion, CommandCodeRuntimeConfigSchema } from "../src/adapters/command-code.js";
 import { validateAdapter, type AdapterDocument } from "../src/schema/adapter.js";
+import { writeGuardHookFixture } from "./guard-hook-fixtures.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "uh-command-code-"));
@@ -34,7 +36,7 @@ beforeEach(async () => {
   snapshotRoot = await mkdtemp(path.join(tmpdir(), "uh-command-code-snapshot-"));
   const hook = path.join(snapshotRoot, "dist", "extensions", "tool-guard", "cmdc-hook.js");
   await mkdir(path.dirname(hook), { recursive: true });
-  await writeFile(hook, "export default function () {}\n");
+  await writeGuardHookFixture(hook);
   previousDist = process.env.UH_HARNESS_DIST;
   previousCache = process.env.UH_RUNTIME_SNAPSHOT_CACHE;
   process.env.UH_HARNESS_DIST = path.join(snapshotRoot, "dist");
@@ -63,13 +65,22 @@ test("guard policy selects yolo and records guard permission mode", async () => 
     const plan = await planCommandCodeRun(root, missionPath);
     expect(plan.permission_mode).toBe("guard");
     expect(plan.args).toContain("--yolo");
+    // The prompt is transmitted on stdin, never in argv: `-p` carries no query.
+    expect(plan.args).toContain("-p");
+    expect(plan.args[plan.args.indexOf("-p") + 1]).not.toBe(plan.prompt);
+    expect(plan.args).not.toContain(plan.prompt);
+    expect(plan.promptSource).toBe("stdin");
     let seenMode: string | undefined;
+    let seenInput: { args: string[]; stdin?: string } | undefined;
     await runCommandCode(root, missionPath, {
       runId: "guard-mode",
-      runner: async input => { seenMode = input.permissionMode; return { stdout: "", stderr: "", exitCode: 1, timedOut: false }; },
+      runner: async input => { seenMode = input.permissionMode; seenInput = { args: input.args, stdin: input.stdin }; return { stdout: "", stderr: "", exitCode: 1, timedOut: false }; },
       collectDiff: async () => ({ patch: "" }),
     });
     expect(seenMode).toBe("guard");
+    expect(seenInput!.args).toContain("-p");
+    expect(seenInput!.stdin).toContain("Preserve outputs");
+    expect(seenInput!.args).not.toContain(seenInput!.stdin);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -286,8 +297,13 @@ test("guard policy artifacts and Command Code hook preserve existing settings", 
       collectDiff: async () => ({ patch: "" }),
     });
     const runDir = path.join(path.dirname(missionPath), "runs", "guarded-run");
-    expect(parse(await readFile(path.join(runDir, "tool-guard.json"), "utf8"))).toMatchObject({ schema_version: "uh.tool-guard.v0", write_roots: ["out"] });
+    const guardArtifact = parse(await readFile(path.join(runDir, "tool-guard.json"), "utf8")) as { written_files?: Record<string, string> };
+    expect(guardArtifact).toMatchObject({ schema_version: "uh.tool-guard.v0", write_roots: ["out"] });
     expect(seenEnv?.UH_TOOL_GUARD_POLICY).toContain("tool-guard.json");
+    // The baseline the protected-paths invariant judges against: the sha256 of
+    // each policy file exactly as written.
+    expect(guardArtifact.written_files?.[".commandcode/settings.json"]).toBe(createHash("sha256").update(await readFile(settingsPath)).digest("hex"));
+    expect(guardArtifact.written_files?.[".commandcode/.gitignore"]).toBe(createHash("sha256").update("*\n").digest("hex"));
     expect(parse(await readFile(settingsPath, "utf8"))).toMatchObject({ permissions: { defaultMode: "default" }, custom: { keep: true }, hooks: { PreToolUse: [{ hooks: [{ type: "command" }] }] } });
     const persistedSettings = parse(await readFile(settingsPath, "utf8")) as { hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> } };
     const hookCommand = persistedSettings.hooks.PreToolUse.at(-1)?.hooks[0]?.command ?? "";
@@ -446,6 +462,23 @@ test("an orchestrator mission without a guard is refused before spawn", async ()
     (mission.runtime_config_overrides as Record<string, unknown>).role = "orchestrator";
     await writeFile(missionPath, stringify(mission));
     await expect(planCommandCodeRun(root, missionPath)).rejects.toThrow(/orchestrator.*guard/i);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// An orchestrator runs in the live project root, so its guard's write roots are what confines it.
+test.each([
+  ["the whole repository (an empty guard)", {}, /whole repository/],
+  ["the whole repository (an explicit dot)", { write_roots: ["."] }, /whole repository/],
+  ["a root that climbs out of the checkout", { write_roots: ["../elsewhere"] }, /outside the mission checkout/],
+  ["an absolute root", { write_roots: ["/etc"] }, /outside the mission checkout/],
+])("an orchestrator whose guard writes %s is refused at planning", async (_name, guard, expected) => {
+  const { root, missionPath } = await fixture();
+  try {
+    const mission = parse(await readFile(missionPath, "utf8")) as Record<string, unknown>;
+    (mission.runtime_config_overrides as Record<string, unknown>).role = "orchestrator";
+    mission.guard = guard;
+    await writeFile(missionPath, stringify(mission));
+    await expect(planCommandCodeRun(root, missionPath)).rejects.toThrow(expected);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

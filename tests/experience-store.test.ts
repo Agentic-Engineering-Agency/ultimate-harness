@@ -128,6 +128,42 @@ describe("experience store", () => {
     expect(byTier.find((summary) => summary.key === undefined)).toMatchObject({ runs: 1 });
   });
 
+  test("groups the same model reported under different identities onto one canonical key", async () => {
+    root = await mkdtemp(path.join(tmpdir(), "uh-experience-model-"));
+    await putRun("mission-a", "run-plain", {
+      "runtime-result.yaml": result({ provider: "openrouter", model: "Qwen3.8-Flash" }),
+    });
+    await putRun("mission-a", "run-prefixed", {
+      "runtime-result.yaml": result({ provider: "openrouter", model: "Qwen/Qwen3.8-Flash" }),
+    });
+    await putRun("mission-a", "run-spaced", {
+      "runtime-result.yaml": result({ provider: "gateway", model: " qwen/qwen3.8-flash " }),
+    });
+    await putRun("mission-a", "run-other", {
+      "runtime-result.yaml": result({ provider: "provider-c", model: "deepseek/deepseek-v4.1-flash" }),
+    });
+
+    const records = await indexRuns(root);
+    const byModel = summarizeRuns(records, "model");
+    const qwen = byModel.filter((summary) => summary.key === "qwen3.8-flash");
+    expect(qwen).toHaveLength(1);
+    expect(qwen[0]).toMatchObject({ runs: 3, passed: 3, success_rate: 1 });
+    expect(byModel.find((summary) => summary.key === "deepseek-v4.1-flash")).toMatchObject({ runs: 1 });
+    expect(byModel.some((summary) => summary.key === "Qwen/Qwen3.8-Flash")).toBe(false);
+
+    // The raw reported model and provider stay on each record.
+    expect(records.find((record) => record.run_id === "run-plain")).toMatchObject({
+      model_key: "qwen3.8-flash", model: "Qwen3.8-Flash", provider: "openrouter",
+    });
+    expect(records.find((record) => record.run_id === "run-prefixed")).toMatchObject({
+      model_key: "qwen3.8-flash", model: "Qwen/Qwen3.8-Flash", provider: "openrouter",
+    });
+    expect(records.find((record) => record.run_id === "run-spaced")).toMatchObject({
+      model_key: "qwen3.8-flash", model: " qwen/qwen3.8-flash ", provider: "gateway",
+    });
+    expect(records.find((record) => record.run_id === "run-other")?.model_key).toBe("deepseek-v4.1-flash");
+  });
+
   test("removes dominated groups and never treats unknown cost as free", () => {
     const summaries = [
       { key: "cheap-success", runs: 2, passed: 2, success_rate: 1, known_cost_runs: 2, total_cost_usd: 2, mean_cost_usd: 1, mean_duration_ms: 1, cache_read_share: 0 },

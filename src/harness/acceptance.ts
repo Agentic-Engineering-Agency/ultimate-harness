@@ -1,10 +1,14 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cp, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { initializeHarness } from "./init.js";
+import { runtimeRegistry } from "./registry.js";
+import { buildCommandCodeProbeArgs, parseCommandCodeVersion } from "../adapters/command-code.js";
+import { DEFAULT_PROTECTED_PATHS } from "../schema/runtime-control.js";
 import { AcceptanceEvidenceSchema, AcceptanceRegistryEntrySchema, AcceptanceRegistrySchema, type AcceptanceEvidence, type AcceptanceExpected } from "../schema/acceptance.js";
 
 const execFileAsync = promisify(execFile);
@@ -70,6 +74,19 @@ export function compareAcceptanceFacts(expected: AcceptanceExpected, observed: A
   const mismatches: AcceptanceEvidence["mismatches"] = [];
   for (const [field, expectedValue] of Object.entries(expected)) {
     if (field === "fact_sources") continue;
+    // `exercised_report` is reported in the evidence, never judged: a mechanism
+    // that did not fire is a report fact, not a failure.
+    if (field === "exercised_report") continue;
+    if (field === "invariants") {
+      const observedInvariants = observed.invariants && typeof observed.invariants === "object"
+        ? observed.invariants as Record<string, unknown>
+        : {};
+      const names = Array.isArray(expectedValue) ? expectedValue.filter((item): item is string => typeof item === "string") : [];
+      for (const name of names) {
+        if (observedInvariants[name] !== true) mismatches.push({ field: `invariants.${name}`, expected: true, observed: observedInvariants[name] });
+      }
+      continue;
+    }
     if (field === "required_files") {
       const files = observed.files;
       const requiredFiles = Array.isArray(expectedValue) ? expectedValue.filter((file): file is string => typeof file === "string") : [];
@@ -116,17 +133,259 @@ export function compareAcceptanceFacts(expected: AcceptanceExpected, observed: A
 }
 
 
-export function classifyAcceptance(
-  evidence: Pick<AcceptanceEvidence, "outcome" | "checked_at"> & Partial<Pick<AcceptanceEvidence, "harness_commit">> | null,
+export type AcceptanceInputIdentity = { runtime: string; model: string; runtimeVersion?: string };
+export type AcceptanceInputDigest = { digest: string; resolved: number; files: string[] };
+export type AcceptanceClassification = { state: AcceptanceState; reasons: string[] };
+export type AcceptanceClassifyContext = {
+  /** Repository root whose tracked files are the evidence's inputs. */
+  root?: string;
+  /** Glob patterns naming the files the probe asserts (see `acceptanceInputs`). */
+  inputs?: string[];
+  /** Runtime version to fold into the digest when it is known. */
+  runtimeVersion?: string;
+  /**
+   * Directory holding the evidence records (`<root>/acceptance/evidence`). When
+   * no explicit `root` is given and the evidence carries an `input_digest`, the
+   * repository root is resolved from this location (two levels up) so freshness
+   * is judged by the digest instead of silently falling back to the commit rule.
+   */
+  evidenceRoot?: string;
+};
+
+const DEFAULT_INPUT_PATTERNS: readonly string[] = ["acceptance/support/**", "src/**"];
+
+/**
+ * The files whose behaviour an entry's probe asserts. `inputs` when declared,
+ * else a conservative default: the entry's own mission directory, the shared
+ * acceptance support files, and every harness source file.
+ */
+export function defaultAcceptanceInputs(entry: { mission: string }): string[] {
+  const missionDirectory = entry.mission.split("/").slice(0, -1).join("/");
+  return [`acceptance/${missionDirectory}/**`, ...DEFAULT_INPUT_PATTERNS];
+}
+
+export function acceptanceInputs(entry: { mission: string; inputs?: string[] }): string[] {
+  return entry.inputs && entry.inputs.length > 0 ? entry.inputs : defaultAcceptanceInputs(entry);
+}
+
+function inputPatternToRegExp(pattern: string): RegExp {
+  let regex = "";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "*") {
+      if (pattern[index + 1] === "*") {
+        index += 1;
+        if (pattern[index + 1] === "/") {
+          index += 1;
+          regex += "(?:.*/)?";
+        } else {
+          regex += ".*";
+        }
+      } else {
+        regex += "[^/]*";
+      }
+    } else if (char === "?") {
+      regex += "[^/]";
+    } else {
+      regex += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${regex}$`);
+}
+
+function matchesAcceptanceInput(relativePath: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => inputPatternToRegExp(pattern).test(relativePath));
+}
+
+function sha256Hex(content: Buffer | string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * Input hashing normalizes CRLF to LF so a commit blob (stored LF) and a
+ * checked-out working-tree file hash identically when their content is
+ * semantically unchanged — otherwise every Windows checkout would look stale.
+ */
+function normalizeInputContent(content: Buffer): string {
+  return content.toString("utf8").replace(/\r\n/g, "\n");
+}
+
+async function listAcceptanceInputFiles(root: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("git", ["ls-files", "-z"], { cwd: root, maxBuffer: 32 * 1024 * 1024 });
+    return stdout.split("\0").filter((entry) => entry !== "").map((entry) => entry.split(path.sep).join("/"));
+  } catch {
+    return listWalkedInputFiles(root);
+  }
+}
+
+async function listWalkedInputFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (!directory) continue;
+    let children;
+    try {
+      children = await readdir(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const child of children) {
+      if (child.name === ".git" || child.name === "node_modules") continue;
+      const childPath = path.join(directory, child.name);
+      if (child.isDirectory()) pending.push(childPath);
+      else if (child.isFile()) files.push(path.relative(root, childPath).split(path.sep).join("/"));
+    }
+  }
+  return files;
+}
+
+async function listInputFilesAtCommit(root: string, commit: string): Promise<string[]> {
+  const { stdout } = await execFileAsync("git", ["ls-tree", "-r", "--name-only", "-z", commit], { cwd: root, maxBuffer: 32 * 1024 * 1024 });
+  return stdout.split("\0").filter((entry) => entry !== "").map((entry) => entry.split(path.sep).join("/"));
+}
+
+/**
+ * Many blobs at one commit through a single `git cat-file --batch` process. A path that is not in the commit is
+ * simply missing from the result.
+ */
+async function readBlobsAtCommit(root: string, commit: string, paths: string[]): Promise<Map<string, Buffer>> {
+  const found = new Map<string, Buffer>();
+  if (paths.length === 0) return found;
+  const output = await new Promise<Buffer>((resolve, reject) => {
+    const child = execFile("git", ["cat-file", "--batch"], { cwd: root, encoding: "buffer", maxBuffer: 512 * 1024 * 1024 }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+    child.stdin?.on("error", () => { /* surfaced through the exit status */ });
+    child.stdin?.end(paths.map((entry) => `${commit}:${entry}\n`).join(""));
+  });
+  let offset = 0;
+  for (const relativePath of paths) {
+    const newline = output.indexOf(0x0a, offset);
+    if (newline < 0) break;
+    const header = output.toString("utf8", offset, newline);
+    offset = newline + 1;
+    const match = /^[0-9a-f]+ (\w+) (\d+)$/.exec(header);
+    if (!match) continue;
+    const size = Number(match[2]);
+    if (match[1] === "blob") found.set(relativePath, output.subarray(offset, offset + size));
+    offset += size + 1;
+  }
+  return found;
+}
+
+async function readInputContent(root: string, relativePath: string, commit?: string): Promise<Buffer | undefined> {
+  try {
+    if (commit) {
+      const result = await execFileAsync("git", ["show", `${commit}:${relativePath}`], { cwd: root, maxBuffer: 32 * 1024 * 1024, encoding: "buffer" });
+      return result.stdout as unknown as Buffer;
+    }
+    return await readFile(path.join(root, relativePath));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * sha256 over the sorted (relative path, content sha256) list of every tracked
+ * file matching `inputs`, plus the runtime id, runtime version when known, and
+ * the model. `commit` reads file contents from that git revision (via
+ * `git show`); otherwise the working tree is read.
+ */
+export async function computeAcceptanceInputDigest(
+  root: string,
+  inputs: string[],
+  identity: AcceptanceInputIdentity,
+  options: { commit?: string } = {},
+): Promise<AcceptanceInputDigest> {
+  const allFiles = options.commit
+    ? await listInputFilesAtCommit(root, options.commit)
+    : await listAcceptanceInputFiles(root);
+  const matched = allFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)).sort();
+  const lines = [`runtime=${identity.runtime}`, `runtime_version=${identity.runtimeVersion ?? UNKNOWN}`, `model=${identity.model}`];
+  const files: string[] = [];
+  const atCommit = options.commit ? await readBlobsAtCommit(root, options.commit, matched) : undefined;
+  for (const relativePath of matched) {
+    const content = atCommit ? atCommit.get(relativePath) : await readInputContent(root, relativePath);
+    if (content === undefined) continue;
+    lines.push(`${relativePath}\t${sha256Hex(normalizeInputContent(content))}`);
+    files.push(relativePath);
+  }
+  return { digest: sha256Hex(lines.join("\n")), resolved: files.length, files };
+}
+
+/**
+ * Input files whose content differs between a base commit and the current
+ * working tree, restricted to those matching the entry's inputs. Returns an
+ * empty list when the base commit cannot be resolved.
+ */
+export async function changedAcceptanceInputs(root: string, inputs: string[], baseCommit?: string): Promise<string[]> {
+  if (!baseCommit || baseCommit === UNKNOWN) return [];
+  let baseFiles: string[];
+  try {
+    baseFiles = await listInputFilesAtCommit(root, baseCommit);
+  } catch {
+    return [];
+  }
+  const currentFiles = await listAcceptanceInputFiles(root);
+  const relevant = new Set([
+    ...baseFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)),
+    ...currentFiles.filter((relativePath) => matchesAcceptanceInput(relativePath, inputs)),
+  ]);
+  const changed: string[] = [];
+  const sorted = [...relevant].sort();
+  const beforeAll = await readBlobsAtCommit(root, baseCommit, sorted);
+  for (const relativePath of sorted) {
+    const before = beforeAll.get(relativePath);
+    const after = await readInputContent(root, relativePath);
+    const beforeHash = before === undefined ? null : sha256Hex(normalizeInputContent(before));
+    const afterHash = after === undefined ? null : sha256Hex(normalizeInputContent(after));
+    if (beforeHash !== afterHash) changed.push(relativePath);
+  }
+  return changed;
+}
+
+export async function classifyAcceptance(
+  evidence: Pick<AcceptanceEvidence, "outcome" | "checked_at"> & Partial<Pick<AcceptanceEvidence, "harness_commit" | "input_digest" | "runtime" | "model" | "runtime_version">> | null,
   freshnessDays: number,
   now = new Date(),
   currentCommit?: string,
-): AcceptanceState {
-  if (!evidence) return "unproven";
-  if (evidence.outcome === "failed") return "failed";
-  if (currentCommit && evidence.harness_commit && evidence.harness_commit !== currentCommit) return "stale";
+  context: AcceptanceClassifyContext = {},
+): Promise<AcceptanceClassification> {
+  if (!evidence) return { state: "unproven", reasons: [] };
+  if (evidence.outcome === "failed") return { state: "failed", reasons: [] };
   const age = now.getTime() - Date.parse(evidence.checked_at);
-  return Number.isFinite(age) && age <= freshnessDays * 86_400_000 ? "proven" : "stale";
+  const fresh = Number.isFinite(age) && age <= freshnessDays * 86_400_000;
+  if (evidence.input_digest) {
+    // With no explicit root, resolve it from the evidence location rather than
+    // falling through to the commit rule: a digest-bearing record can always be
+    // re-hashed, so the commit rule is only a legacy path.
+    const digestRoot = context.root ?? (context.evidenceRoot !== undefined ? path.resolve(context.evidenceRoot, "..", "..") : undefined);
+    if (digestRoot !== undefined) {
+      const version = evidence.runtime_version ?? context.runtimeVersion;
+      const identity: AcceptanceInputIdentity = {
+        runtime: evidence.runtime ?? UNKNOWN,
+        model: evidence.model ?? UNKNOWN,
+        ...(version ? { runtimeVersion: version } : {}),
+      };
+      const current = await computeAcceptanceInputDigest(digestRoot, context.inputs ?? [], identity);
+      if (current.resolved === 0) {
+        // Nothing to hash can never change, so such evidence would stay proven for ever.
+        return { state: "stale", reasons: [`the inputs match no tracked file (${(context.inputs ?? []).join(", ") || "none given"}), so nothing can show this evidence is out of date`] };
+      }
+      if (current.digest === evidence.input_digest) {
+        return fresh ? { state: "proven", reasons: [] } : { state: "stale", reasons: ["freshness window exceeded"] };
+      }
+      const changed = await changedAcceptanceInputs(digestRoot, context.inputs ?? [], evidence.harness_commit);
+      return { state: "stale", reasons: changed.length > 0 ? changed.slice(0, 5) : ["input digest changed"] };
+    }
+  }
+  if (currentCommit && evidence.harness_commit && evidence.harness_commit !== currentCommit) {
+    return { state: "stale", reasons: [`harness commit ${evidence.harness_commit} != ${currentCommit}`] };
+  }
+  return fresh ? { state: "proven", reasons: [] } : { state: "stale", reasons: ["freshness window exceeded"] };
 }
 
 async function latestEvidence(evidenceRoot: string, capability: string): Promise<AcceptanceEvidenceRecord | null> {
@@ -138,7 +397,7 @@ async function latestEvidence(evidenceRoot: string, capability: string): Promise
   }
 }
 
-export async function acceptanceStatus(root: string, now = new Date()): Promise<{ counts: Record<AcceptanceState, number>; failed: string[]; unproven: string[]; states: Record<string, AcceptanceState> }> {
+export async function acceptanceStatus(root: string, now = new Date()): Promise<{ counts: Record<AcceptanceState, number>; failed: string[]; unproven: string[]; states: Record<string, AcceptanceState>; reasons: Record<string, string[]> }> {
   const registry = await loadAcceptanceRegistry(root);
   const currentCommit = await gitCommit(root);
   const evidenceRoot = path.join(root, "acceptance", "evidence");
@@ -146,15 +405,19 @@ export async function acceptanceStatus(root: string, now = new Date()): Promise<
   const failed: string[] = [];
   const unproven: string[] = [];
   const states: Record<string, AcceptanceState> = {};
+  const reasons: Record<string, string[]> = {};
   for (const [capability, entry] of Object.entries(registry.entries)) {
     const evidence = await latestEvidence(evidenceRoot, capability);
-    const state = entry.real_mission === "not_applicable" && !evidence ? "fixture_only" : classifyAcceptance(evidence, entry.freshness_days, now, currentCommit);
-    states[capability] = state;
-    counts[state] += 1;
-    if (state === "failed") failed.push(capability);
-    if (state === "unproven") unproven.push(capability);
+    const classified = entry.real_mission === "not_applicable" && !evidence
+      ? { state: "fixture_only" as AcceptanceState, reasons: [] as string[] }
+      : await classifyAcceptance(evidence, entry.freshness_days, now, currentCommit, { root, inputs: acceptanceInputs(entry), evidenceRoot });
+    states[capability] = classified.state;
+    counts[classified.state] += 1;
+    if (classified.reasons.length > 0) reasons[capability] = classified.reasons;
+    if (classified.state === "failed") failed.push(capability);
+    if (classified.state === "unproven") unproven.push(capability);
   }
-  return { counts, failed, unproven, states };
+  return { counts, failed, unproven, states, reasons };
 }
 
 export async function renderAcceptanceReport(root: string, now = new Date(), options: { evidenceRoot?: string } = {}): Promise<string> {
@@ -165,7 +428,9 @@ export async function renderAcceptanceReport(root: string, now = new Date(), opt
   const rows = ["<!-- Generated by `uh acceptance report`; do not edit by hand. -->", "# Acceptance evidence", "", "| Capability | Inventory ID | Title | State | Last checked | Runtime | Model | Cost (USD) | Evidence |", "|---|---|---|---|---|---|---|---:|---|"];
   for (const [capability, entry] of Object.entries(registry.entries)) {
     const evidence = await latestEvidence(evidenceRoot, capability);
-    const state = entry.real_mission === "not_applicable" && !evidence ? "fixture_only" : classifyAcceptance(evidence, entry.freshness_days, now, currentCommit);
+    const state = entry.real_mission === "not_applicable" && !evidence
+      ? "fixture_only"
+      : (await classifyAcceptance(evidence, entry.freshness_days, now, currentCommit, { root, inputs: acceptanceInputs(entry), evidenceRoot })).state;
     const evidencePath = path.relative(reportDirectory, path.join(evidenceRoot, capability, "latest.json")).split(path.sep).join("/");
     const evidenceCell = evidence ? `[latest](${evidencePath})` : "—";
     rows.push(`| ${capability} | ${entry.capability ?? capability} | ${entry.title} | ${state} | ${evidence?.checked_at ?? "—"} | ${evidence?.runtime ?? entry.runtime} | ${evidence?.model ?? entry.model ?? "—"} | ${evidence?.cost_usd ?? "—"} | ${evidenceCell} |`);
@@ -220,6 +485,469 @@ async function listAcceptanceFiles(root: string): Promise<string[]> {
     }
   }
   return files;
+}
+
+/**
+ * A command runner for the acceptance runner's own side commands (runtime
+ * version probe and injected cancel/steer actions). Defaults to `runProcess`;
+ * tests inject a fake so no real runtime is ever contacted.
+ */
+export type AcceptanceCommandRunner = (command: string, args: string[], cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+/** Commit identity the harness uses when it commits worker work itself. */
+const HARNESS_COMMIT_EMAIL = "uh-team@example.com";
+/**
+ * The harness commits each worker at most once, under the repository's configured identity (the placeholder
+ * email only when none is set), so its commit is recognised by the exact subject it writes for that worker.
+ */
+function isHarnessWorkerSubject(workerId: string, subject: string): boolean {
+  return subject === `team(${workerId}): worker run` || subject === `team(${workerId}): salvaged worker run`;
+}
+/**
+ * Ignored paths the harness itself owns: writes here are expected, so the
+ * ignored-write scan never reports them. Everything else gitignored is judged
+ * against the guard write roots like any other change.
+ */
+const HARNESS_OWNED_IGNORED_ROOTS = [...DEFAULT_PROTECTED_PATHS, "node_modules"];
+/** Lockfiles whose appearance in a worker worktree means a package manager ran. */
+const LOCKFILE_NAMES = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
+
+/** The runtime version probe command per runtime; others fall back to `<runtime> --version`. */
+const RUNTIME_VERSION_PROBES: Record<string, { command: string; args: string[] }> = {
+  "command-code": { command: "cmdc", args: buildCommandCodeProbeArgs() },
+  "oh-my-pi": { command: "omp", args: ["--version"] },
+};
+
+/**
+ * Resolve the runtime version that must enter the input digest. Command Code
+ * reuses the adapter's check (`cmdc --version --no-auto-update`); oh-my-pi uses
+ * its `--version` command; other runtimes use `<runtime> --version`. The
+ * adapter manifest's `cli_command`/`cli_args` win when present. Returns
+ * `"unknown"` whenever the version cannot be read.
+ */
+export async function resolveAcceptanceRuntimeVersion(runtime: string, root: string, run: AcceptanceCommandRunner = runProcess): Promise<string> {
+  const probe = RUNTIME_VERSION_PROBES[runtime] ?? { command: runtime, args: ["--version"] };
+  let command = probe.command;
+  let args = probe.args;
+  try {
+    const manifest = (await runtimeRegistry.load(root, runtime)).document;
+    const cliCommand = manifest.config?.cli_command;
+    if (typeof cliCommand === "string" && cliCommand.length > 0) command = cliCommand;
+    if (runtime === "command-code") {
+      const runtimeConfig = manifest.config?.runtime_config as Record<string, unknown> | undefined;
+      const cliArgs = Array.isArray(runtimeConfig?.cli_args) ? runtimeConfig.cli_args.filter((item): item is string => typeof item === "string") : [];
+      args = buildCommandCodeProbeArgs(cliArgs);
+    }
+  } catch { /* no manifest: use the default probe command */ }
+  try {
+    const result = await run(command, args, root);
+    if (runtime === "command-code") return parseCommandCodeVersion(`${result.stdout}\n${result.stderr}`) ?? UNKNOWN;
+    const lines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    return lines.length > 0 ? lines[lines.length - 1] : UNKNOWN;
+  } catch {
+    return UNKNOWN;
+  }
+}
+
+type WorktreeRef = { id: string; path: string; relative: string };
+
+async function gitOutput(cwd: string, args: string[]): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+    return stdout;
+  } catch {
+    return undefined;
+  }
+}
+
+async function gitLines(cwd: string, args: string[], separator: "nul" | "newline" = "newline"): Promise<string[]> {
+  const output = await gitOutput(cwd, args);
+  if (output === undefined) return [];
+  return output
+    .split(separator === "nul" ? "\0" : "\n")
+    .map((entry) => entry.replace(/\r$/, ""))
+    .filter((entry) => entry.length > 0);
+}
+
+async function isDirectory(target: string): Promise<boolean> {
+  try { return (await stat(target)).isDirectory(); } catch { return false; }
+}
+
+async function fileExistsAt(target: string): Promise<boolean> {
+  try { return (await stat(target)).isFile(); } catch { return false; }
+}
+
+function normalizeRelativePath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+function insideRelativeRoot(candidate: string, root: string): boolean {
+  const relative = normalizeRelativePath(candidate);
+  const base = normalizeRelativePath(root);
+  if (base === "" || base === ".") return true;
+  return relative === base || relative.startsWith(`${base}/`);
+}
+
+/** A mismatch marker for an invariant that read no evidence; a mismatch, never a pass. */
+function unverifiable(reason: string): string[] {
+  return [`unverifiable: ${reason}`];
+}
+
+/** An absolute root normalized for comparison against a recorded `worker_root`. */
+function normalizeAbsoluteRoot(value: string): string {
+  return path.resolve(value).replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+async function readMissionDocument(missionRoot: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed = parse(await readFile(path.join(missionRoot, "mission.yaml"), "utf8")) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The write roots the guard enforced for the mission's workers (default `.`). */
+async function missionWriteRoots(missionRoot: string): Promise<string[]> {
+  const document = await readMissionDocument(missionRoot);
+  const guard = document.guard && typeof document.guard === "object" ? document.guard as Record<string, unknown> : {};
+  const roots = stringList(guard.write_roots);
+  return roots.length > 0 ? roots : ["."];
+}
+
+/** Declared outputs from the mission packet and every canonical team state. */
+async function declaredWorkerOutputs(missionRoot: string): Promise<string[]> {
+  const outputs: string[] = [];
+  const document = await readMissionDocument(missionRoot);
+  const missionOutputs = document.expected_outputs && typeof document.expected_outputs === "object" ? document.expected_outputs as Record<string, unknown> : {};
+  outputs.push(...stringList(missionOutputs.files));
+  const runsRoot = path.join(missionRoot, "runs");
+  const runEntries = await readdir(runsRoot, { withFileTypes: true }).catch(() => []);
+  for (const entry of runEntries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const state = JSON.parse(await readFile(path.join(runsRoot, entry.name, "team-state.json"), "utf8")) as Record<string, unknown>;
+      const workers = Array.isArray(state.workers) ? state.workers : [];
+      for (const worker of workers) {
+        const contract = worker && typeof worker === "object" ? (worker as Record<string, unknown>).contract as Record<string, unknown> | undefined : undefined;
+        const expected = contract && typeof contract.expected_outputs === "object" ? contract.expected_outputs as Record<string, unknown> : {};
+        outputs.push(...stringList(expected.files));
+      }
+    } catch { /* no team state for this run */ }
+  }
+  return [...new Set(outputs)];
+}
+
+/** Every worker worktree under `<missionRoot>/team/workers` that is a real git worktree. */
+async function listWorkerWorktrees(runRoot: string, missionRoot: string): Promise<WorktreeRef[]> {
+  const workersRoot = path.join(missionRoot, "team", "workers");
+  let entries;
+  try { entries = await readdir(workersRoot, { withFileTypes: true }); } catch { return []; }
+  const worktrees: WorktreeRef[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const worktreePath = path.join(workersRoot, entry.name);
+    try { await stat(path.join(worktreePath, ".git")); } catch { continue; }
+    worktrees.push({ id: entry.name, path: worktreePath, relative: path.relative(runRoot, worktreePath).split(path.sep).join("/") });
+  }
+  return worktrees.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+/** The commit a worker branch forked from: the merge base with the run root's HEAD. */
+async function worktreeBaseCommit(runRoot: string, worktreePath: string): Promise<string | undefined> {
+  const primary = (await gitOutput(runRoot, ["rev-parse", "HEAD"]))?.trim();
+  if (primary) {
+    const base = (await gitOutput(worktreePath, ["merge-base", "HEAD", primary]))?.trim();
+    if (base) return base;
+  }
+  const root = (await gitOutput(worktreePath, ["rev-list", "--max-parents=0", "HEAD"]))?.trim();
+  return root && root.length > 0 ? root : undefined;
+}
+
+/** Files changed in a worktree against its base, including untracked files. */
+async function worktreeChangedPaths(worktreePath: string, base: string | undefined): Promise<string[]> {
+  const tracked = base ? await gitLines(worktreePath, ["diff", "--name-only", "-z", base], "nul") : [];
+  const untracked = await gitLines(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], "nul");
+  return [...new Set([...tracked, ...untracked])].map((entry) => entry.split(path.sep).join("/")).sort();
+}
+
+/**
+ * Ignored untracked files in a worktree, minus the roots the harness itself
+ * owns. `git ls-files --others --exclude-standard` never lists these, so a write
+ * into a gitignored path outside the write roots would otherwise escape.
+ */
+async function ignoredUntrackedPaths(worktreePath: string): Promise<string[]> {
+  const ignored = await gitLines(worktreePath, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], "nul");
+  return ignored
+    .map((entry) => entry.split(path.sep).join("/"))
+    .filter((entry) => !HARNESS_OWNED_IGNORED_ROOTS.some((root) => insideRelativeRoot(entry, root)));
+}
+
+async function invariantNoWritesOutsideRoots(runRoot: string, missionRoot: string): Promise<true | string[]> {
+  const worktrees = await listWorkerWorktrees(runRoot, missionRoot);
+  if (worktrees.length === 0) return unverifiable("no worker worktrees found");
+  const allowed = [...await missionWriteRoots(missionRoot), ...await declaredWorkerOutputs(missionRoot)];
+  const offending: string[] = [];
+  for (const worktree of worktrees) {
+    const base = await worktreeBaseCommit(runRoot, worktree.path);
+    const changed = [...await worktreeChangedPaths(worktree.path, base), ...await ignoredUntrackedPaths(worktree.path)];
+    for (const entry of [...new Set(changed)]) {
+      if (!allowed.some((root) => insideRelativeRoot(entry, root))) offending.push(`${worktree.relative}/${entry}`);
+    }
+  }
+  return offending.length > 0 ? offending : true;
+}
+
+/**
+ * The commits the harness recorded for each worker (`commit`, and `salvage.commit`) in the team states under the
+ * mission, by worker id. `undefined` when no team state records any, as for runs made before it did.
+ */
+async function recordedHarnessCommits(missionRoot: string): Promise<Map<string, Set<string>> | undefined> {
+  const recorded = new Map<string, Set<string>>();
+  let any = false;
+  const runsRoot = path.join(missionRoot, "runs");
+  for (const entry of await readdir(runsRoot, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const state = JSON.parse(await readFile(path.join(runsRoot, entry.name, "team-state.json"), "utf8")) as Record<string, unknown>;
+      for (const worker of Array.isArray(state.workers) ? state.workers : []) {
+        const record = worker as { id?: unknown; commit?: unknown; salvage?: { commit?: unknown } };
+        if (typeof record.id !== "string") continue;
+        for (const commit of [record.commit, record.salvage?.commit]) {
+          if (typeof commit !== "string") continue;
+          any = true;
+          recorded.set(record.id, (recorded.get(record.id) ?? new Set<string>()).add(commit));
+        }
+      }
+    } catch { /* no team state for this run */ }
+  }
+  return any ? recorded : undefined;
+}
+
+async function invariantNoWorkerCommits(runRoot: string, missionRoot: string): Promise<true | string[]> {
+  const worktrees = await listWorkerWorktrees(runRoot, missionRoot);
+  if (worktrees.length === 0) return unverifiable("no worker worktrees found");
+  const harnessCommitsByWorker = await recordedHarnessCommits(missionRoot);
+  const offending: string[] = [];
+  for (const worktree of worktrees) {
+    const base = await worktreeBaseCommit(runRoot, worktree.path);
+    if (!base) continue;
+    const recordedForWorker = harnessCommitsByWorker?.get(worktree.id);
+    let harnessCommits = 0;
+    for (const line of await gitLines(worktree.path, ["log", "--format=%H%x09%ae%x09%s", `${base}..HEAD`])) {
+      const [sha, email, subject] = line.split("\t");
+      if (email === HARNESS_COMMIT_EMAIL && harnessCommitsByWorker === undefined) continue;
+      if (harnessCommitsByWorker !== undefined) {
+        // The team state names the harness's own commits, so a message that merely looks like one proves nothing.
+        if (recordedForWorker?.has(sha)) continue;
+      } else if (harnessCommits === 0 && isHarnessWorkerSubject(worktree.id, subject ?? "")) {
+        // Runs made before the state recorded its commits: the exact subject, once, is all there is to go on.
+        harnessCommits += 1;
+        continue;
+      }
+      offending.push(`${worktree.id} ${sha.slice(0, 7)} ${email} ${subject}`);
+    }
+  }
+  return offending.length > 0 ? offending : true;
+}
+
+async function invariantNoPackageInstall(runRoot: string, missionRoot: string): Promise<true | string[]> {
+  const worktrees = await listWorkerWorktrees(runRoot, missionRoot);
+  if (worktrees.length === 0) return unverifiable("no worker worktrees found");
+  const offending: string[] = [];
+  for (const worktree of worktrees) {
+    if (await isDirectory(path.join(worktree.path, "node_modules"))) offending.push(`${worktree.relative}/node_modules`);
+    const base = await worktreeBaseCommit(runRoot, worktree.path);
+    for (const lockfile of LOCKFILE_NAMES) {
+      if (!(await fileExistsAt(path.join(worktree.path, lockfile)))) continue;
+      const trackedAtBase = base ? (await gitLines(worktree.path, ["ls-tree", "--name-only", base, "--", lockfile])).length > 0 : false;
+      if (!trackedAtBase) offending.push(`${worktree.relative}/${lockfile}`);
+    }
+  }
+  return offending.length > 0 ? offending : true;
+}
+
+/** sha256 of the policy files the harness wrote, grouped by the root that wrote them. */
+async function collectProtectedBaselines(missionRoot: string): Promise<Map<string, Map<string, string>>> {
+  const baselines = new Map<string, Map<string, string>>();
+  for (const bucket of (await collectArtifactFiles(missionRoot)).values()) {
+    const artifactPath = bucket.get("tool-guard.json");
+    if (!artifactPath) continue;
+    let parsed: unknown;
+    try { parsed = JSON.parse(await readFile(artifactPath, "utf8")); } catch { continue; }
+    const record = parsed !== null && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
+    const workerRoot = typeof record?.worker_root === "string" ? record.worker_root : undefined;
+    const written = record?.written_files && typeof record.written_files === "object" && !Array.isArray(record.written_files)
+      ? record.written_files as Record<string, unknown> : undefined;
+    if (!workerRoot || !written) continue;
+    const files = new Map<string, string>();
+    for (const [relativePath, hash] of Object.entries(written)) {
+      if (typeof hash === "string") files.set(normalizeRelativePath(relativePath), hash);
+    }
+    if (files.size > 0) baselines.set(normalizeAbsoluteRoot(workerRoot), files);
+  }
+  return baselines;
+}
+
+/**
+ * Every protected policy file must still match the sha256 the harness recorded
+ * in the tool-guard artifact for the same worker root when it wrote the file.
+ * Comparing copies with each other is not enough: a file rewritten identically
+ * everywhere, present in only one copy, or missing everywhere passes vacuously
+ * without a baseline. A missing baseline is `unverifiable`, never a pass.
+ */
+async function invariantProtectedPathsUntouched(runRoot: string, missionRoot: string): Promise<true | string[]> {
+  const baselines = await collectProtectedBaselines(missionRoot);
+  if (baselines.size === 0) return unverifiable("no recorded tool-guard written_files baseline");
+  const locations = [{ label: ".", root: runRoot }];
+  for (const worktree of await listWorkerWorktrees(runRoot, missionRoot)) locations.push({ label: worktree.relative, root: worktree.path });
+  const offending: string[] = [];
+  let matched = 0;
+  for (const location of locations) {
+    const baseline = baselines.get(normalizeAbsoluteRoot(location.root));
+    if (!baseline) continue;
+    matched += 1;
+    for (const [relativePath, expectedHash] of baseline) {
+      let content: Buffer;
+      try { content = await readFile(path.join(location.root, relativePath)); }
+      catch { offending.push(`${location.label}/${relativePath}: missing (baseline ${expectedHash.slice(0, 12)})`); continue; }
+      const digest = sha256Hex(content);
+      if (digest !== expectedHash) offending.push(`${location.label}/${relativePath}: rewritten (baseline ${expectedHash.slice(0, 12)} observed ${digest.slice(0, 12)})`);
+    }
+  }
+  if (matched === 0) return unverifiable("recorded baseline does not match any worker root");
+  return offending.length > 0 ? offending : true;
+}
+
+/** `allow` for an allowed call, `denial` for every other parseable line or a `"deny"` fragment, `other` otherwise. */
+function classifyGuardLogLine(line: string): "allow" | "denial" | "other" {
+  try {
+    const parsed: unknown = JSON.parse(line);
+    const guardClass = parsed !== null && typeof parsed === "object" ? (parsed as { class?: unknown }).class : undefined;
+    return guardClass === "allow" ? "allow" : "denial";
+  } catch {
+    return line.includes("\"deny\"") ? "denial" : "other";
+  }
+}
+
+/** Every artifact file under a root, grouped by the directory that holds it. */
+async function collectArtifactFiles(root: string): Promise<Map<string, Map<string, string>>> {
+  const grouped = new Map<string, Map<string, string>>();
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (!directory) continue;
+    let children;
+    try { children = await readdir(directory, { withFileTypes: true }); } catch { continue; }
+    for (const child of children) {
+      const childPath = path.join(directory, child.name);
+      if (child.isDirectory()) { pending.push(childPath); continue; }
+      const bucket = grouped.get(directory) ?? new Map<string, string>();
+      bucket.set(child.name, childPath);
+      grouped.set(directory, bucket);
+    }
+  }
+  return grouped;
+}
+
+/**
+ * The denials a run's runtime-control receipt counts must equal its non-allow
+ * guard-log lines plus the native refusals that same receipt records. Native
+ * refusals are counted in `runtime-control.json` (`native_refusals`), not in
+ * the guard log: no hook runs for them, so no log line is written.
+ */
+async function invariantGuardLogConsistent(missionRoot: string): Promise<true | string[]> {
+  const files = await collectArtifactFiles(missionRoot);
+  const offending: string[] = [];
+  let receipts = 0;
+  for (const [directory, bucket] of files) {
+    const controlPath = bucket.get("runtime-control.json");
+    if (!controlPath) continue;
+    let control: Record<string, unknown>;
+    try { control = JSON.parse(await readFile(controlPath, "utf8")) as Record<string, unknown>; } catch { continue; }
+    receipts += 1;
+    const denials = typeof control.denials === "number" ? control.denials : 0;
+    const nativeRefusals = typeof control.native_refusals === "number" ? control.native_refusals : 0;
+    let guardDenials = 0;
+    const logPath = bucket.get("tool-guard.log");
+    if (logPath) {
+      for (const line of (await readFile(logPath, "utf8")).split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed === "") continue;
+        if (classifyGuardLogLine(trimmed) === "denial") guardDenials += 1;
+      }
+    }
+    if (denials !== guardDenials + nativeRefusals) {
+      const label = path.relative(missionRoot, directory).split(path.sep).join("/") || ".";
+      offending.push(`${label}: runtime-control denials=${denials} but guard-log non-allow lines=${guardDenials} native refusals=${nativeRefusals}`);
+    }
+  }
+  if (receipts === 0) return unverifiable("no runtime-control.json receipt found");
+  return offending.length > 0 ? offending : true;
+}
+
+/**
+ * Evaluate the entry's declared invariants and return one observed fact per
+ * name: `true` when it holds, or the offending paths/lines when it does not.
+ */
+export async function evaluateAcceptanceInvariants(runRoot: string, missionId: string, expected: AcceptanceExpected): Promise<Record<string, true | string[]>> {
+  const missionRoot = path.join(runRoot, ".harness", "missions", missionId);
+  const evaluated: Record<string, true | string[]> = {};
+  const artifactsPresent = await isDirectory(missionRoot);
+  for (const name of expected.invariants ?? []) {
+    if (!artifactsPresent) { evaluated[name] = unverifiable(`mission artifact root is absent: ${missionId}`); continue; }
+    switch (name) {
+      case "no_writes_outside_roots": evaluated[name] = await invariantNoWritesOutsideRoots(runRoot, missionRoot); break;
+      case "no_worker_commits": evaluated[name] = await invariantNoWorkerCommits(runRoot, missionRoot); break;
+      case "no_package_install": evaluated[name] = await invariantNoPackageInstall(runRoot, missionRoot); break;
+      case "protected_paths_untouched": evaluated[name] = await invariantProtectedPathsUntouched(runRoot, missionRoot); break;
+      case "guard_log_consistent": evaluated[name] = await invariantGuardLogConsistent(missionRoot); break;
+      default: evaluated[name] = [`unknown invariant: ${String(name)}`];
+    }
+  }
+  return evaluated;
+}
+
+/**
+ * Record whether each listed mechanism actually fired, keyed by name. A
+ * mechanism fires when a guard-log line carries its class (with or without the
+ * `guard_` prefix) or a runtime-control receipt carries it as a stop code.
+ */
+export async function evaluateExercisedMechanisms(runRoot: string, missionId: string, names: string[]): Promise<Record<string, boolean>> {
+  const missionRoot = path.join(runRoot, ".harness", "missions", missionId);
+  const classes = new Set<string>();
+  const stopCodes = new Set<string>();
+  const files = await collectArtifactFiles(missionRoot);
+  for (const bucket of files.values()) {
+    const logPath = bucket.get("tool-guard.log");
+    if (logPath) {
+      for (const line of (await readFile(logPath, "utf8")).split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed === "") continue;
+        try {
+          const parsed = JSON.parse(trimmed) as { class?: unknown };
+          if (parsed && typeof parsed.class === "string" && parsed.class !== "allow") classes.add(parsed.class);
+        } catch { /* unparseable guard-log lines carry no class */ }
+      }
+    }
+    const controlPath = bucket.get("runtime-control.json");
+    if (controlPath) {
+      try {
+        const control = JSON.parse(await readFile(controlPath, "utf8")) as { stop_code?: unknown };
+        if (control && typeof control.stop_code === "string") stopCodes.add(control.stop_code);
+      } catch { /* optional control receipt */ }
+    }
+  }
+  const exercised: Record<string, boolean> = {};
+  for (const name of names) {
+    const unprefixed = name.startsWith("guard_") ? name.slice("guard_".length) : name;
+    exercised[name] = classes.has(name) || classes.has(unprefixed) || stopCodes.has(name) || stopCodes.has(unprefixed);
+  }
+  return exercised;
 }
 
 export async function collectFacts(runRoot: string, missionId: string, expected?: AcceptanceExpected): Promise<{ observed: AcceptanceFacts; runIds: string[]; provider: string; model: string; cost: number | "unknown"; fact_sources: Record<string, string> }> {
@@ -366,6 +1094,12 @@ export async function collectFacts(runRoot: string, missionId: string, expected?
   }
   observed.path_style = pathStyleValid ? "forward_slashes" : "backslashes";
   observed.fact_sources = factSources;
+  if (expected?.invariants && expected.invariants.length > 0) {
+    observed.invariants = await evaluateAcceptanceInvariants(runRoot, missionId, expected);
+  }
+  if (expected?.exercised_report && expected.exercised_report.length > 0) {
+    observed.exercised = await evaluateExercisedMechanisms(runRoot, missionId, expected.exercised_report);
+  }
   return { observed, runIds, provider, model, cost, fact_sources: factSources };
 }
 
@@ -480,11 +1214,30 @@ export async function applyTeamMissionOverrides(missionPath: string, overrides: 
   await writeFile(missionPath, stringify(mission), "utf8");
 }
 
-async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: string, entry: AcceptanceRegistryEntry, runtime: string, options: AcceptanceRunOptions): Promise<AcceptanceEvidenceRecord> {
+/**
+ * Evidence for an entry that produced no run of its own: its wrapper runtime is
+ * unavailable, or the runner threw before the entry could run. The failure
+ * reason is recorded as `observed.reason`, `failure.mismatch` becomes the single
+ * mismatch, and `failure.line` is printed. `cli.exit_code` is always null: no
+ * mission CLI process produced this record.
+ */
+async function recordFailedAcceptanceEvidence(
+  sourceRoot: string,
+  capability: string,
+  entry: AcceptanceRegistryEntry,
+  runtime: string,
+  options: AcceptanceRunOptions,
+  failure: { reason: string; mismatch: AcceptanceEvidence["mismatches"][number]; line: string },
+): Promise<AcceptanceEvidenceRecord> {
   const timestamp = new Date().toISOString().replace(/[-:.]/g, "").replace(/Z$/, "Z");
   const workspace = path.resolve(options.workspace ?? sourceRoot);
   const runRoot = path.join(workspace, capability, timestamp);
   const missionId = acceptanceMissionId(capability);
+  const model = entry.model ?? options.model ?? UNKNOWN;
+  const runtimeVersion = await resolveAcceptanceRuntimeVersion(runtime, path.resolve(sourceRoot), options.commandRunner ?? runProcess);
+  const inputDigest = await computeAcceptanceInputDigest(sourceRoot, acceptanceInputs(entry), { runtime, model, runtimeVersion });
+  const observed: AcceptanceFacts = { status: "failed", reason: failure.reason };
+  if (runtimeVersion === UNKNOWN) observed.runtime_version_unreadable = true;
   const evidence: AcceptanceEvidenceRecord = {
     schema_version: "uh.acceptance-evidence.v0",
     capability,
@@ -493,24 +1246,27 @@ async function recordWrapperUnavailableEvidence(sourceRoot: string, capability: 
     harness_commit: await gitCommit(sourceRoot),
     runtime,
     provider: UNKNOWN,
-    model: entry.model ?? options.model ?? UNKNOWN,
+    model,
     cost_usd: "unknown",
     workspace: runRoot,
     run_ids: [],
     mission_id: missionId,
     expected: entry.expected,
-    observed: { status: "failed", reason: "wrapper_unavailable" },
+    observed,
     fact_sources: {},
-    mismatches: [{ field: "wrapper", expected: `${capability} mechanism for runtime ${runtime}`, observed: "wrapper_unavailable" }],
+    mismatches: [failure.mismatch],
     artifact_root: path.join(runRoot, ".harness", "missions", missionId),
     cli: { exit_code: null, stderr_tail: "", stdout_tail: "" },
+    input_digest: inputDigest.digest,
+    inputs_resolved: inputDigest.resolved,
+    runtime_version: runtimeVersion,
   };
   const checked = AcceptanceEvidenceRecordSchema.parse(evidence);
   const evidenceDir = path.join(sourceRoot, "acceptance", "evidence", capability);
   await mkdir(evidenceDir, { recursive: true });
   await writeFile(path.join(evidenceDir, `${timestamp}.json`), JSON.stringify(checked, null, 2) + "\n", "utf8");
   await writeFile(path.join(evidenceDir, "latest.json"), JSON.stringify(checked, null, 2) + "\n", "utf8");
-  console.log(`FAIL ${capability} — wrapper_unavailable: no ${capability} mechanism for runtime ${runtime}`);
+  console.log(failure.line);
   return checked;
 }
 
@@ -524,6 +1280,93 @@ export function acceptanceSpawnEnv(entry: Pick<AcceptanceRegistryEntry, "support
   const supportDir = path.join(runRoot, "acceptance", "support");
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
   return { [pathKey]: `${supportDir}${path.delimiter}${process.env[pathKey] ?? ""}` };
+}
+
+/** The action and outcome recorded in the evidence for an injected run. */
+export type AcceptanceInjectionOutcome = { action: "cancel_after_ready" | "steer_after_ready"; outcome: string };
+/** Resolve the run id of a run ready to receive an injected action, or undefined. */
+export type AcceptanceReadinessProbe = (root: string, missionId: string, hintRunId: string | undefined, stillOpen: () => boolean) => Promise<string | undefined>;
+
+const INJECT_RUN_ID = "20260101T000002Z-abcdef";
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+function firstNonEmptyLine(text: string): string {
+  return text.split(/\r?\n/).find((line) => line.trim() !== "")?.trim() ?? "";
+}
+
+/**
+ * Default readiness: the run is ready once its runtime-control receipt records
+ * `ready_at`. The run id is read from that receipt (single-shape runs pass a
+ * hint via `--run-id`); polling stops as soon as the child exits.
+ */
+async function readyRunId(runRoot: string, missionId: string, hintRunId: string | undefined, stillOpen: () => boolean, timeoutMs: number, pollMs: number): Promise<string | undefined> {
+  const missionRoot = path.join(runRoot, ".harness", "missions", missionId);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const files = await collectArtifactFiles(missionRoot);
+    for (const bucket of files.values()) {
+      const controlPath = bucket.get("runtime-control.json");
+      if (!controlPath) continue;
+      try {
+        const control = JSON.parse(await readFile(controlPath, "utf8")) as { run_id?: unknown; ready_at?: unknown };
+        if (typeof control.ready_at === "string" && typeof control.run_id === "string" && (hintRunId === undefined || control.run_id === hintRunId)) {
+          return control.run_id;
+        }
+      } catch { /* not written yet */ }
+    }
+    if (!stillOpen() || Date.now() >= deadline) return undefined;
+    await delay(pollMs);
+  }
+}
+
+type InjectionPlan = {
+  missionId: string;
+  hintRunId?: string;
+  build: (runId: string) => { action: AcceptanceInjectionOutcome["action"]; args: string[] };
+  resolveReady: AcceptanceReadinessProbe;
+};
+
+/**
+ * Spawn the mission child and, concurrently, wait until the run is ready then
+ * run the injected cancel/steer action through `run`. The child's output and
+ * the injected outcome are returned together.
+ */
+async function runProcessWithInjection(
+  command: string,
+  args: string[],
+  cwd: string,
+  plan: InjectionPlan,
+  run: AcceptanceCommandRunner,
+  distRoot?: string,
+  extraEnv?: Record<string, string>,
+): Promise<{ code: number; stdout: string; stderr: string; injection: AcceptanceInjectionOutcome }> {
+  return await new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, env: { ...process.env, ...(distRoot ? { UH_HARNESS_DIST: path.resolve(distRoot, "dist") } : {}), ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let open = true;
+    const injectionTask: Promise<AcceptanceInjectionOutcome> = (async () => {
+      const runId = await plan.resolveReady(cwd, plan.missionId, plan.hintRunId, () => open);
+      const built = plan.build(runId ?? plan.hintRunId ?? "unknown");
+      if (runId === undefined) return { action: built.action, outcome: "not_ready" };
+      try {
+        const result = await run(process.execPath, built.args, cwd);
+        const detail = result.code === 0 ? "" : `: ${firstNonEmptyLine(result.stderr) || firstNonEmptyLine(result.stdout)}`;
+        return { action: built.action, outcome: result.code === 0 ? "ok" : `exit ${result.code}${detail}` };
+      } catch (error) {
+        return { action: built.action, outcome: `error: ${(error as Error).message}` };
+      }
+    })();
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stdout.on("error", () => undefined);
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.stderr.on("error", () => undefined);
+    child.on("close", async (code) => { open = false; resolve({ code: code ?? 1, stdout, stderr, injection: await injectionTask }); });
+    child.on("error", async (error) => { open = false; resolve({ code: 1, stdout, stderr: `${stderr}${error.message}`, injection: await injectionTask }); });
+  });
 }
 
 async function runOneAcceptance(sourceRoot: string, capability: string, entry: AcceptanceRegistryEntry, options: AcceptanceRunOptions): Promise<AcceptanceEvidence> {
@@ -587,6 +1430,9 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
     manifest.config = config;
     await writeFile(path.join(runRoot, ".harness", "adapters", "command-code.yaml"), stringify(manifest), "utf8");
   }
+  // Probe the runtime version from the real harness adapters, not the run's
+  // copied fixtures (a wrapper-forced capability rewrites cli_command).
+  const runtimeVersion = await resolveAcceptanceRuntimeVersion(runtime, sourceRoot, options.commandRunner ?? runProcess);
   const cli = options.cliPath ?? path.resolve(sourceRoot, "dist", "cli.js");
   const args = [cli, "mission", entry.shape === "team" ? "run-team" : "run", entry.shape === "team" ? missionId : path.join(missionDir, "mission.yaml"), "--root", runRoot];
   // The campaign workspace has no bound sandbox by design, so the single-shape
@@ -597,9 +1443,14 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   await configureAcceptanceSeed(runRoot);
   const cancelRunId = "20260101T000000Z-abcdef";
   const controllerLossRunId = "20260101T000001Z-abcdef";
-  const launchArgs = baseAcceptanceCapability(capability) === "R5" ? [...args, "--run-id", cancelRunId] : args;
+  const launchArgs = baseAcceptanceCapability(capability) === "R5" ? [...args, "--run-id", cancelRunId] : [...args];
+  // A single-shape injected run pins its run id so the cancel/steer target is
+  // known before the child writes its first receipt.
+  if (entry.inject && entry.shape !== "team") launchArgs.push("--run-id", INJECT_RUN_ID);
   const spawnEnv = acceptanceSpawnEnv(entry, runRoot);
+  const commandRunner = options.commandRunner ?? runProcess;
   let result: { code: number; stdout: string; stderr: string };
+  let injectionOutcome: AcceptanceInjectionOutcome | undefined;
   if (baseAcceptanceCapability(capability) === "R5") {
     result = await runProcessAndCancel(process.execPath, launchArgs, sourceRoot, process.execPath, [cli, "mission", "cancel", "--mission", missionId, "--run-id", cancelRunId, "--root", runRoot], 750, sourceRoot);
   } else if (baseAcceptanceCapability(capability) === "R10-controller-loss") {
@@ -610,13 +1461,45 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
       ? [...args.slice(0, -2), "--runtime-config-overrides", JSON.stringify({ model, resume_from_run: controllerLossRunId, recovery_notes: "Recover the controller-lost attempt and create out/controller-recovered.txt." })]
       : [...args, "--runtime-config-overrides", JSON.stringify({ resume_from_run: controllerLossRunId, recovery_notes: "Recover the controller-lost attempt and create out/controller-recovered.txt." })];
     result = await runProcess(process.execPath, resumeArgs, sourceRoot, sourceRoot);
+  } else if (entry.inject) {
+    const action: AcceptanceInjectionOutcome["action"] = entry.inject.steer_after_ready !== undefined ? "steer_after_ready" : "cancel_after_ready";
+    const message = entry.inject.steer_after_ready ?? "";
+    const injected = await runProcessWithInjection(process.execPath, launchArgs, sourceRoot, {
+      missionId,
+      ...(entry.shape === "team" ? {} : { hintRunId: INJECT_RUN_ID }),
+      build: (runId) => ({
+        action,
+        args: action === "cancel_after_ready"
+          ? [cli, "mission", "cancel", "--mission", missionId, "--run-id", runId, "--root", runRoot]
+          : [cli, "steer", runId, message, "--root", runRoot],
+      }),
+      resolveReady: options.injectReady
+        ? (root, id, hint) => options.injectReady!(root, id, hint)
+        : (root, id, hint, stillOpen) => readyRunId(root, id, hint, stillOpen, options.injectTimeoutMs ?? 60_000, options.injectPollMs ?? 250),
+    }, commandRunner, sourceRoot, spawnEnv);
+    result = { code: injected.code, stdout: injected.stdout, stderr: injected.stderr };
+    injectionOutcome = injected.injection;
   } else {
     result = await runProcess(process.execPath, launchArgs, sourceRoot, sourceRoot, spawnEnv);
   }
   const facts = await collectFacts(runRoot, missionId, entry.expected);
   if (entry.support_shim) facts.observed.shim_on_path = true;
+  if (injectionOutcome) facts.observed.injected = injectionOutcome;
+  if (runtimeVersion === UNKNOWN) facts.observed.runtime_version_unreadable = true;
   if (result.code !== 0 && facts.observed.status === "passed") facts.observed.status = "failed";
+  // A run with no run record settles nothing: an entry whose declared expected
+  // fields are all skipped or absent must fail instead of passing vacuously.
+  const noVerdict = facts.runIds.length === 0 || facts.observed.status === undefined;
+  const noVerdictCause = noVerdict
+    ? (firstNonEmptyLine(result.stderr) || `mission CLI exited ${result.code} with no run record`)
+    : "";
+  if (noVerdict) {
+    if (facts.observed.status === undefined) facts.observed.status = "failed";
+    facts.observed.reason = "no_verdict";
+  }
   const mismatches = compareAcceptanceFacts(entry.expected, facts.observed);
+  if (noVerdict) mismatches.push({ field: "verdict", expected: "a settled run record", observed: noVerdictCause });
+  const inputDigest = await computeAcceptanceInputDigest(sourceRoot, acceptanceInputs(entry), { runtime, model: facts.model, runtimeVersion });
   const evidence: AcceptanceEvidenceRecord = {
     schema_version: "uh.acceptance-evidence.v0",
     capability,
@@ -636,6 +1519,9 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
     mismatches,
     artifact_root: path.join(runRoot, ".harness", "missions", missionId),
     cli: { exit_code: result.code, stderr_tail: result.stderr.slice(-2048), stdout_tail: result.stdout.slice(-2048) },
+    input_digest: inputDigest.digest,
+    inputs_resolved: inputDigest.resolved,
+    runtime_version: runtimeVersion,
   };
   const checked = AcceptanceEvidenceRecordSchema.parse(evidence);
   const evidenceDir = path.join(sourceRoot, "acceptance", "evidence", capability);
@@ -643,13 +1529,63 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   await writeFile(path.join(evidenceDir, `${timestamp}.json`), JSON.stringify(checked, null, 2) + "\n", "utf8");
   await writeFile(path.join(evidenceDir, "latest.json"), JSON.stringify(checked, null, 2) + "\n", "utf8");
   const cost = checked.cost_usd === "unknown" ? "unknown" : checked.cost_usd.toFixed(6);
-  const stderrFirstLine = result.stderr.split(/\r?\n/).find((line) => line.trim() !== "")?.trim() ?? "";
-  const stderrCause = facts.observed.status === undefined && stderrFirstLine !== "" ? ` — ${stderrFirstLine}` : "";
-  console.log(`${checked.outcome === "passed" ? "PASS" : "FAIL"} ${capability} cost_usd=${cost}${mismatches.length ? ` — ${mismatches.map((m) => `${m.field}: expected ${JSON.stringify(m.expected)} observed ${JSON.stringify(m.observed)}`).join("; ")}` : ""}${stderrCause}`);
+  console.log(`${checked.outcome === "passed" ? "PASS" : "FAIL"} ${capability} cost_usd=${cost}${mismatches.length ? ` — ${mismatches.map((m) => `${m.field}: expected ${JSON.stringify(m.expected)} observed ${JSON.stringify(m.observed)}`).join("; ")}` : ""}${noVerdictCause ? ` no verdict: ${noVerdictCause}` : ""}`);
   return checked;
 }
 
-export type AcceptanceRunOptions = { workspace?: string; runtime?: string; model?: string; keep?: boolean; capabilities?: string[]; cliPath?: string };
+export type AcceptanceRunOptions = {
+  workspace?: string;
+  runtime?: string;
+  model?: string;
+  keep?: boolean;
+  capabilities?: string[];
+  cliPath?: string;
+  /** Command runner for the version probe and injected cancel/steer actions. */
+  commandRunner?: AcceptanceCommandRunner;
+  /** Override the readiness probe that gates an injected action. */
+  injectReady?: (root: string, missionId: string, hintRunId: string | undefined) => Promise<string | undefined>;
+  /** How long to wait for a run to become ready before an injected action. */
+  injectTimeoutMs?: number;
+  /** Poll interval while waiting for a run to become ready. */
+  injectPollMs?: number;
+};
+
+export type AcceptanceCampaignSummary = {
+  passed: number;
+  failed: number;
+  not_applicable: number;
+  failures: { capability: string; reason: string }[];
+};
+
+/**
+ * Pure campaign tally: counts passed and failed entries and the capabilities the
+ * registry marks not applicable (the FIXTURE branch), and names each failure with
+ * its reason — `observed.reason` when the runner set one, else the first mismatch
+ * rendered as `field: expected X observed Y`.
+ */
+export function summarizeAcceptanceCampaign(
+  results: readonly Pick<AcceptanceEvidence, "capability" | "outcome" | "observed" | "mismatches">[],
+  notApplicable: readonly string[],
+): AcceptanceCampaignSummary {
+  const summary: AcceptanceCampaignSummary = { passed: 0, failed: 0, not_applicable: notApplicable.length, failures: [] };
+  for (const result of results) {
+    if (result.outcome === "passed") {
+      summary.passed += 1;
+      continue;
+    }
+    summary.failed += 1;
+    summary.failures.push({ capability: result.capability, reason: acceptanceFailureReason(result) });
+  }
+  return summary;
+}
+
+function acceptanceFailureReason(result: Pick<AcceptanceEvidence, "observed" | "mismatches">): string {
+  const reason = result.observed.reason;
+  if (typeof reason === "string" && reason.length > 0) return reason;
+  const mismatch = result.mismatches[0];
+  if (!mismatch) return "failed";
+  return `${mismatch.field}: expected ${JSON.stringify(mismatch.expected)} observed ${JSON.stringify(mismatch.observed)}`;
+}
 
 export async function runAcceptance(sourceRoot: string, options: AcceptanceRunOptions = {}): Promise<AcceptanceEvidenceRecord[]> {
   if (!options.workspace) throw new Error("acceptance run requires --workspace <dir>");
@@ -657,26 +1593,51 @@ export async function runAcceptance(sourceRoot: string, options: AcceptanceRunOp
   const workspace = path.resolve(options.workspace);
   const capabilities = options.capabilities?.length ? options.capabilities : Object.keys(registry.entries);
   const results: AcceptanceEvidence[] = [];
+  const notApplicable: string[] = [];
   const runnable: { capability: string; entry: AcceptanceRegistryEntry }[] = [];
   for (const capability of capabilities) {
     const entry = registry.entries[capability];
     if (!entry) throw new Error(`Unknown acceptance capability: ${capability}`);
     if (entry.real_mission === "not_applicable") {
       console.log(`FIXTURE ${capability} — ${entry.reason}`);
+      notApplicable.push(capability);
       continue;
     }
     const runtime = options.runtime ?? entry.runtime;
     if (wrapperMechanismUnavailable(capability, runtime)) {
-      results.push(await recordWrapperUnavailableEvidence(sourceRoot, capability, entry, runtime, options));
+      results.push(await recordFailedAcceptanceEvidence(sourceRoot, capability, entry, runtime, options, {
+        reason: "wrapper_unavailable",
+        mismatch: { field: "wrapper", expected: `${capability} mechanism for runtime ${runtime}`, observed: "wrapper_unavailable" },
+        line: `FAIL ${capability} — wrapper_unavailable: no ${capability} mechanism for runtime ${runtime}`,
+      }));
       continue;
     }
     runnable.push({ capability, entry });
   }
-  if (runnable.length === 0) return results;
+  const printSummary = (): void => {
+    const summary = summarizeAcceptanceCampaign(results, notApplicable);
+    console.log(`SUMMARY passed ${summary.passed} failed ${summary.failed} not_applicable ${summary.not_applicable}`);
+    for (const failure of summary.failures) console.log(`  failed ${failure.capability}: ${failure.reason}`);
+  };
+  if (runnable.length === 0) {
+    printSummary();
+    return results;
+  }
   const cliPath = options.cliPath ?? await preloadAcceptanceCampaign(sourceRoot, workspace);
   for (const { capability, entry } of runnable) {
-    results.push(await runOneAcceptance(sourceRoot, capability, entry, { ...options, workspace, cliPath }));
+    const runtime = options.runtime ?? entry.runtime;
+    try {
+      results.push(await runOneAcceptance(sourceRoot, capability, entry, { ...options, workspace, cliPath }));
+    } catch (error) {
+      const message = (error as Error).message;
+      results.push(await recordFailedAcceptanceEvidence(sourceRoot, capability, entry, runtime, { ...options, workspace }, {
+        reason: "runner_error",
+        mismatch: { field: "runner", expected: "entry ran", observed: message },
+        line: `FAIL ${capability} — runner_error: ${message}`,
+      }));
+    }
   }
+  printSummary();
   return results;
 }
 async function configureAcceptanceSeed(runRoot: string): Promise<void> {
@@ -699,4 +1660,95 @@ export async function writeAcceptanceReport(root: string): Promise<string> {
   const report = await renderAcceptanceReport(root);
   await writeFile(output, report, "utf8");
   return output;
+}
+
+export type AcceptanceRebindOutcome = {
+  capability: string;
+  evidence_path: string;
+  outcome: "rebound" | "changed" | "skipped";
+  changed?: string[];
+  reason?: string;
+};
+
+async function listEvidenceFiles(directory: string): Promise<string[]> {
+  try {
+    return (await readdir(directory)).filter((file) => file.endsWith(".json")).sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Revalidate legacy evidence (records written before `input_digest` existed)
+ * without rerunning any model: when the entry's inputs hash identically at the
+ * record's `harness_commit` and at HEAD, stamp the record with the input digest
+ * and the commit it was rebound from. Records whose inputs changed are reported
+ * as `changed`; unresolvable records are `skipped`.
+ */
+export async function rebindAcceptanceEvidence(root: string): Promise<AcceptanceRebindOutcome[]> {
+  const registry = await loadAcceptanceRegistry(root);
+  const evidenceRoot = path.join(root, "acceptance", "evidence");
+  const outcomes: AcceptanceRebindOutcome[] = [];
+  for (const [capability, entry] of Object.entries(registry.entries)) {
+    const directory = path.join(evidenceRoot, capability);
+    for (const file of await listEvidenceFiles(directory)) {
+      const evidencePath = path.join(directory, file);
+      let record: AcceptanceEvidenceRecord;
+      try {
+        record = AcceptanceEvidenceRecordSchema.parse(JSON.parse(await readFile(evidencePath, "utf8")));
+      } catch (error) {
+        const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "skipped", reason: `unreadable evidence (${(error as Error).message})` };
+        outcomes.push(outcome);
+        console.log(`skipped ${capability} ${file} — ${outcome.reason}`);
+        continue;
+      }
+      if (record.input_digest) continue;
+      const baseCommit = record.harness_commit;
+      if (!baseCommit || baseCommit === UNKNOWN) {
+        const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "skipped", reason: "harness_commit is unknown" };
+        outcomes.push(outcome);
+        console.log(`skipped ${capability} ${file} — ${outcome.reason}`);
+        continue;
+      }
+      const inputs = acceptanceInputs(entry);
+      const identity: AcceptanceInputIdentity = {
+        runtime: record.runtime,
+        model: record.model,
+        ...(record.runtime_version ? { runtimeVersion: record.runtime_version } : {}),
+      };
+      let atCommit: AcceptanceInputDigest;
+      let atHead: AcceptanceInputDigest;
+      try {
+        atCommit = await computeAcceptanceInputDigest(root, inputs, identity, { commit: baseCommit });
+        atHead = await computeAcceptanceInputDigest(root, inputs, identity, { commit: "HEAD" });
+      } catch (error) {
+        const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "skipped", reason: `cannot resolve commit ${baseCommit} (${(error as Error).message})` };
+        outcomes.push(outcome);
+        console.log(`skipped ${capability} ${file} — ${outcome.reason}`);
+        continue;
+      }
+      if (atCommit.digest !== atHead.digest) {
+        const changed = await changedAcceptanceInputs(root, inputs, baseCommit);
+        const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "changed", changed };
+        outcomes.push(outcome);
+        console.log(`changed ${capability} ${file} — ${changed.length > 0 ? changed.join(", ") : "input files differ"}`);
+        continue;
+      }
+      const rebound = AcceptanceEvidenceRecordSchema.parse({
+        ...record,
+        input_digest: atHead.digest,
+        inputs_resolved: atHead.resolved,
+        rebound_from_commit: baseCommit,
+      });
+      await writeFile(evidencePath, JSON.stringify(rebound, null, 2) + "\n", "utf8");
+      const outcome: AcceptanceRebindOutcome = { capability, evidence_path: evidencePath, outcome: "rebound", reason: baseCommit };
+      outcomes.push(outcome);
+      console.log(`rebound ${capability} ${file} — ${atHead.resolved} input(s) unchanged since ${commitLabel(baseCommit)}`);
+    }
+  }
+  return outcomes;
+}
+
+function commitLabel(commit: string): string {
+  return commit.length > 12 ? commit.slice(0, 12) : commit;
 }

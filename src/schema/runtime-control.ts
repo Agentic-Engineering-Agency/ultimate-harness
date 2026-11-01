@@ -44,8 +44,39 @@ export const ToolGuardArtifactSchema = ToolGuardPolicySchema.extend({
   protected_paths: z.array(z.string().min(1)),
   /** Only the explicit Claude Code orchestrator role may set this marker. */
   controller_commands: z.boolean().default(false),
-}).strict();
+  /**
+   * sha256 of each harness-written policy file, keyed by the path relative to
+   * `worker_root`. The acceptance `protected_paths_untouched` invariant treats
+   * this as the baseline: later copies must match it, so a policy file
+   * rewritten identically everywhere is still caught.
+   */
+  written_files: z.record(z.string().min(1), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
+}).passthrough();
 export type ToolGuardArtifact = z.infer<typeof ToolGuardArtifactSchema>;
+
+export type AppliedToolGuardPolicy = ToolGuardPolicy & {
+  worker_root: string;
+  protected_paths?: string[];
+  controller_commands?: boolean;
+};
+
+/**
+ * Extract applied policy from an artifact, isolating policy fields from metadata.
+ * The policy fields are read through `ToolGuardPolicySchema`'s own shape, so a key
+ * added to the schema is applied rather than dropped; the metadata fields
+ * (`worker_root`, `protected_paths`, `controller_commands`) are added explicitly.
+ */
+export function policyFromArtifact(artifact: ToolGuardArtifact): AppliedToolGuardPolicy {
+  const source = artifact as Record<string, unknown>;
+  const fields: Record<string, unknown> = {};
+  for (const key of Object.keys(ToolGuardPolicySchema.shape)) fields[key] = source[key];
+  return {
+    ...ToolGuardPolicySchema.parse(fields),
+    worker_root: artifact.worker_root,
+    protected_paths: artifact.protected_paths,
+    controller_commands: artifact.controller_commands,
+  };
+}
 
 /** Optional limits are enforced by UH, independently of model compliance. */
 export const RuntimeLimitsSchema = z.object({
@@ -65,8 +96,22 @@ export const TeamResourceLimitsSchema = z.object({
   max_parallel: z.number().int().positive().default(4),
   worker_memory_mb: z.number().int().positive().optional(),
   reserve_memory_mb: z.number().int().nonnegative().default(1024),
+  /**
+   * How long a wave may wait for memory headroom (polling every 10 s) before
+   * the team is blocked with the current admission reason. Defaults to 20
+   * minutes so a team started alongside another can wait for it to settle
+   * instead of failing immediately.
+   */
+  admission_timeout_ms: z.number().int().positive().default(20 * 60 * 1000),
   max_cost_usd: z.number().positive().optional(),
   worker_cost_reservation_usd: z.number().positive().optional(),
+  /**
+   * What an unknown completed worker cost does to the next wave. `block` is the
+   * default: unknown cost is never treated as zero. `admit` lets the next wave
+   * proceed for fleets that cannot report price (for example Command Code) while
+   * every such wave records an explicit admission note.
+   */
+  unknown_cost: z.enum(["block", "admit"]).default("block"),
 }).strict().superRefine((limits, ctx) => {
   if ((limits.max_cost_usd === undefined) !== (limits.worker_cost_reservation_usd === undefined)) {
     ctx.addIssue({ code: "custom", message: "Cost admission requires both max_cost_usd and worker_cost_reservation_usd" });
@@ -80,7 +125,12 @@ export const RuntimeRouteSchema = z.object({
 }).strict();
 export type RuntimeRoute = z.infer<typeof RuntimeRouteSchema>;
 
-export const RuntimeStopCodeSchema = z.enum(["startup", "stall", "timeout", "turn_limit", "deadline", "output_limit", "repeated_failure", "denial_budget", "policy", "route_mismatch", "route_unverified", "cancelled", "runtime_error", "controller_error", "controller_lost"]);
+/**
+ * `steered` is not a terminal cancel: the owning controller stops the attempt
+ * only to resume the same native session with an operator message. It is
+ * resumable and never counts against the recovery `max_resumes` budget.
+ */
+export const RuntimeStopCodeSchema = z.enum(["startup", "stall", "timeout", "turn_limit", "deadline", "output_limit", "repeated_failure", "denial_budget", "policy", "route_mismatch", "route_unverified", "cancelled", "steered", "runtime_error", "controller_error", "controller_lost"]);
 export type RuntimeStopCode = z.infer<typeof RuntimeStopCodeSchema>;
 export const RuntimeRecoveryDeadlineSchema = z.object({
   grace_turns: z.number().int().min(1).default(3),
@@ -121,6 +171,8 @@ export const RuntimeControlSchema = z.object({
   guard_armed: z.boolean().optional(),
   turns: z.number().int().nonnegative(),
   denials: z.number().int().nonnegative(),
+  /** Calls the runtime denied natively without invoking the guard hook; also counted in `denials`. */
+  native_refusals: z.number().int().nonnegative().optional(),
   inflight_tools: z.number().int().nonnegative(),
   usage: RuntimeUsageSchema.optional(),
   settlement_confirmed: z.boolean().optional(),
@@ -137,6 +189,8 @@ export const WindowsJobResultSchema = z.object({
   peak_memory_bytes: z.number().int().nonnegative(),
   controller_lost: z.boolean(),
   settled: z.boolean(),
+  /** Whether the guardian attached a headless pseudoconsole instead of the CREATE_NO_WINDOW fallback. */
+  pseudoconsole: z.boolean().optional(),
 }).strict();
 
 export const RuntimeCancelRequestSchema = z.object({
@@ -145,3 +199,18 @@ export const RuntimeCancelRequestSchema = z.object({
   run_id: z.string().min(1),
   requested_at: z.string().datetime(),
 }).strict();
+
+/**
+ * A `uh steer` request, written next to a live attempt's `runtime-control.json`.
+ * The owning controller consumes it: it stops the attempt (stop code `steered`)
+ * and resumes the same native session with `message` as the first instruction.
+ */
+export const RuntimeSteerRequestSchema = z.object({
+  schema_version: z.literal("uh.runtime-steer-request.v0"),
+  mission_id: z.string().min(1),
+  run_id: z.string().min(1),
+  message: z.string().min(1),
+  report: z.boolean().default(false),
+  requested_at: z.string().datetime(),
+}).strict();
+export type RuntimeSteerRequest = z.infer<typeof RuntimeSteerRequestSchema>;

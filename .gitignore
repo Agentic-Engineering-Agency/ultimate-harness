@@ -34,6 +34,9 @@ __pycache__/
 # tracked; deliberately add future reusable templates with an explicit exception.
 /.harness/missions/*
 
+# The intervention ledger records corrections, including owner ones, so it is private.
+/.harness/ledger/
+
 # Locally generated duplicate GitNexus skills; canonical nested skills are tracked.
 /.claude/skills/gitnexus-cli/
 /.claude/skills/gitnexus-debugging/
@@ -42,3 +45,8 @@ __pycache__/
 /.claude/skills/gitnexus-impact-analysis/
 /.claude/skills/gitnexus-refactoring/
 /.harness/sandboxes/
+dist.next/
+dist.old/
+
+# Throwaway marker written by the examples/missions/hello-uh walkthrough.
+HELLO-UH.txt

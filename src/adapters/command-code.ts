@@ -2,6 +2,7 @@ import { assertIndependentReviewExecution } from "../harness/independent-review-
 import { prepareRuntimeResume, recoveryPrompt, persistRuntimeRecovery } from "../harness/runtime-recovery.js";
 import { claimRuntimeAttempt } from "../harness/runtime-attempt.js";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -21,12 +22,14 @@ import { mergeRuntimeConfigOverrides } from "../harness/runtime-config-overrides
 import { generateRunId, appendRunsIndexEntry, writeLatestPointer, mirrorRuntimeResultToLatest } from "../harness/run-id.js";
 import { runRuntimeProcess, type RuntimeProcessInput, type RuntimeProcessOutput } from "../harness/runtime-process.js";
 import { snapshotGuardHook } from "../harness/runtime-snapshot.js";
+import { armGuard, guardArmStopReceipt, GUARD_ARM_LOG_NAME, type GuardArmingFailure, type GuardArmingInput, type GuardArmingResult } from "../harness/guard-arming.js";
 import { nativeRuntimeCompleted, nativeRuntimeEvent, nativeRuntimeRoute, nativeTerminalBudgetCap, nativeTerminalStopReason, runtimeRouteMismatch, runtimeTerminalFailure } from "../harness/runtime-supervision.js";
 import { settleNativeCap, reconcileNativeCapSettlement } from "../harness/runtime-settlement.js";
 import { resolveRuntimeCommand } from "../harness/runtime-command.js";
 import { captureDiffWithUntracked, diffCaptureFailureRecord } from "../harness/diff-capture.js";
 import { extractRuntimeFinalMessageSentinel } from "../harness/runtime-final-message.js";
-import { getMissionArtifactContext, persistPromptAndSession, appendMissionEvent, writeArtifactFile } from "./_artifact-context.js";
+import { assertOrchestratorWriteRoots } from "../harness/orchestrator-write-roots.js";
+import { getMissionArtifactContext, persistPromptAndSession, appendMissionEvent, writeArtifactFile, writeReadOnlyArtifactFile } from "./_artifact-context.js";
 
 export const CommandCodeRuntimeConfigSchema = z.object({
   model: z.string().optional().default(""),
@@ -45,6 +48,10 @@ export const CommandCodeRuntimeConfigSchema = z.object({
 }).strict();
 registerRuntimeConfigSchema("command-code", CommandCodeRuntimeConfigSchema);
 const exec = promisify(execFile);
+
+function sha256Hex(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
 
 function controllerGuard(guard: ToolGuardPolicy | undefined): ToolGuardPolicy & { controller_commands: boolean } {
   return { ...(guard ?? resolveToolGuardPolicy(undefined)), controller_commands: true };
@@ -118,6 +125,8 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   if (config.role === "orchestrator" && !mission.guard) {
     throw new Error("Command Code orchestrator runs require a mission guard policy");
   }
+  // The orchestrator runs in the live project root, so only its write roots confine it.
+  if (config.role === "orchestrator") assertOrchestratorWriteRoots(controllerGuard(mission.guard).write_roots, "Command Code");
   const permissionMode = mission.guard ? "guard" as const : config.permission_mode ?? "prompt" as const;
   const reviewRequestSha256 = await assertIndependentReviewExecution(root, missionPath, mission, {
     canonicalRoot: options.artifactRoot ?? root, runtime: "command-code", model: config.model,
@@ -134,7 +143,9 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   const prompt = renderPrompt(buildDispatchContext(mission, workflow)) + (resume ? recoveryPrompt(resume) : "")
     + (config.role === "orchestrator" ? `\n\n${ORCHESTRATOR_DELEGATION_INSTRUCTION}` : "");
   // Preserve native sessions; authorization remains with the configured CLI and sandbox.
-  const args = [...config.cli_args, "-p", prompt];
+  // The prompt rides stdin (`-p` without a query) so a multi-KB packet never has to
+  // fit the Windows command line.
+  const args = [...config.cli_args, "-p"];
   const resumeSession = resume?.sessionId ?? config.resume_session;
   if (resumeSession) args.push("--resume", resumeSession);
   args.push("-m", config.model, "--verbose", "--skip-onboarding", "--no-auto-update", "--no-skills", "--output-format", "json");
@@ -150,7 +161,7 @@ export async function planCommandCodeRun(root: string, missionPath: string, opti
   const onDeadline = deadline === undefined ? undefined
     : grace ? { ...deadline, grace: true as const }
       : deadline;
-  return { command: cliCommand, args, prompt, mission, config, resume,
+  return { command: cliCommand, args, prompt, stdin: prompt, promptSource: "stdin" as const, mission, config, resume,
     grace, deadline, onDeadline,
     permission_mode: permissionMode,
     ...(guard ? { guard } : {}),
@@ -171,6 +182,8 @@ export async function dryRunCommandCode(root: string, missionPath: string, optio
 export interface CommandCodeRunOptions {
   runner?: (input: RuntimeProcessInput) => Promise<RuntimeProcessOutput>;
   collectDiff?: (cwd: string) => Promise<{ patch: string; errors?: string[] }>;
+  /** Pre-launch guard arming seam; defaults to the real arming check. */
+  armGuard?: (input: GuardArmingInput) => Promise<GuardArmingResult>;
   runId?: string;
   artifactRoot?: string;
   timeoutMs?: number;
@@ -197,19 +210,12 @@ export async function runCommandCode(root: string, missionPath: string, options:
   await writeLatestPointer(canonical, plan.mission.id, { schema_version: "uh.latest-run.v0", run_id: runId, started_at: startedAt, status: "running" });
   await appendMissionEvent(artifacts, { event: "runtime.started", runtime: "command-code", mission_id: plan.mission.id, run_id: runId, timestamp: startedAt });
   let guardEnv: NodeJS.ProcessEnv | undefined;
+  let guardArmFailure: GuardArmingFailure | undefined;
   if (plan.guard) {
     const effectiveLimits = { ...plan.config.limits, ...options.limits };
     const protectedPaths = effectiveLimits.protected_paths ?? DEFAULT_PROTECTED_PATHS;
-    const artifact = ToolGuardArtifactSchema.parse({
-      schema_version: "uh.tool-guard.v0",
-      ...plan.guard,
-      worker_root: root,
-      protected_paths: protectedPaths,
-      controller_commands: plan.config.role === "orchestrator",
-    });
     const policyPath = path.join(artifacts.runDir, "tool-guard.json");
     const logPath = path.join(artifacts.runDir, "tool-guard.log");
-    await writeArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     const settingsPath = path.join(root, ".commandcode", "settings.json");
     await mkdir(path.dirname(settingsPath), { recursive: true });
     let settings: Record<string, unknown> = {};
@@ -228,9 +234,34 @@ export async function runCommandCode(root: string, missionPath: string, options:
     });
     hooks.PreToolUse = [...retainedHooks, { hooks: [{ type: "command", command: `${process.execPath} \"${hookPath}\"`, timeout: 10 }] }];
     settings.hooks = hooks;
-    await writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
-    await writeFile(path.join(root, ".commandcode", ".gitignore"), "*\n", "utf8");
+    const settingsContent = JSON.stringify(settings, null, 2);
+    const gitignorePath = path.join(root, ".commandcode", ".gitignore");
+    const gitignoreContent = "*\n";
+    await writeFile(settingsPath, settingsContent, "utf8");
+    await writeFile(gitignorePath, gitignoreContent, "utf8");
+    // The baseline the acceptance invariant judges against: the sha256 of each
+    // policy file exactly as written, keyed relative to `worker_root`. Comparing
+    // copies with each other cannot catch a file rewritten identically everywhere.
+    const artifact = ToolGuardArtifactSchema.parse({
+      schema_version: "uh.tool-guard.v0",
+      ...plan.guard,
+      worker_root: root,
+      protected_paths: protectedPaths,
+      controller_commands: plan.config.role === "orchestrator",
+      written_files: {
+        ".commandcode/settings.json": sha256Hex(settingsContent),
+        ".commandcode/.gitignore": sha256Hex(gitignoreContent),
+      },
+    });
+    await writeReadOnlyArtifactFile(artifacts.missionDir, policyPath, JSON.stringify(artifact, null, 2));
     guardEnv = { ...process.env, UH_TOOL_GUARD_POLICY: policyPath, UH_TOOL_GUARD_LOG: logPath };
+    const arming = await (options.armGuard ?? armGuard)({
+      runtime: "command-code",
+      policyPath,
+      logPath: path.join(artifacts.runDir, GUARD_ARM_LOG_NAME),
+      hookCommand: [process.execPath, hookPath],
+    });
+    if (!arming.ok) guardArmFailure = arming;
   }
   let partial = "";
   const events: Record<string, unknown>[] = [];
@@ -247,8 +278,12 @@ export async function runCommandCode(root: string, missionPath: string, options:
     }
   };
   let output: RuntimeProcessOutput;
-  try {
+  if (guardArmFailure) {
+    await writeArtifactFile(artifacts.missionDir, path.join(artifacts.runDir, "runtime-control.json"), JSON.stringify(guardArmStopReceipt({ missionId: plan.mission.id, runId, runtime: "command-code", reason: guardArmFailure.reason }), null, 2));
+    output = { stdout: "", stderr: "", exitCode: 1, timedOut: false, spawnError: guardArmFailure.reason, supervisionStopCode: "policy" };
+  } else try {
     output = await (options.runner ?? runRuntimeProcess)({ command: plan.command, args: plan.args, cwd: root,
+      stdin: plan.prompt,
       env: guardEnv,
       permissionMode: plan.permission_mode,
       guardLogPath: plan.guard && artifacts ? path.join(artifacts.runDir, "tool-guard.log") : undefined,
