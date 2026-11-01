@@ -174,7 +174,8 @@ describe("uh spec scaffold CLI", () => {
     const outPath = join(dir, "cli.test.ts");
     await writeFile(specPath, VALID_SPEC, "utf-8");
 
-    await execFileP(join(process.cwd(), "node_modules", ".bin", "tsx"), [
+    await execFileP(process.execPath, [
+      "--import", "tsx",
       "src/cli.ts",
       "spec",
       "scaffold",

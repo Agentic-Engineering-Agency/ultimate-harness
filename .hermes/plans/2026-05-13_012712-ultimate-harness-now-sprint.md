@@ -19,7 +19,7 @@ uh init
 
 ## Current context
 
-- Repository: `/Users/eduardojaviergarcialopez/AgenticEngineering/ultimate-harness`
+- Repository: `/Users/example/AgenticEngineering/ultimate-harness`
 - Current branch: `main`
 - Latest commit: `7b69603 docs: add Ultimate Harness documentation spine`
 - Working tree appeared clean before this plan was written.

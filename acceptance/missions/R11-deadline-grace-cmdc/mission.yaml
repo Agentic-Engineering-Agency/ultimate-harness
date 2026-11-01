@@ -1,0 +1,34 @@
+schema_version: uh.mission.v0
+id: r11-deadline-grace-cmdc-acceptance
+title: Deadline grace delivery
+workflow_profile: bugfix-contained
+objective: >-
+  Survey every file under acceptance/support/ and prepare a summary with one
+  finding per file. Read each file separately before writing
+  out/REPORT.md with INCOMPLETE at the top and a section titled "Missing for
+  the next step" listing any remaining files.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Do not start new investigation during grace.
+  - Keep all files under out/.
+expected_outputs:
+  files:
+    - out/REPORT.md
+runtime_config_overrides:
+  permission_mode: yolo
+  limits:
+    max_turns: 4
+  recovery:
+    max_resumes: 0
+    notes: Preserve the reportable findings already gathered.
+    on_deadline:
+      grace_turns: 2
+      grace_timeout_ms: 300000
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved

@@ -1,0 +1,28 @@
+{"type":"run_start","timestamp":"2026-01-01T00:00:01.000Z"}
+{"type":"turn_start","turnNumber":1,"timestamp":"2026-01-01T00:00:02.000Z"}
+{"type":"message_start","timestamp":"2026-01-01T00:00:03.000Z"}
+{"type":"model_request_start","model":"deepseek/deepseek-v4.1-flash","timestamp":"2026-01-01T00:00:04.000Z"}
+{"type":"model_request_end","model":"deepseek/deepseek-v4.1-flash","timestamp":"2026-01-01T00:00:05.000Z"}
+{"type":"message_end","timestamp":"2026-01-01T00:00:06.000Z"}
+{"type":"tool_queued","toolCallId":"call-1","toolName":"shell_command","input":{"command":"node -e \"process.exit(1)\"","cwd":"/outside/path","timeout":30000},"timestamp":"2026-01-01T00:00:07.000Z"}
+{"type":"tool_running","toolCallId":"call-1","toolName":"shell_command","timestamp":"2026-01-01T00:00:08.000Z"}
+{"type":"tool_completed","toolCallId":"call-1","toolName":"shell_command","deferred":false,"result":[{"type":"text","text":"Exit code: 1\n<stderr text>"}],"timestamp":"2026-01-01T00:00:09.000Z"}
+{"type":"turn_end","turnNumber":1,"timestamp":"2026-01-01T00:00:10.000Z"}
+{"type":"turn_start","turnNumber":2,"timestamp":"2026-01-01T00:00:11.000Z"}
+{"type":"message_start","timestamp":"2026-01-01T00:00:12.000Z"}
+{"type":"model_request_start","model":"deepseek/deepseek-v4.1-flash","timestamp":"2026-01-01T00:00:13.000Z"}
+{"type":"model_request_end","model":"deepseek/deepseek-v4.1-flash","timestamp":"2026-01-01T00:00:14.000Z"}
+{"type":"message_end","timestamp":"2026-01-01T00:00:15.000Z"}
+{"type":"tool_queued","toolCallId":"call-2","toolName":"shell_command","input":{"command":"node -e \"process.exit(1)\"","cwd":"/outside/path","timeout":30000},"timestamp":"2026-01-01T00:00:16.000Z"}
+{"type":"tool_running","toolCallId":"call-2","toolName":"shell_command","timestamp":"2026-01-01T00:00:17.000Z"}
+{"type":"tool_completed","toolCallId":"call-2","toolName":"shell_command","deferred":false,"result":[{"type":"text","text":"Exit code: 1\n<stderr text>"}],"timestamp":"2026-01-01T00:00:18.000Z"}
+{"type":"turn_end","turnNumber":2,"timestamp":"2026-01-01T00:00:19.000Z"}
+{"type":"turn_start","turnNumber":3,"timestamp":"2026-01-01T00:00:20.000Z"}
+{"type":"message_start","timestamp":"2026-01-01T00:00:21.000Z"}
+{"type":"model_request_start","model":"deepseek/deepseek-v4.1-flash","timestamp":"2026-01-01T00:00:22.000Z"}
+{"type":"model_request_end","model":"deepseek/deepseek-v4.1-flash","timestamp":"2026-01-01T00:00:23.000Z"}
+{"type":"message_end","timestamp":"2026-01-01T00:00:24.000Z"}
+{"type":"tool_queued","toolCallId":"call-3","toolName":"shell_command","input":{"command":"node -e \"process.exit(1)\"","cwd":"/outside/path","timeout":30000},"timestamp":"2026-01-01T00:00:25.000Z"}
+{"type":"tool_running","toolCallId":"call-3","toolName":"shell_command","timestamp":"2026-01-01T00:00:26.000Z"}
+{"type":"tool_completed","toolCallId":"call-3","toolName":"shell_command","deferred":false,"result":[{"type":"text","text":"Exit code: 1\n<stderr text>"}],"timestamp":"2026-01-01T00:00:27.000Z"}
+{"type":"turn_end","turnNumber":3,"timestamp":"2026-01-01T00:00:28.000Z"}

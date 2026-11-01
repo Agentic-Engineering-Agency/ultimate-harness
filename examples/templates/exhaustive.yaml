@@ -1,0 +1,22 @@
+schema_version: uh.session-template.v0
+id: exhaustive
+title: Exhaustive Deep Execution
+tier: exhaustive
+containment: standard
+adapter: hermes
+runtime_config_overrides:
+  model: "<provider/model>"
+  thinking: high
+limits:
+  max_turns: 50
+  timeout_ms: 900000
+  stall_timeout_ms: 120000
+recovery:
+  max_resumes: 3
+  notes: Multi-attempt recovery with deadline grace for exhaustive completion.
+  on_deadline:
+    grace_turns: 5
+    grace_timeout_ms: 300000
+    notes: Grace period to allow active reasoning loops to finish and summarize.
+attempts: 3
+notes: Exhaustive configuration with high reasoning budget, deep turn limits, and multiple attempts.

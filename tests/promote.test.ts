@@ -11,10 +11,9 @@ import { validateFile } from "../src/harness/validate.js";
 
 let TEST_ROOT: string;
 const execFileP = promisify(execFile);
-const CLI = join(process.cwd(), "node_modules", ".bin", "tsx");
 
 async function runUh(args: string[]) {
-  return execFileP(CLI, ["src/cli.ts", ...args], { cwd: process.cwd() });
+  return execFileP(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], { cwd: process.cwd() });
 }
 
 async function runUhFailure(args: string[]) {

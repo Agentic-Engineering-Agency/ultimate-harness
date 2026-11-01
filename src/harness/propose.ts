@@ -1,5 +1,7 @@
+import type { IndependentReviewBinding } from "../schema/independent-review.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { relativeArtifactPath } from "./artifact-paths.js";
 import { stringify } from "yaml";
 import { validateMission } from "../schema/mission.js";
 import { validateFile } from "./validate.js";
@@ -52,6 +54,8 @@ export type ProposeMissionOptions = {
   promotionPolicy?: string;
   requiredChecks?: ProposeRequiredCheck[];
   reviewGates?: string[];
+  runtimeConfigOverrides?: Record<string, unknown>;
+  independentReview?: IndependentReviewBinding;
   outputPath?: string;
   force?: boolean;
 };
@@ -173,6 +177,8 @@ function buildMissionDocument(opts: ProposeMissionOptions): Record<string, unkno
       review_gates: reviewGates,
     },
     completion_criteria: opts.completionCriteria ?? [],
+    ...(opts.runtimeConfigOverrides ? { runtime_config_overrides: opts.runtimeConfigOverrides } : {}),
+    ...(opts.independentReview ? { independent_review: opts.independentReview } : {}),
     ...(opts.acceptanceCriteria && opts.acceptanceCriteria.length > 0
       ? {
           acceptance_criteria: opts.acceptanceCriteria.map((ac) => ({
@@ -219,7 +225,7 @@ export async function proposeMissionFromSpec(
     : path.resolve(root, opts.specPath);
   const spec = await loadSpecFile(resolvedSpec);
 
-  const specRelative = path.relative(root, resolvedSpec);
+  const specRelative = relativeArtifactPath(root, resolvedSpec);
   const readFirst = [...new Set([
     ...(opts.readFirst ?? []),
     specRelative.startsWith("..") ? resolvedSpec : specRelative,

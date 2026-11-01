@@ -1,5 +1,7 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile, utimes } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   loadAdapters,
@@ -10,7 +12,7 @@ import {
   loadMissionDetail,
 } from "../src/tui/model.js";
 
-const TEST_ROOT = "/tmp/uh-test-tui-model";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-tui-model-"));
 const HARNESS = join(TEST_ROOT, ".harness");
 
 async function cleanup() {
@@ -19,6 +21,7 @@ async function cleanup() {
 
 beforeEach(cleanup);
 afterEach(cleanup);
+afterAll(cleanup);
 
 async function seedAdapters() {
   await mkdir(join(HARNESS, "adapters"), { recursive: true });
@@ -165,13 +168,14 @@ describe("tui/model loadSandboxes", () => {
   });
 
   test("returns rows for valid entries", async () => {
+    const sbxPath = join(HARNESS, "sandboxes", "sbx-1", "worktree");
     await seedSandboxIndex([
       "sandboxes:",
       "  - id: sbx-1",
       "    mission_id: m-1",
       "    backend: git-worktree",
       "    status: created",
-      "    path: /tmp/uh-test-tui-model/.harness/sandboxes/sbx-1/worktree",
+      `    path: ${sbxPath}`,
     ].join("\n"));
     const rows = await loadSandboxes(TEST_ROOT);
     expect(rows).toEqual([
@@ -180,7 +184,7 @@ describe("tui/model loadSandboxes", () => {
         missionId: "m-1",
         backend: "git-worktree",
         status: "created",
-        worktreePath: "/tmp/uh-test-tui-model/.harness/sandboxes/sbx-1/worktree",
+        worktreePath: sbxPath,
       },
     ]);
   });

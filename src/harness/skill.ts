@@ -1,5 +1,6 @@
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { relativeArtifactPath } from "./artifact-paths.js";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import {
@@ -85,7 +86,7 @@ export async function addSkill(root: string, dir: string): Promise<AddSkillResul
     throw new Error(`Skill already registered: id ${frontmatter.id}`);
   }
 
-  const relPath = path.relative(projectRoot, skillDir);
+  const relPath = relativeArtifactPath(projectRoot, skillDir);
   const entry: SkillIndexEntry = {
     id: frontmatter.id,
     name: frontmatter.name,

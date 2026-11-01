@@ -1,0 +1,34 @@
+schema_version: uh.mission.v0
+id: c1-cmdc-acceptance
+title: Per-worker contracts
+workflow_profile: bugfix-contained
+objective: Create the declared worker outputs under out/.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved
+shape: team
+team:
+  resources:
+    max_parallel: 2
+  workers:
+    - adapter: command-code
+      role: worker-a
+      objective: Create out/worker-a.txt containing exactly the single line worker-a, then stop.
+      runtime_config_overrides: { permission_mode: yolo }
+      limits: { max_turns: 12 }
+      expected_outputs: { files: [out/worker-a.txt] }
+    - adapter: command-code
+      role: worker-b
+      objective: Create out/worker-b.txt containing exactly the single line worker-b, then stop.
+      runtime_config_overrides: { permission_mode: yolo }
+      limits: { max_turns: 12 }
+      expected_outputs: { files: [out/worker-b.txt] }
+  leader: { adapter: command-code }

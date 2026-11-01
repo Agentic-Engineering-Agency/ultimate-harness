@@ -1,0 +1,33 @@
+schema_version: uh.mission.v0
+id: c1-missing-output-cmdc-acceptance
+title: Missing declared output
+workflow_profile: bugfix-contained
+objective: Ensure the worker output contracts are evaluated independently.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved
+shape: team
+team:
+  resources: { max_parallel: 2 }
+  workers:
+    - adapter: command-code
+      role: worker-missing
+      objective: Do not create out/missing.txt; stop without writing that file.
+      runtime_config_overrides: { permission_mode: yolo }
+      limits: { max_turns: 12 }
+      expected_outputs: { files: [out/missing.txt] }
+    - adapter: command-code
+      role: worker-good
+      objective: Create out/good.txt containing exactly the single line good, then stop.
+      runtime_config_overrides: { permission_mode: yolo }
+      limits: { max_turns: 12 }
+      expected_outputs: { files: [out/good.txt] }
+  leader: { adapter: command-code }

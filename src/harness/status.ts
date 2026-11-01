@@ -17,6 +17,7 @@ import {
   type SandboxStatus,
 } from "../schema/artifacts.js";
 import { MissionSchema } from "../schema/mission.js";
+import { acceptanceStatus } from "./acceptance.js";
 
 export type AdapterInfo = {
   id: string;
@@ -42,6 +43,14 @@ export type StatusResult = {
   sandboxes: SandboxStatusSummary;
   verified_missions_count: number;
   promoted_missions_count: number;
+  acceptance: {
+    proven: number;
+    stale: number;
+    failed: number;
+    unproven: number;
+    failed_ids: string[];
+    unproven_ids: string[];
+  };
 };
 
 export async function getStatus(root: string): Promise<StatusResult> {
@@ -63,6 +72,13 @@ export async function getStatus(root: string): Promise<StatusResult> {
   const sandboxes = await summarizeSandboxes(sandboxesIndex(root));
   const verifiedMissions = await countPassedVerificationMissionDirs(missionsDir(root));
   const promotedMissions = await countPromotedMissionDirs(missionsDir(root));
+  let acceptance = { proven: 0, stale: 0, failed: 0, unproven: 0, failed_ids: [] as string[], unproven_ids: [] as string[] };
+  try {
+    const summary = await acceptanceStatus(root);
+    acceptance = { ...summary.counts, failed_ids: summary.failed, unproven_ids: summary.unproven };
+  } catch {
+    // Acceptance registry is optional for older projects.
+  }
 
   return {
     name: String(project.name ?? "unknown"),
@@ -75,6 +91,7 @@ export async function getStatus(root: string): Promise<StatusResult> {
     sandboxes,
     verified_missions_count: verifiedMissions,
     promoted_missions_count: promotedMissions,
+    acceptance,
   };
 }
 

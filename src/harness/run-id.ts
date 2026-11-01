@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, lstat } from "node:fs/promises";
 import path from "node:path";
+import { withArtifactTransaction, writeAtomicArtifact } from "./artifact-transaction.js";
 import {
   missionDir,
   missionLatestPointer,
@@ -45,7 +46,14 @@ export function assertValidRunId(runId: string): void {
 }
 
 export async function ensureRunDir(root: string, missionId: string, runId: string): Promise<string> {
+  assertValidRunId(runId);
   const dir = missionRunDir(root, missionId, runId);
+  for (const directory of [missionRunsDir(root, missionId), dir]) {
+    try {
+      const existing = await lstat(directory);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) throw new Error(`Unsafe run directory: ${directory}`);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
   await mkdir(dir, { recursive: true });
   return dir;
 }
@@ -55,12 +63,21 @@ export async function writeLatestPointer(
   missionId: string,
   pointer: LatestRunPointer,
 ): Promise<void> {
-  await mkdir(missionDir(root, missionId), { recursive: true });
+  await mkdir(missionRunsDir(root, missionId), { recursive: true });
   const validated = LatestRunPointerSchema.parse(pointer);
   const dst = missionLatestPointer(root, missionId);
-  const tmp = `${dst}.tmp`;
-  await writeFile(tmp, JSON.stringify(validated, null, 2), "utf-8");
-  await rename(tmp, dst);
+  await withArtifactTransaction(missionRunsIndex(root, missionId), async () => {
+    let previous: LatestRunPointer | undefined;
+    try { previous = LatestRunPointerSchema.parse(JSON.parse(await readFile(dst, "utf8"))); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (previous && previous.run_id !== validated.run_id &&
+        (previous.started_at > validated.started_at ||
+         (previous.started_at === validated.started_at && previous.run_id > validated.run_id))) return;
+    if (previous?.run_id === validated.run_id && previous.status !== "running" && validated.status === "running") {
+      throw new Error(`Cannot restart settled attempt ${validated.run_id}; allocate a new run id`);
+    }
+    await writeAtomicArtifact(dst, JSON.stringify(validated, null, 2));
+  });
 }
 
 export async function readLatestPointer(
@@ -87,41 +104,28 @@ export async function appendRunsIndexEntry(
 ): Promise<void> {
   const indexPath = missionRunsIndex(root, missionId);
   await mkdir(missionRunsDir(root, missionId), { recursive: true });
-  let current: { schema_version: "uh.runs-index.v0"; runs: RunsIndexEntry[] };
-  try {
-    const raw = await readFile(indexPath, "utf-8");
-    current = RunsIndexSchema.parse(JSON.parse(raw));
-  } catch {
-    current = { schema_version: "uh.runs-index.v0", runs: [] };
-  }
-  const idx = current.runs.findIndex((r) => r.run_id === entry.run_id);
-  if (idx >= 0) {
-    // UH-87: `replay_of` is set by the Hermes plugin when start_run is
-    // called with a `replay_of` body field; adapters never set it. Without
-    // this preservation the adapter's first running -> terminal row
-    // overwrite would erase the lineage breadcrumb the plugin just wrote.
-    const preserved = current.runs[idx];
-    if (entry.replay_of === undefined && preserved?.replay_of !== undefined) {
-      current.runs[idx] = { ...entry, replay_of: preserved.replay_of };
-    } else {
-      current.runs[idx] = entry;
+  await withArtifactTransaction(indexPath, async () => {
+    let current: { schema_version: "uh.runs-index.v0"; runs: RunsIndexEntry[] };
+    try {
+      current = RunsIndexSchema.parse(JSON.parse(await readFile(indexPath, "utf-8")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      current = { schema_version: "uh.runs-index.v0", runs: [] };
     }
-  } else {
-    current.runs.push(entry);
-  }
-  // Codex P1 (PR #96): two concurrent writers must NOT race on the same
-  // tmp path. A shared `index.json.tmp` would either ENOENT-fail one
-  // rename or silently overwrite — both drop run history entries. Suffix
-  // with random bytes so each writer has its own staging file. Rename is
-  // still atomic on the same filesystem (POSIX rename(2) overwrites the
-  // destination atomically), so the last-finishing writer wins the merge
-  // — and since `current` is recomputed under each writer's read, the
-  // race only loses the entry the slower writer added between read and
-  // rename. That's the same exposure as `latest.json` writes (best-effort,
-  // last-write-wins). Per-run dirs themselves are race-free.
-  const tmp = `${indexPath}.${randomBytes(6).toString("hex")}.tmp`;
-  await writeFile(tmp, JSON.stringify(current, null, 2), "utf-8");
-  await rename(tmp, indexPath);
+    const validated = RunsIndexSchema.parse({ schema_version: "uh.runs-index.v0", runs: [entry] }).runs[0];
+    const index = current.runs.findIndex((run) => run.run_id === validated.run_id);
+    if (index < 0) {
+      current.runs.push(validated);
+    } else {
+      const previous = current.runs[index];
+      current.runs[index] = {
+        ...previous,
+        ...validated,
+        ...(validated.replay_of === undefined && previous.replay_of !== undefined ? { replay_of: previous.replay_of } : {}),
+      };
+    }
+    await writeAtomicArtifact(indexPath, JSON.stringify(current, null, 2));
+  });
 }
 
 /**
@@ -135,15 +139,17 @@ export async function mirrorRuntimeResultToLatest(
   runId: string,
 ): Promise<void> {
   const src = path.join(missionRunDir(root, missionId, runId), "runtime-result.yaml");
-  try {
-    await stat(src);
-  } catch {
-    return;
-  }
-  const dst = path.join(missionDir(root, missionId), "runtime-result.yaml");
-  const tmp = `${dst}.tmp`;
-  await copyFile(src, tmp);
-  await rename(tmp, dst);
+  await mkdir(missionRunsDir(root, missionId), { recursive: true });
+  await withArtifactTransaction(missionRunsIndex(root, missionId), async () => {
+    let latest: LatestRunPointer | undefined;
+    try { latest = LatestRunPointerSchema.parse(JSON.parse(await readFile(missionLatestPointer(root, missionId), "utf8"))); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (latest && latest.run_id !== runId) return;
+    let content: string;
+    try { content = await readFile(src, "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    await writeAtomicArtifact(path.join(missionDir(root, missionId), "runtime-result.yaml"), content);
+  });
 }
 
 /**
@@ -167,49 +173,26 @@ export async function pruneOldRuns(
     throw new Error("max_runs_per_mission must be a positive integer or null");
   }
   const indexPath = missionRunsIndex(root, missionId);
-  let current: { schema_version: "uh.runs-index.v0"; runs: RunsIndexEntry[] };
-  try {
-    const raw = await readFile(indexPath, "utf-8");
-    current = RunsIndexSchema.parse(JSON.parse(raw));
-  } catch {
-    // No index yet (mission has never run) or it's corrupt — either way
-    // there's nothing for retention to prune.
-    return 0;
-  }
-  const nonArchived = current.runs.filter((r) => r.archived !== true);
-  if (nonArchived.length <= max) {
-    return 0;
-  }
-  // Sort by started_at ASC so the oldest entries are at the front.
-  // Tie-break on run_id to keep the order deterministic when two runs
-  // share an ISO timestamp (the `_make_run_id()` minute granularity makes
-  // collisions plausible under load).
-  const oldestFirst = [...nonArchived].sort((a, b) => {
-    if (a.started_at !== b.started_at) return a.started_at < b.started_at ? -1 : 1;
-    return a.run_id < b.run_id ? -1 : 1;
-  });
-  const pruneCount = nonArchived.length - max;
-  const toPrune = oldestFirst.slice(0, pruneCount);
-  // Flip the archived flag on the in-memory entries (lookup by run_id —
-  // we don't depend on indices because the sort reordered them).
-  const archivedIds = new Set(toPrune.map((r) => r.run_id));
-  for (const entry of current.runs) {
-    if (archivedIds.has(entry.run_id)) {
+  await mkdir(missionRunsDir(root, missionId), { recursive: true });
+  return withArtifactTransaction(indexPath, async () => {
+    let current: { schema_version: "uh.runs-index.v0"; runs: RunsIndexEntry[] };
+    try {
+      current = RunsIndexSchema.parse(JSON.parse(await readFile(indexPath, "utf-8")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+      throw error;
+    }
+    // Active attempts retain their evidence regardless of the completed-run cap.
+    const settled = current.runs.filter((entry) => !entry.archived && entry.status !== "running");
+    if (settled.length <= max) return 0;
+    settled.sort((a, b) => a.started_at.localeCompare(b.started_at) || a.run_id.localeCompare(b.run_id));
+    const toPrune = settled.slice(0, settled.length - max);
+    for (const entry of toPrune) assertValidRunId(entry.run_id);
+    for (const entry of toPrune) {
+      await rm(missionRunDir(root, missionId, entry.run_id), { recursive: true, force: true });
       entry.archived = true;
     }
-  }
-  // Best-effort per-run dir removal. `force: true` already swallows
-  // ENOENT, so re-running prune after a partial failure converges.
-  for (const entry of toPrune) {
-    await rm(missionRunDir(root, missionId, entry.run_id), { recursive: true, force: true });
-  }
-  // Atomic write via the same unique-tmp rename strategy as
-  // appendRunsIndexEntry. Two writers (e.g. prune + a concurrent
-  // appendRunsIndexEntry from a still-finishing terminal-status flip)
-  // could still race on the read-modify-write window, but each rename
-  // is atomic and per-writer staging files don't collide.
-  const tmp = `${indexPath}.${randomBytes(6).toString("hex")}.tmp`;
-  await writeFile(tmp, JSON.stringify(current, null, 2), "utf-8");
-  await rename(tmp, indexPath);
-  return pruneCount;
+    await writeAtomicArtifact(indexPath, JSON.stringify(current, null, 2));
+    return toPrune.length;
+  });
 }

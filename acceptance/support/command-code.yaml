@@ -1,0 +1,12 @@
+schema_version: uh.adapter.v0
+id: command-code
+name: command-code acceptance adapter
+runtime: command-code
+capabilities: [cli-execution, non-interactive, json-output]
+status: active
+config:
+  cli_command: cmdc
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    model: ""

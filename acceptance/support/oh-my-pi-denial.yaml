@@ -1,0 +1,14 @@
+schema_version: uh.adapter.v0
+id: oh-my-pi
+name: oh-my-pi denial acceptance adapter
+runtime: oh-my-pi
+capabilities: [cli-execution, non-interactive, json-output]
+status: active
+config:
+  cli_command: denial-wrapper.mjs
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    mode: json
+    allow_extensions: true
+    allow_skills: false

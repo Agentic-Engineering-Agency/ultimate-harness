@@ -3,7 +3,7 @@ id: oh-my-pi
 name: oh-my-pi
 description: >-
   Runtime adapter for oh-my-pi (omp), a multi-provider CLI coding agent.
-  Executes missions via `omp --print --mode json` with sessions ephemeral and
+  Executes missions via `omp --print --mode json` with persistent sessions and
   extensions/skills disabled by default for deterministic runs. Provider /
   account auth flows through OMP's own credential store and env vars.
 runtime: oh-my-pi

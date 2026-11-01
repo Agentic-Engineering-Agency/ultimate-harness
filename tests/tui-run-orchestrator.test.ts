@@ -1,4 +1,5 @@
 import { describe, test, expect } from "vitest";
+import path from "node:path";
 import { buildRunArgs, resolveDefaultCliEntry } from "../src/tui/run-orchestrator.js";
 
 describe("tui/run-orchestrator buildRunArgs", () => {
@@ -35,6 +36,6 @@ describe("tui/run-orchestrator resolveDefaultCliEntry", () => {
   test("returns an absolute path pointing to cli.{js,ts} beside the module", () => {
     const entry = resolveDefaultCliEntry();
     expect(entry).toMatch(/[\/\\]cli\.(ts|js)$/);
-    expect(entry.startsWith("/")).toBe(true);
+    expect(path.isAbsolute(entry)).toBe(true);
   });
 });

@@ -1,0 +1,15 @@
+schema_version: uh.mission.v0
+id: policy-acceptance
+title: Protected-path policy stop
+workflow_profile: bugfix-contained
+objective: Write exactly policy-probe to .harness/adapters/oh-my-pi.yaml once, then stop.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep permitted files under out/; the protected-path write is the single intentional probe.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+runtime_config_overrides:
+  thinking: low

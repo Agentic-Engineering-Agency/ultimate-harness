@@ -125,6 +125,7 @@ const HONCHO_ENV_KEYS = [
 
 const savedEnv: Record<string, string | undefined> = {};
 let savedHome: string | undefined;
+let savedUserProfile: string | undefined;
 let tmpHomeDir: string | undefined;
 
 beforeEach(async () => {
@@ -135,12 +136,13 @@ beforeEach(async () => {
   // Isolate from the developer's real ~/.honcho/config.json so tests do
   // not silently pick up a live apiKey or workspace.
   savedHome = process.env.HOME;
+  savedUserProfile = process.env.USERPROFILE;
   const { mkdtemp } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   tmpHomeDir = await mkdtemp(join(tmpdir(), "uh-honcho-home-"));
   process.env.HOME = tmpHomeDir;
-  process.env.HONCHO_ENABLED = "false";
+  process.env.USERPROFILE = tmpHomeDir;
   resetHonchoExtensionForTests();
   setHonchoClientFactory(undefined);
 });
@@ -158,6 +160,11 @@ afterEach(async () => {
     delete process.env.HOME;
   } else {
     process.env.HOME = savedHome;
+  }
+  if (savedUserProfile === undefined) {
+    delete process.env.USERPROFILE;
+  } else {
+    process.env.USERPROFILE = savedUserProfile;
   }
   if (tmpHomeDir) {
     const { rm } = await import("node:fs/promises");

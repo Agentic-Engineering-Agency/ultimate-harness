@@ -9,3 +9,4 @@
 // side effect. Tests that exercise Honcho itself set their own env per-test
 // (tests/extension-honcho-memory.test.ts) and restore it afterwards.
 process.env.HONCHO_ENABLED = "false";
+delete process.env.TYPESAFE_API_KEY;

@@ -1,6 +1,8 @@
-import { test, expect, describe, beforeEach, afterEach } from "vitest";
+import { test, expect, describe, beforeEach, afterEach, afterAll } from "vitest";
 import * as http from "node:http";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   OpenRouterRuntimeConfigSchema,
@@ -118,7 +120,10 @@ describe("openrouter runtime checker", () => {
   });
 });
 
-const TEST_ROOT = "/tmp/uh-test-openrouter";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-openrouter-"));
+afterAll(async () => {
+  await rm(TEST_ROOT, { recursive: true, force: true });
+});
 
 async function setupHarness(): Promise<{ missionPath: string }> {
   await rm(TEST_ROOT, { recursive: true, force: true });

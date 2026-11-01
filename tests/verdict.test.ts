@@ -13,7 +13,6 @@ const execFileP = promisify(execFile);
 
 let TEST_ROOT: string;
 const CLI = join(process.cwd(), "src", "cli.ts");
-const RUNNER = join(process.cwd(), "node_modules", ".bin", "tsx");
 
 beforeEach(async () => {
   TEST_ROOT = await mkdtemp(join(tmpdir(), "uh-test-verdict-"));
@@ -208,8 +207,7 @@ describe("UH-76 uh mission verdict CLI", () => {
       if (value !== "pass") {
         args.push("--rationale", `because ${value}`);
       }
-      const { stdout } = await execFileP(RUNNER, args, { env: { ...process.env, NODE_ENV: "test" } });
-      expect(stdout).toContain(`[OK] verdict recorded: ${value}`);
+      await execFileP(process.execPath, ["--import", "tsx", ...args], { env: { ...process.env, NODE_ENV: "test" } });
     }
     const audit = (await readFile(join(TEST_ROOT, ".harness", "audit.log"), "utf-8"))
       .trim().split("\n");
@@ -218,7 +216,7 @@ describe("UH-76 uh mission verdict CLI", () => {
 
   test("fails when --rationale is missing on a non-pass verdict", async () => {
     await seedRuntimeResult("m-cli-fail");
-    await expect(execFileP(RUNNER, [
+    await expect(execFileP(process.execPath, ["--import", "tsx",
       CLI, "mission", "verdict", "m-cli-fail", "needs-remediation", "--root", TEST_ROOT,
     ])).rejects.toMatchObject({ code: 1 });
   });

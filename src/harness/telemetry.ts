@@ -125,9 +125,14 @@ async function resolveCaptureEndpoint(
     return null;
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-  if (isRefusedCaptureHost(url.hostname)) return null;
+  const lookupHost = url.hostname.replace(/^\[|\]$/g, "");
+  if (isRefusedCaptureHost(lookupHost)) return null;
   try {
-    const records = await lookupImpl(url.hostname, { all: true });
+    const lookupPromise = lookupImpl(lookupHost, { all: true });
+    const records = await Promise.race([
+      lookupPromise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("DNS timeout")), CAPTURE_TIMEOUT_MS)),
+    ]);
     if (records.length === 0) return null;
     if (records.some((record) => isRefusedCaptureAddress(record.address))) return null;
   } catch {
@@ -194,7 +199,7 @@ function sendBeacon(config: TelemetryConfig, outcome: CommandOutcome): void {
     if (url.protocol !== "https:" && url.protocol !== "http:") return;
     if (isRefusedCaptureHost(url.hostname)) return;
     const body = JSON.stringify(buildCapturePayload(config, outcome));
-    const child = spawn("node", [beaconPath], {
+    const child = spawn(process.execPath, [beaconPath], {
       detached: true,
       shell: false,
       stdio: "ignore",

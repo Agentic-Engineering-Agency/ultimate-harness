@@ -1,0 +1,17 @@
+schema_version: uh.mission.v0
+id: r5-cmdc-acceptance
+title: Guardian ownership
+workflow_profile: bugfix-contained
+objective: Sleep for 60 seconds without changing files, then stop.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+runtime_config_overrides:
+  permission_mode: yolo
+  limits:
+    timeout_ms: 120000

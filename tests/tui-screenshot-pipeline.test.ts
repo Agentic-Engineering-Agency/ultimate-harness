@@ -1,4 +1,5 @@
 import { describe, test, expect, vi } from "vitest";
+import path from "node:path";
 import {
   navigationKeysForView,
   runScreenshotPipeline,
@@ -50,7 +51,7 @@ describe("tui/screenshot-pipeline runScreenshotPipeline", () => {
     });
     expect(writeFile).toHaveBeenCalledTimes(1);
     const [calledPath, calledContents] = writeFile.mock.calls[0]!;
-    expect(calledPath).toBe("/tmp/screenshots/missions.txt");
+    expect(calledPath).toBe(path.resolve("/tmp/screenshots/missions.txt"));
     expect(calledContents).toContain("FRAME:missions@80x24");
     // File output is always newline-terminated.
     expect(calledContents.endsWith("\n")).toBe(true);

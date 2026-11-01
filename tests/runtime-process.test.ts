@@ -1,0 +1,502 @@
+import { test, expect } from "vitest";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { runRuntimeProcess, type RuntimeProcessOutput } from "../src/harness/runtime-process.js";
+import { cancelLocalMissionRun } from "../src/harness/mission-cancel.js";
+
+const execFileAsync = promisify(execFile);
+
+// Real child processes and filesystem visibility cannot be driven by Vitest's fake clock.
+async function waitForFile(file: string, predicate: (text: string) => boolean) {
+  for (let i = 0; i < 100; i++) {
+    try { const text = await readFile(file, "utf8"); if (predicate(text)) return text; } catch { /* Not persisted yet. */ }
+    await delay(20);
+  }
+  throw new Error(`Expected persisted state at ${file}`);
+}
+
+/**
+ * Supervision deadlines are fired by advancing this clock, never by waiting
+ * out wall time, so the tests stay deterministic under machine load.
+ */
+function manualClock() {
+  let current = Date.now();
+  const polls: Array<() => void> = [];
+  return {
+    now: () => current,
+    setInterval: (callback: () => void) => { polls.push(callback); return polls.length; },
+    clearInterval: () => {},
+    advance: (milliseconds: number) => { current += milliseconds; for (const poll of [...polls]) poll(); },
+  };
+}
+
+/** Yield to the event loop without sleeping on wall time. */
+const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("local cancellation settles only the selected real child and preserves live transcript", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-local-cancel-"));
+  const directory = path.join(root, ".harness", "missions", "one", "runs", "attempt-one");
+  const abort = new AbortController();
+  let running: Promise<RuntimeProcessOutput> | undefined;
+  try {
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(root, ".harness", "missions", "one", "mission.yaml"), "schema_version: uh.mission.v0\nid: one\n");
+    running = runRuntimeProcess({ command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'native-session'})); console.log(JSON.stringify({type:'tool_execution_start',toolCallId:'one'})); setInterval(()=>{},1000)"],
+      cwd: root, cancellationSignal: abort.signal, timeoutMs: 5000,
+      getUsage: () => ({ source: "runtime", input_tokens: 7, cache_read_tokens: 11 }),
+      artifacts: { directory, missionId: "one", runId: "attempt-one", runtime: "fixture" },
+    });
+    const live = await waitForFile(path.join(directory, "runtime.stdout.log"), text => text.includes("tool_execution_start"));
+    expect(live).toContain("tool_execution_start");
+    const liveControl = JSON.parse(await waitForFile(path.join(directory, "runtime-control.json"),
+      text => JSON.parse(text).status === "running" && JSON.parse(text).usage?.input_tokens === 7));
+    expect(liveControl.usage).toMatchObject({ input_tokens: 7, cache_read_tokens: 11 });
+    const cancellation = await cancelLocalMissionRun(root, "one", "attempt-one");
+    const result = await running;
+    expect(cancellation.status).toBe("cancelled");
+    expect(result.cancelled).toBe(true);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.sessionId).toBe("native-session");
+    const persisted = JSON.parse(await readFile(path.join(directory, "runtime-control.json"), "utf8"));
+    expect(persisted.status).toBe("cancelled");
+    expect(persisted.usage).toMatchObject({ input_tokens: 7, cache_read_tokens: 11 });
+    expect(persisted.usage.total_tokens).toBeUndefined();
+    expect(await readFile(path.join(directory, "runtime.stdout.log"), "utf8")).toBe(result.stdout);
+    expect((await cancelLocalMissionRun(root, "one", "attempt-one")).status).toBe("cancelled");
+    await expect(cancelLocalMissionRun(root, "one", "other-attempt")).rejects.toThrow();
+  } finally {
+    abort.abort();
+    if (running) await running;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+test("a failed periodic heartbeat does not stop an otherwise successful run", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-heartbeat-retry-"));
+  const clock = manualClock();
+  const startedAt = clock.now();
+  let heartbeatFailures = 0;
+  // Serializes the "running" persists and exposes their completion, so the
+  // test advances virtual time only after the initial and stdout-driven
+  // persists have drained; the next running-persist is then a heartbeat.
+  let runningPersistsDrained: Promise<void> = Promise.resolve();
+  try {
+    const run = runRuntimeProcess({
+      command: process.execPath,
+      // The child stays alive until the test confirms the heartbeat mechanism
+      // ran, then exits on signal; the 10s backstop only bounds failure paths.
+      args: ["-e", "const fs=require('node:fs'); process.stdout.write(JSON.stringify({type:'session',id:'heartbeat'})+'\\n'+JSON.stringify({type:'run_end'})+'\\n'); setInterval(()=>{ if (fs.existsSync('heartbeat-exercised')) process.exit(0); },20); setTimeout(()=>process.exit(0),10000)"],
+      cwd: root,
+      timeoutMs: 5000,
+      clock,
+      artifacts: { directory: path.join(root, "run"), missionId: "one", runId: "one", runtime: "fixture" },
+      persistArtifact: async (_file, content) => {
+        if (JSON.parse(content).status !== "running") return;
+        const previous = runningPersistsDrained;
+        let release!: () => void;
+        runningPersistsDrained = new Promise<void>(resolve => { release = resolve; });
+        try {
+          await previous;
+          if (clock.now() - startedAt > 500) { heartbeatFailures++; throw new Error("simulated heartbeat failure"); }
+        } finally { release(); }
+      },
+    });
+    let settled = false;
+    void run.then(() => { settled = true; });
+    await waitForFile(path.join(root, "run", "runtime.stdout.log"), text => text.includes("run_end"));
+    await runningPersistsDrained;
+    // Advance across the 1s heartbeat interval so a poll fires a heartbeat
+    // persist, which fails; a real tick never has to elapse for this.
+    while (heartbeatFailures === 0 && !settled) {
+      clock.advance(1500);
+      await yieldToEventLoop();
+    }
+    await writeFile(path.join(root, "heartbeat-exercised"), "", "utf8");
+    const result = await run;
+    expect(heartbeatFailures).toBe(1);
+    expect(result.exitCode).toBe(0);
+    expect(result.supervisionStopCode).toBeUndefined();
+  } finally {
+    await writeFile(path.join(root, "heartbeat-exercised"), "", "utf8").catch(() => {});
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+}, 10_000);
+
+test("real process with no progress is stopped without a provider call", async () => {
+  const clock = manualClock();
+  const run = runRuntimeProcess({ command: process.execPath,
+    args: ["-e", "setInterval(()=>{},1000)"], cwd: process.cwd(), limits: { startup_timeout_ms: 100 }, clock,
+  });
+  let settled = false;
+  void run.then(() => { settled = true; });
+  // Advance virtual time past the startup budget so the readiness deadline
+  // fires on the next poll, exactly when intended, independent of load.
+  while (!settled) {
+    clock.advance(200);
+    await yieldToEventLoop();
+  }
+  const result = await run;
+  expect(result.exitCode).not.toBe(0);
+  expect(result.timedOut).toBe(true);
+});
+
+test("a native max_turns result settles its receipt as turn_limit with a non-empty reason", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-native-turn-cap-"));
+  try {
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'turn-cap'})); console.log(JSON.stringify({type:'result',subtype:'error_max_turns',stopReason:'max_turns',num_turns:100}))"],
+      cwd: root,
+      artifacts: { directory: root, missionId: "one", runId: "turn-cap", runtime: "fixture" },
+    });
+    expect(result.supervisionStopCode).toBe("turn_limit");
+    const control = JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ status: "failed", stop_code: "turn_limit" });
+    expect(control.stop_reason).toBe("Native turn cap (max_turns) reached after 100 turns");
+    expect(control.turns).toBe(100);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test("an unrecognized native terminal stop settles as runtime_error with the reason copied", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-native-stop-reason-"));
+  try {
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'native-stop'})); console.log(JSON.stringify({type:'result',finalText:'partial',stopReason:'aborted',num_turns:4}))"],
+      cwd: root,
+      artifacts: { directory: root, missionId: "one", runId: "native-stop", runtime: "fixture" },
+    });
+    expect(result.supervisionStopCode).toBe("runtime_error");
+    const control = JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ status: "failed", stop_code: "runtime_error" });
+    expect(control.stop_reason).toBe("Runtime reported failure (aborted)");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test.skipIf(process.platform !== "win32")("job cap prevents an owned child from committing excessive memory", async () => {
+  const outcome = await runRuntimeProcess({
+    command: process.execPath,
+    args: ["-e", "const b = Buffer.alloc(256 * 1024 * 1024, 7); console.log('ALLOCATION_COMPLETED', b[0]);"],
+    cwd: process.cwd(),
+    limits: { memory_mb: 64, timeout_ms: 5000 },
+  });
+  expect(outcome.exitCode).not.toBe(0);
+  expect(outcome.stdout).not.toContain("ALLOCATION_COMPLETED");
+  expect(outcome.timedOut).toBe(false);
+});
+
+test.skipIf(process.platform !== "win32")("controller death settles the owned worker tree and publishes failure", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-controller-loss-"));
+  const worker = "const fs=require('node:fs'); const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'}); child.unref(); fs.writeFileSync('pids.json',JSON.stringify([process.pid,child.pid])); setInterval(()=>{},1000);";
+  const options = { command: process.execPath, args: ["-e", worker], cwd: root,
+    limits: { timeout_ms: 10000 },
+    artifacts: { directory: root, missionId: "one", runId: "owner-loss", runtime: "fixture" },
+  };
+  const source = `import {runRuntimeProcess} from ${JSON.stringify(new URL("../src/harness/runtime-process.ts", import.meta.url).href)}; await runRuntimeProcess(${JSON.stringify(options)});`;
+  const controller = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], { stdio: "ignore", windowsHide: true });
+  const closed = new Promise<void>(resolve => controller.once("close", () => resolve()));
+  try {
+    const pids: number[] = JSON.parse(await waitForFile(path.join(root, "pids.json"), text => Boolean(text.trim())));
+    controller.kill("SIGKILL");
+    await closed;
+    const control = JSON.parse(await waitForFile(path.join(root, "runtime-control.json"), text => JSON.parse(text).status === "failed"));
+    expect(control).toMatchObject({ stop_code: "controller_lost", settlement_confirmed: true });
+    for (const pid of pids) expect(() => process.kill(pid, 0)).toThrow();
+  } finally {
+    controller.kill("SIGKILL");
+    await closed;
+    // The guardian publishes the receipt immediately before releasing its executable handle.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+}, 15000);
+
+test("combined output limit settles a noisy child and bounds both durable streams", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-output-cap-"));
+  const limit = 32 * 1024;
+  try {
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'bounded-output'})); let n=0; setInterval(()=>{(n++%2 ? process.stdout : process.stderr).write('é'.repeat(8192));},20);"],
+      cwd: root, limits: { max_output_bytes: limit, timeout_ms: 10000 },
+      artifacts: { directory: root, missionId: "one", runId: "noisy", runtime: "fixture" },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.sessionId).toBe("bounded-output");
+    expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(limit);
+    expect(await readFile(path.join(root, "runtime.stdout.log"), "utf8")).toBe(result.stdout);
+    expect(await readFile(path.join(root, "runtime.stderr.log"), "utf8")).toBe(result.stderr);
+    const control = JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ status: "failed", stop_code: "output_limit" });
+    if (process.platform === "win32") expect(control.settlement_confirmed).toBe(true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15000);
+
+test.skipIf(process.platform !== "win32")("Windows-only guardian cache is reused across runs (non-Windows skips because the guardian requires PowerShell)", async () => {
+  const cacheRoot = await mkdtemp(path.join(tmpdir(), "uh-guardian-cache-"));
+  const previousLocalAppData = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = cacheRoot;
+  const roots: string[] = [];
+  let cachedMtime: number | undefined;
+  try {
+    for (const runId of ["first", "second"]) {
+      const root = await mkdtemp(path.join(tmpdir(), `uh-guardian-${runId}-`));
+      roots.push(root);
+      const result = await runRuntimeProcess({
+        command: process.execPath,
+        args: ["-e", "console.log(JSON.stringify({type:'session',id:'guardian-cache'}));"],
+        cwd: root,
+        artifacts: { directory: root, missionId: "one", runId, runtime: "fixture" },
+      });
+      expect(result.exitCode).toBe(0);
+      const control = JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8"));
+      expect(control.guardian.mode).toBe("cache");
+      if (runId === "first") {
+        cachedMtime = (await stat(control.guardian.path)).mtimeMs;
+        // Let a mistaken second PowerShell compilation produce a distinct mtime.
+        await delay(100);
+      } else {
+        expect((await stat(control.guardian.path)).mtimeMs).toBe(cachedMtime);
+      }
+    }
+  } finally {
+    if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = previousLocalAppData;
+    for (const root of roots) await rm(root, { recursive: true, force: true });
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+}, 15000);
+
+test.skipIf(process.platform !== "win32")("Windows-only guardian accepts forward-slash artifact paths (non-Windows skips because the guardian requires PowerShell)", async () => {
+  const cacheRoot = await mkdtemp("T:/tmp/uh-guardian-forward-cache-");
+  const root = await mkdtemp("T:/tmp/uh-guardian-forward-");
+  const previousLocalAppData = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = cacheRoot.replaceAll("\\", "/");
+  try {
+    // Keep the drive path in T:/tmp while exercising a pre-extended forward-slash form.
+    const artifactsDirectory = `//?/${root.replaceAll("\\", "/")}`;
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'guardian-forward'}));"],
+      cwd: root,
+      artifacts: { directory: artifactsDirectory, missionId: "one", runId: "forward", runtime: "fixture" },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("UH Windows job failed");
+    const receipt = JSON.parse(await readFile(path.join(root, "windows-job-result.json"), "utf8"));
+    expect(receipt.settled).toBe(true);
+    const control = JSON.parse(await readFile(path.join(root, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ settlement_confirmed: true, guardian: { mode: "cache" } });
+  } finally {
+    if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = previousLocalAppData;
+    await rm(root, { recursive: true, force: true });
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+}, 15000);
+
+test.skipIf(process.platform !== "win32")("Windows-only guardian settles a deep run directory (non-Windows skips because the guardian requires PowerShell)", async () => {
+  const cacheRoot = await mkdtemp(path.join(tmpdir(), "uh-guardian-deep-cache-"));
+  const base = await mkdtemp(path.join(tmpdir(), "uh-guardian-deep-"));
+  const root = path.join(base, ...Array.from({ length: 10 }, (_, index) => `worker-project-${index.toString().padStart(2, "0")}-0123456789abcdef`));
+  const previousLocalAppData = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = cacheRoot;
+  try {
+    const missionDirectory = path.join(root, ".harness", "missions", "one");
+    const directory = path.join(missionDirectory, "runs", "deep");
+    await mkdir(missionDirectory, { recursive: true });
+    await writeFile(path.join(missionDirectory, "mission.yaml"), "schema_version: uh.mission.v0\nid: one\n");
+    expect(directory.length).toBeGreaterThan(260);
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'guardian-deep'}));"],
+      cwd: base,
+      artifacts: { directory, missionId: "one", runId: "deep", runtime: "fixture" },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("UH Windows job failed");
+    const receipt = JSON.parse(await readFile(path.join(directory, "windows-job-result.json"), "utf8"));
+    expect(receipt.settled).toBe(true);
+    const control = JSON.parse(await readFile(path.join(directory, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ settlement_confirmed: true, guardian: { mode: "cache" } });
+    expect(control.guardian.path.length).toBeLessThan(260);
+  } finally {
+    if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = previousLocalAppData;
+    await rm(base, { recursive: true, force: true });
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+}, 15000);
+
+test.skipIf(process.platform !== "win32")("Windows-only guardian honors cancellation in a deep run directory (non-Windows skips because the guardian requires PowerShell)", async () => {
+  const cacheRoot = await mkdtemp(path.join(tmpdir(), "uh-guardian-stop-cache-"));
+  const base = await mkdtemp(path.join(tmpdir(), "uh-guardian-stop-"));
+  const root = path.join(base, ...Array.from({ length: 10 }, (_, index) => `worker-project-${index.toString().padStart(2, "0")}-0123456789abcdef`));
+  const previousLocalAppData = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = cacheRoot;
+  const abort = new AbortController();
+  let running: Promise<RuntimeProcessOutput> | undefined;
+  try {
+    const missionDirectory = path.join(root, ".harness", "missions", "one");
+    const directory = path.join(missionDirectory, "runs", "deep-stop");
+    await mkdir(missionDirectory, { recursive: true });
+    await writeFile(path.join(missionDirectory, "mission.yaml"), "schema_version: uh.mission.v0\nid: one\n");
+    expect(directory.length).toBeGreaterThan(260);
+    running = runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'session',id:'guardian-stop'})); setInterval(()=>{},1000)"],
+      cwd: base,
+      cancellationSignal: abort.signal,
+      timeoutMs: 10000,
+      artifacts: { directory, missionId: "one", runId: "deep-stop", runtime: "fixture" },
+    });
+    await waitForFile(path.join(directory, "runtime.stdout.log"), text => text.includes("guardian-stop"));
+    const cancellation = await cancelLocalMissionRun(root, "one", "deep-stop");
+    const result = await running;
+    expect(cancellation).toEqual({ ok: true, status: "cancelled" });
+    expect(result.cancelled).toBe(true);
+    expect(result.settlementConfirmed).toBe(true);
+    expect(result.stderr).not.toContain("UH Windows job failed");
+    const receipt = JSON.parse(await readFile(path.join(directory, "windows-job-result.json"), "utf8"));
+    expect(receipt).toMatchObject({ exit_code: 130, settled: true });
+    const control = JSON.parse(await readFile(path.join(directory, "runtime-control.json"), "utf8"));
+    expect(control).toMatchObject({ status: "cancelled", settlement_confirmed: true, guardian: { mode: "cache" } });
+  } finally {
+    abort.abort();
+    if (running) await running;
+    if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = previousLocalAppData;
+    await rm(base, { recursive: true, force: true });
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+}, 20000);
+
+/** One process-table row, used only to judge the guardian's own tree. */
+interface WindowsProcessRow { pid: number; ppid: number; name: string; command: string; }
+const CONSOLE_HOST = /^(conhost|OpenConsole)\.exe$/i;
+
+/** Enumerates the machine's process table once; callers narrow it to a tree. */
+async function listWindowsProcesses(): Promise<WindowsProcessRow[]> {
+  const script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress";
+  const { stdout } = await execFileAsync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    { windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  const parsed = JSON.parse(stdout.trim() || "[]") as Array<Record<string, unknown>> | Record<string, unknown>;
+  return (Array.isArray(parsed) ? parsed : [parsed]).map(row => ({
+    pid: Number(row.ProcessId), ppid: Number(row.ParentProcessId), name: String(row.Name),
+    command: row.CommandLine === undefined || row.CommandLine === null ? "" : String(row.CommandLine),
+  }));
+}
+
+/** Expands a root pid to its observed descendants across every sample. */
+function observedDescendants(root: number, samples: WindowsProcessRow[][]): Set<number> {
+  const tree = new Set<number>([root]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const sample of samples) for (const row of sample) {
+      if (tree.has(row.ppid) && !tree.has(row.pid)) { tree.add(row.pid); grew = true; }
+    }
+  }
+  return tree;
+}
+
+/**
+ * The Windows guardian must attach the worker and every descendant that
+ * inherits a console to one windowless pseudoconsole. Without it, a console
+ * program in the worker's pipeline makes Windows allocate a console, and a
+ * default terminal (Windows Terminal) turns that handoff into a visible
+ * window. The worker here spawns the console pipeline without `windowsHide`:
+ * `CREATE_NO_WINDOW` is itself a request for a fresh, non-headless console,
+ * which no parent can override, so it would defeat the very guarantee under
+ * test. This test judges only the guardian's own process tree, never the whole
+ * machine: the operator may open terminals at any time and the default terminal
+ * differs between machines. A window never fails a run; this is the only place
+ * that asserts none can arise.
+ */
+test.skipIf(process.platform !== "win32")("Windows-only guardian runs the worker tree in one headless pseudoconsole (non-Windows skips because the guardian requires PowerShell)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-pseudoconsole-"));
+  const worker = [
+    "const fs=require('node:fs');",
+    "const {spawn}=require('node:child_process');",
+    // A pipeline through a console program, kept alive long enough to sample the tree.
+    "const cmd=spawn('cmd.exe',['/d','/s','/c','echo HEADLESS_MARKER 2>&1 | findstr HEADLESS_MARKER & ping -n 12 127.0.0.1 > nul']);",
+    "console.log(JSON.stringify({type:'session',id:'pseudoconsole'}));",
+    "fs.writeFileSync('tree.json', JSON.stringify({worker:process.pid,guardian:process.ppid,cmd:cmd.pid}));",
+    "cmd.stdout.on('data',d=>process.stdout.write(d));",
+    "cmd.stderr.on('data',d=>process.stderr.write(d));",
+    "cmd.on('exit',()=>process.exit(0));",
+    "setTimeout(()=>process.exit(0),25000);",
+  ].join("");
+  const running = runRuntimeProcess({
+    command: process.execPath, args: ["-e", worker], cwd: root,
+    limits: { timeout_ms: 30000 },
+    artifacts: { directory: path.join(root, "run"), missionId: "one", runId: "pseudoconsole", runtime: "fixture" },
+  });
+  const samples: WindowsProcessRow[][] = [];
+  try {
+    const topology = JSON.parse(await waitForFile(path.join(root, "tree.json"), text => Boolean(text.trim()))) as { guardian: number };
+    // The guardian's own pseudoconsole host is the only console host it may
+    // create, and it is headless; anything else in the tree allocated a console.
+    const isHeadlessHost = (row: WindowsProcessRow) =>
+      CONSOLE_HOST.test(row.name) && row.ppid === topology.guardian && row.command.includes("--headless");
+    // A single sample races the host's creation under machine load, so poll the
+    // process table every few hundred milliseconds until the host is seen or the
+    // run ends, then judge the union of every sample taken.
+    const observationDeadline = Date.now() + 45000;
+    for (;;) {
+      const sample = await listWindowsProcesses();
+      samples.push(sample);
+      if (sample.some(isHeadlessHost)) break;
+      if (await Promise.race([running.then(() => true), delay(50).then(() => false)])) break;
+      if (Date.now() >= observationDeadline) break;
+      await delay(250);
+    }
+    const result = await running;
+    const tree = observedDescendants(topology.guardian, samples);
+    // One row per distinct process, so repeated samples cannot inflate a report.
+    const rows = [...new Map(samples.flat().filter(row => tree.has(row.pid))
+      .map(row => [`${row.pid}|${row.ppid}|${row.name}`, row])).values()];
+    const headlessHosts = rows.filter(isHeadlessHost);
+    const offenders = rows.filter(row => CONSOLE_HOST.test(row.name) && row.ppid !== topology.guardian);
+    expect(headlessHosts.length, `No headless pseudoconsole host (conhost/OpenConsole --headless) parented by guardian ${topology.guardian} was observed across ${samples.length} sample(s) within the 45s observation window; the guardian must attach the worker tree to one windowless pseudoconsole`).toBeGreaterThan(0);
+    expect(offenders).toEqual([]);
+    expect(result.pseudoconsole).toBe(true);
+    expect(result.stdout).toContain("HEADLESS_MARKER");
+    expect(result.settlementConfirmed).toBe(true);
+    expect(result.exitCode).toBe(0);
+  } finally {
+    await running;
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+}, 60000);
+
+test.skipIf(process.platform !== "win32")("Windows-only guardian feeds a 50,000-character stdin payload to the worker and still settles (non-Windows skips because the guardian requires PowerShell)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uh-guardian-stdin-"));
+  const directory = path.join(root, "run");
+  try {
+    const payload = "S".repeat(50_000);
+    // The worker reads its whole standard input, persists it verbatim, and
+    // reports the byte count; the guardian must deliver every byte even though
+    // it consumes its own stdin for the job specification.
+    const worker = "const fs=require('node:fs');let b='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>b+=c);process.stdin.on('end',()=>{fs.writeFileSync('received.txt',b);process.stdout.write('RECEIVED:'+b.length);});";
+    const result = await runRuntimeProcess({
+      command: process.execPath,
+      args: ["-e", worker],
+      cwd: root,
+      stdin: payload,
+      limits: { timeout_ms: 20000 },
+      artifacts: { directory, missionId: "one", runId: "stdin", runtime: "fixture" },
+    });
+    expect(await readFile(path.join(root, "received.txt"), "utf8")).toBe(payload);
+    expect(result.stdout).toContain("RECEIVED:50000");
+    expect(result.exitCode).toBe(0);
+    expect(result.settlementConfirmed).toBe(true);
+    const receipt = JSON.parse(await readFile(path.join(directory, "windows-job-result.json"), "utf8"));
+    expect(receipt).toMatchObject({ settled: true, pseudoconsole: true });
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+}, 60000);

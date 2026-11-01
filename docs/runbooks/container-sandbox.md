@@ -88,7 +88,7 @@ curl http://127.0.0.1:8080/health
 |---|---|---|
 | Generate OpenSandbox Docker config | PASS | `Wrote example config (docker) to /tmp/uh-opensandbox-smoke.dRGQbI/sandbox.toml` |
 | Start OpenSandbox server | FAIL | Server exited before health check. |
-| Docker daemon availability | FAIL | `failed to connect to the docker API at unix:///Users/eduardojaviergarcialopez/.docker/run/docker.sock` |
+| Docker daemon availability | FAIL | `failed to connect to the docker API at unix:///Users/example/.docker/run/docker.sock` |
 | OpenSandbox health endpoint | FAIL | `/health` never became reachable. |
 | Sandbox create/command/file/kill | NOT RUN | Blocked by server startup failure. |
 

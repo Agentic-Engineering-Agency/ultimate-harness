@@ -1,5 +1,7 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import {
   createFilePersistenceStore,
@@ -7,7 +9,7 @@ import {
   resolveDefaultConfigDir,
 } from "../src/tui/persistence.js";
 
-const TMP_ROOT = "/tmp/uh-test-tui-persistence";
+const TMP_ROOT = mkdtempSync(path.join(tmpdir(), "uh-test-tui-persistence-"));
 
 async function reset() {
   try { await rm(TMP_ROOT, { recursive: true, force: true }); } catch {}
@@ -16,14 +18,15 @@ async function reset() {
 
 beforeEach(reset);
 afterEach(async () => { try { await rm(TMP_ROOT, { recursive: true, force: true }); } catch {} });
+afterAll(async () => { try { await rm(TMP_ROOT, { recursive: true, force: true }); } catch {} });
 
 describe("tui/persistence resolveDefaultConfigDir", () => {
   test("prefers XDG_CONFIG_HOME when set", () => {
-    expect(resolveDefaultConfigDir({ XDG_CONFIG_HOME: "/tmp/xdg" })).toBe("/tmp/xdg/uh");
+    expect(resolveDefaultConfigDir({ XDG_CONFIG_HOME: "/tmp/xdg" })).toBe(path.join("/tmp/xdg", "uh"));
   });
   test("falls back to ~/.config/uh otherwise", () => {
     const dir = resolveDefaultConfigDir({});
-    expect(dir.endsWith("/.config/uh")).toBe(true);
+    expect(dir).toBe(path.join(homedir(), ".config", "uh"));
   });
 });
 

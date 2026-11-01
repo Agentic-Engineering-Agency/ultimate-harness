@@ -1,0 +1,42 @@
+{
+  "contract_version": "uh.landscape-register.test",
+  "generated": "2026-09-15",
+  "rows": [
+    {
+      "system": "Verified Tool",
+      "build_item": "V",
+      "source_url": "https://fixtures.test/verified",
+      "quote": "A durable worker register supports monthly freshness checks for every captured source.",
+      "date_checked": "2026-09-15",
+      "fetch_status": "fetched",
+      "coordinator_check": "verified"
+    },
+    {
+      "system": "Drifted Tool",
+      "build_item": "D",
+      "source_url": "https://fixtures.test/drifted",
+      "quote": "A durable worker register supports monthly freshness checks for every captured source.",
+      "date_checked": "2026-09-15",
+      "fetch_status": "fetched",
+      "coordinator_check": "verified"
+    },
+    {
+      "system": "Unreachable Tool",
+      "build_item": "U",
+      "source_url": "https://fixtures.test/unreachable",
+      "quote": "A durable worker register supports monthly freshness checks for every captured source.",
+      "date_checked": "2026-09-15",
+      "fetch_status": "fetched",
+      "coordinator_check": "unverified"
+    },
+    {
+      "system": "Guide Tool",
+      "build_item": "G",
+      "source_url": "orca://skills/test",
+      "source_kind": "installed_cli_guide",
+      "quote": "A durable worker register supports monthly freshness checks for every captured source.",
+      "date_checked": "2026-09-15",
+      "coordinator_check": "not_applicable_local_guide"
+    }
+  ]
+}
