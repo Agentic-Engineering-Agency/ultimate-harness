@@ -1229,7 +1229,7 @@ async function recordFailedAcceptanceEvidence(
   options: AcceptanceRunOptions,
   failure: { reason: string; mismatch: AcceptanceEvidence["mismatches"][number]; line: string },
 ): Promise<AcceptanceEvidenceRecord> {
-  const timestamp = new Date().toISOString().replace(/[-:.]/g, "").replace(/Z$/, "Z");
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
   const workspace = path.resolve(options.workspace ?? sourceRoot);
   const runRoot = path.join(workspace, capability, timestamp);
   const missionId = acceptanceMissionId(capability);
@@ -1374,7 +1374,7 @@ async function runOneAcceptance(sourceRoot: string, capability: string, entry: A
   if (!options.workspace) throw new Error("acceptance run requires --workspace <dir>");
   const runtime = options.runtime ?? entry.runtime;
   if (options.runtime && options.runtime !== entry.runtime) console.warn(`WARN ${capability}: runtime override ${options.runtime} differs from registry runtime ${entry.runtime}`);
-  const timestamp = new Date().toISOString().replace(/[-:.]/g, "").replace(/Z$/, "Z");
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
   const deepSegments = baseAcceptanceCapability(capability) === "R5-deep-path"
     ? Array.from({ length: 2 }, (_, index) => `deep-${index}-${"x".repeat(64)}`)
     : [];
