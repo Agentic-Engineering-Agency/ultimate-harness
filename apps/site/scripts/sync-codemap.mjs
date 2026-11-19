@@ -78,7 +78,8 @@ for (const n of graph.nodes) {
 }
 
 const slug = (layer) => layer.id.replace(/^layer:/, '');
-const esc = (text) => String(text ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+// Backslashes first, so a `\` already in the text cannot cancel the pipe escape.
+const esc = (text) => String(text ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
 const fileLink = (n) => `[\`${n.filePath ?? n.name}\`](${repoUrl}/blob/${commit}/${n.filePath ?? ''})`;
 const page = (title, description, body) =>
   `---\ntitle: ${JSON.stringify(title)}\ndescription: ${JSON.stringify(description)}\n---\n\n${body.trim()}\n`;
