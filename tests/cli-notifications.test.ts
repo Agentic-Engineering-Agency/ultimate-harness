@@ -46,9 +46,9 @@ config:
   const marker = path.join(root, "notified.json");
   const writer = path.join(root, "notify-writer.cjs");
   // A slow command sink: the delivery takes about half a second, so a CLI that exits first loses it.
-  await writeFile(writer, `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, process.env.UH_NOTIFICATION_EVENT || ""), 500);\n`, "utf-8");
+  await writeFile(writer, `setTimeout(() => require("node:fs").writeFileSync(process.argv[2], process.env.UH_NOTIFICATION_EVENT || ""), 500);\n`, "utf-8");
   await mkdir(path.join(root, "user-data"), { recursive: true });
-  await writeFile(path.join(root, "user-data", "notifications.yaml"), stringify({ sinks: [{ id: "capture", kind: "command", argv: [process.execPath, writer], events: ["run.settled"] }] }), "utf-8");
+  await writeFile(path.join(root, "user-data", "notifications.yaml"), stringify({ sinks: [{ id: "capture", kind: "command", argv: [process.execPath, writer, marker], events: ["run.settled"] }] }), "utf-8");
   const missionDir = path.join(root, ".harness", "missions", "m1");
   await mkdir(missionDir, { recursive: true });
   const missionPath = path.join(missionDir, "mission.yaml");

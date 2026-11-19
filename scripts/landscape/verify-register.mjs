@@ -55,9 +55,10 @@ function decodeEntities(value) {
     .replace(/&#(\d+);?/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 10)))
     .replace(/&quot;/gi, '"')
     .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">");
+    .replace(/&gt;/gi, ">")
+    // Last, so `&amp;lt;` decodes once to `&lt;` and not twice to `<`.
+    .replace(/&amp;/gi, "&");
 }
 
 // Keep this normalization intentionally aligned with verify_fetched4.js: HTML

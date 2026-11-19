@@ -27,10 +27,10 @@ async function base(events: string[]) {
   await initializeHarness(root);
   const marker = path.join(root, "notified.ndjson");
   const writer = path.join(root, "notify-writer.cjs");
-  await writeFile(writer, `setTimeout(() => require("node:fs").appendFileSync(${JSON.stringify(marker)}, (process.env.UH_NOTIFICATION_EVENT || "") + "\\n"), 500);\n`, "utf-8");
+  await writeFile(writer, `setTimeout(() => require("node:fs").appendFileSync(process.argv[2], (process.env.UH_NOTIFICATION_EVENT || "") + "\\n"), 500);\n`, "utf-8");
   // The operator's own user file: run discovery (`uh ps`) announces to its sinks only.
   await mkdir(path.join(root, "user-data"), { recursive: true });
-  await writeFile(path.join(root, "user-data", "notifications.yaml"), stringify({ sinks: [{ id: "capture", kind: "command", argv: [process.execPath, writer], events }] }), "utf-8");
+  await writeFile(path.join(root, "user-data", "notifications.yaml"), stringify({ sinks: [{ id: "capture", kind: "command", argv: [process.execPath, writer, marker], events }] }), "utf-8");
   return { root, marker };
 }
 const events = async (marker: string) => (existsSync(marker) ? (await readFile(marker, "utf-8")).split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>) : []);

@@ -240,7 +240,8 @@ export function relativeDisplayPath(value: string, workingDirectory?: string): s
   const rootKey = compareKey(root);
   if (candidate === rootKey) return ".";
   if (candidate.startsWith(`${rootKey.replace(/\/$/, "")}/`)) {
-    return absolute.slice(root.replace(/\/+$/, "").length).replace(/^\/+/, "");
+    // `root` is already normalized, so only the filesystem root ends in a slash.
+    return absolute.slice(root === "/" ? 0 : root.length).replace(/^\/+/, "");
   }
   return OUTSIDE;
 }
