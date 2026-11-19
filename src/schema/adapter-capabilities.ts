@@ -31,7 +31,7 @@ export const AdapterCapabilitiesSchema = z.object({
   display_name: z.string(),
   tools: ToolCapabilitySchema,
   sandbox: SandboxCapabilitySchema,
-  max_context_tokens: z.number().int().positive(),
+  max_context_tokens: z.number().int().positive().nullable(),
   cost_class: CostClassSchema,
   supports_runtime_config_overrides: z.boolean(),
   supports_cancel: z.boolean(),

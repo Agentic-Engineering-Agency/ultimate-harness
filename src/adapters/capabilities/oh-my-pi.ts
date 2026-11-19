@@ -12,7 +12,7 @@ export const ohMyPiCapabilities = {
     custom: ["cli-execution", "json-output", "diff-output"],
   },
   sandbox: "none",
-  max_context_tokens: 128_000,
+  max_context_tokens: null,
   cost_class: "standard",
   supports_runtime_config_overrides: true,
   supports_cancel: true,

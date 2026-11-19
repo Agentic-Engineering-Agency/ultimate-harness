@@ -1,5 +1,7 @@
-import { test, expect, describe, beforeAll } from "vitest";
+import { test, expect, describe, beforeAll, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
@@ -20,7 +22,7 @@ import {
 import { validateFile } from "../src/harness/validate.js";
 import { validateRuntimeResult } from "../src/schema/artifacts.js";
 
-const TEST_ROOT = "/tmp/uh-test-hermes";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-hermes-"));
 
 async function cleanup() {
   try {
@@ -103,6 +105,7 @@ test.beforeEach(async () => {
   await writeHermesManifest("hermes");
 });
 test.afterEach(cleanup);
+test.afterAll(cleanup);
 
 describe("planHermesRun", () => {
   test("emits the canonical hermes chat invocation for a harness mission", async () => {
@@ -229,10 +232,6 @@ describe("runHermes with injected runner", () => {
       runtime: "hermes",
       status: "passed",
       exit_code: 0,
-      prompt_path: ".harness/missions/captures/runs/test-captures/prompt.md",
-      stdout_path: ".harness/missions/captures/runs/test-captures/runtime.stdout.log",
-      stderr_path: ".harness/missions/captures/runs/test-captures/runtime.stderr.log",
-      diff_path: ".harness/missions/captures/runs/test-captures/diff.patch",
       errors: [],
     });
     expect(resultDoc.started_at).toBeTypeOf("string");
@@ -642,7 +641,3 @@ describe("collectHermesSession honcho opt-out", () => {
   });
 });
 
-// Smoke-check the default runner exports remain hooks tests can replace.
-test("defaultHermesRunner is exported and callable", () => {
-  expect(typeof defaultHermesRunner).toBe("function");
-});

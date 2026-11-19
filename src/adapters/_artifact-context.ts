@@ -1,4 +1,4 @@
-import { appendFile, lstat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { stringify } from "yaml";
 import { ensureRunDir } from "../harness/run-id.js";
@@ -112,19 +112,21 @@ export async function getMissionArtifactContext(
 }
 
 /**
- * Guard before writing/overwriting an artifact: the target must be inside the
- * mission directory and must not be a symlink (refuse to follow it).
+ * Guard before writing/overwriting an artifact: reject symlinks at the target
+ * and every ancestor through the owning .harness directory.
  */
 export async function assertWritableArtifact(missionDir: string, artifactPath: string): Promise<void> {
   assertPathInsideMissionDir(missionDir, artifactPath);
-  try {
-    const stat = await lstat(artifactPath);
-    if (stat.isSymbolicLink()) {
-      throw new Error(`Refusing to overwrite symlinked artifact: ${artifactPath}`);
+  const boundary = path.resolve(missionDir, "..", "..");
+  for (let candidate = path.resolve(artifactPath); ; candidate = path.dirname(candidate)) {
+    try {
+      if ((await lstat(candidate)).isSymbolicLink()) {
+        throw new Error(`Refusing to overwrite symlinked artifact: ${candidate}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw err;
+    if (path.relative(boundary, candidate) === "") return;
   }
 }
 
@@ -140,6 +142,13 @@ export function assertPathInsideMissionDir(missionDir: string, artifactPath: str
 export async function writeArtifactFile(missionDir: string, artifactPath: string, content: string): Promise<void> {
   await assertWritableArtifact(missionDir, artifactPath);
   await writeFile(artifactPath, content, "utf-8");
+}
+
+/** Write an artifact the run reads but must not change: replaced whole, and read-only on POSIX. */
+export async function writeReadOnlyArtifactFile(missionDir: string, artifactPath: string, content: string): Promise<void> {
+  await assertWritableArtifact(missionDir, artifactPath);
+  await rm(artifactPath, { force: true });
+  await writeFile(artifactPath, content, { encoding: "utf-8", ...(process.platform === "win32" ? {} : { mode: 0o444 }) });
 }
 
 /** Persist the rendered prompt + the runtime-session document for a run. */

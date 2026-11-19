@@ -1,3 +1,6 @@
+import { ReservationFileSchema } from "../schema/runtime-resources.js";
+import { PostCheckFileSchema } from "../schema/post-checks.js";
+import { ResumeLinkSchema, SteerRecordSchema } from "../schema/steer.js";
 import { access, readFile } from "node:fs/promises";
 import path, { basename } from "node:path";
 import { parse } from "yaml";
@@ -14,6 +17,19 @@ import {
   validateSkillsIndex,
   validateVerificationResult,
 } from "../schema/artifacts.js";
+import { RuntimeControlSchema, RuntimeRecoveryRecordSchema, RuntimeCancelRequestSchema } from "../schema/runtime-control.js";
+import { CanonicalTeamStateSchema } from "../schema/team.js";
+import { LatestRunPointerSchema, RunsIndexSchema } from "../schema/runs.js";
+import { IndependentReviewRequestSchema, IndependentReviewReportSchema, IndependentReviewAssessmentSchema } from "../schema/independent-review.js";
+import { validateDecisionReceipt } from "../schema/decisions.js";
+import { validateAcceptanceEvidence, validateAcceptanceRegistry } from "../schema/acceptance.js";
+import { validateExperiment } from "../schema/experiment.js";
+import { OperatorPriceTableSchema } from "../schema/prices.js";
+import { QueueStateSchema } from "../schema/queue.js";
+import { RunDigestSchema } from "../schema/run-digest.js";
+import { InterventionSchema } from "../schema/intervention.js";
+import { validateSessionTemplate } from "../schema/session-template.js";
+import { RuntimeSteerRequestSchema, ToolGuardArtifactSchema } from "../schema/runtime-control.js";
 
 const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.project.v0": validateProject,
@@ -26,6 +42,30 @@ const SCHEMA_DISPATCH: Record<string, (data: unknown) => unknown> = {
   "uh.promotion.v0": validatePromotion,
   "uh.runtime-session.v0": validateRuntimeSession,
   "uh.runtime-result.v0": validateRuntimeResult,
+  "uh.runtime-control.v0": data => RuntimeControlSchema.parse(data),
+  "uh.runtime-recovery.v0": data => RuntimeRecoveryRecordSchema.parse(data),
+  "uh.runtime-cancel-request.v0": data => RuntimeCancelRequestSchema.parse(data),
+  "uh.team-run.v0": data => CanonicalTeamStateSchema.parse(data),
+  "uh.latest-run.v0": data => LatestRunPointerSchema.parse(data),
+  "uh.runs-index.v0": data => RunsIndexSchema.parse(data),
+  "uh.independent-review-request.v0": data => IndependentReviewRequestSchema.parse(data),
+  "uh.independent-review-report.v0": data => IndependentReviewReportSchema.parse(data),
+  "uh.independent-review-assessment.v0": data => IndependentReviewAssessmentSchema.parse(data),
+  "uh.decision-receipt.v0": validateDecisionReceipt,
+  "uh.steer-record.v0": data => SteerRecordSchema.parse(data),
+  "uh.resume-link.v0": data => ResumeLinkSchema.parse(data),
+  "uh.reservation.v0": data => ReservationFileSchema.parse(data),
+  "uh.post-checks.v0": data => PostCheckFileSchema.parse(data),
+  "uh.acceptance-registry.v0": validateAcceptanceRegistry,
+  "uh.acceptance-evidence.v0": validateAcceptanceEvidence,
+  "uh.experiment.v0": validateExperiment,
+  "uh.prices.v0": data => OperatorPriceTableSchema.parse(data),
+  "uh.queue.v0": data => QueueStateSchema.parse(data),
+  "uh.run-digest.v0": data => RunDigestSchema.parse(data),
+  "uh.intervention.v0": data => InterventionSchema.parse(data),
+  "uh.session-template.v0": validateSessionTemplate,
+  "uh.runtime-steer-request.v0": data => RuntimeSteerRequestSchema.parse(data),
+  "uh.tool-guard.v0": data => ToolGuardArtifactSchema.parse(data),
 };
 
 export type ValidationResult = {
