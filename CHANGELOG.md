@@ -6,7 +6,9 @@ Issues are tracked in [Linear](https://linear.app/agenticengineering-agency/team
 
 ## [Unreleased]
 
-Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been published. 0.10.0 was prepared on `dev` in June 2026 but never tagged: it is skipped, and its changes (UH-138, UH-139 and the spec-stale fix below) ship in 0.11.0.
+## [0.11.0-rc.1] — 2026-10-28
+
+The first release candidate of 0.11.0, published on npm's `next` dist-tag; `latest` stays on 0.9.0 until the final 0.11.0. It holds everything since 0.9.0; nothing after 0.9.0 has been published. 0.10.0 was prepared on `dev` in June 2026 but never tagged: it is skipped, and its changes (UH-138, UH-139 and the spec-stale fix below) ship in 0.11.0.
 
 ### Breaking
 
@@ -20,7 +22,6 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Progressive semantic routing: `chooseSemanticRoute` in `src/harness/auto-route.ts` combining Level 0 deterministic eligibility (runtime_requirements, capabilities, fleet, and `decision_policy.allowed_runtimes`) with Level 1 TypeSafe System One (JEV) classification. Evaluates task cognitive complexity and selects the optimal adapter and model from candidate options with calibrated confidence, writing `uh.decision-receipt.v0` receipts.
 - Mission `decision_policy` schema: `DecisionPolicySchema` in `src/schema/mission.ts` allowing missions to specify `enabled`, `min_confidence`, `allowed_runtimes`, `allowed_models`, `require_provider_for_route`, `require_provider_for_retry`, `escalation_model`, and `fallback_model`.
 - ACP session template: `.harness/templates/acp-worker.yaml` and runbook `docs/runbooks/acp-setup.md`.
-
 - `guard.allow_native_subagents` (default `false`). Native sub-agent tools (`task`, `agent`, `subagent`, `spawn_agent`, `dispatch_agent`, `delegate`) are denied by tool name for every role; a denied worker is told to end with `ESCALATE: <what its orchestrator should delegate>`.
 - Delegated-agent route attestation. Supervision reads the structured `details.progress[]` / `details.jobs[]` metadata of native tool events and stops the run with `route_mismatch`, naming the route, when a sub-agent runs on a provider or model outside the assignment. Tool arguments and tool text are never read.
 - oh-my-pi runs receive a per-run `omp-overlay.yml` through `--config`. It pins every OMP model role to the assigned model, sets `task.eager: default`, disables the advisor, and sets `task.maxRecursionDepth: 0` so the native `task` tool is not offered (`1` when the guard allows native sub-agents).
@@ -95,16 +96,15 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Optional live usage in runtime-control receipts and active non-team Observatory projections. This does not enforce token or context budgets.
 
 ### Changed
+- Releases publish to the npm dist-tag their version implies: a prerelease such as `0.11.0-rc.1` goes to `next`, a release to `latest`, both in the publish workflow and in `bun run publish:dry-run` (`scripts/npm-dist-tag.mjs`). A GitHub release whose pre-release flag disagrees with the package version publishes nothing, neither to npm nor as a Hermes plugin tarball. A test keeps the package, plugin, dashboard manifest, ACP client and OpenTelemetry service versions equal. See `docs/runbooks/publishing.md`.
 - The capability section of `docs/architecture/runtime-adapter-contract.md` says `--force` prints a `[WARN]` line (a bypass is never silent), and a test pins that `--strict` is registered on `dry-run`, `run` and `run-all`. #221.
 - Exit-safe telemetry is covered by a test that a command ending in `process.exit(1)` hands the beacon `status: failed` with exit code 1, once. #211.
 - The post-checks file and the worker-memory reservation file are defined in `src/schema` like the other persisted contracts. A reservation file now carries `schema_version: uh.reservation.v0` (files written before still parse), and the post-checks file may be the original bare list or a versioned `{ schema_version: uh.post-checks.v0, checks }` document. #259.
 - The steer record and the resume link, the two versioned contracts that were defined in `src/harness`, now live in `src/schema` (exported from its index, timestamps checked as datetimes, both known to `uh validate`), and a test fails when a versioned schema literal is defined outside `src/schema`. #259.
 - A team worker's guard is the team mission's, narrowed by its packet, its session template and its own `guard` block, and is written into the worker's packet. Before, a worker's template guard was dropped and its own `guard` block never applied; a worker adopting a `containment: strict` template was not held to strict containment. A layer can only narrow (restrictions on, permissions off, write and read roots inside the parent's); a widening is refused, naming the worker. U-404.
-- GitNexus is optional for contributors and agents (AGENTS.md and CLAUDE.md say so; the mandatory GitNexus rules and the `## Deviations` section were removed in the documentation layer). This records that project-owner decision explicitly; it needs the owner's confirmation in review of the pull request that carries it. No skill or guide still calls GitNexus mandatory. #264.
+- GitNexus is optional for contributors and agents. Layer 07 of the 0.11.0 stack (#246) changed `AGENTS.md`, which `CLAUDE.md` imports: the mandatory GitNexus rules and the `## Deviations` section were removed, and agents fall back to `grep` when GitNexus is not available. This is a project-owner policy decision, recorded here as #251 asks; no skill or guide still calls GitNexus mandatory. #264.
 - `uh land` checks every independent review bound to the branch tip, not only the first clean one: a clean review no longer outvotes another review of the same tip that contradicts it or recommends against landing. A review of an older tip is still set aside. U-409.
-- GitNexus is optional for contributors and agents (the repository's agent guides say so; the mandatory GitNexus rules and the `## Deviations` section were removed in the documentation layer). This records that project-owner decision explicitly; it needs the owner's confirmation in review of the pull request that carries it. No skill or guide still calls GitNexus mandatory. #264.
-
-- Hardened input handling across the tool guard, notification config, the harness's own git calls, the guard hook snapshot cache and hive facts. The guard judges every command a shell line runs, allows only reading `git` forms, and recognises more write, delete, kill and install forms. Project-file notification sinks that start a command or read the environment into a header need `UH_NOTIFICATIONS_TRUST_PROJECT=1`. Harness commits, merges and cherry-picks run no configured hook, and a team worker that changes program-naming git configuration is blocked and the configuration restored. The hook snapshot cache is private to the user and its files are read-only, as is a run's `tool-guard.json`. Hive facts carry a controller `mac`, and evidence refs must stay inside the project.
+- Hardened input handling in the tool guard, the notification config and the harness's own git calls. The guard judges each command a shell line runs, allows only read-only `git` forms, and recognises more write, delete, kill and install forms. A notification sink in the project file that starts a command or reads an environment variable into a header is used only with `UH_NOTIFICATIONS_TRUST_PROJECT=1`; sinks in the user file are unchanged (see `docs/handbook/notifications.md`). Commits, merges and cherry-picks the harness makes run without configured git hooks. Hive facts carry a controller `mac` and only facts with a valid one reach worker prompts, so facts recorded before this release are kept but no longer injected; evidence refs are paths inside the project. #289.
 - Agent-client denial no longer depends on `deny_network_clients`. A mission that sets `runtime_requirements.needs_network` previously lost agent-client denial along with network denial. Workers may not spawn agents; an explicit `guard.agent_clients: []` is the only opt-out.
 - Default `agent_clients` adds `claude`, `opencode`, `qwen`, `goose` and `cursor-agent`.
 - `uh mission run` refuses to run in the project root when no sandbox is bound to the mission, unless `--no-sandbox` is passed. `uh mission dry-run` prints the routing.
@@ -145,7 +145,6 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - `uh steer` and `uh resume` look for `.harness/adapters` only from the run's scope up to its own project root, so a project without adapters no longer loads the manifests of a directory above it. #259.
 - `uh mission check` no longer reads outside the project: a grounding claim's path must be relative and stay inside (refused by the packet schema, and again at read time through links), and a team worker's `mission_id` must be a plain id. #259.
 - `uh steer` re-reads the controller's record after the request file is gone, so a `not_applied` verdict written a moment after the controller takes the request is reported as not applied, not as success. #259.
-- A team worker's commit holds exactly the paths inside its write roots: the index is cleared before staging, so a path staged outside the roots no longer rides along (#259); changed paths are read with `status --porcelain=v1 -z`, so non-ASCII, spaced and quoted names are staged and committed as they are (#259); a declared output that is a whole ignored directory commits its regular files only, never links, `node_modules`, `.env` files or protected paths (#260).
 - `uh steer` no longer reports success for a steer nothing has taken. It wrote the request, signalled the stop, waited 1.5 s for a verdict, and reported `Steered …` when the controller neither refused nor answered. That case now reports `status: pending` (`Steer requested for <run>, not yet taken`) and still records the intervention; a request the controller took, or a `not_applied` record, are reported as before. #259.
 - Toast and notification hardening: the Windows toast app id doubles every typographic single quote (U+2018 to U+201B) as well as the ASCII one, so none can end the PowerShell literal; `app_id` is refused on any preset but `windows-toast`; `uh notify detect` runs `reg.exe` from the Windows folder instead of a bare `reg`, which Windows looks up in the current directory first; and `uh notify detect`, `list` and `test` with `--root` now have CLI tests. #267.
 - The Hermes dashboard plugin stays on the public CLI: cancelling a run goes through `uh kill <run> --json` (the CLI settles the run's records; the plugin terminates the child itself only when the CLI cannot find or stop it) and run retention goes through `uh mission prune-runs`. The plugin no longer writes run events or rewrites run history, and its Python copy of the pruner is gone. #267.
@@ -165,7 +164,6 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - A worker that runs from a project stored under a `.harness` folder, or in a path spelled with another case on a case-sensitive system, is no longer attributed to the wrong owner: the project owning a worker is resolved only from the worker layouts UH creates (`.harness/missions/<id>/team/...`, `.harness/sandboxes/<id>/...`), and the folder name is compared without regard to case only on Windows. #265.
 - A long project brief no longer cuts the hive facts block out of a worker's prompt: the brief and the verified hive facts are budgeted apart, the brief gives way, and the data block keeps its header, its facts and its closing fence. #265.
 - A queue entry's hive fact cites a snapshot written once for that entry (`.harness/queue/<queue>/evidence/<entry>-<run>.json`) instead of the queue's `state.json`, which the next entry rewrites. Before, every queue fact but the last stopped verifying and was never injected into a worker's prompt. #265.
-
 - The loop watchdog is off unless a mission sets `runtime_config.loop_watchdog: shadow`. It used to default to `shadow`, so every scoped run with `TYPESAFE_API_KEY` set could send loop state to the paid TypeSafe API without asking. #252.
 - `uh land` now requires a collected review's `source_root` to resolve to the retained worker's worktree and its recommendation to be `pass`. Workers sharing a team mission can no longer reuse one another's review, even when their changed file bytes match; a review with only supported claims but a non-passing recommendation no longer clears the gate.
 - `uh land` refuses unless the target worktree has `--onto` checked out. On another branch or a detached `HEAD` it used to commit there, report `landed` onto `--onto`, and remove the worker worktrees. #256.
@@ -224,7 +222,6 @@ Everything since 0.9.0, to be released as 0.11.0; nothing after 0.9.0 has been p
 - Runtime callback failures retain diagnostic details instead of reporting only a generic controller error.
 - Interrupted Claude streams retain known usage counters without treating an unfinished message as a complete total.
 - Verification preserves deterministic failures when a semantic evaluator recommends a pass.
-
 - Command Code planning now refuses print-mode launches without a guard or explicit permission mode for every configured `cli_command`, including custom executables.
 - Command Code `shell_command` queue events now stop protected-root shell mutations before execution.
 - Guard supervision now distinguishes a hook that ran but could not log from a hook that did not run.
@@ -465,6 +462,8 @@ Two epics shipped end-to-end plus a deep discipline-layer pass distilled from [G
 
 Initial public release. Adapter framework (`hermes`, `codex`, `oh-my-pi`), mission schema, runtime-result artifact contract, verification + promotion pipeline.
 
+[Unreleased]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.11.0-rc.1...HEAD
+[0.11.0-rc.1]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.9.0...v0.11.0-rc.1
 [0.6.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Agentic-Engineering-Agency/ultimate-harness/compare/v0.3.0...v0.4.0
