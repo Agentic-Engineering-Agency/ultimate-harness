@@ -47,10 +47,16 @@ async function main(): Promise<void> {
     return;
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
-  if (refused(parsed.hostname)) return;
+  const lookupHost = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (refused(lookupHost)) return;
+  const timeoutMs = Number(process.env.UH_BEACON_TIMEOUT_MS) || 2000;
   try {
     const dns = await import("node:dns");
-    const records = await dns.promises.lookup(parsed.hostname, { all: true });
+    const lookupPromise = dns.promises.lookup(lookupHost, { all: true });
+    const records = await Promise.race([
+      lookupPromise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("DNS timeout")), timeoutMs)),
+    ]);
     if (records.length === 0) return;
     if (records.some((record) => refused(record.address))) return;
   } catch {
@@ -58,7 +64,6 @@ async function main(): Promise<void> {
   }
 
   const controller = new AbortController();
-  const timeoutMs = Number(process.env.UH_BEACON_TIMEOUT_MS) || 2000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     await fetch(parsed, {

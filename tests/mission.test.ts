@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import { createMission } from "../src/harness/mission.js";
+import { validateMission } from "../src/schema/mission.js";
 import { initializeHarness } from "../src/harness/init.js";
 import { validateFile } from "../src/harness/validate.js";
 
@@ -23,6 +24,15 @@ test.afterEach(async () => {
 });
 
 describe("createMission", () => {
+  test("rejects protected runtime paths as worker outputs", () => {
+    expect(() => validateMission({
+      schema_version: "uh.mission.v0",
+      id: "protected-output",
+      title: "Protected output",
+      workflow_profile: "research-docs",
+      expected_outputs: { files: ["./.harness/missions/protected-output/evidence.json"] },
+    })).toThrow(/protected runtime path/i);
+  });
   test("creates .harness/missions/<id>/mission.yaml with documented fields and validates", async () => {
     const result = await createMission(TEST_ROOT, {
       id: "docs-spine",
@@ -325,8 +335,9 @@ describe("uh mission create", () => {
     const missionPath = join(TEST_ROOT, ".harness", "missions", "cli-mission", "mission.yaml");
 
     const { stdout, stderr } = await execFileP(
-      join(process.cwd(), "node_modules", ".bin", "tsx"),
+      process.execPath,
       [
+        "--import", "tsx",
         "src/cli.ts",
         "mission",
         "create",

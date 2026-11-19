@@ -1,0 +1,18 @@
+schema_version: uh.session-template.v0
+id: balanced
+title: Balanced Standard Execution
+tier: balanced
+containment: standard
+adapter: hermes
+runtime_config_overrides:
+  model: "<provider/model>"
+  thinking: low
+limits:
+  max_turns: 15
+  timeout_ms: 300000
+  stall_timeout_ms: 60000
+recovery:
+  max_resumes: 1
+  notes: Single resumption on stall or timeout before terminal failure.
+attempts: 1
+notes: Default balanced configuration providing standard turn limits and single-resume recovery.

@@ -22,7 +22,13 @@ The audit trail answers:
 
 ## Storage
 
-Project-level events belong in `.harness/audit/events.ndjson`. Mission-specific events may also be copied to `.harness/missions/<id>/events.ndjson` for local inspection.
+Audit-related records use three distinct locations:
+
+| Path | Receives |
+| --- | --- |
+| `.harness/audit/events.ndjson` | Project-level events, including the `project.init` event. |
+| `.harness/audit.log` | Text lines appended for manually recorded verdicts. |
+| `.harness/missions/<id>/events.ndjson` | Mission-scoped lifecycle events, including `promotion.recorded`. |
 
 ## Rules
 

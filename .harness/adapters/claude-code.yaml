@@ -1,0 +1,21 @@
+schema_version: uh.adapter.v0
+id: claude-code
+name: Claude Code
+description: Native Claude Code execution with exact model routing, stream supervision, guard hooks, and session recovery.
+runtime: claude-code
+capabilities:
+  - cli-execution
+  - non-interactive
+  - stream-json
+  - structured-events
+  - diff-output
+  - session-resume
+status: active
+config:
+  cli_command: claude
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    model: claude-fable-5-1[1m]
+    role: worker
+    permission_mode: default

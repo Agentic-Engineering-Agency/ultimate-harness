@@ -24,6 +24,8 @@ from fastapi import FastAPI, HTTPException
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+# The repository root, where `src/cli.ts` lives: the plugin's pruning is the CLI's own verb, so the tests run it for real.
+REPO_ROOT = HERE.parents[3]
 
 import plugin_api  # noqa: E402
 
@@ -87,6 +89,12 @@ class FakeUhCli(plugin_api._UhCliRunner):
     def run_sync(self, args: list[str], cwd: Path, *, timeout: float) -> Any:  # type: ignore[override]
         key = tuple(args)
         self.calls.append({"args": list(args), "cwd": str(cwd), "timeout": timeout})
+        if args[:2] == ["mission", "prune-runs"] and key not in self.stdout_for:
+            # Pruning is the CLI's job, so run the real verb against the test project.
+            return subprocess.run(
+                ["node", "--import", "tsx", str(REPO_ROOT / "src" / "cli.ts"), *args],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, check=False,
+            )
         return FakeCompletedProcess(
             stdout=self.stdout_for.get(key, ""),
             stderr="",

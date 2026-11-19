@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { chooseAdapter, formatAutoRouteExplain } from "../src/harness/auto-route.js";
+import { chooseAdapter, chooseSemanticRoute, formatAutoRouteExplain } from "../src/harness/auto-route.js";
 import type { AdapterId } from "../src/adapters/capabilities/index.js";
 import type { AdapterCapabilities, CostClass } from "../src/schema/adapter-capabilities.js";
-import type { MissionDocument } from "../src/schema/mission.js";
+import { DecisionPolicySchema, type MissionDocument } from "../src/schema/mission.js";
 
 function makeCaps(
   id: AdapterId,
@@ -167,5 +167,150 @@ describe("UH-101 chooseAdapter", () => {
     expect(text).toContain("hermes");
     expect(text).toContain("excluded:");
     expect(text).toContain("=> hermes");
+  });
+});
+
+describe("Level 1 chooseSemanticRoute", () => {
+  test("returns deterministic route when decision_policy is disabled", async () => {
+    const caps = capsMap({
+      hermes: makeCaps("hermes", { cost: "free" }),
+      codex: makeCaps("codex", { cost: "cheap" }),
+    });
+    const m = mission({});
+    m.decision_policy = DecisionPolicySchema.parse({ enabled: false });
+    const decision = await chooseSemanticRoute({
+      mission: m,
+      available: ["hermes", "codex"],
+      caps,
+    });
+    expect(decision.authorizer).toBe("deterministic");
+    expect(decision.status).toBe("applied");
+    expect(decision.adapter).toBe("hermes");
+  });
+
+  test("narrows candidates by decision_policy.allowed_runtimes", async () => {
+    const caps = capsMap({
+      hermes: makeCaps("hermes", { cost: "free" }),
+      codex: makeCaps("codex", { cost: "cheap" }),
+    });
+    const m = mission({});
+    m.decision_policy = DecisionPolicySchema.parse({ enabled: true, allowed_runtimes: ["codex"] });
+    const decision = await chooseSemanticRoute({
+      mission: m,
+      available: ["hermes", "codex"],
+      caps,
+    });
+    expect(decision.adapter).toBe("codex");
+  });
+
+  test("applies JEV recommendation when confidence exceeds min_confidence", async () => {
+    const caps = capsMap({
+      hermes: makeCaps("hermes", { cost: "free" }),
+      codex: makeCaps("codex", { cost: "cheap" }),
+    });
+    const m = mission({});
+    m.decision_policy = DecisionPolicySchema.parse({
+      enabled: true,
+      min_confidence: 0.75,
+      allowed_models: ["deepseek/deepseek-v4.1-flash", "openai/gpt-5.6-luna"],
+    });
+
+    const mockFetch = async () => new Response(JSON.stringify({
+      model: "jev-1.13.0",
+      answers: {
+        complexity: { type: "score", score: 0.5, probabilities: { "0": 0.5, "1": 0.5 } },
+        recommended_adapter: {
+          type: "choice",
+          choice: "codex",
+          probabilities: { hermes: 0.1, codex: 0.9 },
+        },
+        recommended_model: {
+          type: "choice",
+          choice: "deepseek/deepseek-v4.1-flash",
+          probabilities: { "deepseek/deepseek-v4.1-flash": 0.85, "openai/gpt-5.6-luna": 0.15 },
+        },
+      },
+      usage: { input_tokens: 100, output_tokens: 20 },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+
+    const decision = await chooseSemanticRoute({
+      mission: m,
+      available: ["hermes", "codex"],
+      caps,
+      apiKey: "test-key",
+      fetch: mockFetch as typeof globalThis.fetch,
+    });
+
+    expect(decision.status).toBe("applied");
+    expect(decision.authorizer).toBe("jev");
+    expect(decision.adapter).toBe("codex");
+    expect(decision.model).toBe("deepseek/deepseek-v4.1-flash");
+    expect(decision.confidence).toBe(0.85);
+  });
+
+  test("falls back to deterministic route when confidence is below min_confidence", async () => {
+    const caps = capsMap({
+      hermes: makeCaps("hermes", { cost: "free" }),
+      codex: makeCaps("codex", { cost: "cheap" }),
+    });
+    const m = mission({});
+    m.decision_policy = DecisionPolicySchema.parse({
+      enabled: true,
+      min_confidence: 0.80,
+      fallback_model: "fallback/model-v1",
+      allowed_models: ["model-a", "model-b"],
+    });
+    const mockFetch = async () => new Response(JSON.stringify({
+      model: "jev-1.13.0",
+      answers: {
+        complexity: { type: "score", score: 1 },
+        recommended_adapter: {
+          type: "choice",
+          choice: "codex",
+          probabilities: { hermes: 0.45, codex: 0.55 },
+        },
+        recommended_model: {
+          type: "choice",
+          choice: "model-a",
+          probabilities: { "model-a": 0.55, "model-b": 0.45, "fallback/model-v1": 0 },
+        },
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+
+    const decision = await chooseSemanticRoute({
+      mission: m,
+      available: ["hermes", "codex"],
+      caps,
+      apiKey: "test-key",
+      fetch: mockFetch as typeof globalThis.fetch,
+    });
+
+    expect(decision.status).toBe("uncertain");
+    expect(decision.authorizer).toBe("deterministic");
+    expect(decision.adapter).toBe("hermes"); // deterministic incumbent
+    expect(decision.model).toBe("fallback/model-v1");
+  });
+
+  test("handles provider unavailable by falling back gracefully without throwing", async () => {
+    const caps = capsMap({
+      hermes: makeCaps("hermes", { cost: "free" }),
+      codex: makeCaps("codex", { cost: "cheap" }),
+    });
+    const m = mission({});
+    m.decision_policy = DecisionPolicySchema.parse({ enabled: true });
+
+    const mockFetch = async () => { throw new Error("network down"); };
+
+    const decision = await chooseSemanticRoute({
+      mission: m,
+      available: ["hermes", "codex"],
+      caps,
+      apiKey: "test-key",
+      fetch: mockFetch as typeof globalThis.fetch,
+    });
+
+    expect(decision.status).toBe("unavailable");
+    expect(decision.authorizer).toBe("deterministic");
+    expect(decision.adapter).toBe("hermes");
   });
 });

@@ -62,7 +62,7 @@ describe("npm/Bun publish package metadata", () => {
 
     expect(pkg.scripts).toMatchObject({
       dev: "tsx src/cli.ts",
-      build: "rm -rf dist && tsc -p tsconfig.json",
+      build: "node scripts/build.mjs",
       test: "vitest run",
       typecheck: "tsc -p tsconfig.tests.json --noEmit",
       "tui-spike": "bun bin/uh-tui-spike.tsx",

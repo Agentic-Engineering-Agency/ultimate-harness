@@ -1,0 +1,17 @@
+schema_version: uh.adapter.v0
+id: command-code
+name: Command Code
+description: Native Command Code execution with persistent sessions and UH supervision.
+runtime: command-code
+capabilities:
+  - cli-execution
+  - json-output
+  - diff-output
+  - session-resume
+status: experimental
+config:
+  cli_command: cmdc
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    model: ""

@@ -875,16 +875,37 @@ async def test_cancel_finished_run_returns_409(
 
 
 @pytest.mark.asyncio
-async def test_cancel_running_run_appends_cancelled_event(
+async def test_cancel_running_run_goes_through_uh_kill_and_writes_no_artifacts_itself(
+    client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
+) -> None:
+    """The plugin stays on the public CLI: it cancels with ``uh kill <run> --json``
+    and leaves the run's records (control file, registry, cancelled event) to it."""
+    start = await client.post("/api/plugins/uh/missions/demo/run", json={})
+    run_id = start.json()["runId"]
+    kill_args = ("kill", run_id, "--json", "--root", str(isolated_project))
+    fake_cli.stub(kill_args, stdout=json.dumps({"entries": [{"run_id": run_id, "outcome": "cancelled_gracefully"}], "exit_code": 0}))
+    cancel = await client.post(f"/api/plugins/uh/runs/{run_id}/cancel")
+    assert cancel.status_code == 200
+    assert cancel.json()["status"] == "cancelled"
+    assert any(call["args"] == list(kill_args) for call in fake_cli.calls)
+    events_path = isolated_project / ".harness" / "missions" / "demo" / "runs" / run_id / "events.ndjson"
+    assert not events_path.exists() or "runtime.cancelled" not in events_path.read_text(encoding="utf-8")
+    # The CLI stopped the run, so the plugin did not terminate the child itself.
+    assert fake_cli.last_popen is not None and fake_cli.last_popen.terminated is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_falls_back_to_terminating_its_child_when_uh_kill_cannot(
     client: httpx.AsyncClient, isolated_project: Path, fake_cli: Any,
 ) -> None:
     start = await client.post("/api/plugins/uh/missions/demo/run", json={})
     run_id = start.json()["runId"]
+    fake_cli.stub(("kill", run_id, "--json", "--root", str(isolated_project)), stdout="", returncode=1)
     cancel = await client.post(f"/api/plugins/uh/runs/{run_id}/cancel")
     assert cancel.status_code == 200
-    events_path = isolated_project / ".harness" / "missions" / "demo" / "runs" / run_id / "events.ndjson"
-    assert "runtime.cancelled" in events_path.read_text(encoding="utf-8")
     assert fake_cli.last_popen is not None and fake_cli.last_popen.terminated is True
+    events_path = isolated_project / ".harness" / "missions" / "demo" / "runs" / run_id / "events.ndjson"
+    assert not events_path.exists() or "runtime.cancelled" not in events_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
