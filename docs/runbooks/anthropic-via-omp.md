@@ -154,7 +154,9 @@ this before adopting") rather than restating it. Mirrors the v0.7.0
 - `README.md` — capability summary, adapter table row, and CLI example
   list reflect `oh-my-pi` as active.
 - `docs/ROADMAP.md` — `Adapters considered` table row updated.
-- `apps/docs/content/docs/index.mdx` — docs-site adapter mirror updated.
+- `apps/docs/content/docs/index.mdx` — docs-site adapter mirror updated
+  (that hand-kept mirror was later removed; `apps/site` now builds its pages
+  from `docs/` directly).
 - `CHANGELOG.md` — `[0.8.0]` entry covers the graduation in the v0.8.0
   release notes.
 
