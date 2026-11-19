@@ -17,9 +17,12 @@ Runtime credentials never go into `.harness/`. API keys come from the environmen
 ## Install
 
 ```sh
-bun add -g @agenticengineeringagency/ultimate-harness
+bun add -g @agenticengineeringagency/ultimate-harness@next   # 0.11.0-rc.1, described on this site
+bun add -g @agenticengineeringagency/ultimate-harness        # 0.9.0 on latest
 uh --help
 ```
+
+The release candidate is on the npm `next` tag until the final 0.11.0; `latest` is still 0.9.0, which has none of the commands marked 0.11 on this site.
 
 From a clone, for development:
 
@@ -53,7 +56,7 @@ uh status --json
 
 `dry-run` renders the exact prompt, command, sandbox routing and runtime overrides without spending anything. Use it before every real run while you learn the system.
 
-## Watching runs (v0.11)
+## Watching runs (0.11)
 
 ```sh
 uh ps                          # every run: liveness, turns, denials, last tool
@@ -72,7 +75,7 @@ uh tui --once   # print one frame of Mission Control
 uh tui          # interactive; needs Bun
 ```
 
-The Hermes dashboard plugin (`apps/hermes-plugin`) and `uh mcp serve` (v0.11) read the same `.harness/` files. See [Surfaces](/system/surfaces/).
+The Hermes dashboard plugin (`apps/hermes-plugin`) and `uh mcp serve` (0.11) read the same `.harness/` files. See [Surfaces](/system/surfaces/).
 
 ## Next
 

@@ -79,7 +79,7 @@ For a generated, file-by-file view of the same structure, see the [Code map](/co
 |---|---|---|
 | Command parsing | `src/cli.ts` | `RUNTIME_WIRINGS` maps each runtime id to `{dryRun, run, surfaceBlocked}`; most actions lazy-load their harness module with `await import(...)` |
 | Persisted contracts | `src/schema/*.ts` | `MissionSchema`, `ProjectSchema`, `AdapterSchema`, `RuntimeResultSchema`, `ToolGuardPolicySchema`, ... |
-| Lifecycle | `src/harness/` (about 100 modules on v0.11) | `initializeHarness`, `proposeMission`, `checkMissionPackets`, `verifyMission`, `promoteMission`, `landWorkerBranches` |
+| Lifecycle | `src/harness/` (98 modules, 111 with subfolders) | `initializeHarness`, `proposeMission`, `checkMissionPackets`, `verifyMission`, `promoteMission`, `landWorkerBranches` |
 | Runtime execution | `src/adapters/<runtime>.ts` | each registers with `runtimeRegistry` and exports `check*`, `plan*Run`, `dryRun*`, `run*` |
 | Capability manifests | `src/adapters/capabilities/*.ts` | `uh.adapter-capabilities.v0`: cost class, context window, sandbox support, tool surface |
 | Guard hooks | `src/extensions/tool-guard/` | compiled to `dist/extensions/tool-guard/*.js`, snapshotted per content into a user cache before a run |
@@ -96,7 +96,7 @@ Take `uh mission run .harness/missions/m1/mission.yaml --runtime oh-my-pi`:
 2. **Admission.** Template adoption, routing, capability and requirement preflight, sandbox routing and fleet admission run in order ([lifecycle, step 3](/system/lifecycle/#3-run)).
 3. **Recovery wrapper.** `runWithRuntimeRecovery` owns resume, steer and deadline grace, and calls the oh-my-pi adapter.
 4. **Adapter.** `src/adapters/oh-my-pi.ts` allocates `runs/<run-id>/`, claims a live-run entry at the project root, builds the dispatch context (mission, workflow, project brief, verified hive facts), renders the prompt with the final-message sentinel, writes `tool-guard.json`, installs the guard hook snapshot, **arms** the guard with two synthetic probes, writes a per-run `omp-overlay.yml` that pins every OMP model role to the assigned model, and spawns `omp --print --mode json`.
-5. **Execution core.** `runRuntimeProcess` streams native events to `RuntimeSupervision` (limits, stop codes, route attestation), the run digest builder, the loop watchdog (shadow mode) and the intervention ledger. Inside the runtime, every tool call hits the guard hook, which fails closed.
+5. **Execution core.** `runRuntimeProcess` streams native events to `RuntimeSupervision` (limits, stop codes, route attestation), the run digest builder, the loop probe, the loop watchdog (only when the mission sets `runtime_config.loop_watchdog: shadow`) and the intervention ledger. Inside the runtime, every tool call hits the guard hook, which fails closed.
 6. **Settlement.** On exit, the control file and result are reconciled, the diff is captured, cost is resolved against `.harness/prices.yaml`, the live-run entry settles, notifications fire, and the CLI prints `UH_RESULT`.
 
 ## Design rules that shape the code
@@ -108,21 +108,22 @@ Take `uh mission run .harness/missions/m1/mission.yaml --runtime oh-my-pi`:
 
 ## Where the complexity is
 
-The 20 largest files on the v0.11 line, which is also where the refactoring budget should go first:
+The largest files in 0.11.0-rc.1, which is also where the refactoring budget should go first:
 
 | File | Lines | Note |
 |---|---|---|
-| `src/cli.ts` | 3,709 | Should be a thin dispatcher. See [debt](/release/debt/). |
-| `src/harness/team-run.ts` | 2,407 | Planning, git, salvage, integration and verdict in one file |
-| `apps/hermes-plugin/dashboard/plugin_api.py` | 1,907 | FastAPI router for the dashboard |
-| `src/harness/acceptance.ts` | 1,685 | Acceptance campaign runner and report |
-| `src/adapters/oh-my-pi.ts` | 1,439 | Most complete adapter: guard, overlay, resume |
-| `src/adapters/openrouter.ts`, `hermes-proxy.ts`, `anthropic.ts` | about 1,000 each | Three near-parallel HTTP adapters that could share one client |
-| `src/harness/run-digest.ts` | 1,038 | Live run digest |
+| `src/cli.ts` | 3,815 | Should be a thin dispatcher. See [debt](/release/debt/#td-04-srcclits-is-not-a-thin-dispatcher). |
+| `src/harness/team-run.ts` | 2,572 | Planning, git, salvage, integration and verdict in one file |
+| `apps/hermes-plugin/dashboard/plugin_api.py` | 1,865 | FastAPI router for the dashboard |
+| `src/harness/acceptance.ts` | 1,754 | Acceptance campaign runner and report |
+| `src/adapters/oh-my-pi.ts` | 1,440 | Most complete adapter: guard, overlay, resume |
+| `src/harness/notifications.ts` | 1,064 | Sinks, presets and the project-file trust rules |
+| `src/adapters/openrouter.ts`, `hermes-proxy.ts`, `anthropic.ts` | 991 to 1,064 each | Three near-parallel HTTP adapters that could share one client |
+| `src/harness/run-digest.ts` | 1,039 | Live run digest |
+| `src/harness/tool-guard.ts` | 1,027 | Tool-call decisions for every guarded runtime |
 | `src/tui/dashboard.tsx` | 1,001 | TUI main view |
-| `src/harness/notifications.ts` | 991 | Sinks and presets |
-| `src/adapters/pi.ts`, `hermes.ts`, `codex.ts`, `acp.ts` | 800 to 920 each | |
-| `src/harness/live-runs.ts`, `kill.ts` | about 840 each | Run registry and kill proof |
+| `src/adapters/pi.ts`, `hermes.ts`, `codex.ts`, `acp.ts` | 813 to 921 each | |
+| `src/harness/land.ts`, `live-runs.ts`, `kill.ts` | 836 to 898 each | Landing, run registry and kill proof |
 | `src/harness/runtime-supervision.ts`, `verify.ts` | about 750 each | |
 
-`src/` is about 53,000 lines on the v0.11 line, with 147 test files.
+`src/` is about 55,000 lines of TypeScript in 0.11.0-rc.1, with 179 test files.

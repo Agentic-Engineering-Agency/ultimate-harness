@@ -20,7 +20,7 @@ The primary surface. Every command that prints structured output has a `--json` 
 - **Backend:** `dashboard/plugin_api.py`, a FastAPI router that shells out to `uh` (path from `UH_CLI_BIN`). Routes cover status, observatory snapshot, adapter capabilities, missions, runs (including active runs and SSE event tails), run, cancel, compare, workflows and verification.
 - **Frontend:** `dashboard/src/*.tsx`, bundled by esbuild into `dashboard/dist/`. It uses the Hermes dashboard SDK; React and Hermes UI dependencies are not bundled, which keeps the bundle small (a size guard enforces it).
 - **Tests:** isolated pytest suite in `dashboard/tests/`; `bun run plugin:test`.
-- **Releases:** tagged separately as `plugin-vX.Y.Z` by `release-plugin.yml`. The plugin still reports version 0.9.0 on the v0.11 line.
+- **Releases:** tagged separately as `plugin-vX.Y.Z` by `release-plugin.yml`. The plugin version follows the CLI: 0.11.0-rc.1 in `plugin.yaml` and `dashboard/manifest.json`. On a GitHub release, `release-plugin.yml` refuses a prerelease flag that disagrees with the version, so the stable `releases/latest` download link never serves a prerelease.
 
 See [plugin development](/source/docs/plugin-development/) and the [dashboard runbook](/source/docs/runbooks/hermes-dashboard-plugin/).
 

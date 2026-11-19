@@ -3,7 +3,7 @@ title: Artifacts and schemas
 description: Every file UH persists, its schema version id, and who writes it.
 ---
 
-Everything UH knows is on disk under `.harness/` (plus a few files outside it), and every persisted document carries a `schema_version` checked by a Zod schema in `src/schema/`. This page is the map. It describes the v0.11 line; files marked **v0.11** are not on `main` yet.
+Everything UH knows is on disk under `.harness/` (plus a few files outside it), and every persisted document carries a `schema_version` checked by a Zod schema in `src/schema/`. This page is the map. It describes 0.11.0-rc.1; files marked **v0.11** are new since 0.9.0, and a 0.9.0 reader rejects 0.11 artifacts that use new fields (see the changelog's Breaking section).
 
 :::caution[Contracts are still v0]
 Every id below is `.v0`, which promises nothing about compatibility. Freezing the ones 1.0 promises as `.v1` is a [1.0 hardening item](/release/plan/#phase-3-10-hardening). The repository's own [`harness-artifacts.md`](/source/docs/architecture/harness-artifacts/) still shows only the 0.9-era subset.
@@ -29,11 +29,13 @@ Every id below is `.v0`, which promises nothing about compatibility. Freezing th
 | Path | Schema | Notes |
 |---|---|---|
 | `.harness/live-runs/<run-id>.json` | `uh.live-run.v0` (defined in `live-runs.ts`, not `src/schema`) | One per attempt, at the project root. Backs `uh ps`, `wait`, `kill`. |
-| `.harness/hive/items.yaml`, `facts.ndjson`, `claims.ndjson` | `src/schema/hive.ts` (no version literal yet) | Only the controller writes. Facts are hash-chained and cite evidence. |
+| `.harness/hive/items.yaml`, `facts.ndjson`, `claims.ndjson` | `src/schema/hive.ts` (no version literal yet) | Only the controller writes. Facts are hash-chained, cite evidence inside the project and carry a controller `mac`; only facts with a valid `mac` reach worker prompts. |
+| `.harness/worker-admission/reservations/` | `uh.reservation.v0` (`src/schema/runtime-resources.ts`) | Memory reservations held by admitted workers. |
 | `.harness/ledger/interventions.ndjson` | `uh.intervention.v0` | Hash-chained. Steer, kill, review, settlement and replace events are recorded automatically. |
-| `.harness/land/decisions.ndjson` | land decision lines | Hash-chained record of every `uh land`. |
+| `.harness/land/decisions.ndjson` | land decision lines | Hash-chained record of every `uh land`. Appends to this file, the hive facts and the ledger hold a `<file>.lock`. |
 | `.harness/queue/<id>/state.json` | `uh.queue.v0` (the queue input file has no version literal) | `uh queue run` state, resumable. |
 | `.harness/notifications/deliveries.ndjson` | delivery lines | Every notification attempt. |
+| a `--post-checks` file (anywhere) | `uh.post-checks.v0` (`src/schema/post-checks.ts`), or a bare list | Checks graded after a run that the agent never sees. |
 | `.harness/experiments/<id>.yaml` and `<id>/{plan.json, runs.ndjson, report.json}` | `uh.experiment.v0` | `uh experiment`. |
 
 ## Per mission: `.harness/missions/<id>/`

@@ -18,7 +18,9 @@ An adapter turns a runtime-neutral mission into one runtime's command line or AP
 | `acp` | JSON-RPC 2.0 over stdio | active (v0.11) | own client with permission handling | no | Agent-Client Protocol v1: any ACP agent, headless. |
 | `hermes-proxy` | HTTP, OpenAI compatible | active | HTTP | no | Sanctioned OAuth-backed subscription routing via a local `hermes proxy`. |
 | `openrouter` | HTTP | active | HTTP | no | Cheapest pay-per-token route. `OPENROUTER_API_KEY` from the environment. |
-| `anthropic` | HTTP, Messages API | experimental on `main`, active on v0.11 | HTTP | no | `ANTHROPIC_API_KEY` from the environment. |
+| `anthropic` | HTTP, Messages API | active in the README, experimental in its manifest | HTTP | no | `ANTHROPIC_API_KEY` from the environment. |
+
+Statuses follow the README's adapter table. The manifests are not all in step with it: `uh adapter add` scaffolds `anthropic` and `acp` with `status: experimental`, and this repository's own `.harness/adapters/` has `command-code` and `anthropic` as experimental and no `acp` manifest.
 
 Only oh-my-pi, Command Code and Claude Code have the complete supervision stack (in-runtime guard hook, arming, supervision, resume). Treat the others as trusted-output runtimes: their results are verified, but their tool calls are not intercepted.
 

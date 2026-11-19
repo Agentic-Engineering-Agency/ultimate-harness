@@ -33,6 +33,6 @@ Off by default. Enabled only with `UH_TELEMETRY=posthog` and `UH_POSTHOG_API_KEY
 
 ## Acceptance campaign (v0.11)
 
-`acceptance/registry.yaml` lists 37 capability checks, each paired between the oh-my-pi and Command Code fleets (`<id>-cmdc`), plus guard probes. `uh acceptance run` executes them for real against a runtime; evidence is written to the gitignored `acceptance/evidence/`, bound to an input digest so stale evidence is detected; `uh acceptance report` renders `docs/acceptance/README.md`.
+`acceptance/registry.yaml` has 37 entries: capability checks on the oh-my-pi fleet, their Command Code ports (`<id>-cmdc`, 20 entries) and guard probes (`G1-cmdc-*`, `G2`). `uh acceptance run` executes them for real against a runtime; evidence is written to the gitignored `acceptance/evidence/`, bound to an input digest so stale evidence is detected; `uh acceptance report` renders `docs/acceptance/README.md`.
 
-As of 2026-09-23 no capability has live evidence recorded in the repository (33 unproven, 3 fixture-only). Producing that evidence is a [1.0 criterion](/release/plan/#phase-4-100).
+As of 2026-11-19 no capability has live evidence recorded in the repository: `docs/acceptance/README.md` shows 34 unproven and 3 fixture-only. Producing that evidence is a [1.0 criterion](/release/plan/#phase-4-100).

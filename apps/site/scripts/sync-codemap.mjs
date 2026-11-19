@@ -106,7 +106,7 @@ write(
     'A generated map of the Ultimate Harness codebase: layers, a guided tour, hotspots and an interactive explorer.',
     `${provenance}
 
-This section is generated from a knowledge graph of the v0.11 release line: every source file, its significant functions and classes, and how they import and call each other.
+This section is generated from a knowledge graph of the v0.11 stack at that commit: every source file, its significant functions and classes, and how they import and call each other. The graph predates the fix-forward PRs #271 to #289 and the 0.11.0-rc.1 release prep, so line counts and a few symbols can lag the current code.
 
 **[Open the interactive explorer →](/explorer/)** Pan, zoom, search by name or meaning, follow a node's neighbours and take the guided tour inside the graph.
 

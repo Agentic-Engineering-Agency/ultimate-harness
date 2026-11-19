@@ -3,7 +3,7 @@ title: Supervision and the guard
 description: How UH keeps a running agent inside its assignment, and how a run ends.
 ---
 
-Most of the v0.11 line is about one question: when an agent is running unattended, what stops it from doing something it was not assigned? The answer has three parts that work together: the **tool guard** inside the runtime, **supervision** watching the event stream, and **settlement** reconciling what happened.
+Most of the 0.11 line is about one question: when an agent is running unattended, what stops it from doing something it was not assigned? The answer has three parts that work together: the **tool guard** inside the runtime, **supervision** watching the event stream, and **settlement** reconciling what happened.
 
 ## The tool guard
 
@@ -16,7 +16,7 @@ What it denies, by class:
 | `write_outside`, `delete_outside` | writes and deletes outside the worker root and its `write_roots`, including through redirections, `tee`, `Out-File`, copy destinations and directory changes inside a command |
 | `protected_root` | `.harness`, `.commandcode`, `.omp`, `.pi`, `.git` and any `protected_paths` |
 | `guard_tamper` | writes to the guard policy or log, harness state, or the hive |
-| `git_mutation` | commits, pushes, resets and other history changes |
+| `git_mutation` | any `git` form that is not read-only: commits, pushes, resets and other history changes (#289) |
 | `package_install` | `npm install`, `pip install`, ... |
 | `network_client` | `curl`, `wget`, ... unless the mission needs network |
 | `agent_client` | starting another agent CLI (`claude`, `codex`, `omp`, `opencode`, `goose`, ...), judged by executable position so `grep -r omp src` is not a false denial; also starting paid runs through `uh` itself |
@@ -30,10 +30,10 @@ Properties:
 - **Armed before spawn.** `guard-arming.ts#armGuard` fires two synthetic probes through the installed hook and logs them to `tool-guard.arm.log`. If the hook does not deny them, the run stops with `policy` before the runtime starts.
 - **Immutable during a run.** Hooks run from a per-content snapshot in a user cache, so a rebuild cannot change the guard under a live worker; a snapshot that no longer matches its hash fails closed.
 - **Tells the agent what to do.** A denial explains the contract ("write only under out/. Put the file under out/ instead.") and tells the agent not to retry by another route. Denials count against `max_denials`.
+- **Judges every command in a shell line.** Since #289 the guard splits a shell line into the commands it runs and judges each one, and recognises more write, delete, kill and install forms. A controller command may not carry an unquoted substitution, group or script block (#260).
+- **POSIX paths are paths.** `/x` tokens are treated as switches only for `cmd.exe` verbs, so `cp x /etc/y` is judged as a write to `/etc/y` (fixed in #240; see the [release plan](/release/plan/#how-the-v011-line-landed)).
 
-:::danger[Known bug on the v0.11 line]
-On Linux and macOS, the copy and delete target scanners skip every argument that starts with `/`, treating it as a `cmd.exe` switch. As a result `cp x /etc/y` and `mv x ~/.bashrc` are **allowed**, and `rm -rf /abs/path/in/root` is falsely denied. This is the cause of the red CI on PRs #247 to #249. The fix and its verification are in the [release plan, Phase 0](/release/plan/#phase-0-unblock-the-stack).
-:::
+An orchestrator runs in the project root without a sandbox only because its guard narrows writes: an orchestrator whose write roots are empty, `.`, absolute or contain `..` is refused at planning (#254).
 
 ## Supervision
 
@@ -59,7 +59,7 @@ On Linux and macOS, the copy and delete target scanners skip every argument that
 
 Supervision is testable without waiting on wall time: `runRuntimeProcess` accepts an injectable clock and poll scheduler.
 
-Also on the event stream: the **run digest** (`run-digest.ts`, what `uh ps` and `uh report` show), a **loop probe and watchdog** in shadow mode (they detect repeat and alternating tool-call signatures and write advisory receipts, but do not stop runs yet), and the **intervention ledger**.
+Also on the event stream: the **run digest** (`run-digest.ts`, what `uh ps` and `uh report` show), the **loop probe** (it detects repeat and alternating tool-call signatures), and the **intervention ledger**. The **loop watchdog** is off by default: a mission opts in with `runtime_config.loop_watchdog: shadow`, and then it writes advisory receipts but does not stop runs. It used to default to shadow and could call the paid TypeSafe API without asking (#252).
 
 ## Settlement
 

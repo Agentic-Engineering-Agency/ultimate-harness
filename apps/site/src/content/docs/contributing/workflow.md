@@ -15,7 +15,7 @@ The authoritative rules are in [`AGENTS.md`](https://github.com/Agentic-Engineer
 | Runtime-specific execution | `src/adapters/<runtime>.ts` (+ manifest capabilities) | `src/harness/` |
 | A human surface | `src/tui/` reading harness files, or the Hermes plugin calling the public `uh` CLI | private TUI internals, new parallel contracts |
 
-`src/cli.ts` is supposed to be a thin dispatcher. It is 1,803 lines on `main` and 3,709 on the v0.11 line, so splitting it is item one on the [debt register](/release/debt/).
+`src/cli.ts` is supposed to be a thin dispatcher. It was 1,803 lines in 0.9.0 and is 3,815 in 0.11.0-rc.1, so splitting it is item one on the [debt register](/release/debt/).
 
 ## Commands
 
@@ -52,7 +52,7 @@ CI (`.github/workflows/ci.yml`) runs all of these on Blacksmith runners for ever
 
 **Optional** (owner decision, 2026-09-23). When GitNexus tools are available, upstream `gitnexus_impact` before changing a widely used symbol and `gitnexus_detect_changes()` before committing are useful checks; without them, use grep. Most workers cannot run GitNexus and their guard may deny it, which is why the mandatory rule was dropped.
 
-`main`'s `AGENTS.md` still says mandatory until the v0.11 stack merges; PR [#246](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/246) (commit `ffc1f8d`) carries the change.
+`AGENTS.md` (which `CLAUDE.md` imports) says so since layer 07 of the 0.11 stack, PR [#246](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/246); the changelog records it as an owner decision. A mission packet's instructions and `read_first` list take precedence over `AGENTS.md`.
 
 ## Agent configuration directories
 
