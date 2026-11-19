@@ -42,6 +42,7 @@ workflow references are maintained in [docs/README.md](docs/README.md).
 | Install plugin test dependencies | `python -m pip install -r apps/hermes-plugin/dashboard/requirements-dev.txt` |
 | Test plugin | `bun run plugin:test` |
 | Publish dry run | `NPM_CONFIG_TOKEN=dry-run-token bun run publish:dry-run` |
+| Docs site (uh.agenticeng.app) | `cd apps/site && bun install --frozen-lockfile && bun run build` |
 | Clean | `bun run clean` |
 
 ## Verification gates

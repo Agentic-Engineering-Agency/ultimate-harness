@@ -80,7 +80,7 @@ proposals rather than defects and moved to the roadmap's
 
 | What goes wrong | Status |
 |---|---|
-| The docs site (`apps/docs`) syncs only the roadmap from `docs/` (`scripts/sync-docs-site.mjs`); its other pages are maintained separately and do not include the handbook or the runbooks added since. | Confirmed at `2bffac4`. The docs-site rework (#250) is not part of 0.11.0-rc.1. |
+| The docs site at the 0.11.0-rc.1 tag (`apps/docs`) synced only the roadmap from `docs/`; its other pages were maintained separately and did not include the handbook or the newer runbooks. | Fixed after 0.11.0-rc.1 by #250: `apps/site` (uh.agenticeng.app) mirrors all of `docs/`, `specs/` and `CHANGELOG.md` on every build; `apps/docs` and its sync script are removed. |
 | `docs/verification/capability-inventory.md` predates this development line; capabilities added since are listed in its section 5 without per-row test and evidence detail. | Confirmed at `2bffac4`. |
 
 ## Fixed before 0.11.0-rc.1

@@ -37,9 +37,9 @@ layout:
 layoutVariant: standard
 
 assets:
-  hero: "https://uh.agenticengineering.lat/og.png"
-  crest: "https://uh.agenticengineering.lat/icon.svg"
-  logo: "https://uh.agenticengineering.lat/wordmark.svg"
+  hero: "https://uh.agenticeng.app/og.png"
+  crest: "https://uh.agenticeng.app/icon.svg"
+  logo: "https://uh.agenticeng.app/wordmark.svg"
 
 componentStyles:
   card:
