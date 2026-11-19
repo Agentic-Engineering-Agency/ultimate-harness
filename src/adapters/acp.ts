@@ -58,7 +58,7 @@ registerRuntimeConfigSchema("acp", AcpRuntimeConfigSchema);
 
 /** Client identity advertised during ACP `initialize`. */
 export const ACP_CLIENT_NAME = "ultimate-harness";
-export const ACP_CLIENT_VERSION = "0.11.0";
+export const ACP_CLIENT_VERSION = "0.11.0-rc.1";
 
 const JSONRPC_METHOD_NOT_FOUND = -32601;
 const JSONRPC_INTERNAL_ERROR = -32603;

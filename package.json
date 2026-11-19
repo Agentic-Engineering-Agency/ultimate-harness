@@ -1,6 +1,6 @@
 {
   "name": "@agenticengineeringagency/ultimate-harness",
-  "version": "0.11.0",
+  "version": "0.11.0-rc.1",
   "description": "Runtime-agnostic software-development harness for agentic engineering work.",
   "type": "module",
   "bin": {
@@ -43,7 +43,7 @@
     "landscape:verify": "node scripts/landscape/verify-register.mjs",
     "tui-spike": "bun bin/uh-tui-spike.tsx",
     "clean": "rm -rf dist",
-    "publish:dry-run": "bun publish --dry-run",
+    "publish:dry-run": "bun publish --dry-run --tag $(node scripts/npm-dist-tag.mjs)",
     "plugin:build": "bun apps/hermes-plugin/esbuild.config.mjs",
     "plugin:watch": "bun apps/hermes-plugin/esbuild.config.mjs --watch",
     "plugin:typecheck": "tsc -p apps/hermes-plugin/dashboard/tsconfig.json --noEmit",
