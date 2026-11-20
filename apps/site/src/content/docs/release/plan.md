@@ -31,7 +31,7 @@ The blockers that changed default behavior, so upgrading operators should know t
 1. **#293** sets every version to `0.11.0-rc.1` (CLI package, plugin manifest and `plugin.yaml`), adds `scripts/npm-dist-tag.mjs` so a prerelease version publishes to `next` and a release version to `latest`, and writes the `[0.11.0-rc.1] — 2026-10-28` changelog section and the known-issues triage. It merges into `release/v0.11.0`.
 2. **#239** merges `release/v0.11.0` into `main` with a merge commit.
 3. A GitHub **prerelease** `v0.11.0-rc.1` triggers `publish.yml`, which publishes `@agenticengineeringagency/ultimate-harness@0.11.0-rc.1` to npm under `next`. `publish.yml` and `release-plugin.yml` both refuse a release whose GitHub prerelease flag disagrees with the version.
-4. **#250** (this site) lands on `main` after the release. It replaces `apps/docs` with `apps/site` and deploys `uh.agenticeng.app`.
+4. **#250** (this site) landed on `main` on 2026-11-19 (merge commit `31e1d3e`). It replaces `apps/docs` with `apps/site`, and the site is live at `uh.agenticeng.app`.
 
 Install the candidate with `bun add -g @agenticengineeringagency/ultimate-harness@next`.
 
@@ -47,7 +47,7 @@ Decided by the owner on 2026-09-23.
 | D2 | GitNexus: mandatory or optional? | **Optional.** Use it when its tools are available; otherwise grep. Recorded in `AGENTS.md` and the changelog (#246, #264). | Done |
 | D3 | Placeholder `uh-team@example.com` authors and the `wip:` commit | **Fix them.** | Done: no commit between `main` and `release/v0.11.0` has a placeholder author or a `wip:` subject |
 | D4 | Publish 0.10.0 separately, or fold it into 0.11.0? | **Skip 0.10.0.** The changelog says 0.10.0 was never published. | Done |
-| D5 | Keep the old docs domain or move? | **Retire the old site.** `apps/docs` and `deploy-docs.yml` are removed in #250; `uh.agenticengineering.lat` redirects to `uh.agenticeng.app`. | Lands with #250; the redirect deploys after the old Worker is removed |
+| D5 | Keep the old docs domain or move? | **Retire the old site.** `apps/docs` and `deploy-docs.yml` are removed in #250; `uh.agenticengineering.lat` redirects to `uh.agenticeng.app`. | Landed with #250 on 2026-11-19. The old domain still serves the old site; the redirect deploys after the old Worker is removed |
 
 Also decided: keep the Codex review bot on (see [Branch and PR audit](/release/branches/#codex-review-bot)).
 
