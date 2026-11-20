@@ -243,7 +243,7 @@ def _reset_active_runs() -> Iterator[None]:
         # so they don't fire after the test exits.
         #
         # Blacksmith CI: this sync fixture's teardown runs *after*
-        # pytest-asyncio (pinned 0.24.0) has already closed the test's
+        # pytest-asyncio (pinned in requirements-dev.txt) has already closed the test's
         # per-test event loop. Calling ``task.cancel()`` on that closed loop
         # schedules ``loop.call_soon(...)`` and raises
         # ``RuntimeError: Event loop is closed`` — surfacing as 17 teardown
