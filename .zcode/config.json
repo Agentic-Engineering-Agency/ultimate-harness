@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "jevmem": {
+        "type": "stdio",
+        "command": "jevmem",
+        "args": [
+          "mcp"
+        ]
+      }
+    }
+  }
+}
