@@ -36,7 +36,7 @@ bun run build      # sync + static build into dist/
 bun run preview    # serve dist/ through wrangler, like production
 ```
 
-Node 22.12 or newer is required by Astro 7. Search is built at build time by Pagefind, so it only works in `build` and `preview`, not in `dev`.
+Node 22.23.4 or newer is required by Astro 7.4. Search is built at build time by Pagefind, so it only works in `build` and `preview`, not in `dev`.
 
 ## Deployment
 
@@ -56,7 +56,7 @@ Wrangler creates the DNS record and certificate for the custom domain on first d
 
 `apps/docs` (fumadocs on TanStack Start, deployed by Alchemy to `uh.agenticengineering.lat`) was removed in PR #250, with its `deploy-docs.yml` workflow and `scripts/sync-docs-site.mjs`. It kept a hand-copied mirror of `docs/` that had drifted badly, depended on a beta Nitro build and needed workarounds for Bun crashes during deploy.
 
-The old domain redirects to this site through a separate Worker in `apps/site/redirect/` (`uh-docs-redirect`). It sends every request to `https://uh.agenticeng.app` with a `301`, mapping the few old routes that have an obvious new home (`/docs/quickstart` to `/start/install/`, for example). To switch it on, once:
+The old domain is meant to redirect to this site through a separate Worker in `apps/site/redirect/` (`uh-docs-redirect`). Until that Worker is deployed, the old domain keeps serving the old site. The Worker sends every request to `https://uh.agenticeng.app` with a `301`, mapping the few old routes that have an obvious new home (`/docs/quickstart` to `/start/install/`, for example). To switch it on, once:
 
 1. In the Cloudflare dashboard, delete the old Worker `uh-docs-uh-docs-prod` (or remove its `uh.agenticengineering.lat` custom domain).
 2. From `apps/site`: `bunx wrangler deploy -c redirect/wrangler.jsonc`.

@@ -9,9 +9,9 @@ Snapshot taken **2026-11-19**. `origin/main` is `c5cec50` (v0.9.0 plus CI fixes)
 
 | | Count |
 |---|---|
-| Remote branches | 68 |
+| Remote branches | 67 |
 | Branches in the release itself | 3: `main`, `release/v0.11.0`, `capy/0110-rc1-versions-next` (#293) |
-| Branches with open work outside the release | 3: the docs site (#250), the proactive handoff rehearsal (#290), `chore/jevmem-install` (no PR) |
+| Branches with open work outside the release | 2: the proactive handoff rehearsal (#290), `chore/jevmem-install` (no PR) |
 | Fully merged into `release/v0.11.0`, safe to delete | 30: the 10 stack layers, 19 fix-forward branches and `codex/merge-readiness-20261005` |
 | Originals that already have an `archive/*` copy, safe to delete | 3: `dev`, `release/v0.10.0`, `fix/changelog-roadmap-link-consistency` |
 | `archive/*` branches, kept | 4 |
@@ -34,7 +34,7 @@ The placeholder authors and the `wip:` commit are gone: every commit between `ma
 |---|---|---|---|
 | [#293](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/293) | `capy/0110-rc1-versions-next` → `release/v0.11.0` | 1 (`10dcfcc`, on `2bffac4`) | Versions `0.11.0-rc.1`, the `next` dist-tag for prereleases, changelog and known issues. Its original base, `stack/v0.11.0-10-notify-toast`, is merged, so it is retargeted to `release/v0.11.0` and merged first |
 | [#239](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/239) | `release/v0.11.0` → `main` | 312 | The release PR. Merged into `main` with a merge commit after #293; the `v0.11.0-rc.1` prerelease then publishes to npm `next` |
-| [#250](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/250) | `claude/branch-audit-1.0-prep-k697wg` → `main` | 7, plus a merge of the release | This site. Lands after the release; merging it to `main` deploys production to `uh.agenticeng.app` |
+| [#250](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/250) | `claude/branch-audit-1.0-prep-k697wg` → `main` | 7, plus a merge of the release | This site. Merged into `main` on 2026-11-19 as merge commit `31e1d3e`; production is deployed to `uh.agenticeng.app` |
 | [#290](https://github.com/Agentic-Engineering-Agency/ultimate-harness/pull/290) | `LaloLalo1999/ae-proactive-integration-v01` → `main` | 2 | "Rehearse guarded proactive agent handoffs" (AE-558). Independent of the release; rebase onto `main` once 0.11.0-rc.1 is in |
 | #241 to #248 | `stack/v0.11.0-02` to `-09` → the layer below | | Redundant: every commit is in `release/v0.11.0` through #249. Close them |
 
@@ -100,4 +100,4 @@ git push origin --delete \
   dev release/v0.10.0 fix/changelog-roadmap-link-consistency
 ```
 
-After 0.11.0-rc.1 is published, also delete `capy/0110-rc1-versions-next`, and `claude/branch-audit-1.0-prep-k697wg` once #250 merges.
+After 0.11.0-rc.1 is published, also delete `capy/0110-rc1-versions-next`. `claude/branch-audit-1.0-prep-k697wg` was deleted after #250 merged on 2026-11-19; the name is reused for the site dependency update that followed and can be deleted again once that merges.
