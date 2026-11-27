@@ -26,6 +26,7 @@
     archive/
   missions/
     mission-2026-05-13-docs-spine/
+      events.ndjson                # mission-scoped lifecycle events
       mission.yaml                # canonical mission packet
       design.md                   # optional UH-75 design companion
       verification.yaml           # output of `uh verify`
@@ -47,6 +48,7 @@
     index.yaml
   audit/
     events.ndjson
+  audit.log
 ```
 
 ## File responsibilities
@@ -60,6 +62,7 @@
 - `missions/<id>/mission.yaml` — canonical mission packet.
 - `missions/<id>/design.md` — optional UH-75 design companion (Why / What / How).
 - `missions/<id>/verification.yaml` — checks and results.
+- `missions/<id>/events.ndjson` — mission-scoped lifecycle event stream; promotion appends `promotion.recorded` events here.
 - `missions/<id>/promotion.yaml` — promotion decision and applied refs.
 - `missions/<id>/runtime-result.yaml` — MIRROR of the latest run's `runtime-result.yaml`. Atomic copy from `runs/<run_id>/runtime-result.yaml` on every run completion, so `uh status`, validate-drift, and the dashboard's `last_run` field can read "the latest result" without learning per-run paths (UH-82).
 - `missions/<id>/latest.json` — pointer at the most recent run: `{schema_version, run_id, started_at, finished_at?, status}` (UH-82). Written before any artifact lands so in-flight runs are visible; rewritten on terminal status.
@@ -67,6 +70,7 @@
 - `missions/<id>/runs/<run_id>/` — per-run artifact directory. Holds the run's `prompt.md`, `runtime-session.yaml`, `events.ndjson`, `runtime.stdout.log`, `runtime.stderr.log`, `diff.patch`, `runtime-result.yaml`, and `runtime-final.txt`. Concurrent runs of the same mission are safe because each lands under its own `<run_id>` (UH-82).
 - `sandboxes/index.yaml` — active/discarded/promoted sandboxes.
 - `audit/events.ndjson` — append-only project-level timeline.
+- `audit.log` — text lines appended for manually recorded verdicts.
 
 ## Design notes
 

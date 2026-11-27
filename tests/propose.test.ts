@@ -256,7 +256,7 @@ describe("proposeMission", () => {
   test("rejects a symlinked missions directory before writing", async () => {
     const outsideRoot = await mkdtemp(join(tmpdir(), "uh-test-propose-missions-link-"));
     await rm(join(TEST_ROOT, ".harness", "missions"), { recursive: true, force: true });
-    await symlink(outsideRoot, join(TEST_ROOT, ".harness", "missions"));
+    await symlink(outsideRoot, join(TEST_ROOT, ".harness", "missions"), process.platform === "win32" ? "junction" : "dir");
     try {
       await expect(proposeMission(TEST_ROOT, {
         id: "symlinked",
@@ -366,8 +366,9 @@ describe("uh propose CLI", () => {
   test("creates a fully-populated mission and prints the path", async () => {
     const missionPath = join(TEST_ROOT, ".harness", "missions", "cli-propose", "mission.yaml");
     const { stdout, stderr } = await execFileP(
-      join(process.cwd(), "node_modules", ".bin", "tsx"),
+      process.execPath,
       [
+        "--import", "tsx",
         "src/cli.ts",
         "propose",
         "cli-propose",
@@ -429,8 +430,9 @@ describe("uh propose CLI", () => {
   test("honors --output to write the mission to an alternative path", async () => {
     const out = join(TEST_ROOT, ".harness", "proposals", "alt.yaml");
     const { stdout, stderr } = await execFileP(
-      join(process.cwd(), "node_modules", ".bin", "tsx"),
+      process.execPath,
       [
+        "--import", "tsx",
         "src/cli.ts",
         "propose",
         "alt-mission",
@@ -453,8 +455,9 @@ describe("uh propose CLI", () => {
 
   test("exits non-zero with a clear error when workflow is unknown", async () => {
     await expect(execFileP(
-      join(process.cwd(), "node_modules", ".bin", "tsx"),
+      process.execPath,
       [
+        "--import", "tsx",
         "src/cli.ts",
         "propose",
         "bad-wf",

@@ -44,6 +44,18 @@ uh status --json
 
 Use `dry-run` before a real runtime invocation when checking command shape, sandbox routing, or runtime config overrides.
 
+## Watch And Control Runs
+
+```sh
+uh ps                          # every run: liveness, turns, denials, last tool, stalled tools
+uh wait <run-id>               # block until it settles; exit code says how
+uh report <run-id>             # what it did: tools, files written, denials, efficiency
+uh steer <run-id> "<message>"  # stop the attempt and resume it with a new first instruction
+uh kill <run-id>               # stop it and prove it is dead
+```
+
+Run ids come from the `Run id:` line of `uh mission run`, the `UH_RESULT` line, or `uh ps`. The [operator handbook](./handbook/README.md) covers team missions, independent review, post-checks, `uh queue` and `uh land`; [known issues](./known-issues.md) lists what does not work yet.
+
 ## Human Surfaces
 
 ```sh

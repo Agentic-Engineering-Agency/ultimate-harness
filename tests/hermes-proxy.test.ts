@@ -1,4 +1,4 @@
-import { test, expect, describe } from "vitest";
+import { test, expect, describe, afterAll } from "vitest";
 import { validateAdapter } from "../src/schema/adapter.js";
 import {
   HermesProxyRuntimeConfigSchema,
@@ -289,7 +289,9 @@ describe("hermes-proxy adapter-add template", () => {
 // ---------- UH-39 implementation suites ----------
 
 import * as http from "node:http";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -300,7 +302,7 @@ import {
 } from "../src/adapters/hermes-proxy.js";
 import { initializeHarness } from "../src/harness/init.js";
 
-const TEST_ROOT = "/tmp/uh-test-hermes-proxy";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-hermes-proxy-"));
 
 async function setupHarness(): Promise<{ missionPath: string }> {
   await rm(TEST_ROOT, { recursive: true, force: true });
@@ -341,6 +343,8 @@ objective: ""
 async function cleanup(): Promise<void> {
   await rm(TEST_ROOT, { recursive: true, force: true });
 }
+afterAll(cleanup);
+
 
 describe("parseHermesProxyStream", () => {
   test("concatenates delta content across multiple frames", () => {
@@ -716,7 +720,7 @@ describe("hermes-proxy promotion (UH-38)", () => {
 
   test("the adapter-add template also ships as status: active", async () => {
     const { addAdapter } = await import("../src/harness/adapter-add.js");
-    const tmp = "/tmp/uh-test-uh38-tpl";
+    const tmp = mkdtempSync(join(tmpdir(), "uh-test-uh38-tpl-"));
     await rm(tmp, { recursive: true, force: true });
     await mkdir(join(tmp, ".harness", "adapters"), { recursive: true });
     await addAdapter(tmp, "hermes-proxy");

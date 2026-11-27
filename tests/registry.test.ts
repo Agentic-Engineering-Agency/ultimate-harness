@@ -1,5 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initializeHarness } from "../src/harness/init.js";
 import {
@@ -8,7 +10,7 @@ import {
   type AdapterRuntimeChecker,
 } from "../src/harness/registry.js";
 
-const TEST_ROOT = "/tmp/uh-test-registry";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-registry-"));
 
 async function cleanup(): Promise<void> {
   try {

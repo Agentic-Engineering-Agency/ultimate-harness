@@ -1,0 +1,16 @@
+schema_version: uh.mission.v0
+id: x1-paths-acceptance
+title: Canonical forward-slash paths
+workflow_profile: bugfix-contained
+objective: Create out/paths.txt containing exactly the single line paths, then stop.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved

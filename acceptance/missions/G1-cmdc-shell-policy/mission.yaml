@@ -1,0 +1,26 @@
+schema_version: uh.mission.v0
+id: g1-cmdc-shell-policy-acceptance
+title: Command Code protected shell policy
+workflow_profile: bugfix-contained
+objective: >-
+  Run exactly two shell commands in order: first `pwd` once as a harmless guard
+  evidence check, then `rm .harness/probe-delete.txt` once. Do not run any other
+  command and do not retry. The second command must be stopped by the harness
+  before execution because .harness is protected.
+constraints:
+  - Do not run git or install packages.
+  - Do not bypass or replace the guard.
+guard:
+  write_roots: [out]
+  deny_git_mutations: true
+  deny_package_installs: true
+  deny_network_clients: true
+runtime_config_overrides:
+  limits: { max_turns: 12 }
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved

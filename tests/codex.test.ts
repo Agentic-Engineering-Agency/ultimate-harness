@@ -1,11 +1,15 @@
-import { test, expect, describe, beforeAll } from "vitest";
+import { test, expect, describe, beforeAll, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { parse } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { validateFile } from "../src/harness/validate.js";
+import { validateAdapter } from "../src/schema/adapter.js";
 import {
   checkCodex,
+  CodexRuntimeConfigSchema,
   detectCodexQuotaError,
   dryRunCodex,
   parseCodexJsonlStream,
@@ -15,7 +19,7 @@ import {
   type DiffCollector,
 } from "../src/adapters/codex.js";
 
-const TEST_ROOT = "/tmp/uh-test-codex-adapter";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-codex-adapter-"));
 
 async function cleanup() {
   try { await rm(TEST_ROOT, { recursive: true, force: true }); } catch {}
@@ -78,6 +82,7 @@ test.beforeEach(async () => {
   await writeCodexManifest();
 });
 test.afterEach(cleanup);
+test.afterAll(cleanup);
 
 describe("uh adapter check codex", () => {
   test("returns valid check result when codex is installed", async () => {
@@ -98,6 +103,41 @@ describe("uh adapter check codex", () => {
   });
 });
 
+  test("accepts an optional model in runtime config", () => {
+    expect(CodexRuntimeConfigSchema.parse({ model: "gpt-5-codex" }).model).toBe("gpt-5-codex");
+  });
+
+test("rejects unknown manifest runtime_config keys while accepting model", () => {
+  const manifest = {
+    schema_version: "uh.adapter.v0",
+    id: "codex",
+    name: "OpenAI Codex",
+    runtime: "codex",
+    config: { runtime_config: { model: "gpt-5-codex", sandbox_modd: "workspace-write" } },
+  };
+
+  expect(() => validateAdapter(manifest)).toThrow(/sandbox_modd/);
+  expect(
+    validateAdapter({ ...manifest, config: { runtime_config: { model: "gpt-5-codex" } } }).config
+      ?.runtime_config,
+  ).toMatchObject({ model: "gpt-5-codex" });
+});
+
+  test("pins the configured model before the prompt and omits it when unset", async () => {
+    const { missionPath } = await writeHarnessMission("model-plan");
+    const pinned = await planCodexRun(TEST_ROOT, missionPath, {
+      extraRuntimeConfigOverrides: { model: "gpt-5-codex" },
+    });
+    const modelIndex = pinned.args.indexOf("-m");
+    expect(modelIndex).toBeGreaterThan(-1);
+    expect(pinned.args[modelIndex + 1]).toBe("gpt-5-codex");
+    expect(modelIndex).toBe(pinned.args.length - 3);
+    expect(pinned.expectedRoute).toEqual({ model: "gpt-5-codex" });
+
+    const unpinned = await planCodexRun(TEST_ROOT, missionPath);
+    expect(unpinned.args).not.toContain("-m");
+    expect(unpinned.expectedRoute).toBeUndefined();
+  });
 describe("uh mission dry-run --runtime codex", () => {
   test("persists prompt and planned runtime session for harness mission", async () => {
     const { missionDir, missionPath } = await writeHarnessMission("dry-run-codex");
@@ -114,7 +154,7 @@ describe("uh mission dry-run --runtime codex", () => {
     expect(result.args).toEqual(expect.arrayContaining([
       "exec",
       "--cd",
-      TEST_ROOT,
+      resolve(TEST_ROOT),
       "--sandbox",
       "workspace-write",
       "--json",
@@ -266,6 +306,42 @@ describe("uh mission run --runtime codex", () => {
       stdout_path: `.harness/missions/run-success/runs/${runId}/runtime.stdout.log`,
       stderr_path: `.harness/missions/run-success/runs/${runId}/runtime.stderr.log`,
     });
+    expect(runtimeResult.diff_path).not.toContain("\\");
+  });
+  test("passes a matching native model attestation", async () => {
+    const { missionDir, missionPath } = await writeHarnessMission("matching-route");
+    const runDir = join(missionDir, "runs", "matching-route");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "runtime-final.txt"), "Done", "utf-8");
+    const result = await runCodex(TEST_ROOT, missionPath, {
+      runId: "matching-route",
+      extraRuntimeConfigOverrides: { model: "gpt-5-codex" },
+      runner: async () => ({
+        stdout: '{"type":"thread.started","thread_id":"abc","model":"gpt-5-codex"}\n{"type":"turn.completed"}\n',
+        stderr: "", exitCode: 0, timedOut: false,
+      }),
+      collectDiff: async () => ({ patch: "" }),
+    });
+    expect(result.result).toMatchObject({ status: "passed", model: "gpt-5-codex" });
+  });
+
+  test("stops a native model mismatch with route_mismatch", async () => {
+    const { missionDir, missionPath } = await writeHarnessMission("mismatched-route");
+    const runDir = join(missionDir, "runs", "mismatched-route");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "runtime-final.txt"), "Done", "utf-8");
+    const result = await runCodex(TEST_ROOT, missionPath, {
+      runId: "mismatched-route",
+      extraRuntimeConfigOverrides: { model: "gpt-5-codex" },
+      runner: async () => ({
+        stdout: '{"type":"thread.started","thread_id":"abc","model":"other-model"}\n{"type":"turn.completed"}\n',
+        stderr: "", exitCode: 0, timedOut: false,
+      }),
+      collectDiff: async () => ({ patch: "" }),
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.result).toMatchObject({ status: "failed", model: "other-model" });
+    expect(result.result?.errors).toContain("Runtime reported a route outside the configured assignment");
   });
 
   test("classifies quota failures as blocked", async () => {

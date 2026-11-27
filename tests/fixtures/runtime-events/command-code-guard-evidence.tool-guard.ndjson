@@ -1,0 +1,14 @@
+{"ts":"2026-09-22T19:06:52.606Z","tool":"read_file","class":"allow","target":"C:\\worker\\src\\harness\\steer.ts"}
+{"ts":"2026-09-22T19:06:52.607Z","tool":"read_file","class":"allow","target":"C:\\worker\\src\\harness\\runtime-recovery.ts"}
+{"ts":"2026-09-22T19:07:01.175Z","tool":"read_file","class":"allow","target":"C:\\worker\\src\\schema\\runtime-control.ts"}
+{"ts":"2026-09-22T19:07:01.176Z","tool":"read_file","class":"allow","target":"C:\\worker\\tests\\steer-resume.test.ts"}
+{"ts":"2026-09-22T19:07:09.674Z","tool":"read_file","class":"allow","target":"C:\\worker\\tests\\runtime-recovery.test.ts"}
+{"ts":"2026-09-22T19:07:09.674Z","tool":"read_file","class":"allow","target":"C:\\worker\\docs\\runbooks\\run-control.md"}
+{"ts":"2026-09-22T19:07:22.583Z","tool":"read_file","class":"allow","target":"C:\\worker\\src\\harness\\live-runs.ts"}
+{"ts":"2026-09-22T19:07:22.584Z","tool":"grep","class":"allow","target":"C:\\worker\\src\\cli.ts"}
+{"ts":"2026-09-22T19:07:40.182Z","tool":"read_file","class":"allow","target":"C:\\worker\\src\\cli.ts"}
+{"ts":"2026-09-22T19:09:19.666Z","tool":"grep","class":"allow","target":"C:\\worker\\src"}
+{"ts":"2026-09-22T19:09:19.667Z","tool":"read_file","class":"allow","target":"C:\\worker\\src\\adapters\\_artifact-context.ts"}
+{"ts":"2026-09-22T19:09:33.341Z","tool":"grep","class":"allow","target":"C:\\worker"}
+{"ts":"2026-09-22T19:09:56.198Z","tool":"grep","class":"allow","target":"C:\\worker\\tests"}
+{"ts":"2026-09-22T19:09:56.200Z","tool":"shell_command","class":"allow","target":"C:\\worker"}

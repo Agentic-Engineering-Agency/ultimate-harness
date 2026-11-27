@@ -57,7 +57,7 @@ schema_version: uh.promotion.v0
 mission_id: mission-2026-05-13-docs-spine
 sandbox_id: sandbox-abc123
 decision: promoted
-approved_by: Lalo
+approved_by: reviewer
 promoted_at: 2026-05-13T00:00:00Z
 changes:
   - docs/README.md
@@ -67,7 +67,8 @@ audit_event_id: audit-...
 
 ## Promotion policies
 
-- `human-approved` — default. Requires explicit human approval.
-- `review-agent-approved` — allowed only for low-risk generated docs or tests when configured.
-- `auto-promote-on-green` — deferred; too risky for MVP.
-- `manual-only` — harness records evidence but a human applies changes.
+- `human-approved`: default. Requires explicit human approval and a manual `uh promote`.
+- `auto-on-verify`: a passed `uh verify` invokes promotion without a human step by design of this policy.
+- Any other value, including a typo, behaves as `human-approved` and does not auto-promote.
+
+`approved_by` is a free-text name today. The harness requires a non-empty value but does not validate an identity.

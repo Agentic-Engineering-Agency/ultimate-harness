@@ -75,12 +75,11 @@ describe("runtime requirements matching", () => {
     }
   });
 
-  test("blocks min_context_tokens above adapter limit", async () => {
-    const caps = getCapabilities("oh-my-pi");
+  test("blocks a context requirement when the selected runtime model limit is unknown", async () => {
     const root = await mkdtemp(join(tmpdir(), "uh-test-runtime-req-"));
     try {
       const missionPath = await writeMission(root, "m-context", {
-        min_context_tokens: caps.max_context_tokens + 1,
+        min_context_tokens: 1,
       });
       await expect(assertRuntimeRequirements(missionPath, "oh-my-pi")).rejects.toThrow(/min_context_tokens/);
     } finally {

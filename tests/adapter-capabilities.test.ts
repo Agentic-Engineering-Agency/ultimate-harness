@@ -6,6 +6,7 @@ import {
 } from "../src/schema/adapter-capabilities.js";
 import {
   CAPABILITIES,
+  CLAUDE_CODE_CAPABILITIES,
   codexCapabilities,
   getCapabilities,
   hermesCapabilities,
@@ -32,6 +33,7 @@ describe("AdapterCapabilitiesSchema", () => {
     ["oh-my-pi", ohMyPiCapabilities],
     ["openrouter", openRouterCapabilities],
     ["pi", piCapabilities],
+    ["claude-code", CLAUDE_CODE_CAPABILITIES],
   ] as const)("parses %s manifest", (id, manifest) => {
     const parsed = validateAdapterCapabilities(manifest);
     expect(parsed.id).toBe(id);
@@ -39,7 +41,7 @@ describe("AdapterCapabilitiesSchema", () => {
   });
 
   test("registry exposes every team adapter id", () => {
-    expect(listAdapterIds()).toEqual(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi"]);
+    expect(listAdapterIds()).toEqual(["hermes", "codex", "oh-my-pi", "hermes-proxy", "openrouter", "anthropic", "pi", "command-code", "claude-code", "acp"]);
     for (const id of listAdapterIds()) {
       expect(getCapabilities(id).id).toBe(id);
       expect(CAPABILITIES[id]).toEqual(getCapabilities(id));

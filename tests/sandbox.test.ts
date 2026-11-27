@@ -2,16 +2,19 @@ import { describe, expect, test } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, normalize } from "node:path";
 import { tmpdir } from "node:os";
-import { parse } from "yaml";
+import { setTimeout as delay } from "node:timers/promises";
+import { parse, stringify } from "yaml";
 import { initializeHarness } from "../src/harness/init.js";
 import { getSandboxBackend, listSandboxBackends, runOpenSandboxCommand } from "../src/harness/sandbox-backends.js";
 import {
@@ -20,14 +23,16 @@ import {
   discardSandbox,
   getSandboxStatus,
   listSandboxes,
+  listSandboxIndexLockBreaks,
+  repairSandboxes,
+  withSandboxesIndexMutation,
 } from "../src/harness/sandbox.js";
 
 let TEST_ROOT: string;
 const execFileP = promisify(execFile);
-const CLI = join(process.cwd(), "node_modules", ".bin", "tsx");
 
 async function runUh(args: string[]) {
-  return execFileP(CLI, ["src/cli.ts", ...args], { cwd: process.cwd() });
+  return execFileP(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], { cwd: process.cwd() });
 }
 
 async function runUhFailure(args: string[]) {
@@ -71,7 +76,7 @@ async function listWorktrees(root: string): Promise<string[]> {
   return stdout
     .split("\n")
     .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length));
+    .map((line) => normalize(line.slice("worktree ".length).trim()));
 }
 
 async function listBranches(root: string): Promise<string[]> {
@@ -312,7 +317,7 @@ describe("sandbox module", () => {
   test("createSandbox seeds the bound mission directory into the worktree (UH-29)", async () => {
     // Pre-create an uncommitted mission directory on the host.
     const missionDir = join(TEST_ROOT, ".harness", "missions", "smoke");
-    await execFileP("mkdir", ["-p", missionDir]);
+    await mkdir(missionDir, { recursive: true });
     await writeFile(
       join(missionDir, "mission.yaml"),
       "schema_version: uh.mission.v0\nid: smoke\nname: Smoke\nworkflow_profile: research-docs\n",
@@ -368,6 +373,280 @@ describe("sandbox module", () => {
         ),
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("sandbox index resilience", () => {
+  const indexPath = () => join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+
+  test("treats a missing index file and directory as an empty registry (fresh clone)", async () => {
+    // A fresh clone may carry none of the sandboxes runtime state.
+    await rm(join(TEST_ROOT, ".harness", "sandboxes"), { recursive: true, force: true });
+
+    expect(await listSandboxes(TEST_ROOT)).toEqual([]);
+    await expect(getSandboxStatus(TEST_ROOT, "ghost")).rejects.toThrow(/Sandbox not found: ghost/);
+    await expect(discardSandbox(TEST_ROOT, "ghost")).rejects.toThrow(/Sandbox not found: ghost/);
+
+    const record = await createSandbox(TEST_ROOT, { id: "fresh", missionId: "demo" });
+    expect(record).toMatchObject({ id: "fresh", branch: "sandbox/fresh" });
+
+    // `create` wrote a new valid index on demand, with the canonical schema.
+    const indexDoc = parse(await readFile(indexPath(), "utf-8")) as {
+      schema_version: string;
+      sandboxes: Array<{ id: string; mission_id: string }>;
+    };
+    expect(indexDoc.schema_version).toBe("uh.sandboxes-index.v0");
+    expect(indexDoc.sandboxes).toMatchObject([{ id: "fresh", mission_id: "demo" }]);
+
+    const info = await getSandboxStatus(TEST_ROOT, "fresh");
+    expect(info).toMatchObject({ id: "fresh", branch: "sandbox/fresh", dirty: false });
+
+    const discarded = await discardSandbox(TEST_ROOT, "fresh");
+    expect(discarded).toMatchObject({ id: "fresh", branch: "sandbox/fresh" });
+
+    const after = parse(await readFile(indexPath(), "utf-8")) as { sandboxes: unknown[] };
+    expect(after.sandboxes).toEqual([]);
+    expect(await listSandboxes(TEST_ROOT)).toEqual([]);
+  });
+
+  test("a missing index file alone is enough for list, status and discard", async () => {
+    await rm(indexPath(), { force: true });
+    // The sandboxes directory survives; only the runtime index file is gone.
+    await expect(stat(join(TEST_ROOT, ".harness", "sandboxes"))).resolves.toBeTruthy();
+
+    expect(await listSandboxes(TEST_ROOT)).toEqual([]);
+    await expect(getSandboxStatus(TEST_ROOT, "ghost")).rejects.toThrow(/Sandbox not found: ghost/);
+    await expect(discardSandbox(TEST_ROOT, "ghost")).rejects.toThrow(/Sandbox not found: ghost/);
+    await expect(stat(indexPath())).rejects.toThrow();
+  });
+
+  test("refuses an invalid index and leaves it byte-identical", async () => {
+    await writeFile(indexPath(), "schema_version: uh.sandboxes-index.v0\nsandboxes: not-a-list\n", "utf-8");
+    const before = await readFile(indexPath());
+
+    await expect(listSandboxes(TEST_ROOT)).rejects.toThrow(/Sandboxes index is invalid/);
+    await expect(getSandboxStatus(TEST_ROOT, "any")).rejects.toThrow(/Sandboxes index is invalid/);
+    await expect(discardSandbox(TEST_ROOT, "any")).rejects.toThrow(/Sandboxes index is invalid/);
+    await expect(
+      createSandbox(TEST_ROOT, { id: "any", missionId: "demo" }),
+    ).rejects.toThrow(/Sandboxes index is invalid/);
+
+    // Never overwritten: byte-identical, and the refused create left no partial state.
+    expect((await readFile(indexPath())).equals(before)).toBe(true);
+    await expect(stat(join(TEST_ROOT, ".harness", "sandboxes", "any"))).rejects.toThrow();
+  });
+
+  test("refuses an index with invalid YAML and leaves it byte-identical", async () => {
+    await writeFile(indexPath(), "sandboxes: [\n", "utf-8");
+    const before = await readFile(indexPath());
+
+    await expect(listSandboxes(TEST_ROOT)).rejects.toThrow(/invalid YAML/);
+    await expect(
+      createSandbox(TEST_ROOT, { id: "any", missionId: "demo" }),
+    ).rejects.toThrow(/invalid YAML/);
+
+    expect((await readFile(indexPath())).equals(before)).toBe(true);
+  });
+});
+
+describe("sandbox index concurrency and repair", () => {
+  const indexPath = () => join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+
+  test("eight concurrent createSandbox calls all register (no lost update)", async () => {
+    const ids = Array.from({ length: 8 }, (_, index) => `race-${index}`);
+
+    const records = await Promise.all(
+      ids.map((id) => createSandbox(TEST_ROOT, { id, missionId: "demo" })),
+    );
+    expect(records).toHaveLength(8);
+
+    const list = await listSandboxes(TEST_ROOT);
+    expect(list.map((entry) => entry.id).sort()).toEqual([...ids].sort());
+
+    const indexDoc = parse(await readFile(indexPath(), "utf-8")) as {
+      schema_version: string;
+      sandboxes: Array<{ id: string }>;
+    };
+    expect(indexDoc.schema_version).toBe("uh.sandboxes-index.v0");
+    expect(indexDoc.sandboxes).toHaveLength(8);
+    expect(indexDoc.sandboxes.some((entry) => entry.id === "race-3")).toBe(true);
+
+    // Each registration survived with its own worktree on disk.
+    for (const id of ids) {
+      await expect(stat(join(TEST_ROOT, ".harness", "sandboxes", id, "worktree"))).resolves.toBeTruthy();
+    }
+  });
+
+  test("a stale index lock whose owner process is gone is broken and recorded", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    // A pid the OS will not hand out (probe returns ESRCH), so it is provably gone.
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: 2147483647, nonce: "stale-nonce", acquired_at: new Date(0).toISOString() }),
+      "utf-8",
+    );
+    const ancient = new Date(Date.now() - 120_000);
+    await utimes(lockPath, ancient, ancient);
+
+    const before = listSandboxIndexLockBreaks().length;
+    const record = await createSandbox(TEST_ROOT, { id: "after-stale", missionId: "demo" });
+
+    expect(record.id).toBe("after-stale");
+    expect(await listSandboxes(TEST_ROOT)).toHaveLength(1);
+
+    const breaks = listSandboxIndexLockBreaks();
+    expect(breaks.length).toBeGreaterThan(before);
+    expect(breaks[breaks.length - 1]).toMatchObject({
+      lock_file: lockPath,
+      owner_pid: 2147483647,
+    });
+
+    // The broken lock is released, never left behind.
+    await expect(stat(lockPath)).rejects.toThrow();
+  });
+
+  test("repairSandboxes re-registers a directory whose index entry was removed", async () => {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "repair-me");
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(
+      join(missionDir, "mission.yaml"),
+      stringify({
+        schema_version: "uh.mission.v0",
+        id: "repair-me",
+        title: "Repair mission",
+        workflow_profile: "spec-first-feature",
+      }),
+      "utf-8",
+    );
+
+    const record = await createSandbox(TEST_ROOT, { id: "repair-target", missionId: "repair-me" });
+    const worktreeAbs = join(TEST_ROOT, record.path);
+
+    // Simulate the live race outcome: the worktree exists, the entry is gone.
+    const doc = parse(await readFile(indexPath(), "utf-8")) as { sandboxes: Array<{ id: string }> };
+    doc.sandboxes = doc.sandboxes.filter((entry) => entry.id !== "repair-target");
+    await writeFile(indexPath(), stringify(doc), "utf-8");
+
+    expect(await listSandboxes(TEST_ROOT)).toEqual([]);
+    await expect(stat(worktreeAbs)).resolves.toBeTruthy();
+
+    const repaired = await repairSandboxes(TEST_ROOT);
+    expect(repaired).toMatchObject([
+      { id: "repair-target", mission_id: "repair-me", backend: "git-worktree", branch: "sandbox/repair-target" },
+    ]);
+
+    const list = await listSandboxes(TEST_ROOT);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      id: "repair-target",
+      mission_id: "repair-me",
+      path: ".harness/sandboxes/repair-target/worktree",
+    });
+
+    // A second repair has nothing left to do and reports nothing.
+    expect(await repairSandboxes(TEST_ROOT)).toEqual([]);
+  });
+
+  test("repairSandboxes leaves a corrupt index untouched", async () => {
+    await writeFile(indexPath(), "schema_version: uh.sandboxes-index.v0\nsandboxes: not-a-list\n", "utf-8");
+    const before = await readFile(indexPath());
+
+    const orphanDir = join(TEST_ROOT, ".harness", "sandboxes", "orphan", "worktree");
+    await mkdir(join(orphanDir, ".harness", "missions", "m1"), { recursive: true });
+    await writeFile(
+      join(orphanDir, ".harness", "missions", "m1", "mission.yaml"),
+      stringify({ schema_version: "uh.mission.v0", id: "m1", title: "M1", workflow_profile: "research-docs" }),
+      "utf-8",
+    );
+
+    await expect(repairSandboxes(TEST_ROOT)).rejects.toThrow(/Sandboxes index is invalid/);
+    expect((await readFile(indexPath())).equals(before)).toBe(true);
+  });
+
+  test("a mutation that loses its lock to a takeover does not release the new owner's lock", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    // While the mutation holds the lock, a second process takes over by
+    // replacing the lock file with its own token (foreign pid and nonce).
+    const foreign = {
+      pid: process.pid + 1,
+      nonce: "foreign-nonce",
+      acquired_at: new Date().toISOString(),
+    };
+
+    const result = await withSandboxesIndexMutation(TEST_ROOT, async (index) => {
+      const held = JSON.parse(await readFile(lockPath, "utf-8")) as { pid: number; nonce: string };
+      expect(held.pid).toBe(process.pid);
+
+      await writeFile(lockPath, JSON.stringify(foreign), "utf-8");
+      await utimes(lockPath, new Date(), new Date());
+
+      index.sandboxes.push({
+        id: "kept",
+        mission_id: "demo",
+        backend: "git-worktree",
+        status: "created",
+      });
+      return "mutation-completed";
+    });
+
+    // The mutation still completed and its write landed...
+    expect(result).toBe("mutation-completed");
+    expect((await listSandboxes(TEST_ROOT)).map((entry) => entry.id)).toContain("kept");
+
+    // ...and the release saw a foreign owner, so the lock survived untouched.
+    const after = parse(await readFile(lockPath, "utf-8")) as { pid: number; nonce: string };
+    expect(after).toMatchObject(foreign);
+  });
+
+  test("a normal mutation releases its own lock", async () => {
+    const lockPath = `${indexPath()}.lock`;
+
+    const result = await withSandboxesIndexMutation(TEST_ROOT, () => "done");
+    expect(result).toBe("done");
+
+    await expect(stat(lockPath)).rejects.toThrow();
+  });
+
+  test("a stale lock written without a nonce is not broken while its pid is alive", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    // An older build's lock carries only a pid. It is stale by age, but that pid
+    // (ours, hence alive) must be honored rather than broken out from under it.
+    await writeFile(lockPath, JSON.stringify({ pid: process.pid }), "utf-8");
+    const ancient = new Date(Date.now() - 120_000);
+    await utimes(lockPath, ancient, ancient);
+
+    const before = listSandboxIndexLockBreaks().length;
+    const mutation = withSandboxesIndexMutation(TEST_ROOT, () => "ok");
+    const raced = await Promise.race([
+      mutation.then(() => "completed" as const),
+      delay(750).then(() => "waited" as const),
+    ]);
+    expect(raced).toBe("waited");
+
+    // Honored: still present, still ours, and no break was recorded.
+    expect(JSON.parse(await readFile(lockPath, "utf-8"))).toMatchObject({ pid: process.pid });
+    expect(listSandboxIndexLockBreaks().length).toBe(before);
+
+    // Release the lock ourselves so the pending mutation can finish.
+    await rm(lockPath, { force: true });
+    await expect(mutation).resolves.toBe("ok");
+  });
+
+  test("a stale lock written without a nonce whose owner is gone is broken and records the pid", async () => {
+    const lockPath = `${indexPath()}.lock`;
+    const deadPid = 2147483647; // an unallocatable pid: the OS probe returns ESRCH
+    await writeFile(lockPath, JSON.stringify({ pid: deadPid }), "utf-8");
+    const ancient = new Date(Date.now() - 120_000);
+    await utimes(lockPath, ancient, ancient);
+
+    const before = listSandboxIndexLockBreaks().length;
+    const record = await createSandbox(TEST_ROOT, { id: "after-nonce-less-stale", missionId: "demo" });
+    expect(record.id).toBe("after-nonce-less-stale");
+
+    const breaks = listSandboxIndexLockBreaks();
+    expect(breaks.length).toBeGreaterThan(before);
+    expect(breaks[breaks.length - 1]).toMatchObject({ lock_file: lockPath, owner_pid: deadPid });
+    await expect(stat(lockPath)).rejects.toThrow();
   });
 });
 
@@ -466,6 +745,40 @@ describe("uh sandbox CLI", () => {
     ]);
     expect(forced.stdout).toContain("[DISCARDED] cli-dirty");
     await expect(stat(worktreeAbs)).rejects.toThrow();
+  });
+
+  test("uh sandbox repair re-registers a directory whose index entry was removed", async () => {
+    const missionDir = join(TEST_ROOT, ".harness", "missions", "cli-repair");
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(
+      join(missionDir, "mission.yaml"),
+      stringify({
+        schema_version: "uh.mission.v0",
+        id: "cli-repair",
+        title: "CLI repair mission",
+        workflow_profile: "spec-first-feature",
+      }),
+      "utf-8",
+    );
+
+    await runUh(["sandbox", "create", "cli-lost", "--mission", "cli-repair", "--root", TEST_ROOT]);
+
+    const indexPath = join(TEST_ROOT, ".harness", "sandboxes", "index.yaml");
+    const doc = parse(await readFile(indexPath, "utf-8")) as { sandboxes: Array<{ id: string }> };
+    doc.sandboxes = doc.sandboxes.filter((entry) => entry.id !== "cli-lost");
+    await writeFile(indexPath, stringify(doc), "utf-8");
+
+    const emptyRepair = await runUh(["sandbox", "repair", "--root", TEST_ROOT]);
+    expect(emptyRepair.stderr).toBe("");
+    expect(emptyRepair.stdout).toContain("[REPAIRED] cli-lost");
+    expect(emptyRepair.stdout).toContain("mission: cli-repair");
+
+    const listOut = await runUh(["sandbox", "list", "--root", TEST_ROOT]);
+    expect(listOut.stdout).toContain("cli-lost");
+    expect(listOut.stdout).toContain("mission=cli-repair");
+
+    const secondRepair = await runUh(["sandbox", "repair", "--root", TEST_ROOT]);
+    expect(secondRepair.stdout).toContain("No sandbox registrations repaired.");
   });
 });
 
@@ -607,8 +920,8 @@ describe("container backend (#155 OpenSandbox)", () => {
 
   test("OpenSandbox templates spawn in the requested sandbox cwd (#157)", async () => {
     process.env.UH_OPENSANDBOX_ENABLED = "1";
-    // Template ignores {command} via the shell `:` no-op so we only observe the spawn cwd.
-    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "pwd; : {command}";
+    await writeFile(join(TEST_ROOT, "cwd-proof.txt"), TEST_ROOT, "utf8");
+    process.env.UH_OPENSANDBOX_EXEC_COMMAND = "cat cwd-proof.txt; : {command}";
     try {
       const observed = await runOpenSandboxCommand(TEST_ROOT, "noop", 5_000);
       expect(observed.exitCode).toBe(0);
@@ -666,5 +979,124 @@ describe("container backend (#155 OpenSandbox)", () => {
       delete process.env.UH_OPENSANDBOX_CREATE_COMMAND;
       delete process.env.UH_OPENSANDBOX_LIFECYCLE_TIMEOUT_MS;
     }
+  });
+});
+
+async function writeRoutingMission(root: string, id: string): Promise<string> {
+  const missionDir = join(root, ".harness", "missions", id);
+  await mkdir(missionDir, { recursive: true });
+  const missionPath = join(missionDir, "mission.yaml");
+  await writeFile(
+    missionPath,
+    stringify({
+      schema_version: "uh.mission.v0",
+      id,
+      title: `Routing mission ${id}`,
+      objective: "Exercise mission run sandbox routing",
+      workflow_profile: "spec-first-feature",
+    }),
+    "utf-8",
+  );
+  return missionPath;
+}
+
+function settlementLine(stdout: string): {
+  mission_id: string;
+  run_id: string;
+  runtime: string;
+  status: string;
+  exit_code: number;
+  run_dir: string;
+} {
+  const lines = stdout.trim().split(/\r?\n/);
+  const last = lines[lines.length - 1];
+  expect(last).toMatch(/^UH_RESULT /);
+  return JSON.parse(last.slice("UH_RESULT ".length));
+}
+
+describe("mission run sandbox routing", () => {
+  test("refuses a no-flag run in the project root when the mission has no bound sandbox", async () => {
+    const missionPath = await writeRoutingMission(TEST_ROOT, "sr-unbound");
+
+    const refusal = await runUhFailure([
+      "mission", "run", missionPath,
+      "--runtime", "hermes", "--force", "--root", TEST_ROOT,
+    ]);
+
+    expect(refusal.code).toBe(2);
+    expect(refusal.stderr).toContain(
+      '[BLOCKED] mission sr-unbound has no bound sandbox; create one with "uh sandbox create <sandbox-id> --mission sr-unbound" or pass --no-sandbox to run in the project root',
+    );
+    // Refused before the runtime was reached, so nothing else was reported.
+    expect(refusal.stdout).not.toContain("Running mission:");
+    expect(refusal.stdout).not.toContain("Adapter manifest not found");
+
+    const payload = settlementLine(refusal.stdout);
+    expect(payload).toMatchObject({
+      mission_id: "sr-unbound",
+      runtime: "hermes",
+      status: "blocked",
+      exit_code: 2,
+    });
+    expect(payload.run_id).toBeTruthy();
+    expect(payload.run_dir).toBe(`.harness/missions/sr-unbound/runs/${payload.run_id}`);
+
+    // The refusal created no run directory: the project root stays untouched.
+    await expect(stat(join(TEST_ROOT, ".harness", "missions", "sr-unbound", "runs"))).rejects.toThrow();
+  });
+
+  test("--no-sandbox keeps today's root execution and says so", async () => {
+    const missionPath = await writeRoutingMission(TEST_ROOT, "sr-explicit");
+
+    const result = await runUhFailure([
+      "mission", "run", missionPath,
+      "--runtime", "hermes", "--force", "--no-sandbox", "--root", TEST_ROOT,
+    ]);
+
+    expect(result.stdout).toContain("Running mission:");
+    expect(result.stdout).toContain("Sandbox: none (project root, --no-sandbox)");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("has no bound sandbox");
+    // Reached the adapter dispatch (no hermes manifest in this root) rather
+    // than being refused by routing — and no model is ever invoked.
+    expect(`${result.stdout}${result.stderr}`).toContain("Adapter manifest not found");
+  });
+
+  test("dry-run reports the routing decision and never blocks on a missing binding", async () => {
+    const missionPath = await writeRoutingMission(TEST_ROOT, "sr-dry");
+
+    const unbound = await runUhFailure([
+      "mission", "dry-run", missionPath,
+      "--runtime", "hermes", "--force", "--root", TEST_ROOT,
+    ]);
+    expect(unbound.stdout).toContain("Sandbox: none (project root)");
+    expect(`${unbound.stdout}${unbound.stderr}`).not.toContain("has no bound sandbox");
+    expect(unbound.stderr).not.toContain("[BLOCKED]");
+
+    const opted = await runUhFailure([
+      "mission", "dry-run", missionPath,
+      "--runtime", "hermes", "--force", "--no-sandbox", "--root", TEST_ROOT,
+    ]);
+    expect(opted.stdout).toContain("Sandbox: none (project root, --no-sandbox)");
+  });
+
+  test("a bound sandbox still routes the run and the dry-run into the worktree", async () => {
+    const missionPath = await writeRoutingMission(TEST_ROOT, "sr-bound");
+    const record = await createSandbox(TEST_ROOT, { id: "sr-sbx", missionId: "sr-bound" });
+    const worktreeAbs = join(TEST_ROOT, record.path);
+
+    const dryRun = await runUhFailure([
+      "mission", "dry-run", missionPath,
+      "--runtime", "hermes", "--force", "--root", TEST_ROOT,
+    ]);
+    expect(dryRun.stdout).toContain(`Sandbox: sr-sbx (${worktreeAbs})`);
+
+    const run = await runUhFailure([
+      "mission", "run", missionPath,
+      "--runtime", "hermes", "--force", "--root", TEST_ROOT,
+    ]);
+    expect(run.stdout).toContain(`Sandbox: sr-sbx (${worktreeAbs})`);
+    expect(`${run.stdout}${run.stderr}`).not.toContain("has no bound sandbox");
+    // The adapter lookup happened inside the sandbox worktree, not the root.
+    expect(`${run.stdout}${run.stderr}`).toContain(join("sr-sbx", "worktree"));
   });
 });

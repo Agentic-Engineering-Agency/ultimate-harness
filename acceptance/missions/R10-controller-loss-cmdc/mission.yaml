@@ -1,0 +1,25 @@
+schema_version: uh.mission.v0
+id: r10-controller-loss-cmdc-acceptance
+title: Controller loss recovery
+workflow_profile: bugfix-contained
+objective: >-
+  On the first attempt, run exactly one harmless shell command and then wait.
+  When this mission is resumed after controller loss, create
+  out/controller-recovered.txt containing exactly the single line recovered,
+  then stop.
+constraints:
+  - Do not run git.
+  - Do not install packages.
+  - Keep all files under out/.
+runtime_config_overrides:
+  permission_mode: yolo
+  recovery:
+    max_resumes: 1
+    notes: The controller was lost; create out/controller-recovered.txt containing exactly recovered.
+verification:
+  required_checks:
+    - name: noop
+      command: node -e "process.exit(0)"
+sandbox:
+  backend: git-worktree
+  promotion_policy: human-approved

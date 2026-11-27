@@ -1,10 +1,11 @@
-import { test, expect, describe } from "vitest";
+import { test, expect, describe, afterAll } from "vitest";
 import { mkdir, rm, access, stat, readdir } from "node:fs/promises";
 import { initializeHarness } from "../src/harness/init.js";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const TEST_ROOT = "/tmp/uh-test-init";
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "uh-test-init-"));
 
 async function cleanup() {
   try { await rm(TEST_ROOT, { recursive: true, force: true }); } catch {}
@@ -12,6 +13,7 @@ async function cleanup() {
 
 test.beforeEach(cleanup);
 test.afterEach(cleanup);
+test.afterAll(cleanup);
 
 describe("uh init", () => {
   test("creates .harness/project.yaml", async () => {

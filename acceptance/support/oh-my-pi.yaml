@@ -1,0 +1,14 @@
+schema_version: uh.adapter.v0
+id: oh-my-pi
+name: oh-my-pi costless acceptance adapter
+runtime: oh-my-pi
+capabilities: [cli-execution, non-interactive, json-output]
+status: active
+config:
+  cli_command: omp
+  worktree_mode: false
+  pass_session_id: false
+  runtime_config:
+    mode: json
+    allow_extensions: false
+    allow_skills: false
