@@ -79,3 +79,13 @@ this file remains the single instruction source. It is **not** the default — O
 generated `.commandcode/settings.json` mirrors the OMP discipline in Command Code's permission
 rules and is materialized from `scripts/harness-matrix.json`; never hand-edit it. See
 `docs/standards/harness.md` (Command Code section) and `docs/research/command-code-evaluation.md`.
+
+## Jevmem project memory
+
+Durable project memory lives in `JEVMEM.md` (one line per decision, constraint, preference, bug, architecture fact, or todo) and is served by the `jevmem` MCP server.
+
+- Before any non-trivial task, call the `search_memory` tool with a one-line description of the task and follow what comes back unless the user overrides it.
+- When the user states a decision, a hard rule, a preference, a root cause, or defers work, call `add_memory` with one line (≤ 200 chars) and the right kind: decision | constraint | preference | bug | architecture | todo. jevmem scrubs secrets and asks Jev first; it may refuse the line or correct the kind, and says why.
+- If something contradicts an existing memory, add the new line and say which memory it replaces.
+- Never add greetings, questions, or things already obvious from the code.
+- Never add, edit or remove lines in `JEVMEM.md` directly: record memories only through `add_memory` (with `jevmem watch` running, jevmem also records them from the session on its own).
